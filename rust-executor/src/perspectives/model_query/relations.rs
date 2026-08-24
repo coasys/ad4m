@@ -14,9 +14,9 @@
 //!    hydrated child instances.  This supports arbitrary nesting depth
 //!    (bounded by [`MAX_INCLUDE_DEPTH`](super::utils::MAX_INCLUDE_DEPTH)).
 
-use deno_core::anyhow::Error;
+use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::query::execute_model_query_inner;
 use super::types::{
@@ -146,6 +146,99 @@ pub(super) async fn resolve_includes_recursive(
     Ok(())
 }
 
+/// The JSON key carrying each polymorphically-hydrated instance's concrete
+/// class, so the TypeScript layer can construct the right model class for it.
+pub(crate) const SUBJECT_CLASS_KEY: &str = "__subjectClass";
+
+/// Hydrate a heterogeneous set of target URIs, each as the class it actually is.
+///
+/// A relation whose targets are of mixed type cannot be hydrated against one
+/// shape. `hydrate_one` only reads predicates present in the shape it is given,
+/// so hydrating a subclass against its parent's shape does not merely mislabel it
+/// — the subclass's own properties never enter the JSON at all. Choosing the right class
+/// afterwards, in TypeScript, would therefore construct it over data that had
+/// already been discarded.
+///
+/// So: classify the targets, group them by concrete class, and run one sub-query
+/// per group against that group's own shape. The cost is one query per *distinct
+/// class present*, not per instance.
+///
+/// Each instance carries its class name back under [`SUBJECT_CLASS_KEY`], which
+/// is what lets the caller construct the matching model class rather than the
+/// one the relation declared.
+async fn hydrate_polymorphic(
+    store: &SparqlStore,
+    target_ids: &[String],
+    sub_query: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+    depth: u8,
+    hydrated: &mut HashMap<String, Value>,
+    ordered_ids: &mut Vec<String>,
+) -> Result<(), Error> {
+    let classes =
+        crate::perspectives::subject_class_of::subject_class_of(store, resolver, target_ids)?;
+
+    // Group by class, keeping the ids of each group in the order they arrived so
+    // a group's own results stay stable.
+    let mut by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for id in target_ids {
+        if let Some(class_name) = classes.get(id) {
+            by_class
+                .entry(class_name.clone())
+                .or_default()
+                .push(id.clone());
+        }
+        // A target matching no registered class is skipped rather than
+        // hydrated as something it is not. It stays absent from the relation,
+        // which is the same outcome a non-conforming target has always had.
+    }
+
+    for (class_name, ids) in by_class {
+        let target_shape = match resolver.get_shape(&class_name) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("polymorphic include: no shape for '{class_name}': {e}");
+                continue;
+            }
+        };
+
+        let mut group_query = sub_query.clone();
+        let mut wc = group_query.where_clause.take().unwrap_or_default();
+        wc.insert("id".to_string(), WhereCondition::StringArray(ids));
+        group_query.where_clause = Some(wc);
+        // A limit is per-class here; applying the parent's limit to each group
+        // would silently mean something different from what it means on a
+        // single-class include, so it is dropped and the caller's link order
+        // decides what survives.
+        group_query.limit = None;
+        group_query.offset = None;
+
+        let result = Box::pin(execute_model_query_inner(
+            store,
+            target_shape.as_ref(),
+            &group_query,
+            resolver,
+            depth + 1,
+        ))
+        .await?;
+
+        for mut inst in result.instances {
+            if let Some(id) = inst["id"].as_str().map(|s| s.to_string()) {
+                if let Some(obj) = inst.as_object_mut() {
+                    obj.insert(
+                        SUBJECT_CLASS_KEY.to_string(),
+                        Value::String(class_name.clone()),
+                    );
+                }
+                ordered_ids.push(id.clone());
+                hydrated.insert(id, inst);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Resolve a forward relation (`@HasMany` / `@HasOne`) for all instances.
 ///
 /// Collects all unique target IDs from the relation arrays, runs a sub-query
@@ -191,30 +284,62 @@ async fn resolve_forward_include(
         };
         all_ids.retain(|id| filter_ids.contains(id));
     }
+    let polymorphic = sub_query.polymorphic.unwrap_or(false);
+    let target_ids = all_ids.clone();
     wc.insert("id".to_string(), WhereCondition::StringArray(all_ids));
     query.where_clause = Some(wc);
 
-    let has_sub_order = sub_query.order.is_some();
-
-    let target_shape = resolver.get_shape(&rel.target_class_name)?;
-    let result = Box::pin(execute_model_query_inner(
-        store,
-        target_shape.as_ref(),
-        &query,
-        resolver,
-        depth + 1,
-    ))
-    .await?;
+    // Ordering a polymorphic set by a property is only meaningful within a
+    // concrete class — the classes need not share the property at all — so the
+    // parent's link order is kept across classes.
+    let has_sub_order = sub_query.order.is_some() && !polymorphic;
 
     let mut hydrated: HashMap<String, Value> = HashMap::new();
-    let ordered_ids: Vec<String> = result
-        .instances
-        .iter()
-        .filter_map(|inst| inst["id"].as_str().map(|s| s.to_string()))
-        .collect();
-    for inst in result.instances {
-        if let Some(id) = inst["id"].as_str() {
-            hydrated.insert(id.to_string(), inst);
+    let mut ordered_ids: Vec<String> = Vec::new();
+
+    if polymorphic {
+        hydrate_polymorphic(
+            store,
+            &target_ids,
+            &query,
+            resolver,
+            depth,
+            &mut hydrated,
+            &mut ordered_ids,
+        )
+        .await?;
+    } else {
+        if rel.target_class_name.is_empty() {
+            // An untyped relation names no class, so there is no shape to
+            // hydrate its targets against. This used to surface as a shape
+            // lookup for the empty string, which failed the whole query with a
+            // message naming neither the relation nor the fix.
+            return Err(anyhow!(
+                "include on relation '{}': the relation declares no target class, so its \
+                 targets cannot be hydrated. Either give it a target, or read it with \
+                 `polymorphic: true` to hydrate each target as the class it actually is.",
+                rel.name
+            ));
+        }
+        let target_shape = resolver.get_shape(&rel.target_class_name)?;
+        let result = Box::pin(execute_model_query_inner(
+            store,
+            target_shape.as_ref(),
+            &query,
+            resolver,
+            depth + 1,
+        ))
+        .await?;
+
+        ordered_ids = result
+            .instances
+            .iter()
+            .filter_map(|inst| inst["id"].as_str().map(|s| s.to_string()))
+            .collect();
+        for inst in result.instances {
+            if let Some(id) = inst["id"].as_str() {
+                hydrated.insert(id.to_string(), inst);
+            }
         }
     }
 

@@ -2636,3 +2636,110 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     });
   });
 });
+
+describe("Polymorphic relations", () => {
+  @Model({ name: "PolyTextBlock" })
+  class PolyTextBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://text_block" })
+    flag: string = "";
+    @Property({ through: "we://text" })
+    text: string = "";
+  }
+
+  @Model({ name: "PolyImageBlock" })
+  class PolyImageBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://image_block" })
+    flag: string = "";
+    @Property({ through: "we://src" })
+    src: string = "";
+  }
+
+  const blockModels: Record<string, any> = {
+    PolyTextBlock,
+    PolyImageBlock,
+  };
+
+  @Model({ name: "PolyCollection" })
+  class PolyCollection extends Ad4mModel {
+    // No target class — the members are of genuinely different types, which is
+    // the situation `polymorphic` exists for.
+    @HasMany({
+      through: "we://children",
+      polymorphic: true,
+      classResolver: (name: string) => blockModels[name],
+    })
+    children: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("constructs each child as the class the executor says it is", () => {
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://i/1", __subjectClass: "PolyImageBlock", src: "cat.png" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1]).toBeInstanceOf(PolyImageBlock);
+    // The property that only exists on the concrete class — what a base-class
+    // hydration would have dropped before the value ever reached here.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[1].src).toBe("cat.png");
+  });
+
+  it("leaves children as data when no classResolver is given", () => {
+    @Model({ name: "PolyCollectionNoResolver" })
+    class PolyCollectionNoResolver extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollectionNoResolver.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    // Still correct data, just untyped — the concrete class name is present for
+    // a caller that wants to do its own dispatch.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[0].__subjectClass).toBe("PolyTextBlock");
+  });
+
+  it("asks the executor for polymorphic hydration without the caller repeating it", () => {
+    // The relation being heterogeneous is a fact about the data, so declaring it
+    // on the model should be enough — `include: { children: true }` must still
+    // arrive at the executor as a polymorphic read.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    expect(JSON.parse(queryJson).include.children).toEqual({ polymorphic: true });
+  });
+
+  it("lets an explicit false at the call site win", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { polymorphic: false } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.polymorphic).toBe(false);
+  });
+});

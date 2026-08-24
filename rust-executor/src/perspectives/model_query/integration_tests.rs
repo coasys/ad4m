@@ -5537,3 +5537,171 @@ async fn test_subject_class_of_prefers_the_more_specific_class() {
         "the instance conforms to Post too, but the derived class is the answer",
     );
 }
+
+/// A heterogeneous relation hydrates each target as the class it actually is.
+///
+/// Without this the collection has no good answer. Declaring the base class
+/// loses every subclass property — `hydrate_one` only reads predicates present
+/// in the shape it is handed, so a subclass read as its parent arrives with
+/// `text` *absent*, not merely mislabelled — and declaring nothing leaves the
+/// include with no shape to resolve at all.
+#[tokio::test]
+async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // Register the classes so `subject_class_of` can enumerate them.
+    for uri in [
+        "we://models/Collection",
+        "we://models/TextBlock",
+        "we://models/ImageBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    // One collection holding one text block and one image block.
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://i/1", "4"))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "5",
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://i/1", "we://flag", "we://image_block", "6"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://i/1",
+            "we://src",
+            "literal:string:cat.png",
+            "6",
+        ))
+        .unwrap();
+
+    // The collection's `children` names no target class — which is exactly why
+    // it needs this: its members are of genuinely different types.
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
+                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImageBlock",
+        parse_shape_from_json(
+            r#"{"className":"ImageBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://image_block"},
+                 "src":{"predicate":"we://src","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "ImageBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 2, "both children hydrate");
+
+    let text = children
+        .iter()
+        .find(|c| c["id"] == "we://t/1")
+        .expect("the text block");
+    let image = children
+        .iter()
+        .find(|c| c["id"] == "we://i/1")
+        .expect("the image block");
+
+    assert_eq!(text["__subjectClass"].as_str(), Some("TextBlock"));
+    assert_eq!(image["__subjectClass"].as_str(), Some("ImageBlock"));
+    // The property that only exists on the concrete class — the thing a
+    // base-class hydration silently drops.
+    assert_eq!(text["text"].as_str(), Some("hello"));
+    assert_eq!(image["src"].as_str(), Some("cat.png"));
+}
+
+/// An untyped relation read without `polymorphic` fails with an actionable
+/// message rather than a shape lookup for the empty string.
+#[tokio::test]
+async fn test_untyped_include_without_polymorphic_explains_itself() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, shape) = StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("must not silently succeed");
+    let msg = err.to_string();
+    assert!(msg.contains("children"), "names the relation: {msg}");
+    assert!(msg.contains("polymorphic"), "names the fix: {msg}");
+}

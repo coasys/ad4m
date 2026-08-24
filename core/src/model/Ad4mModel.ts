@@ -35,6 +35,9 @@ import type {
  * Rust endpoint.  Recursively converts included relation values (which come
  * back as plain JSON objects) into proper model class instances.
  */
+/** Key under which the executor returns a polymorphically-hydrated instance's concrete class. */
+const SUBJECT_CLASS_KEY = '__subjectClass';
+
 function jsonToModelInstance<T extends Ad4mModel>(
   ModelClass: typeof Ad4mModel & (new (...args: any[]) => T),
   perspective: PerspectiveProxy,
@@ -87,8 +90,27 @@ function jsonToModelInstance<T extends Ad4mModel>(
     for (const [relName, includeVal] of Object.entries(include)) {
       if (!includeVal) continue;
       const meta = relMeta[relName];
-      if (!meta?.target) continue;
-      const TargetClass = meta.target() as any;
+      // A polymorphic relation may legitimately declare no target at all —
+      // that is the case it exists for — so it must not be gated on one.
+      if (!meta) continue;
+      if (!meta.target && !meta.polymorphic) continue;
+      const TargetClass = meta.target?.() as any;
+      // For a polymorphic relation the executor sends each child's concrete
+      // class back on the instance, because it had to know it in order to
+      // hydrate against the right shape at all. `classResolver` turns that name
+      // into a class; without one the data is still correct, just untyped.
+      //
+      // May resolve to nothing: a polymorphic relation is allowed to declare no
+      // target at all, and its resolver may not recognise a class. The item then
+      // stays plain JSON — correct data, carrying its class name for a caller
+      // that wants to dispatch on it — rather than being forced through a
+      // constructor that does not exist.
+      const resolveChildClass = (item: any): any => {
+        if (!meta.polymorphic || !meta.classResolver) return TargetClass;
+        const concrete = item?.[SUBJECT_CLASS_KEY];
+        if (typeof concrete !== 'string') return TargetClass;
+        return meta.classResolver(concrete) ?? TargetClass;
+      };
       const nestedInclude =
         typeof includeVal === 'object' && includeVal !== null
           ? (includeVal as any).include
@@ -101,15 +123,19 @@ function jsonToModelInstance<T extends Ad4mModel>(
       const raw = instance[relName];
       if (Array.isArray(raw)) {
         instance[relName] = raw.map((item: any) => {
-          if (typeof item === 'object' && item !== null && item.id) {
-            return jsonToModelInstance(TargetClass, perspective, item, nestedInclude, nestedProperties);
+          const ChildClass = resolveChildClass(item);
+          if (ChildClass && typeof item === 'object' && item !== null && item.id) {
+            return jsonToModelInstance(ChildClass, perspective, item, nestedInclude, nestedProperties);
           }
           return item;
         });
       } else if (typeof raw === 'object' && raw !== null && raw.id) {
-        instance[relName] = jsonToModelInstance(
-          TargetClass, perspective, raw, nestedInclude, nestedProperties,
-        );
+        const ChildClass = resolveChildClass(raw);
+        if (ChildClass) {
+          instance[relName] = jsonToModelInstance(
+            ChildClass, perspective, raw, nestedInclude, nestedProperties,
+          );
+        }
       }
     }
   }
@@ -836,7 +862,24 @@ export class Ad4mModel {
           normalIncludes[key] = val;
         }
       }
-      if (Object.keys(normalIncludes).length > 0) queryInput.include = normalIncludes;
+      // A relation declared `polymorphic` reads that way by default, so the
+      // caller writes `include: { children: true }` and still gets each child
+      // hydrated as the class it actually is. Declaring it on the model rather
+      // than repeating it at every call site is the point — the relation being
+      // heterogeneous is a fact about the data, not about one query — but an
+      // explicit `polymorphic: false` at the call site still wins.
+      if (Object.keys(normalIncludes).length > 0) {
+        const allRelMeta = getRelationsMetadata(this as any);
+        for (const [relName, val] of Object.entries(normalIncludes)) {
+          if (!allRelMeta[relName]?.polymorphic) continue;
+          if (val === true) {
+            normalIncludes[relName] = { polymorphic: true } as any;
+          } else if (typeof val === 'object' && val !== null && (val as any).polymorphic === undefined) {
+            (val as any).polymorphic = true;
+          }
+        }
+        queryInput.include = normalIncludes;
+      }
       if (Object.keys(projections).length > 0) {
         // Tag each projection with its target class name so the executor can
         // resolve the target shape through its in-memory cache when applying

@@ -57,6 +57,10 @@ export interface RelationMetadataEntry {
      * instances — those pass through byte-for-byte.
      */
     datatype?: string;
+    /** Hydrate targets as the class each one actually is — see `RelationOptions.polymorphic`. */
+    polymorphic?: boolean;
+    /** Maps a concrete class name to its model class, for polymorphic hydration. */
+    classResolver?: (className: string) => Ad4mModelLike | undefined;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -861,6 +865,46 @@ export interface RelationOptions {
      * ```
      */
     datatype?: string;
+    /**
+     * Hydrate each target as the class it actually **is**, rather than as the
+     * class this relation declares.
+     *
+     * A heterogeneous relation has no single right target. Declaring the base
+     * class loses every subclass property — the executor hydrates against the
+     * shape it is given, so an `ImagePost` read as a `Post` arrives with its own
+     * fields simply absent, not merely mislabelled. Declaring nothing leaves
+     * `include` with no shape to resolve at all.
+     *
+     * With this set, the targets are classified, grouped by concrete class, and
+     * hydrated against their own shapes — one query per distinct class present,
+     * not per instance.
+     *
+     * Pair with `classResolver` so the results become instances of the right
+     * model class rather than plain objects.
+     *
+     * @example
+     * ```typescript
+     * @HasMany({
+     *   through: "we://children",
+     *   polymorphic: true,
+     *   classResolver: (name) => blockModels[name],
+     * })
+     * children: Post[] = [];
+     * ```
+     */
+    polymorphic?: boolean;
+    /**
+     * Maps a concrete class name to its model class, for `polymorphic` reads.
+     *
+     * Taken as a resolver rather than resolved through a global registry, for
+     * the same reason `fromSHACL` does: the caller knows its own classes, and a
+     * process-wide mutable registry is awkward across several perspectives and
+     * outright wrong across a hot reload.
+     *
+     * Without one, polymorphic results still carry their concrete class name but
+     * stay plain objects.
+     */
+    classResolver?: (className: string) => Ad4mModelLike | undefined;
 }
 
 /**
@@ -988,6 +1032,8 @@ export function HasMany(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.classResolver && { classResolver: opts.classResolver }),
         };
 
         const relKey = key as string;
@@ -1052,6 +1098,8 @@ export function HasOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.classResolver && { classResolver: opts.classResolver }),
         };
 
         const relKey = key as string;
@@ -1131,6 +1179,8 @@ export function BelongsToOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.classResolver && { classResolver: opts.classResolver }),
         };
 
         if (opts.through) {
@@ -1190,6 +1240,8 @@ export function BelongsToMany(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.classResolver && { classResolver: opts.classResolver }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*

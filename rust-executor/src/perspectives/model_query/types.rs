@@ -273,6 +273,16 @@ pub struct ModelQueryInput {
     /// batched VALUES queries (O(M) cost).  Set to false to skip them.
     #[serde(default, rename = "deepQuery")]
     pub deep_query: Option<bool>,
+    /// Hydrate this relation's targets as the class each one actually *is*,
+    /// rather than as the class the relation declares.
+    ///
+    /// Only meaningful on an `include` sub-query. A heterogeneous relation —
+    /// `CollectionBlock.children`, a reified edge's endpoints — either declares
+    /// a base class, in which case every subclass property is dropped on
+    /// hydration, or declares nothing, in which case the include cannot resolve
+    /// a shape at all.
+    #[serde(default)]
+    pub polymorphic: Option<bool>,
 }
 
 /// Result returned by the model query endpoint.
