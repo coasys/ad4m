@@ -85,6 +85,27 @@ pub(crate) const TASK_WITH_RELATION_SDNA: &str = r#"{
   ]
 }"#;
 
+/// Intention class carrying a `basedOn` hasMany relation to Belief — the
+/// relation-typed shape the harness path exercises in `interpretation_harness_e2e`.
+///
+/// Locally mirrors the harder TS integration test (3 seeded beliefs +
+/// basedOn back-linking) so failures can be reproduced against Marvin without
+/// waiting on the full JS suite in CI.
+///
+/// Class-level hint tells the LLM to `belief_query` first and link to the
+/// discovered URIs via `basedOn`, never to invent new belief URIs.
+pub(crate) const INTENTION_WITH_BASED_ON_SDNA: &str = r#"{
+  "target_class":"ns://Intention",
+  "interpretation_hint":"A first-person commitment to do something the speaker themselves will act on (e.g., 'I'll write X', 'I plan to do Y'). CRITICAL WORKFLOW: if the intention rests on existing beliefs already in the graph, you MUST first call belief_query to discover their URIs, then link the new intention via basedOn to those URIs using intention_propose_link_child. Never invent belief URIs and never recreate a belief that already exists.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://intention"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://intention","min_count":1,"max_count":1},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Imperative summary of the commitment.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"Who committed to it, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]},
+    {"path":"ns://basedOn","name":"basedOn","relation_kind":"hasMany","target_class_name":"Belief","class":"ns://BeliefShape","interpretation_hint":"Beliefs this intention rests on — link to existing belief URIs discovered via belief_query. Do not invent URIs and do not recreate beliefs that already exist."}
+  ]
+}"#;
+
 pub(crate) const OBSERVATION_SDNA: &str = r#"{
   "target_class":"ns://Observation",
   "interpretation_hint":"A factual observation or reported state of the world or system - something seen, measured or reported, not an opinion, plan or task.",
