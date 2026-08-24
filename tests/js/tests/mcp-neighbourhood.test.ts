@@ -84,10 +84,9 @@ describe("MCP Neighbourhood Integration Tests", function () {
             await pollUntil(() => executorProcess!.killed, { timeoutMs: 5000, label: "executor exits after SIGTERM" }).catch(() => {});
             if (!executorProcess.killed) executorProcess.kill('SIGKILL');
         }
-        killByPorts([API_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT]);
-        // Force-exit: open handles keep the Node event loop alive after
-        // all tests pass, causing CI SIGTERM (exit 143).
-        await pollUntil(() => false, { timeoutMs: 500 }).catch(() => {});
+        // Exit before killByPorts: lsof includes the test process's own
+        // client connections, so killByPorts would SIGTERM mocha itself
+        // (exit 143). cleanup.js between test files handles residual ports.
         process.exit(0);
     });
 

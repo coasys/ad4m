@@ -94,15 +94,10 @@ describe("MCP Authentication HTTP Tests", function() {
                 executorProcess.kill('SIGKILL');
             }
         }
-        // Port-based kill as safety net — catches the executor even if the
-        // ChildProcess handle is stale or kill() missed a grandchild process.
-        killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        // Exit before killByPorts: lsof includes the test process's own
+        // client connections, so killByPorts would SIGTERM mocha itself
+        // (exit 143). cleanup.js between test files handles residual ports.
         deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
-        // Force-exit: open handles (WebSocket subscriptions, EventSource
-        // polyfill) keep the Node event loop alive after all tests pass.
-        // mocha --exit should handle this, but the CI step timeout fires
-        // first and SIGTERMs the process (exit 143).
-        await pollUntil(() => false, { timeoutMs: 500 }).catch(() => {});
         process.exit(0);
     });
 
