@@ -78,7 +78,25 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
   let events: AutoProcessorEvent[];
   let nbEvents: AutoProcessorNeighbourhoodStateEvent[];
 
-  before(async () => {
+  before(async function () {
+    // LLM availability gate — this suite needs a reachable OpenAI-compatible
+    // endpoint at BASE_URL hosting MODEL. Skip cleanly on runners without it
+    // (mirrors the gate in run-interpretation-harness.test.ts).
+    try {
+      const probe = await fetch(BASE_URL.replace(/\/v1\/?$/, "") + "/v1/models", {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!probe.ok) throw new Error(`probe ${probe.status}`);
+      const body = (await probe.json()) as { data?: Array<{ id?: string }> };
+      const ids = (body.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
+      if (!ids.includes(MODEL)) {
+        throw new Error(`model ${MODEL} not present in /v1/models (have: ${ids.join(", ") || "none"})`);
+      }
+    } catch (e) {
+      console.log(`Skipping auto-processor observability e2e — LLM endpoint ${BASE_URL} unreachable: ${(e as Error).message}`);
+      this.skip();
+    }
+
     const agent = await startAgent("auto-processor-observability");
     ad4m = agent.client;
     stopAgent = agent.stop;
@@ -218,7 +236,7 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
     // No `persistDebug` → the run's `debugPrompt` / `debugResponse` must be
     // absent (undefined; the fields simply have no links, not empty strings).
     const runs = await InterpretationRun.findAll(p);
-    expect(runs.length, "the pass wrote exactly one InterpretationRun").to.be.greaterThan(0);
+    expect(runs.length, "the pass wrote at least one InterpretationRun").to.be.greaterThan(0);
     for (const r of runs) {
       expect(r.debugPrompt, "no `persistDebug` → debugPrompt must be absent").to.be.undefined;
       expect(r.debugResponse, "no `persistDebug` → debugResponse must be absent").to.be.undefined;
@@ -244,7 +262,7 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
     ).to.have.length(0);
 
     const runs = await InterpretationRun.findAll(p);
-    expect(runs.length, "the pass wrote exactly one InterpretationRun").to.be.greaterThan(0);
+    expect(runs.length, "the pass wrote at least one InterpretationRun").to.be.greaterThan(0);
     // findAll returns runs in unspecified order across passes; the run this
     // pass wrote is the first (and only) one on this fresh perspective.
     const run = runs[0];
@@ -297,7 +315,7 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
     // even though the exact same prompt / response just went out over the
     // event stream. That is the whole point of the split.
     const runs = await InterpretationRun.findAll(p);
-    expect(runs.length, "the pass wrote exactly one InterpretationRun").to.be.greaterThan(0);
+    expect(runs.length, "the pass wrote at least one InterpretationRun").to.be.greaterThan(0);
     for (const r of runs) {
       expect(
         r.debugPrompt,
