@@ -217,6 +217,56 @@ fn strip_tool_call_blocks(text: &str) -> String {
     collapsed.trim().to_string()
 }
 
+/// Coerce a message-content `Value` into a plain string.
+///
+/// The harness constructs string-content messages today, but the OpenAI
+/// wire spec allows `content` to be an array of typed content-parts
+/// (`[{type:"text",text:"..."}, {type:"image_url",...}]`) — Lal's PR #911
+/// review, harness_bridge.rs:232, flagged the earlier
+/// `.as_str().unwrap_or("")` as silently dropping the whole message when
+/// such a value ever arrived. Robust flattening:
+///   * `String` → the string
+///   * `Array` → concatenate `text` fields of any text parts, newline-
+///     separated; non-text parts render as their JSON so nothing is silently
+///     lost from the model's view
+///   * `Object` (single content-part) → same handling as an array of one
+///   * anything else → the value's JSON dump (defensive; better a visible
+///     placeholder than a blank message)
+fn flatten_content_value(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                let piece = flatten_content_part(part);
+                if piece.is_empty() {
+                    continue;
+                }
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&piece);
+            }
+            out
+        }
+        Value::Object(_) => flatten_content_part(v),
+        other => other.to_string(),
+    }
+}
+
+/// One content-part → text. Understands OpenAI's `{type:"text", text: "…"}`
+/// shape; renders anything else as JSON so unknown modalities don't vanish
+/// silently.
+fn flatten_content_part(part: &Value) -> String {
+    if let Some(text) = part.get("text").and_then(Value::as_str) {
+        return text.to_string();
+    }
+    // Non-text part (image_url, input_audio, etc.): render as JSON. The LLM
+    // sees it as raw shape, which is better than an empty message.
+    part.to_string()
+}
+
 /// Fold one harness-shape JSON message into `(role, text)` for the
 /// `prompt_messages` API. Mirrors `chat::flatten_message` but consumes raw
 /// `serde_json::Value` (that's what the harness loop constructs) instead
@@ -232,9 +282,8 @@ fn flatten_json_message(m: &Value) -> Result<(String, String)> {
 
     let content = m
         .get("content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
+        .map(flatten_content_value)
+        .unwrap_or_default();
 
     match role {
         // Tool result → a `<tool_response>` block folded into a user turn,
@@ -394,6 +443,55 @@ mod tests {
             "no id key should mean no id attribute; got: {body}"
         );
         assert!(body.starts_with("<tool_response>\n"), "{body}");
+    }
+
+    #[test]
+    fn flatten_content_value_preserves_string() {
+        assert_eq!(flatten_content_value(&json!("hello")), "hello");
+    }
+
+    #[test]
+    fn flatten_content_value_folds_openai_text_parts_array() {
+        // OpenAI wire spec: content can be an array of typed parts. The
+        // earlier `.as_str().unwrap_or("")` silently dropped every message
+        // in that shape (Lal's PR #911 review). Text parts must survive.
+        let v = json!([
+            {"type": "text", "text": "first paragraph"},
+            {"type": "text", "text": "second paragraph"},
+        ]);
+        assert_eq!(
+            flatten_content_value(&v),
+            "first paragraph\nsecond paragraph"
+        );
+    }
+
+    #[test]
+    fn flatten_content_value_renders_non_text_parts_as_json_not_empty() {
+        // An image_url or input_audio part shouldn't vanish silently — the
+        // LLM sees it as raw JSON, which is at least a visible signal that
+        // the message carried something the harness didn't yet decode.
+        let v = json!([
+            {"type": "text", "text": "look at this:"},
+            {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}},
+        ]);
+        let out = flatten_content_value(&v);
+        assert!(out.starts_with("look at this:\n"), "{out}");
+        assert!(
+            out.contains("image_url"),
+            "non-text part must render, got: {out}"
+        );
+    }
+
+    #[test]
+    fn flatten_content_value_handles_single_object_part() {
+        // Some callers ship a bare object instead of an array of one.
+        let v = json!({"type": "text", "text": "solo"});
+        assert_eq!(flatten_content_value(&v), "solo");
+    }
+
+    #[test]
+    fn flatten_content_value_null_and_missing_are_empty() {
+        assert_eq!(flatten_content_value(&Value::Null), "");
     }
 
     #[test]

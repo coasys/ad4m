@@ -50,27 +50,34 @@ impl ProposalBuffer {
         Self::default()
     }
 
+    /// Recover-on-poison lock: if the mutex was poisoned by an earlier panic
+    /// during dispatch, take the guard anyway. The inner `Vec<InterpretationOp>`
+    /// is a plain data structure — a panic mid-`push` can't have left it in a
+    /// torn state, only in whatever state it was in when the panic fired.
+    /// Continuing the pass on that data is strictly better than escalating to
+    /// a hard abort of every subsequent tool call in the same run (Lal's
+    /// PR #911 review, propose.rs:56).
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<InterpretationOp>> {
+        self.inner.lock().unwrap_or_else(|poisoned| {
+            log::warn!(
+                "harness: ProposalBuffer mutex was poisoned by an earlier panic; \
+                 continuing with the recovered inner data ({} op(s) so far)",
+                poisoned.get_ref().len()
+            );
+            poisoned.into_inner()
+        })
+    }
+
     pub fn push(&self, op: InterpretationOp) {
-        self.inner
-            .lock()
-            .expect("ProposalBuffer mutex poisoned — see anyhow trace on the panicking thread")
-            .push(op);
+        self.lock().push(op);
     }
 
     pub fn drain(&self) -> Vec<InterpretationOp> {
-        std::mem::take(
-            &mut *self
-                .inner
-                .lock()
-                .expect("ProposalBuffer mutex poisoned — see anyhow trace on the panicking thread"),
-        )
+        std::mem::take(&mut *self.lock())
     }
 
     pub fn len(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("ProposalBuffer mutex poisoned — see anyhow trace on the panicking thread")
-            .len()
+        self.lock().len()
     }
 }
 
@@ -237,6 +244,25 @@ where
         if let Some(class_name) = strip_class_suffix(name, "_propose_create") {
             return self.handle_propose_create(&class_name, args);
         }
+        // Alias handling for hallucinated CRUD verbs (see comment on
+        // `matches_alias` below). Both alias families need to know whether
+        // the LLM's name already exists in the inner (filtered) surface,
+        // so we fetch that ONCE up front instead of re-enumerating on every
+        // iteration of the two class loops (Lal's PR #911 review,
+        // propose.rs:234 — 1 tools() enumeration total, was up to 2·N).
+        let name_lc = name.to_lowercase();
+        let inner_tool_names: Vec<String> = self
+            .inner
+            .tools()
+            .await
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let inner_has = |target: &str| -> bool {
+            inner_tool_names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(target))
+        };
         // Small local models (gemma3:12b in CI) reliably hallucinate the
         // dynamic CRUD verbs from AD4M's MCP surface — `<class>_create`,
         // `add_<class>`, `<class>_add` — because that's what a CRUD API
@@ -254,7 +280,6 @@ where
         // still queues an InterpretationOp gated by the human-divergence
         // check on apply. Small models get their "obvious" verb; the
         // extraction pass proceeds without stalling.
-        let name_lc = name.to_lowercase();
         for c in &self.classes {
             let lower = c.class_name.to_lowercase();
             let matches_alias = name_lc == format!("{lower}_create")
@@ -266,13 +291,7 @@ where
             if !matches_alias {
                 continue;
             }
-            let inner_has_name = self
-                .inner
-                .tools()
-                .await
-                .into_iter()
-                .any(|t| t.name.eq_ignore_ascii_case(name));
-            if inner_has_name {
+            if inner_has(name) {
                 break;
             }
             log::warn!("harness: aliasing hallucinated tool `{name}` → `{lower}_propose_create`");
@@ -302,13 +321,7 @@ where
             if relation_tail.is_empty() {
                 continue;
             }
-            let inner_has_name = self
-                .inner
-                .tools()
-                .await
-                .into_iter()
-                .any(|t| t.name.eq_ignore_ascii_case(name));
-            if inner_has_name {
+            if inner_has(name) {
                 break;
             }
             return Err(anyhow!(
@@ -1470,6 +1483,44 @@ mod tests {
             msg.contains("randomlyInvented"),
             "err should echo the bad predicate for context: {msg}"
         );
+    }
+
+    #[test]
+    fn proposal_buffer_recovers_from_poisoned_mutex() {
+        // Poison the mutex by triggering a panic inside a lock scope, then
+        // confirm subsequent operations still work with the original data
+        // intact. Regression against Lal's PR #911 review (propose.rs:56):
+        // the earlier `.expect("poisoned")` cascaded a single flaky tool
+        // panic into a hard abort of every subsequent tool call and the
+        // drain-then-apply block. Recovering the guard on poison keeps the
+        // pass alive.
+        let buf = ProposalBuffer::new();
+        buf.push(InterpretationOp::Create {
+            base: "ns://test/task/pre-poison".into(),
+            class: "Task".into(),
+            values: serde_json::Map::new(),
+        });
+        // Poison it: acquire the lock in a scope that panics.
+        let inner_arc = buf.inner.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = inner_arc.lock().unwrap();
+            panic!("simulated flaky tool");
+        });
+        assert!(
+            buf.inner.is_poisoned(),
+            "test setup: mutex should be poisoned"
+        );
+        // These would have panicked before the recovery fix.
+        assert_eq!(buf.len(), 1, "recovered data must still be visible");
+        buf.push(InterpretationOp::Create {
+            base: "ns://test/task/post-poison".into(),
+            class: "Task".into(),
+            values: serde_json::Map::new(),
+        });
+        assert_eq!(buf.len(), 2);
+        let drained = buf.drain();
+        assert_eq!(drained.len(), 2, "drain must succeed post-poison");
+        assert_eq!(buf.len(), 0, "drain must have consumed the ops");
     }
 
     #[tokio::test]
