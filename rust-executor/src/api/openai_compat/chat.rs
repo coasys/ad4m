@@ -469,10 +469,13 @@ fn flatten_message(m: &ChatMessage) -> (String, String) {
         .unwrap_or_default();
 
     match m.role {
-        // Tool result → a `<tool_response>` block in a user turn.
+        // Tool result → a `<tool_response>` block in a user turn. Shared
+        // renderer with harness_bridge so a fix in one place propagates.
+        // Legacy: `ChatMessage` doesn't carry `tool_call_id` on `Role::Tool`
+        // today; passing `None` matches the pre-refactor bare-tag output.
         Role::Tool => (
             "user".to_string(),
-            format!("<tool_response>\n{}\n</tool_response>", base_text),
+            tool_grammar::render_tool_response_block(&base_text, None),
         ),
         // Assistant turn that called tools → re-render the calls so the model
         // sees its own prior invocations.
@@ -483,22 +486,9 @@ fn flatten_message(m: &ChatMessage) -> (String, String) {
                     if !text.is_empty() {
                         text.push('\n');
                     }
-                    let args_trimmed = call.function.arguments.trim();
-                    // Validate that `args` is real JSON before splicing it in
-                    // verbatim; drop to `{}` on garbage upstream.
-                    let args = if args_trimmed.is_empty()
-                        || serde_json::from_str::<serde_json::Value>(args_trimmed).is_err()
-                    {
-                        "{}".to_string()
-                    } else {
-                        args_trimmed.to_string()
-                    };
-                    // Encode name via serde_json so quotes/backslashes/newlines
-                    // can't produce a malformed block.
-                    let name_encoded = serde_json::to_string(&call.function.name)
-                        .unwrap_or_else(|_| "\"\"".to_string());
-                    text.push_str(&format!(
-                        "<tool_call>\n{{\"name\": {name_encoded}, \"arguments\": {args}}}\n</tool_call>"
+                    text.push_str(&tool_grammar::render_tool_call_block(
+                        &call.function.name,
+                        &call.function.arguments,
                     ));
                 }
             }

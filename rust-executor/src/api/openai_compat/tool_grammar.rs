@@ -133,6 +133,51 @@ pub fn render_tools_system_prompt(tools: &[ToolDef]) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Wire-format render helpers (shared by chat::flatten_message +
+// harness_bridge::flatten_json_message — Lal's PR #911 review flagged the
+// two flatteners as byte-identical duplicates of these building blocks).
+// ---------------------------------------------------------------------------
+
+/// Render one `<tool_call>` block for a prior assistant turn's re-play.
+///
+/// The block matches the Hermes/Qwen convention exactly — same shape
+/// `extract_tool_calls` parses back and `single_tool_call_parser` writes
+/// on the constrained-decoding side, so a round-trip through this helper
+/// stays consistent with the grammar the model was trained on.
+///
+/// * `name` is JSON-encoded so a name containing `"` / `\` / newlines
+///   can't produce a malformed block.
+/// * `args_json_string` is validated as parseable JSON before it goes in
+///   verbatim. Empty or unparseable input degrades to `{}` — the LLM sees
+///   a syntactically valid call rather than a broken one.
+pub fn render_tool_call_block(name: &str, args_json_string: &str) -> String {
+    let args_trimmed = args_json_string.trim();
+    let args = if args_trimmed.is_empty() || serde_json::from_str::<Value>(args_trimmed).is_err() {
+        "{}".to_string()
+    } else {
+        args_trimmed.to_string()
+    };
+    let name_encoded = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
+    format!("<tool_call>\n{{\"name\": {name_encoded}, \"arguments\": {args}}}\n</tool_call>")
+}
+
+/// Wrap a tool result string as a `<tool_response>` block. When `id`
+/// is present (from OpenAI's `tool_call_id` on `role:"tool"`
+/// messages), it's included as an `id=` attribute so the model can
+/// correlate parallel tool_calls back to their invocations on the next
+/// prompt. Absent id → bare `<tool_response>`. `id` is JSON-encoded so
+/// quotes/backslashes can't produce a malformed attribute.
+pub fn render_tool_response_block(content: &str, id: Option<&str>) -> String {
+    match id.filter(|s| !s.is_empty()) {
+        Some(id) => {
+            let id_encoded = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string());
+            format!("<tool_response id={id_encoded}>\n{content}\n</tool_response>")
+        }
+        None => format!("<tool_response>\n{content}\n</tool_response>"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Grammar compiler
 // ---------------------------------------------------------------------------
 

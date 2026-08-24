@@ -294,15 +294,17 @@ fn flatten_json_message(m: &Value) -> Result<(String, String)> {
         // `<tool_response>` for backwards-compat with earlier turns and
         // hand-written test messages.
         "tool" => {
-            let block = match m.get("tool_call_id").and_then(|v| v.as_str()) {
-                Some(id) if !id.is_empty() => {
-                    let id_encoded =
-                        serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string());
-                    format!("<tool_response id={id_encoded}>\n{content}\n</tool_response>")
-                }
-                _ => format!("<tool_response>\n{content}\n</tool_response>"),
-            };
-            Ok(("user".to_string(), block))
+            // Tool result → `<tool_response>` block folded into a user
+            // turn (chat template has no tool role). Round-trips
+            // `tool_call_id` when present so parallel calls can be
+            // correlated back to their invocations on the next prompt.
+            // Shared renderer with `chat::flatten_message` — fix once,
+            // fix both.
+            let id = m.get("tool_call_id").and_then(|v| v.as_str());
+            Ok((
+                "user".to_string(),
+                tool_grammar::render_tool_response_block(&content, id),
+            ))
         }
         // Assistant turn that carried tool_calls → re-render them in the
         // Qwen `<tool_call>` convention so the model sees its own prior
@@ -325,28 +327,10 @@ fn flatten_json_message(m: &Value) -> Result<(String, String)> {
                     .and_then(|f| f.get("arguments"))
                     .and_then(|a| a.as_str())
                     .unwrap_or("{}");
-                let args_trimmed = args_str.trim();
-                // Validate that `args` is real JSON before splicing it into
-                // the block verbatim. An invalid arguments string from an
-                // upstream provider would otherwise produce an unparseable
-                // <tool_call> block that the LLM sees on its next turn.
-                let args = if args_trimmed.is_empty()
-                    || serde_json::from_str::<serde_json::Value>(args_trimmed).is_err()
-                {
-                    "{}".to_string()
-                } else {
-                    args_trimmed.to_string()
-                };
-                // Encode `name` via serde_json so a name containing `"`, `\`,
-                // or a newline can't produce a malformed block.
-                let name_encoded =
-                    serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string());
                 if !text.is_empty() {
                     text.push('\n');
                 }
-                text.push_str(&format!(
-                    "<tool_call>\n{{\"name\": {name_encoded}, \"arguments\": {args}}}\n</tool_call>"
-                ));
+                text.push_str(&tool_grammar::render_tool_call_block(name, args_str));
             }
             Ok(("assistant".to_string(), text))
         }

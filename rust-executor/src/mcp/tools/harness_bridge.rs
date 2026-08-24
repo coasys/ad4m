@@ -76,49 +76,42 @@ impl Ad4mMcpHandler {
     /// harness wiring. Additional static tools land here one arm at a time;
     /// the pattern is mechanical.
     pub(crate) async fn call_tool_by_name(&self, name: &str, args: Value) -> Result<String> {
-        // Each static tool's `Parameters<T>` is a distinct type, so
-        // deserialization is per-call. A closure with an inferred generic
-        // return type would only work for the first arm — inline
-        // `serde_json::from_value` gives each match arm its own turbofish
-        // and a clean error message on wrong-shape args.
+        // The seven static-tool arms below all deserialize into a distinct
+        // `Parameters<T>` where T is the argument struct on the
+        // `#[tool]`-annotated method. That's why they can't collapse into
+        // a `match` value + a shared closure — each T's turbofish is
+        // per-call. The `dispatch_static_tool!` macro paves the pattern:
+        // it inlines the deserialize + Parameters wrap + await, with a
+        // uniform error message that names the tool the LLM asked for.
+        //
+        // Adding a static tool: add one line here naming the method. If
+        // the method isn't in scope yet, add a `use` at the top of the
+        // module or reach it via `self`. Lal's PR #911 review
+        // (harness_bridge.rs:78) flagged the mechanical repetition —
+        // this macro is the DRY that keeps future additions honest
+        // without adding runtime cost or dyn-dispatch.
+        macro_rules! dispatch_static_tool {
+            ($method:ident) => {{
+                let params = serde_json::from_value(args).map_err(|e| {
+                    anyhow!(
+                        "failed to deserialize `{}` arguments: {e}",
+                        stringify!($method)
+                    )
+                })?;
+                return Ok(self.$method(Parameters(params)).await);
+            }};
+        }
+
         match name {
             // ── perspectives.rs ─────────────────────────────────────────
-            "list_perspectives" => Ok(self
-                .list_perspectives(Parameters(serde_json::from_value(args).map_err(|e| {
-                    anyhow!("failed to deserialize `list_perspectives` arguments: {e}")
-                })?))
-                .await),
-            "get_models" => Ok(self
-                .get_models(Parameters(serde_json::from_value(args).map_err(|e| {
-                    anyhow!("failed to deserialize `get_models` arguments: {e}")
-                })?))
-                .await),
-            "query_links" => Ok(self
-                .query_links(Parameters(serde_json::from_value(args).map_err(|e| {
-                    anyhow!("failed to deserialize `query_links` arguments: {e}")
-                })?))
-                .await),
-            "infer" => Ok(self
-                .infer(Parameters(serde_json::from_value(args).map_err(|e| {
-                    anyhow!("failed to deserialize `infer` arguments: {e}")
-                })?))
-                .await),
+            "list_perspectives" => dispatch_static_tool!(list_perspectives),
+            "get_models" => dispatch_static_tool!(get_models),
+            "query_links" => dispatch_static_tool!(query_links),
+            "infer" => dispatch_static_tool!(infer),
             // ── subjects.rs ─────────────────────────────────────────────
-            "query_subjects" => Ok(self
-                .query_subjects(Parameters(serde_json::from_value(args).map_err(|e| {
-                    anyhow!("failed to deserialize `query_subjects` arguments: {e}")
-                })?))
-                .await),
-            "get_subject_data" => Ok(self
-                .get_subject_data(Parameters(serde_json::from_value(args).map_err(|e| {
-                    anyhow!("failed to deserialize `get_subject_data` arguments: {e}")
-                })?))
-                .await),
-            "get_subject_children" => Ok(self
-                .get_subject_children(Parameters(serde_json::from_value(args).map_err(|e| {
-                    anyhow!("failed to deserialize `get_subject_children` arguments: {e}")
-                })?))
-                .await),
+            "query_subjects" => dispatch_static_tool!(query_subjects),
+            "get_subject_data" => dispatch_static_tool!(get_subject_data),
+            "get_subject_children" => dispatch_static_tool!(get_subject_children),
             // ── fallback: per-class dynamic tools ───────────────────────
             _ => {
                 // `handle_dynamic_tool` expects the args as a
