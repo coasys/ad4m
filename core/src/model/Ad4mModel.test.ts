@@ -2494,3 +2494,145 @@ describe("Ad4mModel instance identity (uniqueness without envelopes)", () => {
     expect(instance.id).toBe("flux://existing-instance");
   });
 });
+
+describe("Relation writes: to-one batching and scalar coercion", () => {
+  // `Relationship` is the shape that made both of these visible: a record whose
+  // two to-one relations name the things it connects, so it is worthless until
+  // both endpoints are linked, and it is created and pointed in one gesture.
+  @Model({ name: "TestRelationship" })
+  class TestRelationship extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://relationship" })
+    flag: string = "";
+
+    @Property({ through: "we://title", required: true })
+    label: string = "";
+
+    @HasOne({ through: "we://relationship_source" })
+    source?: string;
+
+    @HasOne({ through: "we://relationship_target" })
+    target?: string;
+  }
+
+  // No required property, no flag, no initial — so `save()` finds no SHACL
+  // constructor, skips `createSubject`, and calls `innerUpdate(true)`.
+  @Model({ name: "TestPlacement" })
+  class TestPlacement extends Ad4mModel {
+    @HasOne({ through: "we://placed_node" })
+    node?: string;
+  }
+
+  const makePerspective = () =>
+    ({
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      createSubject: jest.fn().mockResolvedValue(undefined),
+      createBatch: jest.fn().mockResolvedValue("batch-generated"),
+      commitBatch: jest.fn().mockResolvedValue(undefined),
+      stringOrTemplateObjectToSubjectClassName: jest
+        .fn()
+        .mockResolvedValue("TestRelationship"),
+      uuid: "test-perspective-uuid",
+    }) as any;
+
+  /** Targets written by `executeAction`, across every call. */
+  const writtenTargets = (perspective: any): string[] =>
+    perspective.executeAction.mock.calls.flatMap((call: any[]) =>
+      (call[2] ?? []).map((param: any) => param.value)
+    );
+
+  /** The batchId argument of each `executeAction` call. */
+  const batchIds = (perspective: any): unknown[] =>
+    perspective.executeAction.mock.calls.map((call: any[]) => call[3]);
+
+  describe("a scalar handed to a relation field", () => {
+    it("writes a link instead of being silently dropped", async () => {
+      // The failure this closes: this call typechecked, ran, resolved, and
+      // wrote no link — leaving a relationship with no endpoints, which only
+      // surfaces later as a reader calling the record malformed.
+      const perspective = makePerspective();
+
+      await TestRelationship.create(
+        perspective,
+        { label: "contradicts", source: "we://block/a", target: "we://block/b" },
+        { batchId: "batch-1" }
+      );
+
+      expect(writtenTargets(perspective)).toEqual(
+        expect.arrayContaining(["we://block/a", "we://block/b"])
+      );
+    });
+
+    it("writes it even when a constructor consumed the properties", async () => {
+      // `create` passes `setProperties: false` when the class has a SHACL
+      // constructor, because `createSubject` writes the values map. A relation
+      // carries `ad4m://adder` rather than `ad4m://setter`, so `createSubject`
+      // drops it — meaning the relation write has to happen here regardless of
+      // that flag, or both paths discard it at once.
+      const perspective = makePerspective();
+
+      await TestRelationship.create(
+        perspective,
+        { label: "contradicts", source: "we://block/a" },
+        { batchId: "batch-1" }
+      );
+
+      expect(perspective.createSubject).toHaveBeenCalled();
+      expect(writtenTargets(perspective)).toContain("we://block/a");
+    });
+
+    it("agrees with the documented array form", async () => {
+      const scalar = makePerspective();
+      await TestRelationship.create(
+        scalar,
+        { label: "x", source: "we://block/a" },
+        { batchId: "b" }
+      );
+
+      const array = makePerspective();
+      await TestRelationship.create(
+        array,
+        { label: "x", source: ["we://block/a"] as any },
+        { batchId: "b" }
+      );
+
+      expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
+    });
+
+    it("still writes the relation when there is no SHACL constructor", async () => {
+      const perspective = makePerspective();
+
+      await TestPlacement.create(
+        perspective,
+        { node: "we://block/a" },
+        { batchId: "batch-1" }
+      );
+
+      expect(perspective.createSubject).not.toHaveBeenCalled();
+      expect(writtenTargets(perspective)).toContain("we://block/a");
+    });
+  });
+
+  describe("generated @HasOne accessors", () => {
+    it("forward batchId, so a to-one link can join a write group", async () => {
+      // Without this the link commits on its own, so every subscriber sees the
+      // record with its relation still empty — a card before its placement.
+      const perspective = makePerspective();
+      const rel = new TestRelationship(perspective, "we://rel/1") as any;
+
+      await rel.setSource("we://block/a", "batch-1");
+      await rel.addTarget("we://block/b", "batch-1");
+      await rel.removeTarget("we://block/b", "batch-1");
+
+      expect(batchIds(perspective)).toEqual(["batch-1", "batch-1", "batch-1"]);
+    });
+
+    it("still work without one", async () => {
+      const perspective = makePerspective();
+      const rel = new TestRelationship(perspective, "we://rel/1") as any;
+
+      await rel.setSource("we://block/a");
+
+      expect(batchIds(perspective)).toEqual([undefined]);
+    });
+  });
+});

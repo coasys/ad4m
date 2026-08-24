@@ -1063,15 +1063,23 @@ export function HasOne(
                 local: opts.local,
             })(target, key);
 
-            // Add prototype methods for add/remove/set (mirroring @HasMany)
-            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any) {
-                return (this as any).addRelationValue(relKey, arg);
+            // Add prototype methods for add/remove/set (mirroring @HasMany).
+            //
+            // `batchId` is part of that mirroring: without it a to-one link
+            // cannot join a write group, so anything that creates a record and
+            // then points it at something has to commit twice and every
+            // subscriber sees the state in between — a record whose to-one
+            // relation is still empty. Anything rendering from a subscription
+            // therefore has a frame in which the record exists and points at
+            // nothing.
+            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).addRelationValue(relKey, arg, batchId);
             };
-            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any) {
-                return (this as any).removeRelationValue(relKey, arg);
+            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).removeRelationValue(relKey, arg, batchId);
             };
-            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any) {
-                return (this as any).setRelationValues(relKey, arg);
+            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).setRelationValues(relKey, arg, batchId);
             };
         } else {
             Object.defineProperty(target, relKey, { configurable: true, writable: true });
