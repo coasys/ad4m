@@ -18,6 +18,7 @@
     {"path": "ad4m://dedup_strategy",    "name": "dedupStrategy",                         "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://dedup_strategy", "target": "value"}]},
     {"path": "ad4m://existing_scope",    "name": "existingScope",                         "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://existing_scope", "target": "value"}]},
     {"path": "ad4m://mint_scope",        "name": "mintScope",                             "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://mint_scope", "target": "value"}]},
-    {"path": "ad4m://max_tool_calls",    "name": "maxToolCalls",                          "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://max_tool_calls", "target": "value"}]}
+    {"path": "ad4m://max_tool_calls",    "name": "maxToolCalls",                          "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://max_tool_calls", "target": "value"}]},
+    {"path": "ad4m://emit_debug_events", "name": "emitDebugEvents",                       "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://emit_debug_events", "target": "value"}]}
   ]
 }

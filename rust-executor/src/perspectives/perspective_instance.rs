@@ -4706,6 +4706,27 @@ impl PerspectiveInstance {
                                 });
                             }
                         }
+                    } else {
+                        /*
+                           A value was supplied for a property with no `ad4m://setter`, and until now
+                           that was silently dropped.
+
+                           Silent is the wrong default here: from the caller's side the write
+                           succeeds — the instance is minted, every other property lands, no error is
+                           returned — and the omission only surfaces much later as whatever reads the
+                           instance back deciding it is malformed. Tracing one of those means working
+                           backwards from a reader to a writer that never complained.
+
+                           Warn rather than fail, because dropping an unknown key is legitimate: a
+                           caller may pass a superset of what a class declares. What is not
+                           legitimate is doing it without saying so.
+                        */
+                        log::warn!(
+                            "create_subject: class `{}` declares no setter for property `{}` — \
+                             the supplied value was NOT written",
+                            class_name,
+                            prop
+                        );
                     }
                 }
             }
@@ -4761,6 +4782,16 @@ impl PerspectiveInstance {
                 let Some(setter_commands) =
                     self.get_property_setter_actions(&class_name, prop).await?
                 else {
+                    // Same silent drop as `create_subject`, same reason for saying so out loud —
+                    // see the comment there. `update_subject` is the path a collection's second and
+                    // subsequent members go through, so a class whose collection has no setter
+                    // loses every one of them here without a word.
+                    log::warn!(
+                        "update_subject: class `{}` declares no setter for property `{}` — \
+                         the supplied value was NOT written",
+                        class_name,
+                        prop
+                    );
                     continue;
                 };
                 let target_value = self
@@ -5726,11 +5757,17 @@ impl PerspectiveInstance {
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
                 continue;
             };
+            // Hoisted above the `BatchReady` emit so that signal can carry the batch key too.
+            // It is the first event of a pass, so a consumer that could not key it would have to
+            // buffer everything until the pass's second event told it what row to open.
+            let item_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
+            let batch_id = crate::perspectives::auto_processor::claim::batch_key(&item_ids);
             // Signal the batch is ready before the pass runs, so listeners
             // (tests, the WS layer) can await "processing started".
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::BatchReady)
-                    .with_items(&batch.iter().map(|t| t.id.clone()).collect::<Vec<_>>()),
+                    .with_items(&item_ids)
+                    .with_batch_key(&batch_id),
             )
             .await;
             let mut perspective_clone = self.clone();
@@ -5738,8 +5775,6 @@ impl PerspectiveInstance {
             // elected author past `claim_ttl_ms`, escalate past election straight
             // to the claim (the min-DID claim still prevents doubles among peers
             // that escalate together).
-            let item_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
-            let batch_id = crate::perspectives::auto_processor::claim::batch_key(&item_ids);
             let escalate = watcher.should_escalate(&batch_id, now_ms, cfg.claim_ttl_ms);
             let outcome = match run_one_pass(
                 &mut perspective_clone,

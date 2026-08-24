@@ -11,7 +11,7 @@ import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlayInfo, RawScope } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -275,11 +275,22 @@ export class PerspectiveClient {
         classes?: string[],
         existingScope?: RawScope,
         mintScope?: RawScope,
+        observe?: RunInterpretationObserveOptions,
     ): Promise<string[]> {
         const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<string[]>(
             'perspective.runInterpretation',
-            { uuid, transcript, basePrefix, classes, existingScope, mintScope },
+            {
+                uuid, transcript, basePrefix, classes, existingScope, mintScope,
+                // Spread rather than always-present, so a client talking to a pre-#903
+                // executor sends exactly the params it sent before. `serde` would ignore
+                // the extra keys anyway; keeping the wire identical means a bug report
+                // from an older node cannot be about these.
+                ...(observe ? {
+                    observationId: observe.observationId,
+                    emitDebugEvents: observe.emitDebugEvents ?? false,
+                } : {}),
+            },
             RUN_INTERPRETATION_TIMEOUT_MS,
         )
     }
@@ -368,6 +379,31 @@ export class PerspectiveClient {
             (data) => {
                 if (data.type === 'auto-processor-event' && data.perspectiveUuid === uuid) {
                     cb(data as unknown as AutoProcessorEvent)
+                }
+            }
+        )
+        let existing = this.#linkUnsubscribers.get(uuid as string) || []
+        existing.push(unsub)
+        this.#linkUnsubscribers.set(uuid as string, existing)
+        await this.#apiClient.waitForSubscription()
+    }
+
+    /**
+     * Subscribe to neighbourhood-state events on a perspective. `cb` fires
+     * when THIS executor claims / finishes / abandons a batch for any
+     * processor on `uuid` — perspective-scoped observability so a UI can
+     * render "someone is auto-processing this" without receiving the batch
+     * payload or LLM I/O. Registered on the per-uuid `#linkUnsubscribers`
+     * map so `PerspectiveProxy.dispose()` sweeps it up.
+     */
+    async addAutoProcessorNeighbourhoodStateListener(
+        uuid: String,
+        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
+    ): Promise<void> {
+        const unsub = this.#apiClient.subscribe(
+            (data) => {
+                if (data.type === 'auto-processor-neighbourhood-state' && data.perspectiveUuid === uuid) {
+                    cb(data as unknown as AutoProcessorNeighbourhoodStateEvent)
                 }
             }
         )

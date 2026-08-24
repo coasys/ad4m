@@ -323,6 +323,48 @@ pub async fn run_interpretation(
     .await
 }
 
+/// [`run_interpretation`] with live mid-pass telemetry.
+///
+/// Identical pipeline and defaults to [`run_interpretation`]; the only
+/// difference is that `emit_ctx`, when `Some`, makes the engine emit
+/// `LlmRequestSent` (with the prompt) and `LlmResponseReceived` (with the
+/// response) around the model call.
+///
+/// Exists because the one-shot WS path had no way to reach that plumbing.
+/// The parameters already existed on
+/// [`run_interpretation_with_strategy_and_model`], but reaching them meant a
+/// call site spelling out eleven arguments — nine of which are the defaults
+/// [`run_interpretation`] already picks — so the handler either duplicated
+/// those defaults (and drifted from them) or the one-shot path stayed silent.
+/// It stayed silent — so a caller blocked on `runInterpretation` observed no
+/// progress at all, while the same work under a standing watch produced a full
+/// step stream.
+pub async fn run_interpretation_observed(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[TranscriptTurn],
+    base_prefix: &str,
+    context: &AgentContext,
+    scope: Option<&Scope>,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+) -> anyhow::Result<Vec<String>> {
+    run_interpretation_with_strategy_and_model(
+        perspective,
+        shapes,
+        transcript,
+        base_prefix,
+        context,
+        &DedupStrategy::default(),
+        None,
+        scope,
+        None,
+        false,
+        emit_ctx,
+    )
+    .await
+    .map(|out| out.bases)
+}
+
 /// [`run_interpretation`] with an explicit [`DedupStrategy`] — same pipeline,
 /// but the identity-dedup safety net switches between normalized-string
 /// matching (default) and semantic (embedding-based) matching per call.
@@ -351,8 +393,11 @@ pub async fn run_interpretation_with_strategy(
         None,
         scope,
         None,
+        false,
+        None,
     )
     .await
+    .map(|out| out.bases)
 }
 
 /// [`run_interpretation_with_strategy`] with an optional per-call LLM model
@@ -362,6 +407,29 @@ pub async fn run_interpretation_with_strategy(
 ///
 /// `model_override = None` reuses the exact task row every existing caller
 /// already uses, so behaviour is unchanged for all non-processor callers.
+/// Optional live-debug capture for a single interpretation pass — the raw
+/// prompt fed to the LLM and its response, verbatim. Populated only when the
+/// caller opts in via `emit_debug_events`. Kept out of the base `Vec<String>`
+/// return so a normal pass does not carry tens of KB of prompt text through
+/// every call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterpretationDebug {
+    pub prompt: String,
+    pub response: String,
+}
+
+/// Enhanced outcome of one interpretation pass: the affected instance bases
+/// (create/update/relations touched) plus optional live-debug capture.
+///
+/// This is the shape `run_interpretation_with_strategy_and_model` returns
+/// now; delegators (`run_interpretation`, `run_interpretation_with_strategy`)
+/// preserve their `Vec<String>` return by extracting `.bases`.
+#[derive(Debug, Clone)]
+pub struct InterpretationOutcome {
+    pub bases: Vec<String>,
+    pub debug: Option<InterpretationDebug>,
+}
+
 pub async fn run_interpretation_with_strategy_and_model(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -372,7 +440,9 @@ pub async fn run_interpretation_with_strategy_and_model(
     model_override: Option<&str>,
     scope: Option<&Scope>,
     cursor: Option<&InterpretationRunCursor>,
-) -> anyhow::Result<Vec<String>> {
+    emit_debug_events: bool,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+) -> anyhow::Result<InterpretationOutcome> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
     let task = ensure_interpretation_task_for_model(model_override).await?;
@@ -402,16 +472,73 @@ pub async fn run_interpretation_with_strategy_and_model(
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
 
+    // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
+    // `LlmRequestSent` fires right before EACH `service.prompt` call and
+    // `LlmResponseReceived` fires right after EACH successful prompt
+    // response — including responses that later fail parsing, so a UI
+    // can diagnose why a retry happened. Both live INSIDE the retry
+    // callback: emitting them once around the whole retry loop would
+    // hide any raw response that wasn't the final parse-successful one.
+    //
+    // `debug_response_capture` retains the LAST successful raw response
+    // for `InterpretationRun` persistence — the same value that ends up
+    // on the run node's `debugResponse` scalar. Retries only happen when
+    // parsing fails, so the value in the cell after `retry_interpretation_parse`
+    // succeeds is by construction the final (parse-successful) attempt.
+    let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
     let instances = retry_interpretation_parse(|_attempt| {
         let service = service.clone();
         let task_id = task.task_id.clone();
         let prompt = prompt.clone();
+        let capture = debug_response_capture.clone();
+        let emit_ctx_cloned = emit_ctx.cloned();
         async move {
+            use crate::perspectives::auto_processor::events::{
+                emit, AutoProcessorEvent, AutoProcessorStep,
+            };
+
+            if let Some(ctx) = emit_ctx_cloned.as_ref() {
+                emit(
+                    AutoProcessorEvent::new(
+                        &ctx.perspective_uuid,
+                        &ctx.processor_id,
+                        AutoProcessorStep::LlmRequestSent,
+                    )
+                    .with_agent_did(&ctx.agent_did)
+                    .with_items(&ctx.item_ids)
+                    .with_batch_key(&ctx.batch_key)
+                    .with_llm_input(prompt.clone()),
+                )
+                .await;
+            }
+
             let result = service
                 // Internal caller (interpretation runner) — no user auth context; billing skipped.
                 .prompt(task_id, prompt, None)
                 .await
                 .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+
+            if let Some(ctx) = emit_ctx_cloned.as_ref() {
+                emit(
+                    AutoProcessorEvent::new(
+                        &ctx.perspective_uuid,
+                        &ctx.processor_id,
+                        AutoProcessorStep::LlmResponseReceived,
+                    )
+                    .with_agent_did(&ctx.agent_did)
+                    .with_items(&ctx.item_ids)
+                    .with_batch_key(&ctx.batch_key)
+                    .with_llm_output(result.text.clone()),
+                )
+                .await;
+            }
+
+            if emit_debug_events {
+                if let Ok(mut slot) = capture.lock() {
+                    *slot = Some(result.text.clone());
+                }
+            }
             Ok(result.text)
         }
     })
@@ -450,6 +577,22 @@ pub async fn run_interpretation_with_strategy_and_model(
     // `InterpretationRun` is minted per pass and threaded onto every overlay.
     let run_id = uuid::Uuid::new_v4().to_string();
     let ran_at = chrono::Utc::now().timestamp_millis().to_string();
+    // Build the debug capture struct once so the shared cell's contents live
+    // exactly one hop: extracted here, cloned into the meta persisted on the
+    // run node, and returned to the caller for the live event.
+    let debug = if emit_debug_events {
+        let response = debug_response_capture
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .unwrap_or_default();
+        Some(InterpretationDebug {
+            prompt: prompt.clone(),
+            response,
+        })
+    } else {
+        None
+    };
     let bases = apply_with_overlay(
         perspective,
         shapes,
@@ -459,12 +602,13 @@ pub async fn run_interpretation_with_strategy_and_model(
         ran_at,
         context,
         cursor,
+        debug.as_ref(),
     )
     .await?;
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
-    Ok(bases)
+    Ok(InterpretationOutcome { bases, debug })
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
@@ -657,6 +801,11 @@ pub async fn run_interpretation_with_harness_and_model(
     );
     let run_id = uuid::Uuid::new_v4().to_string();
     let ran_at = chrono::Utc::now().timestamp_millis().to_string();
+    // Harness path has no single "raw prompt / raw response" to persist —
+    // it's a multi-turn loop with per-round tool_calls. `None` skips the
+    // `InterpretationDebug` payload dev #903 wires into the classic path;
+    // a follow-up commit on this branch can carry a per-round transcript
+    // once the shape is agreed.
     let bases = apply_with_overlay(
         perspective,
         shapes,
@@ -666,6 +815,7 @@ pub async fn run_interpretation_with_harness_and_model(
         ran_at,
         context,
         cursor,
+        None,
     )
     .await?;
 

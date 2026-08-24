@@ -30,9 +30,35 @@
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::types::{Link, LinkStatus};
 
 use super::scalar_string;
 use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
+
+/// Instances already reported as unloadable, so each is complained about once.
+///
+/// The watch loop polls `load_processors` several times a second on every perspective, and a
+/// rejected instance is rejected identically every time — so an unthrottled warning emits the same
+/// line thousands of times a minute, per instance. That is not merely untidy: it buries the log a
+/// person is reading to find out *why*, which is the exact situation the warning exists to serve.
+///
+/// Keyed by instance URI and never cleared. A processor whose config is repaired starts loading and
+/// stops reaching this path at all; one that is deleted never returns. The set is therefore bounded
+/// by the number of distinct broken instances, which is small and finite.
+static REPORTED_BAD_INSTANCES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+/// Whether this is the first time this instance has failed to load.
+fn first_report_for(instance_id: &str) -> bool {
+    REPORTED_BAD_INSTANCES
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(instance_id.to_string()))
+        // A poisoned mutex means another thread panicked mid-report. Log rather than swallow: a
+        // repeated line is a smaller problem than a silent one.
+        .unwrap_or(true)
+}
 
 /// Local subject-class name of a processor config.
 pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
@@ -146,13 +172,19 @@ pub struct AutoProcessorConfig {
     /// and let the LLM make up to `N` tool calls per pass before being
     /// forced to answer. The cap prevents a stuck or adversarial model
     /// from DoS'ing the extraction pass.
-    ///
-    /// This field is plumbed through config but NOT yet consumed by
-    /// [`crate::perspectives::interpretation::run_interpretation`]; the
-    /// engine wiring lands in a follow-up commit (v3 §6). Callers that
-    /// set this today get the field round-tripped through the SDNA but
-    /// no behavioural change.
     pub max_tool_calls: Option<u32>,
+    /// When `true`, enables full debug observability for this processor:
+    /// 1. Persists the raw LLM prompt + response on the pass's
+    ///    `InterpretationRun` node (`debugPrompt`/`debugResponse`) for
+    ///    retrospective inspection.
+    /// 2. Emits `LlmRequestSent` and `LlmResponseReceived`
+    ///    [`super::events::AutoProcessorEvent`]s mid-pass, so a subscribed
+    ///    UI can render "waiting on LLM" between prompt-send and
+    ///    response-receive instead of a single lump payload at `Processed`.
+    ///
+    /// Default: `false`. Prompts + responses are large (10s of KB) and
+    /// every enabled peer syncs them for every pass.
+    pub emit_debug_events: bool,
 }
 
 /// Deterministic node URI for an AutoProcessor. Deterministic in
@@ -182,17 +214,29 @@ pub async fn ensure_auto_processor_class(
 /// Writing the same `processor_id` twice overwrites its scalars (the setters
 /// are `setSingleTarget`) and appends its interpretation classes (deduplicated
 /// on read by [`load_processors`]).
+///
+/// `emit_debug_events_write` is a tri-state intent, resolved at the API
+/// boundary from the request's `Option<bool>` field:
+/// * `Some(true)` writes the link as `"true"`.
+/// * `Some(false)` writes the link as `"false"` — actively overwriting any
+///   pre-existing `"true"` link on an updated processor via `setSingleTarget`.
+/// * `None` omits the value entirely — the setter is not called and any
+///   pre-existing link is preserved verbatim.
+///
 pub async fn write_processor(
     perspective: &mut PerspectiveInstance,
     cfg: &AutoProcessorConfig,
+    emit_debug_events_write: Option<bool>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    let Some((first_class, more_classes)) = cfg.interpretation_classes.split_first() else {
+    // Emptiness is still a hard error — a processor with no classes materialises nothing — but the
+    // members themselves are written as links below rather than through the values map.
+    if cfg.interpretation_classes.is_empty() {
         anyhow::bail!(
             "write_processor: `{}` has no interpretation_classes",
             cfg.processor_id
         );
-    };
+    }
     ensure_auto_processor_class(perspective, context).await?;
 
     let node = processor_node(&cfg.processor_id);
@@ -204,7 +248,6 @@ pub async fn write_processor(
     let mut values = serde_json::json!({
         "processorId": cfg.processor_id,
         "sourceScopeQuery": cfg.source_scope_query,
-        "interpretationClasses": first_class,
         "debounceMs": cfg.debounce_ms.to_string(),
         "batchMin": cfg.batch_min.to_string(),
         "batchMax": cfg.batch_max.to_string(),
@@ -235,6 +278,9 @@ pub async fn write_processor(
     if let Some(max_tool_calls) = cfg.max_tool_calls {
         values["maxToolCalls"] = max_tool_calls.to_string().into();
     }
+    if let Some(v) = emit_debug_events_write {
+        values["emitDebugEvents"] = v.to_string().into();
+    }
 
     // Batch the create_subject + follow-on update_subject calls so the whole
     // AutoProcessorConfig instance lands as ONE `Shared` commit — instead of
@@ -259,22 +305,41 @@ pub async fn write_processor(
             )
             .await
             .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
-        // `create_subject` applies one value per property, so the remaining
-        // members of the `interpretation_class` collection go through the same
-        // `addLink` setter one at a time — still on the same batch so they
-        // commit atomically with the base instance.
-        for class in more_classes {
+        /*
+           The classes are written as links, not through the values map.
+
+           `create_subject` and `update_subject` resolve a property by looking up its
+           `ad4m://setter` actions, and a *collection* has none — it carries `ad4m://adder`
+           instead. So every value handed to them for `interpretationClasses` was silently
+           discarded, and the instance came back without the one property `load_processors`
+           requires first. Every scalar landed, so the write reported success and the failure
+           surfaced only as the reader calling the instance malformed, once per watch tick,
+           forever.
+
+           Adding the links directly is what the collection's own `addLink` action would do,
+           and it needs no shape lookup to get there. Same batch as the instance, so the classes
+           and the config it belongs to still commit atomically — a half-written processor is
+           precisely the state that produced this bug.
+
+           `Shared`, matching every other link this class writes: the processor set is neighbourhood
+           state, and a local-only class list would make one peer's view of what to extract differ
+           from everyone else's.
+        */
+        for class in cfg.interpretation_classes.iter() {
             perspective
-                .update_subject(
-                    class_option(),
-                    node.clone(),
-                    serde_json::json!({ "interpretationClasses": class }),
+                .add_link(
+                    Link {
+                        source: node.clone(),
+                        predicate: Some("ad4m://interpretation_class".to_string()),
+                        target: format!("literal:string:{}", class),
+                    },
+                    LinkStatus::Shared,
                     Some(batch_id.clone()),
                     context,
                 )
                 .await
                 .map_err(|e| {
-                    anyhow::anyhow!("write_processor: update_subject(class) failed: {e:#}")
+                    anyhow::anyhow!("write_processor: add_link(interpretation_class) failed: {e:#}")
                 })?;
         }
         Ok(())
@@ -332,7 +397,7 @@ pub async fn load_processors(
             "processorId", "sourceScopeQuery", "basePrefix",
             "interpretationClasses", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
-            "existingScope", "mintScope", "maxToolCalls",
+            "existingScope", "mintScope", "maxToolCalls", "emitDebugEvents",
         ]
     })
     .to_string();
@@ -347,11 +412,37 @@ pub async fn load_processors(
     for instance in result["instances"].as_array().into_iter().flatten() {
         match config_from_instance(instance) {
             Some(cfg) => out.push(cfg),
-            None => log::warn!(
-                "load_processors: AutoProcessor instance `{}` has missing / unparseable \
-                 fields; skipping",
-                instance["id"].as_str().unwrap_or("<no id>")
-            ),
+            /*
+               The instance itself, not just the fact that it failed.
+
+               "has missing / unparseable fields" names neither the field nor its value, and this
+               fires once per watch tick forever — so the symptom is an endless stream of a message
+               that cannot be acted on. Diagnosing one meant reading three files and guessing, and
+               the guesses were wrong twice.
+
+               Every branch that returns `None` from `config_from_instance` is a statement about one
+               property's value, so printing the whole instance answers the question outright: which
+               field is absent, and how the ones that are present are actually encoded. That second
+               half matters more than it looks — a scalar that arrives in an unexpected encoding
+               reads as "missing" here, and nothing else in the message would distinguish the two.
+
+               At `warn` alongside the existing line rather than `debug`, because a processor that
+               silently stops running is exactly the situation where nobody has debug logging on
+               yet, and the instance is a few hundred bytes once per skip.
+            */
+            None => {
+                let id = instance["id"].as_str().unwrap_or("<no id>");
+                if first_report_for(id) {
+                    log::warn!(
+                        "load_processors: AutoProcessor instance `{}` has missing / unparseable \
+                         fields; skipping (further occurrences suppressed). Instance as read: {}",
+                        id,
+                        instance
+                    );
+                } else {
+                    log::debug!("load_processors: still skipping `{}`", id);
+                }
+            }
         }
     }
     out.sort_by(|a, b| a.processor_id.cmp(&b.processor_id));
@@ -446,6 +537,19 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         Some(s) => Some(s.parse::<u32>().ok()?),
         None => None,
     };
+    let parse_bool = |name: &str| -> Option<Option<bool>> {
+        match scalar(name) {
+            Some(s) => match s.parse::<bool>() {
+                Ok(v) => Some(Some(v)),
+                Err(_) => {
+                    log::warn!("config_from_instance: {name} is not `true`/`false`");
+                    None
+                }
+            },
+            None => Some(None),
+        }
+    };
+    let emit_debug_events = parse_bool("emitDebugEvents")?.unwrap_or(false);
 
     Some(AutoProcessorConfig {
         processor_id: scalar("processorId")?,
@@ -462,6 +566,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         existing_scope,
         mint_scope,
         max_tool_calls,
+        emit_debug_events,
     })
 }
 
@@ -502,6 +607,7 @@ mod tests {
             existing_scope: None,
             mint_scope: None,
             max_tool_calls: None,
+            emit_debug_events: false,
         }
     }
 
@@ -510,7 +616,7 @@ mod tests {
     async fn write_then_load_roundtrip() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let cfg = sample_config("summariser");
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
         let loaded = load_processors(&p).await.expect("load_processors");
@@ -523,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn write_creates_shared_links() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("shared"), &ctx)
+        write_processor(&mut p, &sample_config("shared"), Some(false), &ctx)
             .await
             .expect("write_processor");
         let links = p
@@ -562,7 +668,7 @@ mod tests {
         // write in reverse-alphabetical order to prove sort is by the field,
         // not by write order.
         for id in ["z-tagger", "a-summariser", "m-classifier"] {
-            write_processor(&mut p, &sample_config(id), &ctx)
+            write_processor(&mut p, &sample_config(id), Some(false), &ctx)
                 .await
                 .expect("write");
         }
@@ -582,7 +688,9 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("minimal");
         cfg.dedup_strategy_json = None;
-        write_processor(&mut p, &cfg, &ctx).await.expect("write");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], cfg);
@@ -597,7 +705,9 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("windowed");
         cfg.source_window_ms = Some(42);
-        write_processor(&mut p, &cfg, &ctx).await.expect("write");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded[0].source_window_ms, Some(42));
     }
@@ -612,7 +722,9 @@ mod tests {
 
         // Case 1: both scopes absent (baseline).
         let bare = sample_config("bare");
-        write_processor(&mut p, &bare, &ctx).await.expect("write");
+        write_processor(&mut p, &bare, Some(false), &ctx)
+            .await
+            .expect("write");
 
         // Case 2: `Raw` scope on both sides — different parent nodes so we can
         // prove they don't get conflated on read.
@@ -625,7 +737,9 @@ mod tests {
             id: "soa://project/42/backlog".into(),
             predicate: "ad4m://has_child".into(),
         });
-        write_processor(&mut p, &raw, &ctx).await.expect("write");
+        write_processor(&mut p, &raw, Some(false), &ctx)
+            .await
+            .expect("write");
 
         // Case 3: `Model` scope — verifies the second untagged variant survives
         // the JSON round-trip too (a bare `Raw` would silently match `Model`
@@ -637,7 +751,9 @@ mod tests {
             field: Some("tasks".into()),
         });
         model.mint_scope = None;
-        write_processor(&mut p, &model, &ctx).await.expect("write");
+        write_processor(&mut p, &model, Some(false), &ctx)
+            .await
+            .expect("write");
 
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 3, "three processors round-trip");
@@ -654,10 +770,10 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_unparseable_scope() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("good-scope"), &ctx)
+        write_processor(&mut p, &sample_config("good-scope"), Some(false), &ctx)
             .await
             .expect("write");
-        write_processor(&mut p, &sample_config("garbled-scope"), &ctx)
+        write_processor(&mut p, &sample_config("garbled-scope"), Some(false), &ctx)
             .await
             .expect("write");
         p.update_subject(
@@ -683,7 +799,7 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         // A complete one first, so the class is registered and we prove the
         // partial is skipped while the valid one still comes through.
-        write_processor(&mut p, &sample_config("complete"), &ctx)
+        write_processor(&mut p, &sample_config("complete"), Some(false), &ctx)
             .await
             .expect("write complete");
         p.add_links(
@@ -710,10 +826,10 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_unparseable_numeric() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("garbled"), &ctx)
+        write_processor(&mut p, &sample_config("garbled"), Some(false), &ctx)
             .await
             .expect("write");
-        write_processor(&mut p, &sample_config("garbled-2"), &ctx)
+        write_processor(&mut p, &sample_config("garbled-2"), Some(false), &ctx)
             .await
             .expect("write");
         p.update_subject(
@@ -740,10 +856,10 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_zero_claim_ttl() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("good"), &ctx)
+        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
             .await
             .expect("write good");
-        write_processor(&mut p, &sample_config("zero-ttl"), &ctx)
+        write_processor(&mut p, &sample_config("zero-ttl"), Some(false), &ctx)
             .await
             .expect("write zero-ttl");
         p.update_subject(
@@ -767,10 +883,10 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_negative_max_wait() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("good"), &ctx)
+        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
             .await
             .expect("write good");
-        write_processor(&mut p, &sample_config("neg-wait"), &ctx)
+        write_processor(&mut p, &sample_config("neg-wait"), Some(false), &ctx)
             .await
             .expect("write neg-wait");
         p.update_subject(
@@ -802,7 +918,9 @@ mod tests {
             "ns://Observation".into(),
             "ns://Question".into(),
         ];
-        write_processor(&mut p, &cfg, &ctx).await.expect("write");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(
@@ -828,7 +946,9 @@ mod tests {
             "ns://Task".into(),
             "ns://Question".into(),
         ];
-        write_processor(&mut p, &cfg, &ctx).await.expect("write");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(
@@ -844,12 +964,86 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("empty");
         cfg.interpretation_classes.clear();
-        let err = write_processor(&mut p, &cfg, &ctx)
+        let err = write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect_err("must reject empty interpretation_classes");
         assert!(
             err.to_string().contains("interpretation_classes"),
             "unexpected error: {err}"
         );
+    }
+
+    /// CodeRabbit #903 CR #3 regression, applied per-switch. Each of
+    /// `emit_debug_events_write` carries the tri-state intent:
+    ///
+    /// - `Some(true)` writes `"true"` — the field loads ON.
+    /// - `Some(false)` after `Some(true)` writes `"false"` — the field
+    ///   loads OFF.
+    /// - `None` after `Some(true)` skips the setter — the existing
+    ///   `"true"` link is preserved and the field loads ON.
+    #[tokio::test]
+    async fn debug_switch_tri_state_write_and_preserve() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let cfg = sample_config("debug-toggle");
+
+        write_processor(&mut p, &cfg, Some(true), &ctx)
+            .await
+            .expect("write on");
+        let loaded = load_processors(&p).await.expect("load-on");
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events must load enabled"
+        );
+
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write off");
+        let loaded = load_processors(&p).await.expect("load-off");
+        assert!(
+            !loaded[0].emit_debug_events,
+            "emit_debug_events MUST load disabled after Some(false)"
+        );
+
+        write_processor(&mut p, &cfg, Some(true), &ctx)
+            .await
+            .expect("write on again");
+        write_processor(&mut p, &cfg, None, &ctx)
+            .await
+            .expect("write no-touch");
+        let loaded = load_processors(&p).await.expect("load-preserve");
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events MUST stay enabled when the caller omits it (tri-state preserve)"
+        );
+    }
+
+    /// The tri-state write preserves the existing value when `None` is passed.
+    #[tokio::test]
+    async fn emit_debug_events_tristate_preserves() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let cfg = sample_config("tristate");
+
+        write_processor(&mut p, &cfg, Some(true), &ctx)
+            .await
+            .expect("write on");
+        let loaded = load_processors(&p).await.expect("load on");
+        assert!(loaded[0].emit_debug_events);
+
+        // None preserves existing value
+        write_processor(&mut p, &cfg, None, &ctx)
+            .await
+            .expect("write None");
+        let loaded = load_processors(&p).await.expect("load None");
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events must stay enabled when the caller omits it (tri-state preserve)"
+        );
+
+        // Explicit false turns it off
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write off");
+        let loaded = load_processors(&p).await.expect("load off");
+        assert!(!loaded[0].emit_debug_events);
     }
 }
