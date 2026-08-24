@@ -1,7 +1,7 @@
 import { TestContext } from './test-context'
 import path from "path";
 import fs from "fs";
-import { sleep } from '../utils/utils';
+import { pollUntil } from '../utils/utils';
 import { Ad4mClient, LanguageMetaInput, LanguageRef } from '@coasys/ad4m';
 import { expect } from "chai";
 import { fileURLToPath } from 'url';
@@ -116,7 +116,12 @@ export default function languageTests(testContext: TestContext) {
                 await testContext.makeAllNodesKnown()
                 // .. and have time to gossip inside the Language Language, 
                 // so Bob sees the languages created above by Alice
-                await sleep(1000);
+                await pollUntil(async () => {
+                    try {
+                        const meta = await bobAd4mClient.expression.get(`lang://${sourceLanguage.address}`);
+                        return meta !== null;
+                    } catch { return false; }
+                }, { timeoutMs: 10000, intervalMs: 500, label: "gossip propagates Alice's language metadata to Bob" });
                 
 
                 //Test that bob cannot install source language which alice created since she is not in his trusted agents

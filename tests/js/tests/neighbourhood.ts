@@ -1,6 +1,6 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './test-context'
-import { sleep } from "../utils/utils";
+import { assertStaysFalse } from "../utils/utils";
 import { LinkLangConfig, publishLinkLanguage, pollUntil } from "../utils/linkLangConfig";
 import { expect } from "chai";
 
@@ -53,15 +53,12 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 ]).to.include(perspective?.state);
                 
                 // Wait for the perspective to transition to Synced state
-                let tries = 0;
-                const maxTries = 10;
-                let currentPerspective = perspective;
-                while (currentPerspective?.state !== PerspectiveState.Synced && tries < maxTries) {
-                    await sleep(1000);
-                    currentPerspective = await ad4mClient.perspective.byUUID(create.uuid);
-                    tries++;
-                }
-                expect(currentPerspective?.state).to.be.equal(PerspectiveState.Synced);
+                await pollUntil(async () => {
+                    const p = await ad4mClient.perspective.byUUID(create.uuid);
+                    return p?.state === PerspectiveState.Synced;
+                }, { timeoutMs: 10000, label: "perspective transitions to Synced" });
+                const syncedPerspective = await ad4mClient.perspective.byUUID(create.uuid);
+                expect(syncedPerspective?.state).to.be.equal(PerspectiveState.Synced);
             })
 
             it('can be created by Alice and joined by Bob', async () => {
@@ -97,22 +94,14 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 await testContext.makeAllNodesKnown()
                 expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
 
-                await sleep(1000)
-
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
-                await sleep(1000)
+                await pollUntil(async () => {
+                    const links = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
+                    return links.length >= 1;
+                }, { timeoutMs: 60000, label: "bob receives alice's shared link" });
 
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                let tries = 1
-
-                while(bobLinks.length < 1 && tries < 60) {
-                    console.log("Bob retrying getting links...");
-                    await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                    tries++
-                }
-
+                const bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 expect(bobLinks.length).to.be.equal(1)
                 expect(bobLinks[0].data.target).to.be.equal('test://test')
                 expect(bobLinks[0].proof.valid).to.be.true;
@@ -131,22 +120,15 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 await testContext.makeAllNodesKnown()
 
-                await sleep(1000)
-
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'}, 'local')
 
-                await sleep(1000)
+                // Negative test: actively verify the local link does NOT propagate
+                await assertStaysFalse(async () => {
+                    const links = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
+                    return links.length > 0;
+                }, { waitMs: 3000, label: "local link should NOT propagate to Bob" });
 
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                let tries = 1
-
-                while(bobLinks.length < 1 && tries < 5) {
-                    console.log("Bob retrying getting NOT received links...");
-                    await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                    tries++
-                }
-
+                const bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 expect(bobLinks.length).to.be.equal(0)
             })
 
@@ -162,8 +144,6 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 await testContext.makeAllNodesKnown()
 
-                await sleep(1000)
-
                 // Create 1500 links as fast as possible — the batching system
                 // (enqueueCommitBatched → coalesceDiffs) coalesces the burst
                 // into a small number of POSTs. No artificial throttling: this
@@ -174,19 +154,14 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     console.log("Link expression:", link)
                 }
 
-                console.log("wait 15s for initial sync")
-                await sleep(15000)
+                // Wait for Bob to receive all 1500 links (initial sync + fallback)
+                await pollUntil(async () => {
+                    const links = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
+                    console.log(`Bob has ${links.length}/1500 links`);
+                    return links.length >= 1500;
+                }, { timeoutMs: 195000, intervalMs: 1000, label: "bob receives 1500 links" });
 
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                let tries = 1
-                const maxTries = 180 // 3 minutes with 1 second sleep (increased for fallback sync)
-
-                while(bobLinks.length < 1500 && tries < maxTries) {
-                    console.log(`Bob retrying getting links... Got ${bobLinks.length}/1500`);
-                    await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                    tries++
-                }
 
                 expect(bobLinks.length).to.be.equal(1500)
                 // Verify a few random links to ensure data integrity
@@ -197,8 +172,12 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     expect(link.proof.valid).to.be.true
                 })
                 
-                // make sure we're getting out of burst mode again
-                await sleep(11000)
+                // Wait for burst mode to expire — poll until the perspective
+                // returns to Synced state (burst mode keeps it in a different state)
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    return p?.state === PerspectiveState.Synced;
+                }, { timeoutMs: 30000, intervalMs: 1000, label: "burst mode expires and perspective returns to Synced" });
 
                 // Alice creates some links
                 console.log("Alice creating links...")
@@ -206,17 +185,14 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://alice', target: 'test://alice/2'})
                 await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://alice', target: 'test://alice/3'})
 
-                // Wait for sync with retry loop
-                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}))
-                let bobTries = 1
-                const maxTriesBob = 20 // 20 tries with 2 second sleep = 40 seconds max
+                // Wait for Bob to receive Alice's post-burst links
+                await pollUntil(async () => {
+                    const links = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}));
+                    console.log(`Bob has ${links.length}/3 of Alice's post-burst links`);
+                    return links.length >= 3;
+                }, { timeoutMs: 40000, intervalMs: 2000, label: "bob receives alice's post-burst links" });
 
-                while(bobLinks.length < 3 && bobTries < maxTriesBob) {
-                    console.log(`Bob retrying getting Alice's links... Got ${bobLinks.length}/3`);
-                    await sleep(2000)
-                    bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}))
-                    bobTries++
-                }
+                bobLinks = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}))
 
                 // Verify Bob received Alice's links
                 expect(bobLinks.length).to.equal(3)
@@ -230,17 +206,14 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://bob', target: 'test://bob/2'})
                 await testContext.bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://bob', target: 'test://bob/3'})
 
-                // Wait for sync with retry loop
-                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}))
-                tries = 1
-                const maxTriesAlice = 20 // 2 minutes with 1 second sleep
+                // Wait for Alice to receive Bob's links
+                await pollUntil(async () => {
+                    const links = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}));
+                    console.log(`Alice has ${links.length}/3 of Bob's links`);
+                    return links.length >= 3;
+                }, { timeoutMs: 40000, intervalMs: 2000, label: "alice receives bob's links" });
 
-                while(aliceLinks.length < 3 && tries < maxTriesAlice) {
-                    console.log(`Alice retrying getting links... Got ${aliceLinks.length}/3`);
-                    await sleep(2000)
-                    aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}))
-                    tries++
-                }
+                let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}))
 
                 // Verify Alice received Bob's links
                 //let aliceLinks = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'bob'}))
@@ -305,15 +278,14 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             //     let bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
             //     let tries = 1
 
-            //     while(bobLinks.length < 1 && tries < 300) {
-            //         await sleep(1000)
-            //         bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-            //         tries++
-            //     }
+            //     await pollUntil(async () => {
+            //         bobLinks = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
+            //         return bobLinks.length >= 1;
+            //     }, { timeoutMs: 300000, intervalMs: 1000, label: "bob receives link from alice" });
 
             //     expect(bobLinks.length).to.be.equal(1)
 
-            //     await sleep(5000);
+            //     await pollUntil(() => bobSyncChangeCalls >= 1, { timeoutMs: 5000, intervalMs: 200, label: "bob sync state change" });
 
             //     // expect(aliceSyncChangeCalls).to.be.equal(2);
             //     // expect(aliceSyncChangeData).to.be.equal(PerspectiveState.Synced);
@@ -336,7 +308,13 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     const aliceP1 = await alice.perspective.add("telepresence")
                     const linkLang = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood for Telepresence");
                     const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
-                    await sleep(5000)
+
+                    // Wait for Alice's neighbourhood to reach Synced state
+                    await pollUntil(async () => {
+                        const p = await alice.perspective.byUUID(aliceP1.uuid);
+                        return p?.state === PerspectiveState.Synced;
+                    }, { timeoutMs: 10000, label: "alice's telepresence neighbourhood synced" });
+
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                     const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
                     await testContext.makeAllNodesKnown()
@@ -345,24 +323,25 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     bobNH = bobP1!.getNeighbourhoodProxy()
                     aliceDID = (await alice.agent.me()).did
                     bobDID = (await bob.agent.me()).did
-                    await sleep(5000)
+
+                    // Wait for Bob's perspective to sync
+                    await pollUntil(async () => {
+                        const p = await bob.perspective.byUUID(bobP1Handle.uuid);
+                        return p?.state === PerspectiveState.Synced;
+                    }, { timeoutMs: 10000, label: "bob's telepresence perspective synced" });
                 })
 
                 it('they see each other in `otherAgents`', async () => {
-                    // Wait for agents to discover each other with retry loop
-                    let aliceAgents = await aliceNH!.otherAgents()
-                    let bobAgents = await bobNH!.otherAgents()
-                    let tries = 1
-                    const maxTries = 60 // 60 tries with 1 second sleep = 1 minute max
+                    // Wait for agents to discover each other
+                    await pollUntil(async () => {
+                        const a = await aliceNH!.otherAgents();
+                        const b = await bobNH!.otherAgents();
+                        console.log(`Agents: Alice sees ${a.length}, Bob sees ${b.length}`);
+                        return a.length >= 1 && b.length >= 1;
+                    }, { timeoutMs: 60000, label: "agents discover each other" });
 
-                    while ((aliceAgents.length < 1 || bobAgents.length < 1) && tries < maxTries) {
-                        console.log(`Waiting for agents to discover each other... Alice: ${aliceAgents.length}, Bob: ${bobAgents.length}`);
-                        await sleep(1000)
-                        aliceAgents = await aliceNH!.otherAgents()
-                        bobAgents = await bobNH!.otherAgents()
-                        tries++
-                    }
-
+                    const aliceAgents = await aliceNH!.otherAgents()
+                    const bobAgents = await bobNH!.otherAgents()
                     console.log("alice agents", aliceAgents);
                     console.log("bob agents", bobAgents);
                     expect(aliceAgents.length).to.be.equal(1)
