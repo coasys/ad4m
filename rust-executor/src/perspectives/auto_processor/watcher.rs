@@ -759,6 +759,10 @@ pub async fn run_one_pass(
                 // token to bill. MCP admin credential (if configured) is
                 // read from env inside the harness path.
                 None,
+                // `emit_debug_events` gates the same event stream the
+                // classic path uses; `None` when disabled means the
+                // per-tool-call events also stay silent.
+                emit_ctx.as_ref(),
             )
             .await?;
             (bases, None)

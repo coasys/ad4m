@@ -1392,6 +1392,11 @@ async fn run_interpretation_with_harness_handler(
             None,
             body.max_tool_calls,
             auth_token,
+            // One-shot WS-RPC caller: no persistent processor id, no batch,
+            // so no InterpretationEmitContext to attach. External clients that
+            // want live tool-call events use the auto-processor path (which
+            // has a processor_id + batch_key to correlate on).
+            None,
         ),
     )
     .await

@@ -33,6 +33,49 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use crate::perspectives::auto_processor::events;
+
+/// Max characters we ship on a `ToolResult` event's `tool_result` field.
+/// A `_query` tool can return a many-KB JSON payload — inflating every
+/// event with the whole thing would flood the pubsub topic. Consumers
+/// wanting the full text can re-run the tool or read it off the
+/// InterpretationRun's overlay.
+const TOOL_RESULT_EVENT_MAX_CHARS: usize = 2048;
+
+fn truncate_for_event(text: &str) -> String {
+    if text.chars().count() <= TOOL_RESULT_EVENT_MAX_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(TOOL_RESULT_EVENT_MAX_CHARS).collect();
+    format!("{head}…[truncated for event]")
+}
+
+/// Emit one `ToolCall` / `ToolResult` event on the auto-processor topic
+/// when `ctx` is set. Fire-and-forget; no-op when `ctx` is `None`.
+async fn emit_tool_event(
+    ctx: Option<&events::InterpretationEmitContext>,
+    step: events::AutoProcessorStep,
+    tool_name: &str,
+    tool_args_json: Option<String>,
+    tool_result: Option<String>,
+) {
+    let Some(ctx) = ctx else {
+        return;
+    };
+    let mut ev = events::AutoProcessorEvent::new(&ctx.perspective_uuid, &ctx.processor_id, step)
+        .with_agent_did(&ctx.agent_did)
+        .with_items(&ctx.item_ids)
+        .with_batch_key(&ctx.batch_key);
+    match (tool_args_json, tool_result) {
+        (Some(args), None) => ev = ev.with_tool_call(tool_name, args),
+        (None, Some(result)) => ev = ev.with_tool_result(tool_name, result),
+        _ => {
+            ev.tool_name = Some(tool_name.to_string());
+        }
+    }
+    events::emit(ev).await;
+}
+
 /// A single tool_call emitted by the LLM, in the shape the harness loop
 /// works with. Matches OpenAI's `tool_calls[]` element (id / type=function /
 /// function.name / function.arguments) but with `arguments` already parsed
@@ -107,12 +150,20 @@ impl Default for HarnessConfig {
 /// The harness does NOT prepend any tool-use guidance here; that lives in
 /// the caller's system prompt (design v2 §Q6: "the harness passes tools
 /// verbatim; per-task guidance lives in the caller").
+///
+/// `emit_ctx` opts into the auto-processor event stream for observability:
+/// when set (typically by an auto-processor pass whose config has
+/// `emit_debug_events: true`), every `ToolCall` + `ToolResult` fires a
+/// `AutoProcessorEvent` on the global topic so a subscribed UI can render
+/// the loop live (which tool was called, with what args, what came back).
+/// `None` skips all telemetry — the fast path stays fast for headless runs.
 pub async fn run_with_tools(
     model_id: &str,
     initial_messages: Vec<Value>,
     provider: Arc<dyn ToolProvider>,
     completions: Arc<dyn CompletionSource>,
     config: HarnessConfig,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
 ) -> Result<String> {
     let mut messages = initial_messages;
     // Budget is enforced per *dispatched tool call*, not per round: a single
@@ -160,6 +211,18 @@ pub async fn run_with_tools(
         // message shape stays valid.
         messages.push(assistant_tool_calls_message(&completion));
         for tc in &completion.tool_calls {
+            // Emit `ToolCall` before dispatch — a UI subscribed to the
+            // auto-processor event topic renders "LLM asked for <tool>"
+            // live, without waiting for the tool to return. Gated on
+            // `emit_ctx`: the fast headless path pays no telemetry cost.
+            emit_tool_event(
+                emit_ctx,
+                events::AutoProcessorStep::ToolCall,
+                &tc.name,
+                Some(tc.arguments.to_string()),
+                None,
+            )
+            .await;
             let result = if calls_used < config.max_tool_calls as usize {
                 calls_used += 1;
                 match provider.call(&tc.name, tc.arguments.clone()).await {
@@ -172,6 +235,18 @@ pub async fn run_with_tools(
                     config.max_tool_calls
                 )
             };
+            // Emit `ToolResult` after dispatch. Result is truncated to a
+            // bounded prefix so a `_query` returning MBs doesn't inflate
+            // every event — the UI can request the full text separately
+            // if it needs it.
+            emit_tool_event(
+                emit_ctx,
+                events::AutoProcessorStep::ToolResult,
+                &tc.name,
+                None,
+                Some(truncate_for_event(&result)),
+            )
+            .await;
             messages.push(tool_result_message(&tc.id, &result));
         }
     }
@@ -334,6 +409,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig::default(),
+            None,
         )
         .await
         .unwrap();
@@ -359,6 +435,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig::default(),
+            None,
         )
         .await
         .unwrap();
@@ -409,6 +486,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig::default(),
+            None,
         )
         .await
         .unwrap();
@@ -446,6 +524,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig { max_tool_calls: 3 },
+            None,
         )
         .await
         .unwrap();
@@ -516,6 +595,7 @@ mod tests {
             provider.clone(),
             llm.clone(),
             HarnessConfig { max_tool_calls: 3 },
+            None,
         )
         .await
         .unwrap();
@@ -567,6 +647,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig::default(),
+            None,
         )
         .await
         .unwrap();
@@ -576,5 +657,164 @@ mod tests {
         // The tool result carries the error text, prefixed with "error: ".
         assert_eq!(msgs[2]["role"], "tool");
         assert_eq!(msgs[2]["content"], "error: something went wrong");
+    }
+
+    #[test]
+    fn truncate_for_event_leaves_short_text_unchanged() {
+        let s = "hi";
+        assert_eq!(truncate_for_event(s), "hi");
+    }
+
+    #[test]
+    fn truncate_for_event_caps_long_text_with_marker() {
+        let long = "x".repeat(TOOL_RESULT_EVENT_MAX_CHARS + 100);
+        let out = truncate_for_event(&long);
+        assert!(out.ends_with("…[truncated for event]"));
+        assert!(
+            out.chars().count() <= TOOL_RESULT_EVENT_MAX_CHARS + 40,
+            "truncated output must be bounded (got {} chars)",
+            out.chars().count()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_emits_tool_call_and_tool_result_events_when_ctx_present() {
+        // Subscribe to the auto-processor topic BEFORE running the pass, so
+        // the fire-and-forget events aren't dropped. Then script a
+        // single-tool-call → plain-answer trace and assert both events
+        // land with the expected step / tool_name / args / result.
+        use crate::perspectives::auto_processor::events::{
+            self, AutoProcessorEvent, AutoProcessorStep, InterpretationEmitContext,
+        };
+
+        let script = vec![
+            tool_call_turn("c1", "query_links", json!({"source": "ns://a"})),
+            plain_answer("done"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("query_links", "")],
+        });
+        let ctx = InterpretationEmitContext {
+            perspective_uuid: "u".into(),
+            processor_id: "p".into(),
+            agent_did: "did:test".into(),
+            item_ids: vec!["turn1".into()],
+            batch_key: "bk".into(),
+        };
+
+        // Subscribe first — pubsub is broadcast-based; late subscribers miss events.
+        let mut rx = events::subscribe().await;
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            provider,
+            llm.clone(),
+            HarnessConfig::default(),
+            Some(&ctx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "done");
+
+        // Drain events until we see both ToolCall + ToolResult for our tool,
+        // with a short timeout so a broken emitter fails fast rather than
+        // hanging CI.
+        let mut saw_call = false;
+        let mut saw_result = false;
+        let mut saw_call_args = false;
+        for _ in 0..8 {
+            let evt = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await;
+            let Ok(Ok(raw)) = evt else { break };
+            let Ok(parsed) = serde_json::from_str::<AutoProcessorEvent>(&raw) else {
+                continue;
+            };
+            if parsed.perspective_uuid != "u" || parsed.processor_id != "p" {
+                continue;
+            }
+            match parsed.step {
+                AutoProcessorStep::ToolCall
+                    if parsed.tool_name.as_deref() == Some("query_links") =>
+                {
+                    saw_call = true;
+                    saw_call_args = parsed
+                        .tool_args_json
+                        .as_deref()
+                        .map(|s| s.contains("\"source\":\"ns://a\""))
+                        .unwrap_or(false);
+                }
+                AutoProcessorStep::ToolResult
+                    if parsed.tool_name.as_deref() == Some("query_links") =>
+                {
+                    saw_result = parsed
+                        .tool_result
+                        .as_deref()
+                        .map(|s| s.contains("query_links"))
+                        .unwrap_or(false);
+                }
+                _ => {}
+            }
+            if saw_call && saw_result {
+                break;
+            }
+        }
+        assert!(
+            saw_call,
+            "expected a ToolCall event with tool_name=query_links"
+        );
+        assert!(saw_call_args, "ToolCall event must carry tool_args_json");
+        assert!(
+            saw_result,
+            "expected a ToolResult event with tool_name=query_links + tool_result"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_emits_no_tool_events_when_ctx_absent() {
+        // Regression: the fast headless path (no emit_ctx) must not
+        // publish anything. Subscribe, run a pass with `None`, and confirm
+        // no ToolCall/ToolResult events land in a short window.
+        use crate::perspectives::auto_processor::events::{
+            self, AutoProcessorEvent, AutoProcessorStep,
+        };
+        let script = vec![
+            tool_call_turn("c1", "silent", json!({})),
+            plain_answer("done"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("silent", "")],
+        });
+
+        let mut rx = events::subscribe().await;
+        let _ = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            provider,
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut saw_tool_event = false;
+        for _ in 0..4 {
+            let evt = tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await;
+            let Ok(Ok(raw)) = evt else { break };
+            if let Ok(parsed) = serde_json::from_str::<AutoProcessorEvent>(&raw) {
+                if matches!(
+                    parsed.step,
+                    AutoProcessorStep::ToolCall | AutoProcessorStep::ToolResult
+                ) {
+                    saw_tool_event = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            !saw_tool_event,
+            "no ToolCall/ToolResult must land when emit_ctx is None"
+        );
     }
 }

@@ -476,6 +476,10 @@ pub(crate) async fn run_interpretation_harness_e2e(
         None,
         max_tool_calls,
         None,
+        // Test helper: no auto-processor emit context (event stream is not
+        // asserted on here; scenario E's own tests would attach one if we
+        // add event-shape assertions in a follow-up).
+        None,
     )
     .await
     .expect("run_interpretation_with_harness against real LLM to succeed");

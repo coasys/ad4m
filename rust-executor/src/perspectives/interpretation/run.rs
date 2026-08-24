@@ -651,6 +651,7 @@ pub async fn run_interpretation_with_harness_and_model(
     cursor: Option<&InterpretationRunCursor>,
     max_tool_calls: u32,
     auth_token: Option<String>,
+    emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
 ) -> anyhow::Result<Vec<String>> {
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
@@ -781,6 +782,7 @@ pub async fn run_interpretation_with_harness_and_model(
         provider,
         bridge,
         HarnessConfig { max_tool_calls },
+        emit_ctx,
     )
     .await?;
 
