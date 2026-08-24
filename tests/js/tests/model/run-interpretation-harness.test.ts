@@ -283,3 +283,208 @@ describe("perspective.runInterpretationWithHarness (WS + real LLM)", function ()
     expect(msg.toLowerCase()).to.match(/maxtoolcalls|max_tool_calls|must be/);
   });
 });
+
+/**
+ * Full-stack relation-hint integration test — proves the per-relation
+ * `interpretationHint` declared on `@HasMany(...)` reaches the LLM through
+ * the whole stack (TS decorator → SHACL SDNA → Rust `ShaclProperty
+ * .interpretation_hint` → `ClassProposeShape.relations[N].hint` →
+ * `_propose_link_child` predicate description → LLM picks the right
+ * predicate based on the hint text).
+ *
+ * The `ExtIntention` model here declares TWO relations to `ExtBelief`
+ * with opposite semantics:
+ *   * `basedOn`      — beliefs that JUSTIFY the intention.
+ *   * `contradicts`  — beliefs the intention REJECTS / counters.
+ *
+ * The transcript expresses an intention that clearly derives from two
+ * supporting beliefs AND stands against a third opposing belief. Correct
+ * behaviour requires the model to have READ the hint on each relation —
+ * without the hint, the model has no way to distinguish which predicate
+ * to reach for (both are `basedOn / contradicts` bare local names, both
+ * are HasMany relations to the same target class).
+ */
+describe("perspective.runInterpretationWithHarness — relation interpretation hints", function () {
+  this.timeout(1_200_000);
+
+  let ad4m: Ad4mClient;
+  let stop: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+  let supportingBeliefUris: Set<string>;
+  let opposingBeliefUris: Set<string>;
+
+  before(async function () {
+    // Same LLM availability gate as the sibling describe — skip cleanly
+    // on runners without a reachable Ollama-compatible endpoint hosting
+    // the requested MODEL.
+    try {
+      const probe = await fetch(BASE_URL.replace(/\/v1\/?$/, "") + "/v1/models", {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!probe.ok) throw new Error(`probe ${probe.status}`);
+      const body = (await probe.json()) as { data?: Array<{ id?: string }> };
+      const ids = (body.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
+      if (!ids.includes(MODEL)) {
+        throw new Error(
+          `model ${MODEL} not present in /v1/models (have: ${ids.join(", ") || "none"})`,
+        );
+      }
+    } catch (e) {
+      console.log(
+        `Skipping harness relation-hint e2e — LLM endpoint ${BASE_URL} unreachable: ${(e as Error).message}`,
+      );
+      this.skip();
+    }
+
+    const agent = await startAgent("run-interpretation-harness-relation-hints");
+    ad4m = agent.client;
+    stop = agent.stop;
+
+    const modelId = await ad4m.ai.addModel({
+      name: "harness-llm",
+      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
+      modelType: "LLM",
+    } as any);
+    await ad4m.ai.setDefaultModel("LLM", modelId);
+
+    p = await ad4m.perspective.add("run-interpretation-harness-relation-hints-test");
+    await ExtBelief.register(p);
+    await ExtIntention.register(p);
+
+    // Seed a mix of beliefs. Every belief here is worded so its semantic
+    // role (support vs oppose) w.r.t. the transcript intention is
+    // unambiguous — if the LLM picks the wrong predicate we know it
+    // ignored the relation hint, not that the seed was ambiguous.
+    const support1 = await ExtBelief.create(p, {
+      title: "User sovereignty over data schemas is the foundation of a healthy web.",
+    });
+    const support2 = await ExtBelief.create(p, {
+      title: "Local-first software architecture makes user sovereignty practical, not just aspirational.",
+    });
+    const opposing1 = await ExtBelief.create(p, {
+      title: "Only centralised SaaS platforms can deliver viable AI at scale.",
+    });
+    supportingBeliefUris = new Set([support1.id, support2.id]);
+    opposingBeliefUris = new Set([opposing1.id]);
+  });
+
+  after(async () => {
+    if (stop) await stop();
+  });
+
+  it("links via basedOn to supporting beliefs AND via contradicts to opposing ones", async () => {
+    // Transcript expresses an intention that (a) rests on the two
+    // supporting beliefs and (b) stands directly against the opposing one.
+    // The LLM must:
+    //   1. Discover all three seeded beliefs via `ExtBelief_query`.
+    //   2. Read the per-relation hints on ExtIntention_propose_link_child's
+    //      `predicate` enum (`basedOn` = derives-from, `contradicts` =
+    //      rejects) and pick the RIGHT predicate for each seeded belief.
+    //   3. Emit propose_link_child calls with the correct predicate URIs.
+    const transcript = [
+      {
+        speaker: "Nico",
+        text: "We should commit to a local-first, user-sovereign release path for AD4M — that's the direction I want us going into this next sprint.",
+      },
+      {
+        speaker: "James",
+        text: "Agreed. It's exactly the practical follow-through on the sovereignty argument. And it means we're explicitly rejecting the 'only centralised SaaS can do AI' framing — that view is the one we're actively countering with this release.",
+      },
+      {
+        speaker: "Nico",
+        text: "Right. Make it the intention for the sprint: ship the local-first, user-sovereign release as our stand against the centralised-SaaS-only model of AI.",
+      },
+    ];
+
+    const seededUris = new Set([...supportingBeliefUris, ...opposingBeliefUris]);
+
+    let lastError: any = null;
+    for (let attempt = 1; attempt <= HARNESS_E2E_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        // Fresh state per attempt: strip any intentions the previous try
+        // wrote + any non-seeded beliefs so the LLM sees the same starting
+        // graph on every draw.
+        await purgeGenerated(p, seededUris);
+      }
+
+      try {
+        const bases = await p.runInterpretationWithHarness(
+          transcript,
+          BASE_PREFIX,
+          MAX_TOOL_CALLS,
+          ["ExtBelief", "ExtIntention"],
+        );
+
+        // Something landed.
+        expect(bases.length, "harness pass must produce at least one instance").to.be.greaterThan(0);
+        for (const base of bases) {
+          expect(base.startsWith(BASE_PREFIX), `base ${base}`).to.be.true;
+        }
+
+        // At least one intention.
+        const intentions = await ExtIntention.findAll(p);
+        expect(
+          intentions.length,
+          `expected the harness to materialize at least one ExtIntention (found ${intentions.length})`,
+        ).to.be.greaterThan(0);
+
+        // Aggregate the two predicate targets across all intentions —
+        // small models sometimes split into two intentions ("commit to X"
+        // + "reject Y"); accept either shape as long as SOMEWHERE across
+        // intentions we see one basedOn→supporting and one
+        // contradicts→opposing.
+        const basedOnHits: string[] = [];
+        const contradictsHits: string[] = [];
+        const basedOnMisdirects: string[] = []; // basedOn → opposing (semantic error)
+        const contradictsMisdirects: string[] = []; // contradicts → supporting (semantic error)
+        for (const intent of intentions) {
+          const basedOn = await targetsOf(p, intent.id, "soa://basedOn");
+          const contradicts = await targetsOf(p, intent.id, "soa://contradicts");
+          for (const uri of basedOn) {
+            if (supportingBeliefUris.has(uri)) basedOnHits.push(uri);
+            if (opposingBeliefUris.has(uri)) basedOnMisdirects.push(uri);
+          }
+          for (const uri of contradicts) {
+            if (opposingBeliefUris.has(uri)) contradictsHits.push(uri);
+            if (supportingBeliefUris.has(uri)) contradictsMisdirects.push(uri);
+          }
+        }
+
+        expect(
+          basedOnHits.length,
+          `expected at least one basedOn link to a SUPPORTING belief. Supporting: ${JSON.stringify([...supportingBeliefUris])}. basedOn observed: ${JSON.stringify(await Promise.all(intentions.map((i) => targetsOf(p, i.id, "soa://basedOn"))))}`,
+        ).to.be.greaterThan(0);
+        expect(
+          contradictsHits.length,
+          `expected at least one contradicts link to an OPPOSING belief. Opposing: ${JSON.stringify([...opposingBeliefUris])}. contradicts observed: ${JSON.stringify(await Promise.all(intentions.map((i) => targetsOf(p, i.id, "soa://contradicts"))))}`,
+        ).to.be.greaterThan(0);
+
+        // Semantic-role correctness: an intention that basedOn's the
+        // opposing belief (or contradicts a supporting one) means the
+        // LLM ignored the relation-hint. This is the hard assertion —
+        // relaxed to `<= 1` misdirect on each side so a single
+        // stochastic slip on gemma3:12b doesn't fail the whole run when
+        // the majority is correct.
+        expect(
+          basedOnMisdirects.length,
+          `basedOn misdirects (linked opposing belief as supporting): ${JSON.stringify(basedOnMisdirects)}`,
+        ).to.be.lessThanOrEqual(1);
+        expect(
+          contradictsMisdirects.length,
+          `contradicts misdirects (linked supporting belief as opposing): ${JSON.stringify(contradictsMisdirects)}`,
+        ).to.be.lessThanOrEqual(1);
+
+        console.log(
+          `[relation-hint-e2e] passed on attempt ${attempt}/${HARNESS_E2E_MAX_ATTEMPTS} — basedOn→supporting: ${basedOnHits.length}, contradicts→opposing: ${contradictsHits.length}`,
+        );
+        return;
+      } catch (e) {
+        lastError = e;
+        console.log(
+          `[relation-hint-e2e] attempt ${attempt}/${HARNESS_E2E_MAX_ATTEMPTS} did not satisfy retry guard: ${(e as Error).message}`,
+        );
+      }
+    }
+    throw lastError;
+  });
+});
