@@ -14,7 +14,7 @@
 //! constrained decoding + text-side extraction) so local AND remote models
 //! see tools through one uniform path."
 
-use super::tool_grammar::{self, ToolChoice};
+use super::tool_grammar;
 use super::types::{FunctionDef, ToolDef};
 use crate::ai_service::harness::provider::ToolSchema;
 use crate::ai_service::harness::{CompletionSource, HarnessCompletion, HarnessToolCall};
@@ -75,18 +75,15 @@ impl CompletionSource for OpenAiCompatBridge {
             flat.push(flatten_json_message(m)?);
         }
 
-        // Grammar-constrained decoding only kicks in when tools are active.
-        // Choice is `auto` here — the harness never forces a specific tool;
-        // it lets the model decide per turn (empty tool_calls terminates).
-        let constraint = if tools_active {
-            tool_grammar::build_tool_call_parser(
-                &tool_defs,
-                &ToolChoice::Auto,
-                /* parallel_tool_calls */ true,
-            )
-        } else {
-            None
-        };
+        // The harness always runs in `auto` mode: the model decides per turn
+        // whether to call a tool, and an empty `tool_calls` set terminates the
+        // loop. `tool_grammar::build_tool_call_parser` returns `None` for
+        // `Auto` (and `None`), so this path is deliberately unconstrained;
+        // tool calls are recovered from free-form text by `extract_tool_calls`
+        // (XML `<tool_call>`, fenced JSON, bare-JSON, and wrapped array
+        // shapes). Switching to `Required` would preclude the model from
+        // ever emitting a plain-text terminating turn.
+        let constraint: Option<kalosm::language::ArcParser<()>> = None;
 
         let result = self
             .service

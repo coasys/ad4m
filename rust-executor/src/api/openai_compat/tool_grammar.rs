@@ -186,19 +186,39 @@ fn single_tool_call_parser(tool: &ToolDef) -> ArcParser<()> {
     seq2(seq2(prefix, args), suffix)
 }
 
-/// Compile a JSON-Schema object node into an object parser.  Emits every
-/// declared property, in the schema's property order, joined by `", "`.
-/// Objects with no `properties` compile to the empty object `{}`.
+/// Compile a JSON-Schema object node into an object parser.
+///
+/// Honours the schema's `required` array when present: only required
+/// properties are emitted, in schema order, so a constrained call never
+/// forces the model to fabricate values for optional properties. When
+/// `required` is absent, every declared property is emitted (the historical
+/// behavior).
+///
+/// Objects with no emittable properties compile to the empty object `{}`.
 fn object_parser(schema: &Value) -> ArcParser<()> {
+    let required: Option<Vec<&str>> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect());
     match schema.get("properties").and_then(Value::as_object) {
         Some(props) if !props.is_empty() => {
-            let mut parts = props.iter().map(|(key, prop)| {
+            let selected: Vec<(&String, &Value)> = props
+                .iter()
+                .filter(|(key, _)| match &required {
+                    Some(req) => req.iter().any(|r| *r == key.as_str()),
+                    None => true,
+                })
+                .collect();
+            if selected.is_empty() {
+                return lit("{}");
+            }
+            let mut parts = selected.into_iter().map(|(key, prop)| {
                 seq2(
                     lit(format!("{}: ", json_string_literal(key))),
                     value_parser(prop),
                 )
             });
-            let mut body = parts.next().expect("properties non-empty");
+            let mut body = parts.next().expect("selected non-empty");
             for part in parts {
                 body = seq2(seq2(body, lit(", ")), part);
             }
@@ -577,6 +597,55 @@ mod tests {
         let p = obj(json!({ "type": "object" }));
         assert!(accepts(&p, "{}"));
         assert!(!accepts(&p, r#"{"x": 1}"#));
+    }
+
+    #[test]
+    fn object_parser_honours_required_array() {
+        // Only `title` is required; `hint` and `base` are optional.
+        // Under constrained decoding, the grammar must accept a call with
+        // just `title` and reject one that fabricates the optional fields.
+        let p = obj(json!({
+            "type": "object",
+            "properties": {
+                "title": { "type": "string" },
+                "hint": { "type": "string" },
+                "base": { "type": "string" }
+            },
+            "required": ["title"]
+        }));
+        assert!(accepts(&p, r#"{"title": "buy milk"}"#));
+        // optional fields are not emittable ⇒ rejected
+        assert!(!accepts(&p, r#"{"title": "x", "hint": "y"}"#));
+        assert!(!accepts(&p, r#"{"title": "x", "hint": "y", "base": "z"}"#));
+        // missing required field ⇒ rejected
+        assert!(!accepts(&p, "{}"));
+    }
+
+    #[test]
+    fn object_parser_no_required_emits_all_properties() {
+        // Historical behavior preserved when `required` is absent.
+        let p = obj(json!({
+            "type": "object",
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "integer" }
+            }
+        }));
+        assert!(accepts(&p, r#"{"a": "x", "b": 1}"#));
+        assert!(!accepts(&p, r#"{"a": "x"}"#));
+    }
+
+    #[test]
+    fn object_parser_empty_required_compiles_to_empty_object() {
+        // If `required` is present but empty, no property is emittable,
+        // so the schema collapses to `{}`.
+        let p = obj(json!({
+            "type": "object",
+            "properties": { "x": { "type": "string" } },
+            "required": []
+        }));
+        assert!(accepts(&p, "{}"));
+        assert!(!accepts(&p, r#"{"x": "y"}"#));
     }
 
     #[test]
