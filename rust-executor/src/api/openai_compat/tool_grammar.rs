@@ -159,8 +159,23 @@ pub fn build_tool_call_parser(
             .collect(),
     );
 
+    // Parallel handling is currently gated on `Required` only. This is a
+    // known OpenAI-spec parity gap for `tool_choice: {name: "foo"}` +
+    // `parallel_tool_calls: true` (Lal's PR #911 review,
+    // tool_grammar.rs:162) — named + parallel is silently downgraded to a
+    // single call. Attempted fix (2026-08-25) to run every `parallel=true`
+    // choice through `SeparatedParser<one, "\n", 1..=MAX>` broke the
+    // existing named-single-call test because kalosm's SeparatedParser
+    // doesn't reach a `Finished` state after a single item (it remains
+    // Incomplete pending a potential separator + more items). Making the
+    // grammar `one.or(SeparatedParser<one, "\n", 2..=MAX>)` would fix that
+    // but requires cloning `one`, which — for a chain of many tools built
+    // via `or_all` — either duplicates the whole parser graph or needs a
+    // wrap-in-Arc refactor of `single_tool_call_parser`. Deferred to a
+    // follow-up rather than restructuring the parser chain in this review
+    // pass; named-parallel is a rare shape in practice (Required+parallel
+    // is what real callers use for burst extraction).
     let parser = if parallel && matches!(choice, ToolChoice::Required) {
-        // one ("\n" one){0,}  — 1..=MAX blocks separated by newlines.
         SeparatedParser::new(one, LiteralParser::new("\n"), 1..=MAX_PARALLEL_CALLS)
             .map_output(|_| ())
             .boxed()
@@ -250,6 +265,17 @@ fn value_parser(schema: &Value) -> ArcParser<()> {
         _ => None,
     };
 
+    // Integer/number bounds NOT enforced at grammar level.
+    // Lal's PR #911 review, tool_grammar.rs:253, flagged that
+    // IntegerParser::new(i128::MIN..=i128::MAX) / FloatParser::new(f64::MIN
+    // ..=f64::MAX) ignore schema `minimum`/`maximum`/`multipleOf`. Attempted
+    // fix (2026-08-25) reading bounds into the parser range failed the
+    // "above max must be rejected" test — kalosm's IntegerParser range
+    // parameter is advisory for the parse-time state machine, not a strict
+    // rejection filter (over-range digits still parse as `Finished`).
+    // Enforcing bounds needs a post-parse wrapper that ArcParser doesn't
+    // expose today. Deferred to a follow-up; the harness's tool description
+    // carries the bound as a documented constraint the LLM should respect.
     match ty {
         Some("string") => string_value_parser(),
         Some("integer") => IntegerParser::new(i128::MIN..=i128::MAX)
