@@ -268,14 +268,6 @@ export interface AddAutoProcessorConfig {
    * subscribed UI can render "waiting on LLM". Default `false`.
    */
   emitDebugEvents?: boolean;
-  /**
-   * @deprecated Legacy alias — treated as a fallback for `emitDebugEvents`.
-   */
-  persistDebug?: boolean;
-  /**
-   * @deprecated Legacy alias — treated as a fallback for `emitDebugEvents`.
-   */
-  debugMode?: boolean;
 }
 
 /**

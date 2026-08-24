@@ -10,9 +10,6 @@
  *                             `debugPrompt` + `debugResponse` on the
  *                             `InterpretationRun` node.
  *
- * Legacy aliases `persistDebug` and `debugMode` are treated as fallbacks when
- * `emitDebugEvents` is absent.
- *
  * Also covers the full step-signal lifecycle (`batchReady` → `claimed` →
  * `gatheringTranscript` → `runningInterpretation` → `processed`) and the
  * perspective-scoped `auto-processor-neighbourhood-state` stream (`claimed`
@@ -274,53 +271,4 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
     ).to.equal(true);
   });
 
-  // ── 3. Legacy `persistDebug: true` alias ───────────────────────────────────
-
-  it("with legacy `persistDebug: true`, both effects light up via the fallback", async () => {
-    await addProcessor({ persistDebug: true });
-
-    await driveOnePass();
-
-    const req = events.find((e) => e.step === "llmRequestSent");
-    const res = events.find((e) => e.step === "llmResponseReceived");
-    expect(req, "legacy `persistDebug: true` must emit `llmRequestSent`").to.exist;
-    expect(res, "legacy `persistDebug: true` must emit `llmResponseReceived`").to.exist;
-
-    const runs = await InterpretationRun.findAll(p);
-    expect(runs.length).to.be.greaterThan(0);
-    const run = runs[0];
-    expect(run.debugPrompt, "debugPrompt must be persisted").to.be.a("string");
-    expect(run.debugPrompt!.length).to.be.greaterThan(0);
-    expect(run.debugResponse, "debugResponse must be persisted").to.be.a("string");
-    expect(run.debugResponse!.length).to.be.greaterThan(0);
-  });
-
-  // ── 4. Legacy `debugMode: true` alias ──────────────────────────────────────
-
-  it("with legacy `debugMode: true` alone, both effects light up via the pre-split fallback", async () => {
-    await addProcessor({ debugMode: true });
-
-    await driveOnePass();
-
-    const req = events.find((e) => e.step === "llmRequestSent");
-    const res = events.find((e) => e.step === "llmResponseReceived");
-    expect(req, "legacy `debugMode: true` must still emit `llmRequestSent`").to.exist;
-    expect(res, "legacy `debugMode: true` must still emit `llmResponseReceived`").to.exist;
-    expect(req!.llmInput!.length).to.be.greaterThan(0);
-    expect(res!.llmOutput!.length).to.be.greaterThan(0);
-
-    const runs = await InterpretationRun.findAll(p);
-    expect(runs.length).to.be.greaterThan(0);
-    const run = runs[0];
-    expect(
-      run.debugPrompt,
-      "legacy `debugMode: true` must still persist debugPrompt on the run",
-    ).to.be.a("string");
-    expect(run.debugPrompt!.length).to.be.greaterThan(0);
-    expect(
-      run.debugResponse,
-      "legacy `debugMode: true` must still persist debugResponse on the run",
-    ).to.be.a("string");
-    expect(run.debugResponse!.length).to.be.greaterThan(0);
-  });
 });

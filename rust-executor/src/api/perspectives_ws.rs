@@ -1407,10 +1407,7 @@ async fn add_auto_processor_handler(
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
-    let emit_debug_events_write = body
-        .emit_debug_events
-        .or(body.persist_debug)
-        .or(body.debug_mode);
+    let emit_debug_events_write = body.emit_debug_events;
     let cfg = AutoProcessorConfig {
         processor_id: body.processor_id.clone(),
         source_scope_query: body.source_scope_query,

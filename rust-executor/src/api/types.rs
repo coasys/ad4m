@@ -663,20 +663,11 @@ pub struct AddAutoProcessorRequest {
     /// at watch time.
     #[serde(default)]
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
-    /// Legacy alias — treated as a fallback for `emit_debug_events` when
-    /// that field is absent. Retained so pre-collapse clients still work.
-    #[serde(default)]
-    pub persist_debug: Option<bool>,
     /// Enable full debug observability: persists the raw LLM prompt +
     /// response on the pass's `InterpretationRun` node AND emits
     /// `LlmRequestSent` / `LlmResponseReceived` mid-pass events.
     #[serde(default)]
     pub emit_debug_events: Option<bool>,
-    /// Legacy backwards-compat alias — pre-split callers set `debug_mode`
-    /// as a single coupled flag. Treated as a fallback for
-    /// `emit_debug_events` when that field is absent.
-    #[serde(default)]
-    pub debug_mode: Option<bool>,
 }
 
 /// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —

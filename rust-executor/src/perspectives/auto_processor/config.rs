@@ -216,10 +216,6 @@ pub async fn ensure_auto_processor_class(
 /// * `None` omits the value entirely — the setter is not called and any
 ///   pre-existing link is preserved verbatim.
 ///
-/// The legacy `debugMode` scalar is intentionally **not written** here.
-/// [`load_processors`] still reads it as a fallback for pre-split configs
-/// (a peer that wrote `debugMode: true` before the split gets the flag on
-/// at load time).
 pub async fn write_processor(
     perspective: &mut PerspectiveInstance,
     cfg: &AutoProcessorConfig,
@@ -391,10 +387,7 @@ pub async fn load_processors(
             "processorId", "sourceScopeQuery", "basePrefix",
             "interpretationClasses", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
-            "existingScope", "mintScope",
-            // `debugMode` and `persistDebug` are queried as legacy
-            // fallbacks — new writes use only `emitDebugEvents`.
-            "debugMode", "persistDebug", "emitDebugEvents",
+            "existingScope", "mintScope", "emitDebugEvents",
         ]
     })
     .to_string();
@@ -539,11 +532,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
             None => Some(None),
         }
     };
-    let legacy_debug_mode = parse_bool("debugMode")?;
-    let emit_debug_events = parse_bool("emitDebugEvents")?
-        .or(parse_bool("persistDebug")?)
-        .or(legacy_debug_mode)
-        .unwrap_or(false);
+    let emit_debug_events = parse_bool("emitDebugEvents")?.unwrap_or(false);
 
     Some(AutoProcessorConfig {
         processor_id: scalar("processorId")?,
@@ -1037,44 +1026,5 @@ mod tests {
             .expect("write off");
         let loaded = load_processors(&p).await.expect("load off");
         assert!(!loaded[0].emit_debug_events);
-    }
-
-    /// Legacy backwards-compat: a peer that wrote the pre-split `debugMode`
-    /// or `persistDebug` scalar must still load with `emit_debug_events`
-    /// carrying that value.
-    #[tokio::test]
-    async fn legacy_debug_mode_scalar_is_fallback() {
-        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-
-        let cfg = sample_config("legacy");
-        write_processor(&mut p, &cfg, None, &ctx)
-            .await
-            .expect("write baseline");
-
-        // Simulate a pre-split write: only the legacy `debugMode` scalar set.
-        p.update_subject(
-            class_option(),
-            processor_node("legacy"),
-            serde_json::json!({ "debugMode": "true" }),
-            None,
-            &ctx,
-        )
-        .await
-        .expect("seed legacy debugMode=true");
-        let loaded = load_processors(&p).await.expect("load legacy");
-        assert!(
-            loaded[0].emit_debug_events,
-            "emit_debug_events must fall back to legacy debugMode when the specific field is absent"
-        );
-
-        // Explicit emitDebugEvents=false takes precedence over legacy debugMode=true.
-        write_processor(&mut p, &cfg, Some(false), &ctx)
-            .await
-            .expect("write explicit-off");
-        let loaded = load_processors(&p).await.expect("load precedence");
-        assert!(
-            !loaded[0].emit_debug_events,
-            "explicit emitDebugEvents=false must override legacy debugMode=true"
-        );
     }
 }

@@ -105,14 +105,6 @@ export class AutoProcessorConfig extends Ad4mModel {
   @Optional({ through: "ad4m://mint_scope" })
   mintScope?: string;
 
-  /** @deprecated Legacy alias — falls back to `emitDebugEvents`. */
-  @Optional({ through: "ad4m://debug_mode", resolveLanguage: "literal" })
-  debugMode?: string;
-
-  /** @deprecated Legacy alias — falls back to `emitDebugEvents`. */
-  @Optional({ through: "ad4m://persist_debug", resolveLanguage: "literal" })
-  persistDebug?: string;
-
   /**
    * Enable full debug observability: persists the raw LLM prompt + response
    * on the pass's `InterpretationRun` AND emits `LlmRequestSent` /
