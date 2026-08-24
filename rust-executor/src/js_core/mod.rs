@@ -25,6 +25,8 @@ mod futures;
 pub mod languages_extension;
 mod options;
 pub mod pubsub_extension;
+#[allow(dead_code)]
+pub mod residual_lazy;
 pub mod signature_extension;
 mod string_module_loader;
 pub mod utils;
