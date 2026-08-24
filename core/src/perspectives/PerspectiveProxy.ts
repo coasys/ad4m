@@ -12,9 +12,11 @@ import { AIClient } from "../ai/AIClient";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
+import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -544,6 +546,99 @@ export class PerspectiveProxy {
      */
     async get(query: LinkQuery): Promise<LinkExpression[]> {
         return await this.#client.queryLinks(this.#handle.uuid, query)
+    }
+
+    /**
+     * Runs generic LLM interpretation over a conversation transcript, turning it
+     * into typed instances of this perspective's own SHACL subject classes
+     * (steered by each class's `@InterpretationHint`). The target shapes are
+     * resolved automatically from the perspective's registered classes, so you
+     * pass only the transcript. New instances are written as links into this
+     * perspective; the returned placements list each instance's base URI and
+     * the links written for it.
+     *
+     * @param transcript ordered `{ speaker, text }` turns
+     * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
+     * @param classes local names of the subject classes to extract into; omit for all
+     */
+    async runInterpretation(
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        classes?: string[],
+        options?: {
+            existingScope?: RawScope,
+            mintScope?: RawScope,
+            /** Report progress while the pass runs — see {@link RunInterpretationObserveOptions}. */
+            observe?: RunInterpretationObserveOptions,
+        },
+    ): Promise<string[]> {
+        // Grouped into an options bag rather than continuing the client's positional list.
+        // The scopes were already unreachable from here for that reason, and a fourth, fifth and
+        // sixth positional parameter would have made `undefined, undefined, { … }` the normal way
+        // to ask for the only one of them most callers want.
+        return await this.#client.runInterpretation(
+            this.#handle.uuid,
+            transcript,
+            basePrefix,
+            classes,
+            options?.existingScope,
+            options?.mintScope,
+            options?.observe,
+        )
+    }
+
+    /**
+     * Register a neighbourhood auto-processor on this perspective. The executor
+     * then runs interpretation automatically over new source items (like Flux
+     * per channel), coordinating which peer processes each batch. Returns the
+     * processor id. Subscribe to progress via {@link addAutoProcessorEventListener}.
+     */
+    async addAutoProcessor(config: AddAutoProcessorConfig): Promise<string> {
+        return await this.#client.addAutoProcessor(this.#handle.uuid, config)
+    }
+
+    /**
+     * Pending interpretation overlays on this perspective — LLM suggestions the
+     * §4 divergence gate staged rather than applied, awaiting human accept/reject.
+     */
+    async interpretationOverlays(): Promise<InterpretationOverlayInfo[]> {
+        return await this.#client.interpretationOverlays(this.#handle.uuid)
+    }
+
+    /**
+     * Accept an interpretation overlay's suggestion(s): the LLM's staged value
+     * becomes the real, human-owned value and the overlay is deleted. Pass
+     * `property` to accept a single predicate; omit it for the whole base.
+     */
+    async acceptInterpretation(base: string, property?: string): Promise<boolean> {
+        return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+    }
+
+    /**
+     * Reject an interpretation overlay's suggestion(s). Omit `property` to reject
+     * the whole base — a rejected `create` deletes the suggested instance, a
+     * rejected `update` drops the overlay and keeps the real value.
+     */
+    async rejectInterpretation(base: string, property?: string): Promise<boolean> {
+        return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+    }
+
+    /** Subscribe to this perspective's auto-processor step signals. */
+    async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
+        return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+    }
+
+    /**
+     * Subscribe to this perspective's auto-processor neighbourhood-state
+     * events — fires when this executor claims / finishes / abandons a
+     * batch. Perspective-scoped, so a UI can render "someone is
+     * auto-processing this" without receiving the batch payload. See
+     * `AutoProcessorNeighbourhoodStateEvent`.
+     */
+    async addAutoProcessorNeighbourhoodStateListener(
+        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
+    ): Promise<void> {
+        return await this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb)
     }
 
     /**

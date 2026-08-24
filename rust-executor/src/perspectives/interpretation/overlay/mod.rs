@@ -39,10 +39,14 @@
 //!     together, plus the shared predicate vocabulary. The generic
 //!     single-valued link upsert (`replace_link`) lives in the `graph` submodule.
 
+mod accept;
 mod classes;
 mod gate;
 mod write;
 
+pub(crate) use accept::{
+    accept_interpretation, list_overlays, overlay_of, reject_interpretation, OverlayView,
+};
 pub use classes::InterpretationRunCursor;
 pub(crate) use classes::{
     ensure_interpretation_overlay_classes, mint_interpretation_run, InterpretationRunMeta,
@@ -116,15 +120,56 @@ pub(crate) async fn apply_with_overlay(
     ran_at: String,
     context: &AgentContext,
     cursor: Option<&InterpretationRunCursor>,
+    debug: Option<&crate::perspectives::interpretation::InterpretationDebug>,
 ) -> anyhow::Result<Vec<String>> {
     if ops.is_empty() {
         if cursor.is_some() {
             ensure_interpretation_overlay_classes(perspective, context).await?;
-            let meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
-            // Empty-ops fast-path: no overlays to write, so nothing to keep
-            // atomic with the run mint — the cursor-only run is the whole
-            // Phase 3 for this pass. `None` batch keeps this call cheap.
-            mint_interpretation_run(perspective, &meta, cursor, None, context).await?;
+            let mut meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
+            if let Some(d) = debug {
+                meta.debug_prompt = Some(d.prompt.clone());
+                meta.debug_response = Some(d.response.clone());
+            }
+            // Empty-ops fast-path: no overlays to write, but the cursor mint
+            // itself is a fan-out of `create_subject` + N × `update_subject`
+            // (one per additional source id). Without a batch, each of those
+            // is a separate `Shared` commit and therefore a separate p-diff-sync
+            // revision — peers can observe the run at an intermediate state
+            // with only some of the sources present, so their cursor filter
+            // misses the unpublished ones and re-processes those turns
+            // (2026-08-20 test-2 flake: `[22c2, 82e3, 22c2, ...]` — 22c2
+            // dup'd because Bob's cursor at process time saw only one of
+            // Alice's sources). Batch the whole mint so it lands atomically
+            // as a single revision.
+            let batch_id = perspective.create_batch().await;
+            match mint_interpretation_run(
+                perspective,
+                &meta,
+                cursor,
+                Some(batch_id.clone()),
+                context,
+            )
+            .await
+            {
+                Ok(_) => {
+                    perspective
+                        .commit_batch(batch_id.clone(), context)
+                        .await
+                        .map_err(|e| {
+                            // commit_batch already tries to drop the batch on
+                            // failure; belt-and-suspenders here too.
+                            let _ = perspective.discard_batch(&batch_id);
+                            anyhow::anyhow!(
+                                "plan_interpretation_ops_resolved: empty-ops fast-path \
+                                 commit_batch failed: {e:#}"
+                            )
+                        })?;
+                }
+                Err(e) => {
+                    let _ = perspective.discard_batch(&batch_id).await;
+                    return Err(e);
+                }
+            }
         }
         return Ok(Vec::new());
     }
@@ -211,7 +256,11 @@ pub(crate) async fn apply_with_overlay(
     // `real != inferred` and permanently classify the property as
     // human-diverged, dropping every subsequent LLM proposal on that field.
     if !overlays.is_empty() || cursor.is_some() {
-        let meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
+        let mut meta = InterpretationRunMeta::from_task(task, run_id, ran_at);
+        if let Some(d) = debug {
+            meta.debug_prompt = Some(d.prompt.clone());
+            meta.debug_response = Some(d.response.clone());
+        }
         let batch_id = perspective.create_batch().await;
         let mut phase3_err: Option<anyhow::Error> = None;
 
@@ -303,6 +352,8 @@ pub(crate) async fn seed_overlay(
         model: "seed".to_string(),
         prompt_version: "seed".to_string(),
         ran_at: "0".to_string(),
+        debug_prompt: None,
+        debug_response: None,
     };
     let run_uri = mint_interpretation_run(perspective, &meta, None, None, context).await?;
     let ow = OverlayWrite {
@@ -357,6 +408,7 @@ mod tests {
             run_id.to_string(),
             "1700000000000".to_string(),
             ctx,
+            None,
             None,
         )
         .await

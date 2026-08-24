@@ -388,23 +388,27 @@ Deliberately **not** landed with the cursor itself:
 
 Pair it with the event-driven watcher.
 
-### Later PR (`feature/generic-extraction-ws-ts`)
+### Later PR (`feature/generic-extraction-ws-ts`) — landed
 
-Step 1 lands on `feature/interpretation-auto-processor`. The WS/TS client
-branch does not exist here yet; rebase/merge this cut onto it and apply:
+Step 1 landed on `feature/interpretation-auto-processor` and was merged
+into the WS/TS client branch, where the four follow-ups applied:
 
-1. **`run_interpretation_handler`** — convert API
+1. **`run_interpretation_handler`** — converts API
    `TranscriptTurn { speaker, text }` (ts-rs, unchanged) into
-   interpretation `TranscriptTurn::from_speaker_text`. Do **not** add
-   `timestamp` to the public WS type unless one-shot callers need it;
-   AutoProcessor gather is the path that binds timestamp.
-2. **`AddAutoProcessorRequest.source_scope_query`** (and
-   `core/.../AutoProcessor.ts` `sourceScopeQuery` JSDoc) — document
-   `SELECT ?speaker ?text ?timestamp` and point at
-   `BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY` (reifier `ontology/author` +
-   `ontology/timestamp`, not `ns://author`).
+   interpretation `TranscriptTurn::from_speaker_text`. `timestamp` stays
+   off the public WS type: AutoProcessor gather is the path that binds
+   it, and a one-shot caller passing an explicit transcript has no cursor
+   for it to feed.
+2. **`AddAutoProcessorRequest.source_scope_query`** and
+   `core/.../AutoProcessor.ts` `sourceScopeQuery` — both document
+   `SELECT ?speaker ?text ?timestamp` and spell out the reifier query
+   (`ontology/author` + `ontology/timestamp`, not `ns://author`).
 3. **JS tests** `SCOPE_QUERY` in `auto-processor.test.ts` and
-   `auto-processor-neighbourhood.ts` — same reifier query as §3f,
-   otherwise gather will fail the tick once this cut is merged.
-4. **`sourceWindowMs?`** on `AddAutoProcessorConfig` / the WS request —
+   `auto-processor-neighbourhood.ts` — now the §3f reifier query. Note
+   the consequence for the neighbourhood test: `?speaker` is the DID that
+   *signed* the body link (Alice, who posts every message), not the
+   `ns://author` target, so Bob stands down as `notCandidate` rather than
+   racing for the claim. Both branches of its assertion already allow
+   that.
+4. **`sourceWindowMs?`** on `AddAutoProcessorConfig` and the WS request —
    optional; omit for no window (unbounded gather + cursor).

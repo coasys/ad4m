@@ -221,7 +221,10 @@ pub async fn existing_instance_context(
             continue;
         };
         let idp_name = idp.name.clone();
-        let class = class_local_name(&shape.target_class);
+        // Disambiguated class identifier (full URI on a cross-namespace local-name
+        // clash) — the same key the prompt and routing use, and a valid class name
+        // for `model_query` (`load_shape` resolves a full URI by exact match).
+        let class = class_label(&shape.target_class, shapes);
 
         // Secondary scalars: everything the LLM can meaningfully see about an
         // existing instance beyond its identity — excluding the class type
@@ -256,7 +259,7 @@ pub async fn existing_instance_context(
             })?;
         }
         let query = query_obj.to_string();
-        let result_json = perspective.model_query(class, &query).await.map_err(|e| {
+        let result_json = perspective.model_query(&class, &query).await.map_err(|e| {
             anyhow::anyhow!(
                 "existing_instance_context: model_query({class}) failed — refusing to \
                  proceed because an empty existing-set here would silently break dedup: {e:#}"
@@ -299,7 +302,7 @@ pub async fn existing_instance_context(
                         Some(InstanceContext {
                             id: id.to_string(),
                             title: title.to_string(),
-                            class: class.to_string(),
+                            class: class.clone(),
                             properties,
                         })
                     })

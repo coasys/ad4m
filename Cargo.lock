@@ -10,7 +10,7 @@ checksum = "415ed64958754dbe991900f3940677e6a7eefb4d7367afd70d642677b0c7d19d"
 
 [[package]]
 name = "ad4m"
-version = "0.13.0-test-9"
+version = "0.13.0-test-interpretation-2"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -38,7 +38,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-client"
-version = "0.13.0-test-9"
+version = "0.13.0-test-interpretation-2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -57,7 +57,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-executor"
-version = "0.13.0-test-9"
+version = "0.13.0-test-interpretation-2"
 dependencies = [
  "ad4m-client",
  "anyhow",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "ad4m-launcher"
-version = "0.13.0-test-9"
+version = "0.13.0-test-interpretation-2"
 dependencies = [
  "ad4m-client",
  "ad4m-executor",
@@ -1184,6 +1184,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer 3.1.0",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",

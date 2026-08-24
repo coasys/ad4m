@@ -220,9 +220,12 @@ export class ApiClient {
      * Send an RPC call over the WebSocket connection.
      * @param type - The operation type (e.g. 'agent.get', 'perspective.all')
      * @param params - Optional parameters to include in the message
+     * @param timeoutMs - Optional per-call timeout override in ms. Defaults to
+     *   [[DEFAULT_TIMEOUT_MS]]. Use for long-running calls (LLM prompts,
+     *   holochain ops) that legitimately exceed the default.
      * @returns Promise that resolves with the result from the server
      */
-    async call<T>(type: string, params?: Record<string, unknown>): Promise<T> {
+    async call<T>(type: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T> {
         await this._ready()
 
         const id = nextId()
@@ -230,12 +233,13 @@ export class ApiClient {
         // protocol fields "id" and "type" (e.g. params might contain
         // { id: modelId } or { type: "db" }).
         const message: Record<string, unknown> = { id, type, params: params || {} }
+        const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT_MS
 
         return new Promise<T>((resolve, reject) => {
             const timer = setTimeout(() => {
                 this._pendingCalls.delete(id)
-                reject(new RpcError(408, `RPC call '${type}' timed out after ${DEFAULT_TIMEOUT_MS}ms`))
-            }, DEFAULT_TIMEOUT_MS)
+                reject(new RpcError(408, `RPC call '${type}' timed out after ${effectiveTimeout}ms`))
+            }, effectiveTimeout)
 
             this._pendingCalls.set(id, {
                 resolve: resolve as (value: unknown) => void,

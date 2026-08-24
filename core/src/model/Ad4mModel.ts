@@ -17,7 +17,7 @@ import {
   normalizeValue,
 } from "./hydration";
 import type {
-  ParentScope, IncludeMap, Query,
+  Scope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
@@ -1620,7 +1620,7 @@ export class Ad4mModel {
    * @param perspective - The perspective to create the instance in
    * @param data - Property values to assign before saving
    * @param options - Optional settings:
-   *   - `parent` — a `ParentScope` (model form or raw form) whose `id` will
+   *   - `parent` — a `Scope` (model form or raw form) whose `id` will
    *     be used to create an incoming link from the parent to the new instance.
    *   - `batchId` — an existing batch id; when provided the link write and
    *     `save()` are added to the batch instead of committed immediately.
@@ -1649,7 +1649,7 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     data: Record<string, any> = {},
-    options?: { parent?: ParentScope; batchId?: string },
+    options?: { parent?: Scope; batchId?: string },
   ): Promise<T> {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);

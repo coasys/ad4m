@@ -26,9 +26,12 @@ use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkStatus};
 
-use super::claim::{try_claim, ClaimOutcome};
+use super::claim::{batch_key, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
-use super::events::{emit, AutoProcessorEvent, AutoProcessorStep};
+use super::events::{
+    emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
+    AutoProcessorStep, NeighbourhoodPhase,
+};
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -474,12 +477,22 @@ pub async fn run_one_pass(
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
     let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
+    /*
+       Derived once, up here, rather than at the claim below where it used to be.
+
+       Every signal this pass emits carries it, including the ones emitted *before* a claim is
+       attempted (`BatchReady`, `NotCandidate`, `AwaitingAuthor`, `BackedOff`). Computing it at
+       the claim would have left exactly the stand-down signals — the ones a consumer most wants
+       to attribute to a batch — as the only ones it could not join to a row.
+    */
+    let batch_key_hex = batch_key(&item_ids);
     macro_rules! signal {
         ($step:expr) => {
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
-                    .with_items(&item_ids),
+                    .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex),
             )
             .await
         };
@@ -488,6 +501,7 @@ pub async fn run_one_pass(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
                     .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex)
                     .with_detail($d),
             )
             .await
@@ -497,6 +511,7 @@ pub async fn run_one_pass(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
                     .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex)
                     .with_bases($b),
             )
             .await
@@ -594,6 +609,19 @@ pub async fn run_one_pass(
         return Ok(PassOutcome::BackedOff { holder });
     }
     signal!(AutoProcessorStep::Claimed);
+    // Neighbourhood-state (Nico 2026-08-19): a small perspective-scoped
+    // event so a UI can render "someone is auto-processing here". Distinct
+    // from `AutoProcessorStep::Claimed` above (which is DID-scoped and
+    // carries the batch payload) — this one is delivered to every reader
+    // of the perspective, and carries only the claimant + batch key.
+    emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+        &uuid,
+        &cfg.processor_id,
+        &me,
+        &batch_key_hex,
+        NeighbourhoodPhase::Claimed,
+    ))
+    .await;
 
     // 2. Resolve shapes.
     let store = &*perspective.sparql_store;
@@ -616,6 +644,18 @@ pub async fn run_one_pass(
             AutoProcessorStep::ShapesMissing,
             detail = missing.join(", ")
         );
+        // Close the neighbourhood-state Claimed row: this pass claimed the
+        // batch but is walking away without processing it. Without this,
+        // an observer's UI would keep showing "in progress" for a batch
+        // that will only clear when the claim TTL-expires.
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::ShapesMissing { missing });
     }
 
@@ -627,6 +667,14 @@ pub async fn run_one_pass(
             cfg.processor_id
         );
         signal!(AutoProcessorStep::EmptyTranscript);
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::EmptyTranscript);
     }
     let transcript: Vec<TranscriptTurn> = turns.iter().map(|t| t.as_transcript()).collect();
@@ -660,7 +708,16 @@ pub async fn run_one_pass(
         HashSet::new()
     };
 
-    let bases = run_interpretation_with_strategy_and_model(
+    let emit_ctx = cfg
+        .emit_debug_events
+        .then(|| super::events::InterpretationEmitContext {
+            perspective_uuid: uuid.clone(),
+            processor_id: cfg.processor_id.clone(),
+            agent_did: me.clone(),
+            item_ids: item_ids.clone(),
+            batch_key: batch_key_hex.clone(),
+        });
+    let outcome = run_interpretation_with_strategy_and_model(
         perspective,
         &shapes,
         &transcript,
@@ -668,17 +725,17 @@ pub async fn run_one_pass(
         context,
         &dedup,
         None,
-        // Existing-instance scope: constrains dedup to a subtree when the
-        // processor config specifies one, e.g. "existing Task instances that
-        // live under project X." `None` keeps the whole-perspective existing
-        // set — the pre-scope-config behaviour.
         cfg.existing_scope.as_ref(),
         Some(&InterpretationRunCursor {
             processor: super::config::processor_node(&cfg.processor_id),
             sources: item_ids.clone(),
         }),
+        cfg.emit_debug_events,
+        emit_ctx.as_ref(),
     )
     .await?;
+    let bases = outcome.bases;
+    let debug = outcome.debug;
 
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the
@@ -702,7 +759,31 @@ pub async fn run_one_pass(
         )
         .await?;
     }
-    signal!(AutoProcessorStep::Processed, bases = &bases);
+    // Emit the `Processed` event. Carries the final `bases` list — the
+    // LLM prompt + response now travel via the mid-pass `LlmRequestSent`
+    // and `LlmResponseReceived` events (Nico 2026-08-20), so a subscribing
+    // UI can render "waiting on LLM" between them instead of only seeing
+    // one lump payload here at the end. `_debug` is intentionally not
+    // attached to `Processed` any more — the persistent `InterpretationRun`
+    // (`debug_prompt` / `debug_response`) is the post-hoc lookup channel.
+    let _ = debug; // consumed by the interpretation engine → InterpretationRun
+    let ev = AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::Processed)
+        .with_agent_did(&me)
+        .with_items(&item_ids)
+        .with_batch_key(&batch_key_hex)
+        .with_bases(&bases);
+    emit(ev).await;
+    // Neighbourhood-state: pass complete on this executor. Consumers use
+    // this to close out the `Claimed` row they showed for the same
+    // `batch_key`.
+    emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+        &uuid,
+        &cfg.processor_id,
+        &me,
+        &batch_key_hex,
+        NeighbourhoodPhase::Finished,
+    ))
+    .await;
 
     Ok(PassOutcome::Won { bases })
 }
@@ -717,7 +798,10 @@ pub async fn run_one_pass(
 /// original order. Used by mint-scope linking (CodeRabbit #902 review) to
 /// exclude upserts of pre-existing instances — writing a mint-scope link
 /// for those would multi-parent unrelated graph state into our scope.
-fn partition_created<'a>(bases: &'a [String], pre_existing: &HashSet<String>) -> Vec<String> {
+pub(crate) fn partition_created<'a>(
+    bases: &'a [String],
+    pre_existing: &HashSet<String>,
+) -> Vec<String> {
     bases
         .iter()
         .filter(|b| !pre_existing.contains(*b))
@@ -725,7 +809,7 @@ fn partition_created<'a>(bases: &'a [String], pre_existing: &HashSet<String>) ->
         .collect()
 }
 
-async fn write_mint_scope_links(
+pub(crate) async fn write_mint_scope_links(
     perspective: &mut PerspectiveInstance,
     mint_scope: &Scope,
     bases: &[String],
@@ -787,6 +871,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            emit_debug_events: false,
         }
     }
 

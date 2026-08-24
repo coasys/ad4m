@@ -30,9 +30,35 @@
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::types::{Link, LinkStatus};
 
 use super::scalar_string;
 use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
+
+/// Instances already reported as unloadable, so each is complained about once.
+///
+/// The watch loop polls `load_processors` several times a second on every perspective, and a
+/// rejected instance is rejected identically every time — so an unthrottled warning emits the same
+/// line thousands of times a minute, per instance. That is not merely untidy: it buries the log a
+/// person is reading to find out *why*, which is the exact situation the warning exists to serve.
+///
+/// Keyed by instance URI and never cleared. A processor whose config is repaired starts loading and
+/// stops reaching this path at all; one that is deleted never returns. The set is therefore bounded
+/// by the number of distinct broken instances, which is small and finite.
+static REPORTED_BAD_INSTANCES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+/// Whether this is the first time this instance has failed to load.
+fn first_report_for(instance_id: &str) -> bool {
+    REPORTED_BAD_INSTANCES
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(instance_id.to_string()))
+        // A poisoned mutex means another thread panicked mid-report. Log rather than swallow: a
+        // repeated line is a smaller problem than a silent one.
+        .unwrap_or(true)
+}
 
 /// Local subject-class name of a processor config.
 pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
@@ -42,35 +68,25 @@ const AUTO_PROCESSOR_TARGET_CLASS: &str = "ad4m://AutoProcessor";
 
 /// Hard-wired SDNA for the [`AUTO_PROCESSOR_CLASS`] subject class.
 ///
-/// The `type` flag is the class discriminator (and, with the other
-/// `min_count: 1` properties, the `model_query` conformance pattern: a
-/// half-synced node missing a required scalar simply is not an instance yet).
+/// No dedicated `rdf://type` flag by design (Nico 2026-08-19: "type flags
+/// are an anti-pattern for subject classes; match over all the properties
+/// instead"). Conformance is entirely by the presence of the required
+/// scalars: a node with `processor_id` + `source_scope_query` +
+/// `interpretation_class` + `debounce_ms` + `batch_max` + `claim_ttl_ms`
+/// IS an AutoProcessor. A half-synced node missing any of them is simply
+/// not an instance yet. Same pattern the `InterpretationOverlay` class
+/// already uses (`kind` is its discriminator).
+///
 /// `interpretation_class` is declared `collection` — the marker the shape
 /// reader keys on for a multi-valued *literal* property — so its `addLink`
 /// setter accumulates class URIs instead of replacing them, and hydration
 /// returns them as an array. No `maxCount` is declared on it: the number of
 /// classes one processor materializes is open-ended.
-const AUTO_PROCESSOR_SDNA: &str = r#"{
-  "target_class":"ad4m://AutoProcessor",
-  "interpretation_hint":"An automatic interpretation processor: the content it watches, the classes it materializes, and its batching/claim timings.",
-  "constructor_actions":[{"action":"addLink","source":"this","predicate":"rdf://type","target":"ad4m://AutoProcessor"}],
-  "properties":[
-    {"path":"rdf://type","name":"type","has_value":"ad4m://AutoProcessor","min_count":1,"max_count":1},
-    {"path":"ad4m://processor_id","name":"processor_id","identity":true,"min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://processor_id","target":"value"}]},
-    {"path":"ad4m://source_scope_query","name":"source_scope_query","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_scope_query","target":"value"}]},
-    {"path":"ad4m://base_prefix","name":"base_prefix","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://base_prefix","target":"value"}]},
-    {"path":"ad4m://interpretation_class","name":"interpretation_class","collection":true,"min_count":1,"setter":[{"action":"addLink","source":"this","predicate":"ad4m://interpretation_class","target":"value"}]},
-    {"path":"ad4m://debounce_ms","name":"debounce_ms","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://debounce_ms","target":"value"}]},
-    {"path":"ad4m://batch_min","name":"batch_min","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_min","target":"value"}]},
-    {"path":"ad4m://batch_max","name":"batch_max","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://batch_max","target":"value"}]},
-    {"path":"ad4m://max_wait_ms","name":"max_wait_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://max_wait_ms","target":"value"}]},
-    {"path":"ad4m://claim_ttl_ms","name":"claim_ttl_ms","min_count":1,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://claim_ttl_ms","target":"value"}]},
-    {"path":"ad4m://source_window_ms","name":"source_window_ms","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://source_window_ms","target":"value"}]},
-    {"path":"ad4m://dedup_strategy","name":"dedup_strategy","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://dedup_strategy","target":"value"}]},
-    {"path":"ad4m://existing_scope","name":"existing_scope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://existing_scope","target":"value"}]},
-    {"path":"ad4m://mint_scope","name":"mint_scope","min_count":0,"max_count":1,"setter":[{"action":"setSingleTarget","source":"this","predicate":"ad4m://mint_scope","target":"value"}]}
-  ]
-}"#;
+// Loaded from a JSON file so the TS parity test can read the SAME file and
+// build its expectations from IT — no hand-maintained parallel reference in
+// either language (2026-08-20 debug: hardcoded references in both tests
+// missed the property-name divergence entirely).
+const AUTO_PROCESSOR_SDNA: &str = include_str!("../hardwired_sdna/auto_processor.json");
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
 /// auto-processor pass over a source perspective.
@@ -150,6 +166,18 @@ pub struct AutoProcessorConfig {
     /// May differ from [`Self::existing_scope`] — a watcher can read from a
     /// broader subtree than it writes into, or vice-versa.
     pub mint_scope: Option<Scope>,
+    /// When `true`, enables full debug observability for this processor:
+    /// 1. Persists the raw LLM prompt + response on the pass's
+    ///    `InterpretationRun` node (`debugPrompt`/`debugResponse`) for
+    ///    retrospective inspection.
+    /// 2. Emits `LlmRequestSent` and `LlmResponseReceived`
+    ///    [`super::events::AutoProcessorEvent`]s mid-pass, so a subscribed
+    ///    UI can render "waiting on LLM" between prompt-send and
+    ///    response-receive instead of a single lump payload at `Processed`.
+    ///
+    /// Default: `false`. Prompts + responses are large (10s of KB) and
+    /// every enabled peer syncs them for every pass.
+    pub emit_debug_events: bool,
 }
 
 /// Deterministic node URI for an AutoProcessor. Deterministic in
@@ -179,71 +207,155 @@ pub async fn ensure_auto_processor_class(
 /// Writing the same `processor_id` twice overwrites its scalars (the setters
 /// are `setSingleTarget`) and appends its interpretation classes (deduplicated
 /// on read by [`load_processors`]).
+///
+/// `emit_debug_events_write` is a tri-state intent, resolved at the API
+/// boundary from the request's `Option<bool>` field:
+/// * `Some(true)` writes the link as `"true"`.
+/// * `Some(false)` writes the link as `"false"` — actively overwriting any
+///   pre-existing `"true"` link on an updated processor via `setSingleTarget`.
+/// * `None` omits the value entirely — the setter is not called and any
+///   pre-existing link is preserved verbatim.
+///
 pub async fn write_processor(
     perspective: &mut PerspectiveInstance,
     cfg: &AutoProcessorConfig,
+    emit_debug_events_write: Option<bool>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    let Some((first_class, more_classes)) = cfg.interpretation_classes.split_first() else {
+    // Emptiness is still a hard error — a processor with no classes materialises nothing — but the
+    // members themselves are written as links below rather than through the values map.
+    if cfg.interpretation_classes.is_empty() {
         anyhow::bail!(
             "write_processor: `{}` has no interpretation_classes",
             cfg.processor_id
         );
-    };
+    }
     ensure_auto_processor_class(perspective, context).await?;
 
     let node = processor_node(&cfg.processor_id);
+    // Keys MUST match the camelCase property names in AUTO_PROCESSOR_SDNA above
+    // (which in turn match the TS @Model field names). The setter lookup in
+    // `create_subject` keys on the SDNA property name, not on the path — a
+    // snake_case key here means "no setter found, keep the placeholder"
+    // (2026-08-20 debug: exact bug we hit).
     let mut values = serde_json::json!({
-        "processor_id": cfg.processor_id,
-        "source_scope_query": cfg.source_scope_query,
-        "interpretation_class": first_class,
-        "debounce_ms": cfg.debounce_ms.to_string(),
-        "batch_min": cfg.batch_min.to_string(),
-        "batch_max": cfg.batch_max.to_string(),
-        "claim_ttl_ms": cfg.claim_ttl_ms.to_string(),
+        "processorId": cfg.processor_id,
+        "sourceScopeQuery": cfg.source_scope_query,
+        "debounceMs": cfg.debounce_ms.to_string(),
+        "batchMin": cfg.batch_min.to_string(),
+        "batchMax": cfg.batch_max.to_string(),
+        "claimTtlMs": cfg.claim_ttl_ms.to_string(),
     });
     if let Some(base_prefix) = &cfg.base_prefix {
-        values["base_prefix"] = base_prefix.clone().into();
+        values["basePrefix"] = base_prefix.clone().into();
     }
     if let Some(max_wait_ms) = cfg.max_wait_ms {
-        values["max_wait_ms"] = max_wait_ms.to_string().into();
+        values["maxWaitMs"] = max_wait_ms.to_string().into();
     }
     if let Some(dedup) = &cfg.dedup_strategy_json {
-        values["dedup_strategy"] = dedup.clone().into();
+        values["dedupStrategy"] = dedup.clone().into();
     }
     if let Some(source_window_ms) = cfg.source_window_ms {
-        values["source_window_ms"] = source_window_ms.to_string().into();
+        values["sourceWindowMs"] = source_window_ms.to_string().into();
     }
     if let Some(existing_scope) = &cfg.existing_scope {
         let json = serde_json::to_string(existing_scope)
             .map_err(|e| anyhow::anyhow!("write_processor: serialize existing_scope: {e:#}"))?;
-        values["existing_scope"] = json.into();
+        values["existingScope"] = json.into();
     }
     if let Some(mint_scope) = &cfg.mint_scope {
         let json = serde_json::to_string(mint_scope)
             .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
-        values["mint_scope"] = json.into();
+        values["mintScope"] = json.into();
     }
-    perspective
-        .create_subject(class_option(), node.clone(), Some(values), None, context)
-        .await
-        .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
+    if let Some(v) = emit_debug_events_write {
+        values["emitDebugEvents"] = v.to_string().into();
+    }
 
-    // `create_subject` applies one value per property, so the remaining
-    // members of the `interpretation_class` collection go through the same
-    // `addLink` setter one at a time.
-    for class in more_classes {
+    // Batch the create_subject + follow-on update_subject calls so the whole
+    // AutoProcessorConfig instance lands as ONE `Shared` commit — instead of
+    // ~11 individual commits (one per property setter) from `execute_commands`.
+    // A single-class processor already blew past the per-perspective
+    // `IMMEDIATE_COMMITS_COUNT=20` immediate-commit throttle in
+    // `perspective_instance::commit` when combined with the other setup
+    // writes on a fresh neighbourhood — subsequent commits (including the
+    // wave-1 `InterpretationRun` cursor) landed in the pending-diff queue
+    // and only drained on the 3-second timer, well past any p-diff-sync
+    // gossip window that would have carried the cursor to peers before the
+    // next batch arrived (2026-08-20 Marvin flake root-cause).
+    let batch_id = perspective.create_batch().await;
+    let write_result: anyhow::Result<()> = async {
         perspective
-            .update_subject(
+            .create_subject(
                 class_option(),
                 node.clone(),
-                serde_json::json!({ "interpretation_class": class }),
-                None,
+                Some(values),
+                Some(batch_id.clone()),
                 context,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("write_processor: update_subject(class) failed: {e:#}"))?;
+            .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
+        /*
+           The classes are written as links, not through the values map.
+
+           `create_subject` and `update_subject` resolve a property by looking up its
+           `ad4m://setter` actions, and a *collection* has none — it carries `ad4m://adder`
+           instead. So every value handed to them for `interpretationClasses` was silently
+           discarded, and the instance came back without the one property `load_processors`
+           requires first. Every scalar landed, so the write reported success and the failure
+           surfaced only as the reader calling the instance malformed, once per watch tick,
+           forever.
+
+           Adding the links directly is what the collection's own `addLink` action would do,
+           and it needs no shape lookup to get there. Same batch as the instance, so the classes
+           and the config it belongs to still commit atomically — a half-written processor is
+           precisely the state that produced this bug.
+
+           `Shared`, matching every other link this class writes: the processor set is neighbourhood
+           state, and a local-only class list would make one peer's view of what to extract differ
+           from everyone else's.
+        */
+        for class in cfg.interpretation_classes.iter() {
+            perspective
+                .add_link(
+                    Link {
+                        source: node.clone(),
+                        predicate: Some("ad4m://interpretation_class".to_string()),
+                        target: format!("literal:string:{}", class),
+                    },
+                    LinkStatus::Shared,
+                    Some(batch_id.clone()),
+                    context,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("write_processor: add_link(interpretation_class) failed: {e:#}")
+                })?;
+        }
+        Ok(())
     }
+    .await;
+
+    if let Err(e) = write_result {
+        // Discard the pending batch so it doesn't linger in `batch_store` and
+        // never get committed. `discard_batch` is idempotent-ish (it returns
+        // an error if the id is unknown, which we intentionally ignore) so
+        // this is safe on both partial-write and never-wrote failures.
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(e);
+    }
+
+    if let Err(e) = perspective.commit_batch(batch_id.clone(), context).await {
+        // Defense-in-depth: `commit_batch` already tries to remove the batch
+        // on failure per its contract, but drop it explicitly here too so a
+        // change to `commit_batch`'s control flow can't leave a stale batch
+        // in the store.
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(anyhow::anyhow!(
+            "write_processor: commit_batch failed: {e:#}"
+        ));
+    }
+
     Ok(())
 }
 
@@ -268,12 +380,14 @@ pub async fn load_processors(
     if !subject_class_registered(perspective, AUTO_PROCESSOR_TARGET_CLASS).await? {
         return Ok(Vec::new());
     }
+    // Property names MUST match the camelCase names in AUTO_PROCESSOR_SDNA
+    // above — model_query keys results by property name.
     let query = serde_json::json!({
         "properties": [
-            "processor_id", "source_scope_query", "base_prefix",
-            "interpretation_class", "debounce_ms", "batch_min", "batch_max",
-            "max_wait_ms", "claim_ttl_ms", "dedup_strategy", "source_window_ms",
-            "existing_scope", "mint_scope",
+            "processorId", "sourceScopeQuery", "basePrefix",
+            "interpretationClasses", "debounceMs", "batchMin", "batchMax",
+            "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
+            "existingScope", "mintScope", "emitDebugEvents",
         ]
     })
     .to_string();
@@ -288,11 +402,37 @@ pub async fn load_processors(
     for instance in result["instances"].as_array().into_iter().flatten() {
         match config_from_instance(instance) {
             Some(cfg) => out.push(cfg),
-            None => log::warn!(
-                "load_processors: AutoProcessor instance `{}` has missing / unparseable \
-                 fields; skipping",
-                instance["id"].as_str().unwrap_or("<no id>")
-            ),
+            /*
+               The instance itself, not just the fact that it failed.
+
+               "has missing / unparseable fields" names neither the field nor its value, and this
+               fires once per watch tick forever — so the symptom is an endless stream of a message
+               that cannot be acted on. Diagnosing one meant reading three files and guessing, and
+               the guesses were wrong twice.
+
+               Every branch that returns `None` from `config_from_instance` is a statement about one
+               property's value, so printing the whole instance answers the question outright: which
+               field is absent, and how the ones that are present are actually encoded. That second
+               half matters more than it looks — a scalar that arrives in an unexpected encoding
+               reads as "missing" here, and nothing else in the message would distinguish the two.
+
+               At `warn` alongside the existing line rather than `debug`, because a processor that
+               silently stops running is exactly the situation where nobody has debug logging on
+               yet, and the instance is a few hundred bytes once per skip.
+            */
+            None => {
+                let id = instance["id"].as_str().unwrap_or("<no id>");
+                if first_report_for(id) {
+                    log::warn!(
+                        "load_processors: AutoProcessor instance `{}` has missing / unparseable \
+                         fields; skipping (further occurrences suppressed). Instance as read: {}",
+                        id,
+                        instance
+                    );
+                } else {
+                    log::debug!("load_processors: still skipping `{}`", id);
+                }
+            }
         }
     }
     out.sort_by(|a, b| a.processor_id.cmp(&b.processor_id));
@@ -311,7 +451,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
     // the config shape), since neither store order nor sync order is
     // guaranteed.
     let mut interpretation_classes: Vec<String> = instance
-        .get("interpretation_class")?
+        .get("interpretationClasses")?
         .as_array()?
         .iter()
         .filter_map(|v| v.as_str().map(str::to_string))
@@ -322,35 +462,35 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         return None;
     }
 
-    // Optional thresholds. Absent `batch_min` → 1 (original behaviour). An
-    // absent `max_wait_ms` → `None` (wait indefinitely). A *present but
+    // Optional thresholds. Absent `batchMin` → 1 (original behaviour). An
+    // absent `maxWaitMs` → `None` (wait indefinitely). A *present but
     // unparseable* value is a config error, so we bail (`None`) exactly like
     // the required fields rather than silently defaulting.
-    let batch_min = match scalar("batch_min") {
-        Some(_) => count("batch_min")?.max(1),
+    let batch_min = match scalar("batchMin") {
+        Some(_) => count("batchMin")?.max(1),
         None => 1,
     };
-    let max_wait_ms = match scalar("max_wait_ms") {
-        Some(_) => Some(number("max_wait_ms")?),
+    let max_wait_ms = match scalar("maxWaitMs") {
+        Some(_) => Some(number("maxWaitMs")?),
         None => None,
     };
 
     // Timings must be in range or the batch/claim primitives misbehave: a
-    // `batch_max` of 0 drains nothing (empty passes forever), a non-positive
-    // `claim_ttl_ms` makes each peer's own claim expire the moment it is
+    // `batchMax` of 0 drains nothing (empty passes forever), a non-positive
+    // `claimTtlMs` makes each peer's own claim expire the moment it is
     // written (so every peer reads an empty holder set and processes the same
-    // batch), and a *negative* `max_wait_ms` makes the oldest-item deadline
-    // "expire" immediately, silently bypassing `batch_min` on every pass. Treat
+    // batch), and a *negative* `maxWaitMs` makes the oldest-item deadline
+    // "expire" immediately, silently bypassing `batchMin` on every pass. Treat
     // an out-of-range value like an unparseable one — the processor is simply
     // not loaded (and a warn is logged by the caller).
-    let debounce_ms = number("debounce_ms")?;
-    let batch_max = count("batch_max")?;
-    let claim_ttl_ms = number("claim_ttl_ms")?;
+    let debounce_ms = number("debounceMs")?;
+    let batch_max = count("batchMax")?;
+    let claim_ttl_ms = number("claimTtlMs")?;
     if debounce_ms < 0 || batch_max < 1 || claim_ttl_ms <= 0 || max_wait_ms.is_some_and(|w| w < 0) {
         return None;
     }
-    let source_window_ms = match scalar("source_window_ms") {
-        Some(_) => Some(number("source_window_ms")?),
+    let source_window_ms = match scalar("sourceWindowMs") {
+        Some(_) => Some(number("sourceWindowMs")?),
         None => None,
     };
     if source_window_ms.is_some_and(|w| w <= 0) {
@@ -359,41 +499,56 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
 
     // Scope JSON blobs — a present-but-unparseable value is a config error
     // (bail, same policy as other required-shape fields). Absent → None.
-    let existing_scope = match scalar("existing_scope") {
+    let existing_scope = match scalar("existingScope") {
         Some(json) => match serde_json::from_str::<Scope>(&json) {
             Ok(scope) => Some(scope),
             Err(e) => {
-                log::warn!("config_from_instance: existing_scope parse failed: {e:#}");
+                log::warn!("config_from_instance: existingScope parse failed: {e:#}");
                 return None;
             }
         },
         None => None,
     };
-    let mint_scope = match scalar("mint_scope") {
+    let mint_scope = match scalar("mintScope") {
         Some(json) => match serde_json::from_str::<Scope>(&json) {
             Ok(scope) => Some(scope),
             Err(e) => {
-                log::warn!("config_from_instance: mint_scope parse failed: {e:#}");
+                log::warn!("config_from_instance: mintScope parse failed: {e:#}");
                 return None;
             }
         },
         None => None,
     };
 
+    let parse_bool = |name: &str| -> Option<Option<bool>> {
+        match scalar(name) {
+            Some(s) => match s.parse::<bool>() {
+                Ok(v) => Some(Some(v)),
+                Err(_) => {
+                    log::warn!("config_from_instance: {name} is not `true`/`false`");
+                    None
+                }
+            },
+            None => Some(None),
+        }
+    };
+    let emit_debug_events = parse_bool("emitDebugEvents")?.unwrap_or(false);
+
     Some(AutoProcessorConfig {
-        processor_id: scalar("processor_id")?,
-        source_scope_query: scalar("source_scope_query")?,
-        base_prefix: scalar("base_prefix"),
+        processor_id: scalar("processorId")?,
+        source_scope_query: scalar("sourceScopeQuery")?,
+        base_prefix: scalar("basePrefix"),
         interpretation_classes,
         debounce_ms,
         batch_min,
         batch_max,
         max_wait_ms,
         claim_ttl_ms,
-        dedup_strategy_json: scalar("dedup_strategy"),
+        dedup_strategy_json: scalar("dedupStrategy"),
         source_window_ms,
         existing_scope,
         mint_scope,
+        emit_debug_events,
     })
 }
 
@@ -402,6 +557,15 @@ mod tests {
     use super::*;
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::types::{Link, LinkQuery, LinkStatus};
+
+    // SDNA parity is checked TS-side in
+    // `tests/js/tests/model/interpretation-models.test.ts`, which reads the
+    // same `hardwired_sdna/auto_processor.json` this module `include_str!`s
+    // and compares (path, name) pairs against
+    // `AutoProcessorConfig.generateSHACL().shape`. A hardcoded Rust-side
+    // reference set would fork the source of truth (2026-08-20 bug: paths
+    // matched, names diverged, both sides' parity tests passed while
+    // `create_subject` writes silently no-op'd).
 
     fn sample_config(id: &str) -> AutoProcessorConfig {
         AutoProcessorConfig {
@@ -424,6 +588,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            emit_debug_events: false,
         }
     }
 
@@ -432,7 +597,7 @@ mod tests {
     async fn write_then_load_roundtrip() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let cfg = sample_config("summariser");
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
         let loaded = load_processors(&p).await.expect("load_processors");
@@ -445,7 +610,7 @@ mod tests {
     #[tokio::test]
     async fn write_creates_shared_links() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("shared"), &ctx)
+        write_processor(&mut p, &sample_config("shared"), Some(false), &ctx)
             .await
             .expect("write_processor");
         let links = p
@@ -484,7 +649,7 @@ mod tests {
         // write in reverse-alphabetical order to prove sort is by the field,
         // not by write order.
         for id in ["z-tagger", "a-summariser", "m-classifier"] {
-            write_processor(&mut p, &sample_config(id), &ctx)
+            write_processor(&mut p, &sample_config(id), Some(false), &ctx)
                 .await
                 .expect("write");
         }
@@ -504,7 +669,9 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("minimal");
         cfg.dedup_strategy_json = None;
-        write_processor(&mut p, &cfg, &ctx).await.expect("write");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], cfg);
@@ -519,7 +686,9 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("windowed");
         cfg.source_window_ms = Some(42);
-        write_processor(&mut p, &cfg, &ctx).await.expect("write");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded[0].source_window_ms, Some(42));
     }
@@ -534,7 +703,9 @@ mod tests {
 
         // Case 1: both scopes absent (baseline).
         let bare = sample_config("bare");
-        write_processor(&mut p, &bare, &ctx).await.expect("write");
+        write_processor(&mut p, &bare, Some(false), &ctx)
+            .await
+            .expect("write");
 
         // Case 2: `Raw` scope on both sides — different parent nodes so we can
         // prove they don't get conflated on read.
@@ -547,7 +718,9 @@ mod tests {
             id: "soa://project/42/backlog".into(),
             predicate: "ad4m://has_child".into(),
         });
-        write_processor(&mut p, &raw, &ctx).await.expect("write");
+        write_processor(&mut p, &raw, Some(false), &ctx)
+            .await
+            .expect("write");
 
         // Case 3: `Model` scope — verifies the second untagged variant survives
         // the JSON round-trip too (a bare `Raw` would silently match `Model`
@@ -559,7 +732,9 @@ mod tests {
             field: Some("tasks".into()),
         });
         model.mint_scope = None;
-        write_processor(&mut p, &model, &ctx).await.expect("write");
+        write_processor(&mut p, &model, Some(false), &ctx)
+            .await
+            .expect("write");
 
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 3, "three processors round-trip");
@@ -576,16 +751,16 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_unparseable_scope() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("good-scope"), &ctx)
+        write_processor(&mut p, &sample_config("good-scope"), Some(false), &ctx)
             .await
             .expect("write");
-        write_processor(&mut p, &sample_config("garbled-scope"), &ctx)
+        write_processor(&mut p, &sample_config("garbled-scope"), Some(false), &ctx)
             .await
             .expect("write");
         p.update_subject(
             class_option(),
             processor_node("garbled-scope"),
-            serde_json::json!({ "mint_scope": "not-json {" }),
+            serde_json::json!({ "mintScope": "not-json {" }),
             None,
             &ctx,
         )
@@ -605,7 +780,7 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         // A complete one first, so the class is registered and we prove the
         // partial is skipped while the valid one still comes through.
-        write_processor(&mut p, &sample_config("complete"), &ctx)
+        write_processor(&mut p, &sample_config("complete"), Some(false), &ctx)
             .await
             .expect("write complete");
         p.add_links(
@@ -632,16 +807,16 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_unparseable_numeric() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("garbled"), &ctx)
+        write_processor(&mut p, &sample_config("garbled"), Some(false), &ctx)
             .await
             .expect("write");
-        write_processor(&mut p, &sample_config("garbled-2"), &ctx)
+        write_processor(&mut p, &sample_config("garbled-2"), Some(false), &ctx)
             .await
             .expect("write");
         p.update_subject(
             class_option(),
             processor_node("garbled-2"),
-            serde_json::json!({ "debounce_ms": "not-a-number" }),
+            serde_json::json!({ "debounceMs": "not-a-number" }),
             None,
             &ctx,
         )
@@ -662,16 +837,16 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_zero_claim_ttl() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("good"), &ctx)
+        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
             .await
             .expect("write good");
-        write_processor(&mut p, &sample_config("zero-ttl"), &ctx)
+        write_processor(&mut p, &sample_config("zero-ttl"), Some(false), &ctx)
             .await
             .expect("write zero-ttl");
         p.update_subject(
             class_option(),
             processor_node("zero-ttl"),
-            serde_json::json!({ "claim_ttl_ms": "0" }),
+            serde_json::json!({ "claimTtlMs": "0" }),
             None,
             &ctx,
         )
@@ -689,16 +864,16 @@ mod tests {
     #[tokio::test]
     async fn load_skips_node_with_negative_max_wait() {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        write_processor(&mut p, &sample_config("good"), &ctx)
+        write_processor(&mut p, &sample_config("good"), Some(false), &ctx)
             .await
             .expect("write good");
-        write_processor(&mut p, &sample_config("neg-wait"), &ctx)
+        write_processor(&mut p, &sample_config("neg-wait"), Some(false), &ctx)
             .await
             .expect("write neg-wait");
         p.update_subject(
             class_option(),
             processor_node("neg-wait"),
-            serde_json::json!({ "max_wait_ms": "-1" }),
+            serde_json::json!({ "maxWaitMs": "-1" }),
             None,
             &ctx,
         )
@@ -724,7 +899,9 @@ mod tests {
             "ns://Observation".into(),
             "ns://Question".into(),
         ];
-        write_processor(&mut p, &cfg, &ctx).await.expect("write");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(
@@ -750,7 +927,9 @@ mod tests {
             "ns://Task".into(),
             "ns://Question".into(),
         ];
-        write_processor(&mut p, &cfg, &ctx).await.expect("write");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
         let loaded = load_processors(&p).await.expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(
@@ -766,12 +945,86 @@ mod tests {
         let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         let mut cfg = sample_config("empty");
         cfg.interpretation_classes.clear();
-        let err = write_processor(&mut p, &cfg, &ctx)
+        let err = write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect_err("must reject empty interpretation_classes");
         assert!(
             err.to_string().contains("interpretation_classes"),
             "unexpected error: {err}"
         );
+    }
+
+    /// CodeRabbit #903 CR #3 regression, applied per-switch. Each of
+    /// `emit_debug_events_write` carries the tri-state intent:
+    ///
+    /// - `Some(true)` writes `"true"` — the field loads ON.
+    /// - `Some(false)` after `Some(true)` writes `"false"` — the field
+    ///   loads OFF.
+    /// - `None` after `Some(true)` skips the setter — the existing
+    ///   `"true"` link is preserved and the field loads ON.
+    #[tokio::test]
+    async fn debug_switch_tri_state_write_and_preserve() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let cfg = sample_config("debug-toggle");
+
+        write_processor(&mut p, &cfg, Some(true), &ctx)
+            .await
+            .expect("write on");
+        let loaded = load_processors(&p).await.expect("load-on");
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events must load enabled"
+        );
+
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write off");
+        let loaded = load_processors(&p).await.expect("load-off");
+        assert!(
+            !loaded[0].emit_debug_events,
+            "emit_debug_events MUST load disabled after Some(false)"
+        );
+
+        write_processor(&mut p, &cfg, Some(true), &ctx)
+            .await
+            .expect("write on again");
+        write_processor(&mut p, &cfg, None, &ctx)
+            .await
+            .expect("write no-touch");
+        let loaded = load_processors(&p).await.expect("load-preserve");
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events MUST stay enabled when the caller omits it (tri-state preserve)"
+        );
+    }
+
+    /// The tri-state write preserves the existing value when `None` is passed.
+    #[tokio::test]
+    async fn emit_debug_events_tristate_preserves() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let cfg = sample_config("tristate");
+
+        write_processor(&mut p, &cfg, Some(true), &ctx)
+            .await
+            .expect("write on");
+        let loaded = load_processors(&p).await.expect("load on");
+        assert!(loaded[0].emit_debug_events);
+
+        // None preserves existing value
+        write_processor(&mut p, &cfg, None, &ctx)
+            .await
+            .expect("write None");
+        let loaded = load_processors(&p).await.expect("load None");
+        assert!(
+            loaded[0].emit_debug_events,
+            "emit_debug_events must stay enabled when the caller omits it (tri-state preserve)"
+        );
+
+        // Explicit false turns it off
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write off");
+        let loaded = load_processors(&p).await.expect("load off");
+        assert!(!loaded[0].emit_debug_events);
     }
 }
