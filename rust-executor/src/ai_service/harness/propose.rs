@@ -374,9 +374,9 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
         // they're linking under — we accept ANY class the provider knows
         // about (link semantics don't depend on which class registered
         // the tool). Reject unknown classes to catch typos early.
-        let class_shape = self.find_class(lower_class).ok_or_else(|| {
-            anyhow!("no registered class `{lower_class}` for propose_link_child")
-        })?;
+        let class_shape = self
+            .find_class(lower_class)
+            .ok_or_else(|| anyhow!("no registered class `{lower_class}` for propose_link_child"))?;
 
         let parent = args
             .get("parent")
@@ -501,10 +501,7 @@ fn strip_class_suffix(name: &str, suffix: &str) -> Option<String> {
 /// canonical SHACL URI on success, `None` when the predicate can't be
 /// matched to any declared relation — the caller turns that into an
 /// actionable error naming the valid predicates.
-fn resolve_relation_predicate(
-    relations: &[(String, String)],
-    raw: &str,
-) -> Option<String> {
+fn resolve_relation_predicate(relations: &[(String, String)], raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -1190,7 +1187,10 @@ mod tests {
             .await
             .expect_err("undeclared predicate must be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("ns://basedOn"), "err should list valid predicates: {msg}");
+        assert!(
+            msg.contains("ns://basedOn"),
+            "err should list valid predicates: {msg}"
+        );
         assert!(
             msg.contains("randomlyInvented"),
             "err should echo the bad predicate for context: {msg}"
