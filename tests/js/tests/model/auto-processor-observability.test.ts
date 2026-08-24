@@ -2,21 +2,16 @@
  * PR #903 — auto-processor observability surface, end to end over the real WS
  * API + real LLM.
  *
- * Two independent switches on `AutoProcessorConfig`:
+ * A single `emitDebugEvents` flag on `AutoProcessorConfig`:
  *
- *   `emitDebugEvents`  → the pass fires `llmRequestSent` + `llmResponseReceived`
- *                        `auto-processor-event`s carrying the raw prompt /
- *                        response, so a UI can render "waiting on LLM" between
- *                        prompt-send and response-receive.
+ *   `emitDebugEvents: true` → the pass fires `llmRequestSent` +
+ *                             `llmResponseReceived` `auto-processor-event`s
+ *                             carrying the raw prompt / response, AND persists
+ *                             `debugPrompt` + `debugResponse` on the
+ *                             `InterpretationRun` node.
  *
- *   `persistDebug`     → the pass's `InterpretationRun` node gets
- *                        `debugPrompt` + `debugResponse` scalars written
- *                        (local-only links) for post-hoc inspection.
- *
- * These were coupled behind one `debugMode` scalar pre-#903 (retained here as
- * a legacy alias). The split lets a caller emit without persisting (live
- * observability, no graph-sync payload) or persist without emitting
- * (retrospective only) — the assertion table below is what the split promises.
+ * Legacy aliases `persistDebug` and `debugMode` are treated as fallbacks when
+ * `emitDebugEvents` is absent.
  *
  * Also covers the full step-signal lifecycle (`batchReady` → `claimed` →
  * `gatheringTranscript` → `runningInterpretation` → `processed`) and the
@@ -181,15 +176,11 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
 
   // ── 1. Full lifecycle + neighbourhood-state (no debug) ─────────────────────
 
-  it("emits every step in order, publishes neighbourhood claimed→finished, and persists no LLM I/O when both flags are off", async () => {
+  it("emits every step in order, publishes neighbourhood claimed→finished, and persists no LLM I/O when debug is off", async () => {
     await addProcessor();
 
     await driveOnePass();
 
-    // Every step of a winning-peer pass, in order. `llmRequestSent` and
-    // `llmResponseReceived` are intentionally NOT in this subsequence — with
-    // `emitDebugEvents: false` (default) they must not fire, and the next
-    // assertion pins that.
     expect(
       includesInOrder([
         "batchReady",
@@ -203,21 +194,18 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
 
     expect(
       stepsOfKind("llmRequestSent"),
-      "no `llmRequestSent` event may fire when both `emitDebugEvents` + `debugMode` are off",
+      "no `llmRequestSent` event may fire when `emitDebugEvents` is off",
     ).to.have.length(0);
     expect(
       stepsOfKind("llmResponseReceived"),
-      "no `llmResponseReceived` event may fire when both `emitDebugEvents` + `debugMode` are off",
+      "no `llmResponseReceived` event may fire when `emitDebugEvents` is off",
     ).to.have.length(0);
 
     const processed = events.find((e) => e.step === "processed")!;
     expect(processed.itemIds.length, "the pass retired both turns").to.equal(2);
     expect(processed.bases.length, "processed must carry the written bases").to.be.greaterThan(0);
 
-    // Neighbourhood-state stream — perspective-scoped observability. Won pass
-    // → claimed then finished, in that order (a Holochain-synced peer's
-    // claim would arrive via `link-added`, which this stream deliberately
-    // does not cover).
+    // Neighbourhood-state stream — perspective-scoped observability.
     await waitUntil(
       () => nbEvents.some((e) => e.phase === "finished"),
       30_000,
@@ -233,52 +221,18 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
       "claimed must be emitted before finished",
     ).to.be.lessThan(nbPhases.indexOf("finished"));
 
-    // No `persistDebug` → the run's `debugPrompt` / `debugResponse` must be
-    // absent (undefined; the fields simply have no links, not empty strings).
+    // No debug → no persisted LLM I/O.
     const runs = await InterpretationRun.findAll(p);
     expect(runs.length, "the pass wrote at least one InterpretationRun").to.be.greaterThan(0);
     for (const r of runs) {
-      expect(r.debugPrompt, "no `persistDebug` → debugPrompt must be absent").to.be.undefined;
-      expect(r.debugResponse, "no `persistDebug` → debugResponse must be absent").to.be.undefined;
+      expect(r.debugPrompt, "debugPrompt must be absent when debug is off").to.be.undefined;
+      expect(r.debugResponse, "debugResponse must be absent when debug is off").to.be.undefined;
     }
   });
 
-  // ── 2. persistDebug alone ──────────────────────────────────────────────────
+  // ── 2. emitDebugEvents: true ───────────────────────────────────────────────
 
-  it("with `persistDebug: true` alone, persists LLM I/O on the InterpretationRun but emits no mid-pass debug events", async () => {
-    await addProcessor({ persistDebug: true });
-
-    await driveOnePass();
-
-    // Split promise: persist ≠ emit. Neither of the two live debug events may
-    // fire when only `persistDebug` is on.
-    expect(
-      stepsOfKind("llmRequestSent"),
-      "`persistDebug: true` alone must NOT emit `llmRequestSent`",
-    ).to.have.length(0);
-    expect(
-      stepsOfKind("llmResponseReceived"),
-      "`persistDebug: true` alone must NOT emit `llmResponseReceived`",
-    ).to.have.length(0);
-
-    const runs = await InterpretationRun.findAll(p);
-    expect(runs.length, "the pass wrote at least one InterpretationRun").to.be.greaterThan(0);
-    // findAll returns runs in unspecified order across passes; the run this
-    // pass wrote is the first (and only) one on this fresh perspective.
-    const run = runs[0];
-    expect(run.debugPrompt, "`persistDebug: true` → debugPrompt must be persisted").to.be.a(
-      "string",
-    );
-    expect(run.debugPrompt!.length, "debugPrompt must be non-empty").to.be.greaterThan(0);
-    expect(run.debugResponse, "`persistDebug: true` → debugResponse must be persisted").to.be.a(
-      "string",
-    );
-    expect(run.debugResponse!.length, "debugResponse must be non-empty").to.be.greaterThan(0);
-  });
-
-  // ── 3. emitDebugEvents alone ───────────────────────────────────────────────
-
-  it("with `emitDebugEvents: true` alone, emits llmRequestSent+llmResponseReceived with payloads but does not persist to the InterpretationRun", async () => {
+  it("with `emitDebugEvents: true`, emits llmRequestSent+llmResponseReceived AND persists LLM I/O to the InterpretationRun", async () => {
     await addProcessor({ emitDebugEvents: true });
 
     await driveOnePass();
@@ -288,10 +242,6 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
     expect(req, "`emitDebugEvents: true` must emit `llmRequestSent`").to.exist;
     expect(res, "`emitDebugEvents: true` must emit `llmResponseReceived`").to.exist;
 
-    // Payload placement is asymmetric on purpose (see AutoProcessor.ts):
-    // `llmRequestSent` carries `llmInput`, `llmResponseReceived` carries
-    // `llmOutput`. Prompt is the pass's raw string fed to the model;
-    // response is the raw model output.
     expect(req!.llmInput, "llmRequestSent must carry the raw prompt on llmInput").to.be.a("string");
     expect(req!.llmInput!.length, "llmInput must be non-empty").to.be.greaterThan(0);
     expect(res!.llmOutput, "llmResponseReceived must carry the raw response on llmOutput").to.be.a(
@@ -299,8 +249,6 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
     );
     expect(res!.llmOutput!.length, "llmOutput must be non-empty").to.be.greaterThan(0);
 
-    // Order: request before response, and both between `runningInterpretation`
-    // and `processed` in the step stream (they wrap the LLM call).
     expect(
       includesInOrder([
         "runningInterpretation",
@@ -311,36 +259,32 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
       `llmRequestSent must precede llmResponseReceived and both sit inside the pass; got: ${steps().join(" → ")}`,
     ).to.equal(true);
 
-    // No `persistDebug` → the run must NOT carry debugPrompt / debugResponse
-    // even though the exact same prompt / response just went out over the
-    // event stream. That is the whole point of the split.
+    // Persists debug output on the InterpretationRun.
     const runs = await InterpretationRun.findAll(p);
     expect(runs.length, "the pass wrote at least one InterpretationRun").to.be.greaterThan(0);
-    for (const r of runs) {
-      expect(
-        r.debugPrompt,
-        "`emitDebugEvents: true` alone must NOT persist debugPrompt to the InterpretationRun",
-      ).to.be.undefined;
-      expect(
-        r.debugResponse,
-        "`emitDebugEvents: true` alone must NOT persist debugResponse to the InterpretationRun",
-      ).to.be.undefined;
-    }
+    const run = runs[0];
+    expect(run.debugPrompt, "debugPrompt must be persisted").to.be.a("string");
+    expect(run.debugPrompt!.length, "debugPrompt must be non-empty").to.be.greaterThan(0);
+    expect(run.debugResponse, "debugResponse must be persisted").to.be.a("string");
+    expect(run.debugResponse!.length, "debugResponse must be non-empty").to.be.greaterThan(0);
+
+    expect(
+      run.debugPrompt!.includes(req!.llmInput!.slice(0, 200)),
+      "persisted debugPrompt must contain the same prompt that went out over the event stream",
+    ).to.equal(true);
   });
 
-  // ── 4. Both switches on ────────────────────────────────────────────────────
+  // ── 3. Legacy `persistDebug: true` alias ───────────────────────────────────
 
-  it("with both `persistDebug` + `emitDebugEvents` true, emits the live events AND persists LLM I/O to the InterpretationRun", async () => {
-    await addProcessor({ persistDebug: true, emitDebugEvents: true });
+  it("with legacy `persistDebug: true`, both effects light up via the fallback", async () => {
+    await addProcessor({ persistDebug: true });
 
     await driveOnePass();
 
     const req = events.find((e) => e.step === "llmRequestSent");
     const res = events.find((e) => e.step === "llmResponseReceived");
-    expect(req, "must emit `llmRequestSent`").to.exist;
-    expect(res, "must emit `llmResponseReceived`").to.exist;
-    expect(req!.llmInput!.length).to.be.greaterThan(0);
-    expect(res!.llmOutput!.length).to.be.greaterThan(0);
+    expect(req, "legacy `persistDebug: true` must emit `llmRequestSent`").to.exist;
+    expect(res, "legacy `persistDebug: true` must emit `llmResponseReceived`").to.exist;
 
     const runs = await InterpretationRun.findAll(p);
     expect(runs.length).to.be.greaterThan(0);
@@ -349,29 +293,15 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
     expect(run.debugPrompt!.length).to.be.greaterThan(0);
     expect(run.debugResponse, "debugResponse must be persisted").to.be.a("string");
     expect(run.debugResponse!.length).to.be.greaterThan(0);
-
-    // The persisted prompt is a strict superset of / identical to the
-    // dispatched prompt — same code path emits both. Assert the run's
-    // debugPrompt contains the event's llmInput as a cheap consistency
-    // check without pinning byte-exact equality (framing may differ across
-    // wire encodings).
-    expect(
-      run.debugPrompt!.includes(req!.llmInput!.slice(0, 200)),
-      "persisted debugPrompt must contain the same prompt that went out over the event stream",
-    ).to.equal(true);
   });
 
-  // ── 5. Legacy `debugMode: true` alias ──────────────────────────────────────
+  // ── 4. Legacy `debugMode: true` alias ──────────────────────────────────────
 
   it("with legacy `debugMode: true` alone, both effects light up via the pre-split fallback", async () => {
-    // Neither split field is set — the loader must fall back to `debugMode`
-    // and expand it into both switches (so pre-split clients still get the
-    // coupled behaviour they originally requested).
     await addProcessor({ debugMode: true });
 
     await driveOnePass();
 
-    // Live events fire (emit fallback).
     const req = events.find((e) => e.step === "llmRequestSent");
     const res = events.find((e) => e.step === "llmResponseReceived");
     expect(req, "legacy `debugMode: true` must still emit `llmRequestSent`").to.exist;
@@ -379,7 +309,6 @@ describe("AutoProcessor observability — events + debug output (PR #903)", func
     expect(req!.llmInput!.length).to.be.greaterThan(0);
     expect(res!.llmOutput!.length).to.be.greaterThan(0);
 
-    // And the run persists (persist fallback).
     const runs = await InterpretationRun.findAll(p);
     expect(runs.length).to.be.greaterThan(0);
     const run = runs[0];

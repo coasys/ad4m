@@ -350,10 +350,6 @@ pub async fn run_interpretation_observed(
         None,
         scope,
         None,
-        // Never persists. A one-shot pass has no `AutoProcessorConfig` to
-        // carry a `persist_debug` opt-in, and defaulting it on would write
-        // tens of KB of prompt into the shared graph — syncing to every peer,
-        // permanently — on every call.
         false,
         emit_ctx,
     )
@@ -405,10 +401,9 @@ pub async fn run_interpretation_with_strategy(
 /// already uses, so behaviour is unchanged for all non-processor callers.
 /// Optional live-debug capture for a single interpretation pass — the raw
 /// prompt fed to the LLM and its response, verbatim. Populated only when the
-/// caller opts in via `persist_debug` (e.g. AutoProcessor
-/// `persist_debug: true`). Kept out of the base `Vec<String>` return so a
-/// normal pass does not carry tens of KB of prompt text through every call
-/// site.
+/// caller opts in via `emit_debug_events`. Kept out of the base `Vec<String>`
+/// return so a normal pass does not carry tens of KB of prompt text through
+/// every call site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterpretationDebug {
     pub prompt: String,
@@ -437,18 +432,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     model_override: Option<&str>,
     scope: Option<&Scope>,
     cursor: Option<&InterpretationRunCursor>,
-    // Persist the raw LLM prompt + response on the pass's `InterpretationRun`
-    // node for retrospective inspection. Independent of `emit_ctx` below (the
-    // two switches were split on Nico's PR #903 ask): a caller can persist
-    // without emitting mid-pass events (post-hoc only), or emit without
-    // persisting (live observability, no graph-sync payload).
-    persist_debug: bool,
-    // When this is `Some`, the engine emits `LlmRequestSent` (with the
-    // prompt) right before the LLM call and `LlmResponseReceived` (with
-    // the response) right after — mid-pass events so a UI can render
-    // "waiting on LLM" between them, not just one lump payload at
-    // `Processed`. `None` skips the emits. Presence alone gates the emits
-    // — the watcher gates presence on `cfg.emit_debug_events`.
+    emit_debug_events: bool,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
@@ -542,7 +526,7 @@ pub async fn run_interpretation_with_strategy_and_model(
                 .await;
             }
 
-            if persist_debug {
+            if emit_debug_events {
                 if let Ok(mut slot) = capture.lock() {
                     *slot = Some(result.text.clone());
                 }
@@ -588,7 +572,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     // Build the debug capture struct once so the shared cell's contents live
     // exactly one hop: extracted here, cloned into the meta persisted on the
     // run node, and returned to the caller for the live event.
-    let debug = if persist_debug {
+    let debug = if emit_debug_events {
         let response = debug_response_capture
             .lock()
             .ok()

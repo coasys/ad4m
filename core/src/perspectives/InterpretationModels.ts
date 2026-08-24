@@ -105,33 +105,18 @@ export class AutoProcessorConfig extends Ad4mModel {
   @Optional({ through: "ad4m://mint_scope" })
   mintScope?: string;
 
-  /**
-   * Legacy coupled debug knob (`"true"` / `"false"` string). Reserved as a
-   * backwards-compat scalar: pre-split writes used it as the single flag
-   * for both LLM I/O persistence AND mid-pass event emission. The Rust
-   * loader still reads it as a fallback when the specific `persistDebug`
-   * / `emitDebugEvents` fields are absent. New writes SHOULD prefer the
-   * split fields (below); this alias is retained so a pre-split peer's
-   * config still loads with the coupled behaviour it originally requested.
-   */
+  /** @deprecated Legacy alias — falls back to `emitDebugEvents`. */
   @Optional({ through: "ad4m://debug_mode", resolveLanguage: "literal" })
   debugMode?: string;
 
-  /**
-   * Persist the raw LLM prompt + response on the pass's `InterpretationRun`
-   * (`debugPrompt` / `debugResponse`). Independent of `emitDebugEvents`
-   * — Nico's PR #903 split. Absent = fall back to legacy `debugMode` (see
-   * above); when both are absent, defaults to `"false"`.
-   */
+  /** @deprecated Legacy alias — falls back to `emitDebugEvents`. */
   @Optional({ through: "ad4m://persist_debug", resolveLanguage: "literal" })
   persistDebug?: string;
 
   /**
-   * Emit `LlmRequestSent` and `LlmResponseReceived` auto-processor events
-   * mid-pass, so a subscribed UI can render "waiting on LLM" between
-   * prompt-send and response-receive. Independent of `persistDebug`.
-   * Absent = fall back to legacy `debugMode`; when both are absent,
-   * defaults to `"false"`.
+   * Enable full debug observability: persists the raw LLM prompt + response
+   * on the pass's `InterpretationRun` AND emits `LlmRequestSent` /
+   * `LlmResponseReceived` mid-pass events. `"true"` / `"false"` string.
    */
   @Optional({ through: "ad4m://emit_debug_events", resolveLanguage: "literal" })
   emitDebugEvents?: string;
@@ -184,8 +169,7 @@ export class InterpretationRun extends Ad4mModel {
   sources: string[] = [];
 
   /** Raw LLM prompt this pass fed the model. Present only when the pass's
-   *  AutoProcessor had `persistDebug: true` (or the legacy `debugMode: true`
-   *  fallback). Absent by default. */
+   *  AutoProcessor had `emitDebugEvents: true`. Absent by default. */
   @Optional({ through: "ad4m://interp/debug_prompt", resolveLanguage: "literal" })
   debugPrompt?: string;
 

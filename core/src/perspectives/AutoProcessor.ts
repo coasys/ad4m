@@ -185,10 +185,7 @@ export interface RunInterpretationObserveOptions {
   observationId: string;
   /**
    * Also emit `llmRequestSent` / `llmResponseReceived` with the raw prompt
-   * and response. Default `false`. These never persist on a one-shot pass —
-   * there is no `AutoProcessorConfig` to carry a `persistDebug` opt-in, and
-   * writing tens of KB of prompt into the shared graph on every call is not a
-   * default worth having.
+   * and response. Default `false`.
    */
   emitDebugEvents?: boolean;
 }
@@ -265,28 +262,18 @@ export interface AddAutoProcessorConfig {
    */
   mintScope?: RawScope;
   /**
-   * Persist the raw LLM prompt + response on the pass's `InterpretationRun`
-   * (`debugPrompt` / `debugResponse`) so a UI can look them up post-hoc.
-   * Independent of `emitDebugEvents` — Nico's PR #903 split so a caller
-   * can persist without emitting mid-pass events (retrospective inspection
-   * only) or emit without persisting (live observability, no graph-sync
-   * payload). Default `false` — LLM I/O is 10s of KB per pass and every
-   * enabled peer syncs it.
-   */
-  persistDebug?: boolean;
-  /**
-   * Emit `LlmRequestSent` and `LlmResponseReceived` `auto-processor-event`s
-   * mid-pass, so a subscribed UI can render "waiting on LLM" between
-   * prompt-send and response-receive. See `persistDebug` for the split
-   * rationale. Default `false`.
+   * Enable full debug observability: persists the raw LLM prompt + response
+   * on the pass's `InterpretationRun` (`debugPrompt` / `debugResponse`) AND
+   * emits `LlmRequestSent` / `LlmResponseReceived` mid-pass events so a
+   * subscribed UI can render "waiting on LLM". Default `false`.
    */
   emitDebugEvents?: boolean;
   /**
-   * Legacy backwards-compat alias — pre-split callers set `debugMode` as a
-   * single coupled flag. When present and both `persistDebug` +
-   * `emitDebugEvents` are absent, its value is expanded to both. The two
-   * specific fields take precedence when present. Prefer the split fields;
-   * this alias is retained so pre-split clients still work.
+   * @deprecated Legacy alias — treated as a fallback for `emitDebugEvents`.
+   */
+  persistDebug?: boolean;
+  /**
+   * @deprecated Legacy alias — treated as a fallback for `emitDebugEvents`.
    */
   debugMode?: boolean;
 }

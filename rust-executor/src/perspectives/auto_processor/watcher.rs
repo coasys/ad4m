@@ -708,14 +708,6 @@ pub async fn run_one_pass(
         HashSet::new()
     };
 
-    // Mid-pass emit context (Nico 2026-08-20): when `emit_debug_events` is on
-    // the engine emits `LlmRequestSent` (with prompt) right before the LLM
-    // call and `LlmResponseReceived` (with response) as soon as it returns,
-    // so a UI can show "waiting on LLM" between the two events instead of a
-    // single lump payload at `Processed`. `None` when the switch is off —
-    // engine skips the mid-pass emits. `emit_debug_events` is independent of
-    // `persist_debug` (Nico's PR #903 ask): a caller can emit without
-    // persisting, or persist without emitting.
     let emit_ctx = cfg
         .emit_debug_events
         .then(|| super::events::InterpretationEmitContext {
@@ -733,21 +725,12 @@ pub async fn run_one_pass(
         context,
         &dedup,
         None,
-        // Existing-instance scope: constrains dedup to a subtree when the
-        // processor config specifies one, e.g. "existing Task instances that
-        // live under project X." `None` keeps the whole-perspective existing
-        // set — the pre-scope-config behaviour.
         cfg.existing_scope.as_ref(),
         Some(&InterpretationRunCursor {
             processor: super::config::processor_node(&cfg.processor_id),
             sources: item_ids.clone(),
         }),
-        // Persist-debug: when on, the outcome carries the raw LLM prompt +
-        // response and the interpretation engine persists them on the
-        // pass's `InterpretationRun` node (`debugPrompt`/`debugResponse`)
-        // for retrospective inspection. Independent of `emit_debug_events`
-        // above — see `AutoProcessorConfig` docs.
-        cfg.persist_debug,
+        cfg.emit_debug_events,
         emit_ctx.as_ref(),
     )
     .await?;
@@ -888,7 +871,6 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
-            persist_debug: false,
             emit_debug_events: false,
         }
     }

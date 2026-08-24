@@ -66,7 +66,7 @@ pub(crate) struct InterpretationRunMeta {
     pub prompt_version: String,
     pub ran_at: String,
     /// Optional live-debug prompt string persisted on the run when the caller
-    /// enables observability (AutoProcessor `persist_debug`). `None` in the
+    /// enables observability (AutoProcessor `emitDebugEvents`). `None` in the
     /// normal path — LLM prompts are large and syncing them across a
     /// neighbourhood by default would blow the shared-graph payload.
     pub debug_prompt: Option<String>,
