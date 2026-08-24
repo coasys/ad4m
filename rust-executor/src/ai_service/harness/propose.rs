@@ -415,10 +415,30 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
             ));
         }
 
+        // Class-directional field name: `{lower_class}_uri` (e.g.
+        // `intention_uri`). Structural rename from the older generic
+        // `parent`/`child` — small models (gemma3:12b, observed 2026-08-24
+        // Root tests on `e62474c75` for `harness_intention_links_to_seeded_
+        // beliefs`) read "intention rests on beliefs" as "intention is the
+        // CHILD of beliefs" and swap `parent`/`child` 8/8 attempts, so the
+        // link lands with `source=belief, target=intention` and the
+        // `LinkQuery { source: intention, predicate: basedOn }` in the test
+        // returns zero. `<class>_uri` makes it lexically impossible to place
+        // the wrong instance on the source side. Accept the legacy
+        // `parent` name too for callers that still use it.
+        let source_field = format!("{lower_class}_uri");
         let parent = args
-            .get("parent")
+            .get(&source_field)
+            .or_else(|| args.get("parent"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("propose_link_child: missing `parent` (URI of parent)"))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "propose_link_child: missing `{source_field}` — the URI of the \
+                     `{class}` instance that owns the relation (the SOURCE side of \
+                     the link).",
+                    class = class_shape.class_name
+                )
+            })?
             .to_string();
         let raw_predicate = args
             .get("predicate")
@@ -457,10 +477,19 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
                 }
             }
         };
+        // Target-side field: `linked_uri` (generic, since a relation-typed
+        // class may hasMany multiple target classes). Accept the legacy
+        // `child` name too.
         let child = args
-            .get("child")
+            .get("linked_uri")
+            .or_else(|| args.get("child"))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("propose_link_child: missing `child` (URI of child)"))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "propose_link_child: missing `linked_uri` — the URI of the \
+                     instance being linked TO via `{predicate}` (the TARGET side)."
+                )
+            })?
             .to_string();
 
         // Bounce placeholder URIs (`ad4m://obj/unknown`, `.../placeholder`,
@@ -471,18 +500,18 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
         // fast with a specific redirect gives the LLM an actionable next step.
         if let Some(bad) = placeholder_uri(&parent) {
             return Err(anyhow!(
-                "propose_link_child: `parent` looks like a placeholder ({bad}). \
+                "propose_link_child: `{source_field}` looks like a placeholder ({bad}). \
                  Do NOT invent URIs. First call the class-specific `_query` tool \
                  (e.g. `{lower_class}_query`) to discover real URIs, then pass the \
-                 URI returned by the query verbatim as `parent`."
+                 URI returned by the query verbatim as `{source_field}`."
             ));
         }
         if let Some(bad) = placeholder_uri(&child) {
             return Err(anyhow!(
-                "propose_link_child: `child` looks like a placeholder ({bad}). \
+                "propose_link_child: `linked_uri` looks like a placeholder ({bad}). \
                  Do NOT invent URIs. First call the class-specific `_query` tool \
-                 for the child's class to discover real URIs, then pass the URI \
-                 returned by the query verbatim as `child`."
+                 for the target class to discover real URIs, then pass the URI \
+                 returned by the query verbatim as `linked_uri`."
             ));
         }
 
@@ -697,20 +726,38 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
         })
     };
 
+    // Structural rename to defeat the parent/child direction inversion:
+    // gemma3:12b reads "an intention rests on beliefs" as "intention is
+    // the CHILD of beliefs" and swapped `parent`/`child` 8/8 attempts in
+    // CI Root tests on `e62474c75` (2026-08-24 Scenario D). Naming the
+    // source field after the tool's namesake class (`intention_uri`)
+    // makes it lexically impossible to place the wrong instance on the
+    // source side. Legacy `parent`/`child` still accepted at dispatch.
+    let class_lower = c.class_name.to_lowercase();
+    let source_field = format!("{class_lower}_uri");
     let parameters = json!({
         "type": "object",
         "properties": {
-            "parent": {
+            source_field.clone(): {
                 "type": "string",
-                "description": "URI of the parent instance. MUST be a real URI you already have on hand: either the URI returned by a `_query` tool in this same pass (extract from its JSON `id`/`uri` field), or the URI part of a `proposed create: <URI>` response from `_propose_create`. Do NOT copy schema-example placeholders like `<uri>` or `ad4m://obj/unknown` — those are rejected. Do NOT paste tool names or query text as URIs.",
+                "description": format!(
+                    "URI of the `{class}` instance that OWNS the relation (SOURCE side of the link). \
+                     MUST be a real URI you already have on hand: either the URI returned by a \
+                     `{class_lower}_query` in this same pass (extract from its JSON `id`/`uri` field), \
+                     or the URI part of a `proposed create: <URI>` response from `{class_lower}_propose_create`. \
+                     Do NOT copy schema-example placeholders like `<uri>` or `ad4m://obj/unknown` — \
+                     those are rejected. Do NOT paste tool names or query text as URIs.",
+                    class = c.class_name,
+                    class_lower = class_lower,
+                ),
             },
             "predicate": predicate_schema,
-            "child": {
+            "linked_uri": {
                 "type": "string",
-                "description": "URI of the child instance. Same rules as `parent`: use a URI returned by `_query` (from the JSON response's `id`/`uri` field) or a URI from a prior `_propose_create` in this same pass. NEVER invent or copy schema placeholders.",
+                "description": "URI of the instance being linked TO via `predicate` (TARGET side of the link). Same URI-sourcing rules as the source-side field: use a URI returned by the target class's `_query` (JSON `id`/`uri`) or a URI from a prior `_propose_create` in this same pass. NEVER invent or copy schema placeholders.",
             },
         },
-        "required": ["parent", "predicate", "child"],
+        "required": [source_field.clone(), "predicate", "linked_uri"],
     });
 
     // Class description enumerates the declared relations inline so the LLM
@@ -731,14 +778,17 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
     };
 
     ToolSchema {
-        name: format!("{}_propose_link_child", c.class_name.to_lowercase()),
+        name: format!("{}_propose_link_child", class_lower),
         description: format!(
-            "Propose a parent → child link under a {class} instance. Buffered until the pass completes.\n\
+            "Attach an existing {class} to a related instance via one of its declared relations. Buffered until the pass completes.\n\
+             \n\
+             **DIRECTION — READ CAREFULLY:** `{source_field}` MUST be the `{class}` (source of the link, the side that OWNS the relation). `linked_uri` MUST be the related instance (target of the link). Do NOT invert. Example: if `{class}` has relation `basedOn → Belief`, then `{source_field}` = the {class}'s URI, `linked_uri` = the Belief's URI.\n\
              \n\
              **Workflow — always in this order:**\n\
-             1. Call `<class>_query` for each side to discover real URIs (or use a URI from a prior `_propose_create` in this same pass).\n\
+             1. Call `_query` for each side to discover real URIs (or reuse a URI from a prior `_propose_create` in this same pass).\n\
              2. Call this tool with those real URIs. Placeholders like `ad4m://obj/unknown` are rejected — the pass makes no progress if you invent URIs.{rel_hint}",
             class = c.class_name,
+            source_field = source_field,
             rel_hint = rel_hint,
         ),
         parameters,
@@ -943,6 +993,74 @@ mod tests {
             }
             other => panic!("expected AddLinks, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn propose_link_child_accepts_class_directional_field_names() {
+        // Regression against 2026-08-24 Root-tests failure on `e62474c75`:
+        // gemma3:12b read "intention rests on beliefs" as "intention is the
+        // CHILD of beliefs" and inverted `parent`/`child` 8/8 attempts. The
+        // schema now names the source field `<class>_uri` (e.g.
+        // `intention_uri`) so it's lexically impossible to place the wrong
+        // instance on the source side. Verifies both new names round-trip
+        // to the same AddLinks op as the legacy `parent`/`child` above.
+        let (p, buf) = provider(vec![intention_shape()]);
+        p.call(
+            "intention_propose_link_child",
+            json!({
+                "intention_uri": "soa://intention/i1",
+                "predicate": "ns://basedOn",
+                "linked_uri": "soa://belief/b1",
+            }),
+        )
+        .await
+        .unwrap();
+        let drained = buf.drain();
+        match &drained[0] {
+            InterpretationOp::AddLinks { source, links } => {
+                assert_eq!(source, "soa://intention/i1");
+                assert_eq!(links[0].source, "soa://intention/i1");
+                assert_eq!(links[0].target, "soa://belief/b1");
+            }
+            other => panic!("expected AddLinks, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn propose_link_child_schema_names_source_field_after_class() {
+        // The schema for `<class>_propose_link_child` must expose the source
+        // slot as `<class>_uri` and the target slot as `linked_uri`, both
+        // marked `required[]`. The class-directional name is the entire
+        // defense against small-model direction inversion.
+        let schema = propose_link_child_schema(&intention_shape());
+        let params = &schema.parameters;
+        let props = &params["properties"];
+        assert!(
+            props.get("intention_uri").is_some(),
+            "expected source field `intention_uri`, got props: {props:?}"
+        );
+        assert!(
+            props.get("linked_uri").is_some(),
+            "expected target field `linked_uri`, got props: {props:?}"
+        );
+        let required: Vec<&str> = params["required"]
+            .as_array()
+            .expect("required[] must be an array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"intention_uri"));
+        assert!(required.contains(&"linked_uri"));
+        // Description must call out direction explicitly — the psychological
+        // failure mode is that the LLM reads "intention rests on beliefs"
+        // and swaps source/target. The tool prose is the belt to the
+        // rename's braces.
+        let desc = schema.description.to_lowercase();
+        assert!(
+            desc.contains("direction") && desc.contains("intention_uri"),
+            "description must include a direction cue naming the source field: {}",
+            schema.description
+        );
     }
 
     #[tokio::test]
