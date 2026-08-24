@@ -707,6 +707,30 @@ export class PerspectiveProxy {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson);
     }
 
+    /** Resolve each URI to the name of the subject class it is an instance of.
+     *
+     * The counterpart of {@link isSubjectInstance}, which asks the same question
+     * one class at a time. Without this, finding the class of an arbitrary URI
+     * meant looping over every registered class — a round trip each — and doing
+     * it again for every URI.
+     *
+     * URIs that match no registered class are **absent from the result** rather
+     * than mapped to a placeholder: "not a subject instance" and "an instance of
+     * something this perspective cannot name" are different answers.
+     *
+     * Note that class membership in AD4M is structural — a URI belongs to a class
+     * when it carries that class's flags and required properties — so an instance
+     * conforms to its parent classes too. This returns the most specific match,
+     * meaning the class requiring the most triples; ties resolve alphabetically so
+     * that every peer answers identically.
+     *
+     * @param uris The expression URIs to classify.
+     */
+    async subjectClassOf(uris: string[]): Promise<Record<string, string>> {
+        if (uris.length === 0) return {};
+        return await this.#client.subjectClassOf(this.#handle.uuid, uris);
+    }
+
     /**
      * Evaluate property getters for a batch of instances in a single RPC call.
      * Returns a map of `{ instanceId: { prop: value, ... } }`.

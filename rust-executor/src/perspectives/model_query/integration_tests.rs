@@ -5383,3 +5383,157 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
         "base2's body must be unaffected by base1's independent update"
     );
 }
+
+/// `subjectClassOf` classifies a batch of URIs, preferring the most specific
+/// class and falling back to conformance where a class has no flag.
+#[tokio::test]
+async fn test_subject_class_of_batch() {
+    use crate::perspectives::subject_class_of::subject_class_of;
+
+    let store = SparqlStore::new(None).unwrap();
+
+    // Register three classes. TextBlock and ImageBlock are flagged; Untagged
+    // has no flag, only a required property, so it can only be found by
+    // conformance.
+    for (uri, shape_uri) in [
+        ("ns://models/TextBlock", "ns://models/TextBlockShape"),
+        ("ns://models/ImageBlock", "ns://models/ImageBlockShape"),
+        ("ns://models/Untagged", "ns://models/UntaggedShape"),
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+        store
+            .add_link(&make_link(uri, "ad4m://shape", shape_uri, "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImageBlock",
+        parse_shape_from_json(
+            r#"{"className":"ImageBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://image_block"}
+               },"relations":{}}"#,
+            "ImageBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Untagged",
+        parse_shape_from_json(
+            r#"{"className":"Untagged","properties":{
+                 "serial":{"predicate":"ns://serial","required":true}
+               },"relations":{}}"#,
+            "Untagged",
+        )
+        .unwrap(),
+    );
+
+    // Instances.
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://b", "ns://flag", "ns://image_block", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "ns://c",
+            "ns://serial",
+            "literal:string:xyz",
+            "4",
+        ))
+        .unwrap();
+
+    let uris = vec![
+        "ns://a".to_string(),
+        "ns://b".to_string(),
+        "ns://c".to_string(),
+        "ns://nothing".to_string(),
+    ];
+    let result = subject_class_of(&store, &resolver, &uris).unwrap();
+
+    assert_eq!(result.get("ns://a").map(String::as_str), Some("TextBlock"));
+    assert_eq!(result.get("ns://b").map(String::as_str), Some("ImageBlock"));
+    assert_eq!(
+        result.get("ns://c").map(String::as_str),
+        Some("Untagged"),
+        "a flagless class is still reachable through the conformance pass",
+    );
+    assert!(
+        !result.contains_key("ns://nothing"),
+        "a URI matching no class is absent, not mapped to a placeholder",
+    );
+}
+
+/// Structural membership is not exclusive, so the most specific class wins.
+#[tokio::test]
+async fn test_subject_class_of_prefers_the_more_specific_class() {
+    use crate::perspectives::subject_class_of::subject_class_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    for uri in ["ns://models/Post", "ns://models/ImagePost"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    // Post requires only the base flag; ImagePost requires that *and* more,
+    // which is what every subclass looks like.
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "kind":{"predicate":"ns://kind","required":true,"flag":true,"initial":"ns://node"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImagePost",
+        parse_shape_from_json(
+            r#"{"className":"ImagePost","properties":{
+                 "kind":{"predicate":"ns://kind","required":true,"flag":true,"initial":"ns://node"},
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "ImagePost",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://kind", "ns://node", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
+        .unwrap();
+
+    let result = subject_class_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+
+    assert_eq!(
+        result.get("ns://a").map(String::as_str),
+        Some("ImagePost"),
+        "the instance conforms to Post too, but the derived class is the answer",
+    );
+}
