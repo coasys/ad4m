@@ -105,6 +105,14 @@ export class AutoProcessorConfig extends Ad4mModel {
   @Optional({ through: "ad4m://mint_scope" })
   mintScope?: string;
 
+  /**
+   * Enable full debug observability: persists the raw LLM prompt + response
+   * on the pass's `InterpretationRun` AND emits `LlmRequestSent` /
+   * `LlmResponseReceived` mid-pass events. `"true"` / `"false"` string.
+   */
+  @Optional({ through: "ad4m://emit_debug_events", resolveLanguage: "literal" })
+  emitDebugEvents?: string;
+
   // No `@Flag` type discriminator (Nico 2026-08-19: "type flags are an
   // anti-pattern for subject classes; match over all the properties
   // instead"). Conformance is by the presence of `processorId` +
@@ -151,6 +159,15 @@ export class InterpretationRun extends Ad4mModel {
    */
   @HasMany({ through: "ad4m://interp/sources", datatype: "xsd:string" })
   sources: string[] = [];
+
+  /** Raw LLM prompt this pass fed the model. Present only when the pass's
+   *  AutoProcessor had `emitDebugEvents: true`. Absent by default. */
+  @Optional({ through: "ad4m://interp/debug_prompt", resolveLanguage: "literal" })
+  debugPrompt?: string;
+
+  /** Raw LLM response this pass received. Same rules as `debugPrompt`. */
+  @Optional({ through: "ad4m://interp/debug_response", resolveLanguage: "literal" })
+  debugResponse?: string;
 }
 
 // ── InterpretationOverlay ───────────────────────────────────────────────────

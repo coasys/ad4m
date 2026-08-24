@@ -569,6 +569,32 @@ pub struct RunInterpretationRequest {
     #[serde(default)]
     #[ts(optional, type = "any")]
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Opt into live observability for this one-shot pass, under an id the
+    /// **caller** chooses.
+    ///
+    /// A watch pass is identified by its `batch_key` — a hash of the source
+    /// items the watcher gathered. A one-shot pass has neither: the caller
+    /// supplies the transcript directly, so there are no source item ids to
+    /// hash and no claim to key off. Rather than invent a server-side id the
+    /// caller would then have to correlate by guesswork (the pass is one
+    /// blocking RPC, so there is no earlier response to carry it), the caller
+    /// names the pass and gets its own id back on every event.
+    ///
+    /// Present: the pass emits `RunningInterpretation` → `Processed` on the
+    /// `auto-processor-event` topic, plus `Claimed` → `Finished`/`Abandoned`
+    /// on the neighbourhood topic, all carrying this value as both
+    /// `processor_id` and `batch_key`. Absent: the pass is silent, exactly as
+    /// before — no existing caller changes behaviour.
+    #[serde(default)]
+    #[ts(optional)]
+    pub observation_id: Option<String>,
+    /// Emit `LlmRequestSent` / `LlmResponseReceived` (carrying the raw prompt
+    /// and response) for this pass. Ignored without `observation_id` — there
+    /// would be nothing to correlate the payloads to. Same switch, same
+    /// reasons, as `AutoProcessorConfig.emit_debug_events`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub emit_debug_events: Option<bool>,
 }
 
 /// Register a neighbourhood auto-processor on a perspective. The executor's
@@ -637,6 +663,11 @@ pub struct AddAutoProcessorRequest {
     /// at watch time.
     #[serde(default)]
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Enable full debug observability: persists the raw LLM prompt +
+    /// response on the pass's `InterpretationRun` node AND emits
+    /// `LlmRequestSent` / `LlmResponseReceived` mid-pass events.
+    #[serde(default)]
+    pub emit_debug_events: Option<bool>,
 }
 
 /// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —
