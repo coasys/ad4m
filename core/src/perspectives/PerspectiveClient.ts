@@ -10,6 +10,8 @@ import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
+import type { TranscriptTurn } from "../generated/api";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlayInfo, RawScope } from "./AutoProcessor";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -251,6 +253,100 @@ export class PerspectiveClient {
         return this.#apiClient.call<LinkExpressionMutations>(
             'perspective.linkMutations', { uuid, mutations, status }
         )
+    }
+
+    /**
+     * Run generic LLM interpretation over a transcript into this perspective's own
+     * SHACL subject classes. The target shapes are resolved server-side from the
+     * perspective's registered subject classes, so you pass only the transcript.
+     * Returns the freshly minted instances (their base URIs + the links written).
+     *
+     * The server-side call prompts an LLM (up to `INTERPRETATION_MAX_ATTEMPTS`
+     * retries on parse failure), so it can legitimately take minutes on slower
+     * or CPU-only models. We raise the default 30s RPC timeout here to 20 min
+     * (matches the CI `--timeout 1200000` for the interpretation tests).
+     *
+     * `existingScope` and `mintScope` match the AutoProcessor semantics:
+     * `existingScope` constrains the dedup lookup to instances under a
+     * subtree; `mintScope` links every FRESHLY-created base as a child of
+     * `mintScope.id` via its predicate (upserts of pre-existing instances
+     * are NOT re-parented — same rule as the watcher).
+     */
+    async runInterpretation(
+        uuid: string,
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        classes?: string[],
+        existingScope?: RawScope,
+        mintScope?: RawScope,
+    ): Promise<string[]> {
+        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
+        return this.#apiClient.call<string[]>(
+            'perspective.runInterpretation',
+            { uuid, transcript, basePrefix, classes, existingScope, mintScope },
+            RUN_INTERPRETATION_TIMEOUT_MS,
+        )
+    }
+
+    /**
+     * Register a neighbourhood auto-processor on this perspective. The executor's
+     * watch loop then runs interpretation automatically over new source items
+     * (like Flux per channel), coordinating which peer processes each batch via
+     * the shared-graph ProcessingClaim, and emits step signals on the events
+     * WebSocket (subscribe via {@link addAutoProcessorEventListener}).
+     * Returns the processor id.
+     */
+    async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
+        return this.#apiClient.call<string>(
+            'perspective.addAutoProcessor', { uuid, ...config },
+        )
+    }
+
+    /** Pending interpretation overlays (LLM suggestions awaiting human accept/reject). */
+    async interpretationOverlays(uuid: string): Promise<InterpretationOverlayInfo[]> {
+        return this.#apiClient.call<InterpretationOverlayInfo[]>(
+            'perspective.interpretationOverlays', { uuid },
+        )
+    }
+
+    /** Accept an overlay's suggestion(s): the LLM value becomes the real value and
+     *  the overlay is deleted. Omit `property` to accept the whole base. */
+    async acceptInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.acceptInterpretation', { uuid, base, property },
+        )
+    }
+
+    /** Reject an overlay's suggestion(s). Omit `property` to reject the whole base
+     *  (a rejected `create` deletes the suggested instance). */
+    async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.rejectInterpretation', { uuid, base, property },
+        )
+    }
+
+    /**
+     * Subscribe to auto-processor step signals. `cb` fires for every
+     * `auto-processor-event` on `uuid` (BatchReady → Claimed/BackedOff/… →
+     * Processed), letting a UI show progress and await the next batch.
+     *
+     * Registered on the per-uuid `#linkUnsubscribers` map so
+     * `PerspectiveProxy.dispose()` → `removeAllListeners(uuid)` cleans the
+     * subscription up; using the global `#unsubscribers` array would leak
+     * callbacks across repeated view lifecycles (CodeRabbit #881 review).
+     */
+    async addAutoProcessorEventListener(uuid: String, cb: (event: AutoProcessorEvent) => void): Promise<void> {
+        const unsub = this.#apiClient.subscribe(
+            (data) => {
+                if (data.type === 'auto-processor-event' && data.perspectiveUuid === uuid) {
+                    cb(data as unknown as AutoProcessorEvent)
+                }
+            }
+        )
+        let existing = this.#linkUnsubscribers.get(uuid as string) || []
+        existing.push(unsub)
+        this.#linkUnsubscribers.set(uuid as string, existing)
+        await this.#apiClient.waitForSubscription()
     }
 
     async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {

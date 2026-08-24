@@ -12,9 +12,11 @@ import { AIClient } from "../ai/AIClient";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
+import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlayInfo } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -563,6 +565,64 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Runs generic LLM interpretation over a conversation transcript, turning it
+     * into typed instances of this perspective's own SHACL subject classes
+     * (steered by each class's `@InterpretationHint`). The target shapes are
+     * resolved automatically from the perspective's registered classes, so you
+     * pass only the transcript. New instances are written as links into this
+     * perspective; the returned placements list each instance's base URI and
+     * the links written for it.
+     *
+     * @param transcript ordered `{ speaker, text }` turns
+     * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
+     * @param classes local names of the subject classes to extract into; omit for all
+     */
+    async runInterpretation(transcript: TranscriptTurn[], basePrefix: string, classes?: string[]): Promise<string[]> {
+        return await this.#client.runInterpretation(this.#handle.uuid, transcript, basePrefix, classes)
+    }
+
+    /**
+     * Register a neighbourhood auto-processor on this perspective. The executor
+     * then runs interpretation automatically over new source items (like Flux
+     * per channel), coordinating which peer processes each batch. Returns the
+     * processor id. Subscribe to progress via {@link addAutoProcessorEventListener}.
+     */
+    async addAutoProcessor(config: AddAutoProcessorConfig): Promise<string> {
+        return await this.#client.addAutoProcessor(this.#handle.uuid, config)
+    }
+
+    /**
+     * Pending interpretation overlays on this perspective — LLM suggestions the
+     * §4 divergence gate staged rather than applied, awaiting human accept/reject.
+     */
+    async interpretationOverlays(): Promise<InterpretationOverlayInfo[]> {
+        return await this.#client.interpretationOverlays(this.#handle.uuid)
+    }
+
+    /**
+     * Accept an interpretation overlay's suggestion(s): the LLM's staged value
+     * becomes the real, human-owned value and the overlay is deleted. Pass
+     * `property` to accept a single predicate; omit it for the whole base.
+     */
+    async acceptInterpretation(base: string, property?: string): Promise<boolean> {
+        return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+    }
+
+    /**
+     * Reject an interpretation overlay's suggestion(s). Omit `property` to reject
+     * the whole base — a rejected `create` deletes the suggested instance, a
+     * rejected `update` drops the overlay and keeps the real value.
+     */
+    async rejectInterpretation(base: string, property?: string): Promise<boolean> {
+        return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+    }
+
+    /** Subscribe to this perspective's auto-processor step signals. */
+    async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
+        return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+    }
+
+    /**
      * Executes a Prolog query against the perspective's knowledge base.
      * This is a powerful way to find complex patterns in the graph.
      * 
@@ -656,7 +716,7 @@ export class PerspectiveProxy {
      * internally in Rust, registers a subscription, runs the initial query, and
      * pushes updated results when relevant links change.
      *
-     * The subscription reuses the same GraphQL subscription channel as subscribeQuery().
+     * The subscription reuses the same WS-RPC subscription channel as subscribeQuery().
      * Use keepAliveQuery() / disposeQuerySubscription() with the returned subscriptionId.
      *
      * @param className - The model class name
@@ -1479,36 +1539,39 @@ export class PerspectiveProxy {
      */
     async getFlow(name: string): Promise<SHACLFlow | null> {
         const flowNameLiteral = Literal.from(name).toUrl();
-        
+
         // Find flow URI from name mapping
         const flowUriLinks = await this.get(new LinkQuery({
             source: flowNameLiteral,
             predicate: "ad4m://flow_uri"
         }));
-        
+
         if (flowUriLinks.length === 0) {
             return null;
         }
-        
+
         const flowUri = flowUriLinks[0].data.target;
-        // Compute alternate prefix for state/transition URIs
-        const alternatePrefix = flowUri.endsWith('Flow') 
-            ? flowUri.slice(0, -4) + '.'
-            : flowUri + '.';
-        
-        // Fetch flow links using SPARQL to match flowUri source OR alternatePrefix sources
-        const sparqlQuery = `SELECT ?s ?p ?o WHERE {
-            ?s ?p ?o .
-            FILTER(?s = <${flowUri}> || STRSTARTS(STR(?s), "${alternatePrefix}"))
-        }`;
-        const sparqlResult = await this.querySparql(sparqlQuery);
-        
-        const flowLinks = (sparqlResult || []).map((r: any) => ({
-            source: r.s,
-            predicate: r.p,
-            target: r.o
+
+        // Fetch flow-level links (hasState, hasTransition, flowable, startAction)
+        const flowLevelLinks = await this.get(new LinkQuery({ source: flowUri }));
+
+        // Collect state and transition URIs, then fetch their child links
+        const childUris = flowLevelLinks
+            .filter(l => l.data.predicate === "ad4m://hasState"
+                      || l.data.predicate === "ad4m://hasTransition")
+            .map(l => l.data.target);
+        const childResults = await Promise.all(
+            childUris.map(uri => this.get(new LinkQuery({ source: uri })))
+        );
+
+        // Flatten into the {source, predicate, target} shape fromLinks expects
+        const allExprs = [...flowLevelLinks, ...childResults.flat()];
+        const flowLinks = allExprs.map(l => ({
+            source: l.data.source,
+            predicate: l.data.predicate,
+            target: l.data.target
         }));
-        
+
         return SHACLFlow.fromLinks(flowLinks, flowUri);
     }
 
@@ -1727,7 +1790,7 @@ export class PerspectiveProxy {
     async getSubjectClassMetadata(className: string): Promise<{
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
-        properties: Map<string, { predicate: string, resolveLanguage?: string, resolveLiteral?: boolean }>,
+        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
         relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     } | null> {
         try {
@@ -1740,7 +1803,7 @@ export class PerspectiveProxy {
 
             const requiredPredicates: string[] = [];
             const requiredTriples: Array<{predicate: string, target?: string}> = [];
-            const properties = new Map<string, { predicate: string, resolveLanguage?: string, resolveLiteral?: boolean }>();
+            const properties = new Map<string, { predicate: string, resolveLanguage?: string }>();
             const relations = new Map<string, { predicate: string, instanceFilter?: string }>();
 
             // Build property/relation maps and track writable predicates from shape properties
@@ -1758,8 +1821,7 @@ export class PerspectiveProxy {
                 } else {
                     properties.set(prop.name, {
                         predicate: prop.path,
-                        resolveLanguage: prop.resolveLanguage,
-                        resolveLiteral: prop.resolveLiteral
+                        resolveLanguage: prop.resolveLanguage
                     });
                 }
             }
@@ -1796,7 +1858,7 @@ export class PerspectiveProxy {
     private async findInstancesByMetadata(metadata: {
         requiredPredicates: string[],
         requiredTriples: Array<{predicate: string, target?: string}>,
-        properties: Map<string, { predicate: string, resolveLanguage?: string, resolveLiteral?: boolean }>,
+        properties: Map<string, { predicate: string, resolveLanguage?: string }>,
         relations: Map<string, { predicate: string, instanceFilter?: string, condition?: string }>
     }): Promise<Array<{base: string}>> {
         if (metadata.requiredTriples.length === 0) {

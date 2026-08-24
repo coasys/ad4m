@@ -662,7 +662,6 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: Some("forward".to_string()),
             is_scalar_relation: false,
@@ -670,9 +669,12 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             where_filter: None,
             where_predicates: None,
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     }
 }
 
@@ -1287,7 +1289,6 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -1295,9 +1296,12 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
@@ -1853,7 +1857,6 @@ async fn test_where_filter_signed_expression_string() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -1861,9 +1864,12 @@ async fn test_where_filter_signed_expression_string() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
@@ -1929,7 +1935,6 @@ async fn test_where_filter_signed_expression_no_matches() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -1937,9 +1942,12 @@ async fn test_where_filter_signed_expression_no_matches() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2053,7 +2061,6 @@ async fn test_where_filter_multiple_conditions() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2061,9 +2068,12 @@ async fn test_where_filter_multiple_conditions() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
@@ -2122,7 +2132,6 @@ async fn test_where_filter_missing_property_on_target() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2130,9 +2139,12 @@ async fn test_where_filter_missing_property_on_target() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2189,7 +2201,6 @@ async fn test_where_filter_plain_literal_string() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2197,9 +2208,12 @@ async fn test_where_filter_plain_literal_string() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2279,7 +2293,6 @@ async fn test_where_filter_on_multiple_instances() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: None,
             is_scalar_relation: false,
@@ -2287,9 +2300,12 @@ async fn test_where_filter_on_multiple_instances() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
@@ -2670,7 +2686,6 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
             None
         },
         resolve_language: None,
-        resolve_literal: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -2678,6 +2693,8 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
@@ -2691,7 +2708,6 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         is_required: false,
         initial_value: None,
         resolve_language: None,
-        resolve_literal: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -2699,6 +2715,8 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
@@ -2709,6 +2727,7 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
         properties: props,
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     }
 }
 
@@ -3433,10 +3452,11 @@ async fn test_full_model_query_ops_contains_with_pagination() {
 
 /// Build a `literal:json:<signed_envelope>` IRI — the shape produced by
 /// `expression.create("literal", value)`, i.e. what a `resolveLanguage:"literal"`
-/// (or `resolveLiteral: false`) property stores today, and what older databases
-/// that pre-date plain-literal writes hold on disk. Used both by tests that seed
-/// envelope-form data to exercise the migration path and by tests that assert
-/// envelope properties still query and sort on the inner value.
+/// property stores today, and what older databases that pre-date plain-literal
+/// writes hold on disk. Used both by tests that seed envelope-form data to
+/// exercise the migration path and by tests that assert envelope properties
+/// still query and sort on the inner value.
+#[allow(dead_code)]
 fn signed_envelope_literal(value: &str) -> String {
     signed_envelope_literal_with_ts(value, "2024-01-01T00:00:00.000Z")
 }
@@ -3462,257 +3482,6 @@ fn signed_envelope_literal_with_ts(value: &str, timestamp: &str) -> String {
     });
     let json_str = serde_json::to_string(&envelope).unwrap();
     format!("literal:json:{}", literal_percent_encode(&json_str))
-}
-
-/// Seed envelope-form data, run the migration, and verify model queries
-/// (WHERE + pagination + count) succeed against the rewritten plain-literal
-/// targets. Guards the boot-time upgrade path for stores that still hold
-/// envelope-shaped targets from older writers.
-#[tokio::test]
-async fn test_legacy_envelope_migrated_then_paginate_count() {
-    let store = SparqlStore::new(None).unwrap();
-    let ts_base = 1700000000000i64;
-
-    let items = vec![
-        ("test://item-1", "active", "Alpha"),
-        ("test://item-2", "active", "Beta"),
-        ("test://item-3", "inactive", "Gamma"),
-        ("test://item-4", "active", "Delta"),
-    ];
-    for (i, (uri, status, name)) in items.iter().enumerate() {
-        let ts = format!("{}", ts_base + i as i64);
-        store
-            .add_link(&make_link(uri, "ns://type", "ns://task", &ts))
-            .unwrap();
-        // Bypass the typed-literal translation so the envelope-shaped target
-        // lands as a NamedNode IRI — the only shape the v3 migration looks
-        // for.  Simulates data written by pre-typed-literal builds.
-        store
-            .add_link_with_raw_iri_target(&make_link(
-                uri,
-                "ns://status",
-                &signed_envelope_literal(status),
-                &ts,
-            ))
-            .unwrap();
-        store
-            .add_link_with_raw_iri_target(&make_link(
-                uri,
-                "ns://name",
-                &signed_envelope_literal(name),
-                &ts,
-            ))
-            .unwrap();
-    }
-
-    // T4: simulate first-boot migration converting envelope-form data to plain literals.
-    // After migration the new index-friendly WHERE (V4) can probe the POS index.
-    let migrated = store
-        .migrate_signed_envelopes_to_plain_literals()
-        .expect("migration should succeed");
-    assert!(
-        migrated > 0,
-        "expected migration to rewrite at least one envelope, got {migrated}"
-    );
-
-    let shape_json = r#"{
-        "className": "Task",
-        "properties": {
-            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://task" },
-            "status": { "predicate": "ns://status", "required": false, "resolveLanguage": "literal" },
-            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
-        },
-        "relations": {}
-    }"#;
-
-    // Query: WHERE status = "active", paginated (limit 2, offset 0), ordered by timestamp ASC
-    let mut wc = BTreeMap::new();
-    wc.insert(
-        "status".to_string(),
-        WhereCondition::String("active".to_string()),
-    );
-    let result = execute_model_query_from_json(
-        &store,
-        "Task",
-        &ModelQueryInput {
-            where_clause: Some(wc.clone()),
-            limit: Some(2),
-            offset: Some(0),
-            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
-            count: Some(true),
-            ..Default::default()
-        },
-        shape_json,
-    )
-    .await
-    .unwrap();
-
-    // Should return 2 items in page, total_count = 3 (all active items)
-    assert_eq!(result.instances.len(), 2, "Page should have 2 items");
-    assert_eq!(result.total_count, 3, "Total active items should be 3");
-    assert_eq!(
-        result.instances[0]["name"].as_str().unwrap(),
-        "Alpha",
-        "First item by timestamp"
-    );
-    assert_eq!(
-        result.instances[1]["name"].as_str().unwrap(),
-        "Beta",
-        "Second item by timestamp"
-    );
-
-    // Verify hydration: after migration the stored target is `literal:string:active`,
-    // and parse_literal_value decodes it back to the plain "active" string.
-    assert_eq!(
-        result.instances[0]["status"].as_str().unwrap(),
-        "active",
-        "Status should be plain literal post-migration"
-    );
-
-    // Page 2: offset 2
-    let result2 = execute_model_query_from_json(
-        &store,
-        "Task",
-        &ModelQueryInput {
-            where_clause: Some(wc),
-            limit: Some(2),
-            offset: Some(2),
-            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
-            count: Some(true),
-            ..Default::default()
-        },
-        shape_json,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        result2.instances.len(),
-        1,
-        "Page 2 should have 1 remaining item"
-    );
-    assert_eq!(result2.total_count, 3, "Total count unchanged");
-    assert_eq!(
-        result2.instances[0]["name"].as_str().unwrap(),
-        "Delta",
-        "Third active item"
-    );
-}
-
-/// Mixed envelope-form and plain-form rows in the same store all become
-/// queryable after one migration pass, including via the `contains` filter
-/// (which runs natively over typed-literal storage).
-#[tokio::test]
-async fn test_legacy_mixed_migrated_then_contains() {
-    let store = SparqlStore::new(None).unwrap();
-    let ts_base = 1700000000000i64;
-
-    // Item 1: target is already a plain literal.
-    store
-        .add_link(&make_link(
-            "test://old",
-            "ns://type",
-            "ns://msg",
-            &format!("{ts_base}"),
-        ))
-        .unwrap();
-    store
-        .add_link(&make_link(
-            "test://old",
-            "ns://body",
-            &signed_literal("hello plain"),
-            &format!("{ts_base}"),
-        ))
-        .unwrap();
-
-    // Item 2: target is an envelope-form literal.
-    store
-        .add_link(&make_link(
-            "test://new",
-            "ns://type",
-            "ns://msg",
-            &format!("{}", ts_base + 1),
-        ))
-        .unwrap();
-    store
-        .add_link_with_raw_iri_target(&make_link(
-            "test://new",
-            "ns://body",
-            &signed_envelope_literal("hello signed"),
-            &format!("{}", ts_base + 1),
-        ))
-        .unwrap();
-
-    store
-        .migrate_signed_envelopes_to_plain_literals()
-        .expect("migration should succeed");
-
-    let shape_json = r#"{
-        "className": "Msg",
-        "properties": {
-            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://msg" },
-            "body": { "predicate": "ns://body", "required": false, "resolveLanguage": "literal" }
-        },
-        "relations": {}
-    }"#;
-
-    // Query with contains "hello" — `contains` uses STR(?val) over the typed
-    // literal directly, so it works against the post-migration storage form.
-    let mut wc = BTreeMap::new();
-    wc.insert(
-        "body".to_string(),
-        WhereCondition::Ops(WhereOps {
-            contains: Some(Value::String("hello".to_string())),
-            ..Default::default()
-        }),
-    );
-    let result = execute_model_query_from_json(
-        &store,
-        "Msg",
-        &ModelQueryInput {
-            where_clause: Some(wc),
-            order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
-            ..Default::default()
-        },
-        shape_json,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(result.instances.len(), 2, "Both items should match");
-    assert_eq!(result.instances[0]["body"].as_str().unwrap(), "hello plain");
-    assert_eq!(
-        result.instances[1]["body"].as_str().unwrap(),
-        "hello signed"
-    );
-
-    // Exact equality on the migrated value — V4 emits a direct IRI probe.
-    let mut wc2 = BTreeMap::new();
-    wc2.insert(
-        "body".to_string(),
-        WhereCondition::String("hello signed".to_string()),
-    );
-    let result2 = execute_model_query_from_json(
-        &store,
-        "Msg",
-        &ModelQueryInput {
-            where_clause: Some(wc2),
-            ..Default::default()
-        },
-        shape_json,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(
-        result2.instances.len(),
-        1,
-        "Exact match on migrated literal"
-    );
-    assert_eq!(
-        result2.instances[0]["body"].as_str().unwrap(),
-        "hello signed"
-    );
 }
 
 /// Same workload as `test_legacy_envelope_migrated_then_paginate_count` but
@@ -4046,7 +3815,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         &store,
         "Message",
         &ModelQueryInput {
-            parent: Some(ParentScope::Raw {
+            parent: Some(Scope::Raw {
                 id: "test://channel-2".to_string(),
                 predicate: "ad4m://has_child".to_string(),
             }),
@@ -4471,7 +4240,6 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             is_required: false,
             initial_value: None,
             resolve_language: None,
-            resolve_literal: None,
             datatype: None,
             direction: Some("forward".to_string()),
             is_scalar_relation: false,
@@ -4479,9 +4247,12 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             where_filter: None,
             where_predicates: None,
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
         has_graph: false,
+        interpretation_hint: None,
     };
     resolver.register("Signal", signal_shape);
 
@@ -5209,6 +4980,11 @@ fn bench_indexed_literal_vs_str_filter() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(10_000);
+
+    assert!(
+        n_links > 0,
+        "WT_BENCH_LINKS must be > 0 (got 0); omit the variable to use the default (10 000)"
+    );
 
     let store = SparqlStore::new(None).unwrap();
     let pred = "ns://body";

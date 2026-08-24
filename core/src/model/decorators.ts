@@ -48,6 +48,15 @@ export interface RelationMetadataEntry {
      * Overrides auto-derived conformance when set.
      */
     where?: Where;
+    /**
+     * SHACL `sh:datatype` for the relation's target values. Set when the
+     * relation holds encoded literal values (e.g. `"xsd:string"` for a
+     * `HasMany<string>` that stores plain strings). Emitted into SHACL
+     * so the executor knows to decode `literal:<type>:<value>` wire form
+     * on hydration. Omit for URI relations that point at other model
+     * instances — those pass through byte-for-byte.
+     */
+    datatype?: string;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -280,27 +289,18 @@ export interface PropertyOptions {
     readOnly?: boolean;
 
     /**
-     * The language used to resolve/store the property value. Not defaulted —
-     * its presence selects the storage mode (see `resolveLiteral`):
-     *   - unset → deterministic literal storage (the perf default)
+     * The language used to resolve/store the property value — and the sole
+     * selector of storage mode. Not defaulted:
+     *   - unset (the default for a plain `@Property()`) → deterministic
+     *     typed literal storage (`literal:string:` / `:number:` / `:boolean:` /
+     *     `:json:` IRIs stored as XSD-typed RDF literals; POS-index friendly).
      *   - `"literal"` → the built-in literal language: values go through
      *     `expression_create`, producing a signed-envelope URI with
-     *     author/timestamp/proof (provenance carried in the value)
-     *   - a custom language address → `expression_create` on that language
+     *     author/timestamp/proof (per-value provenance, e.g. Flux message
+     *     bodies).
+     *   - a custom language address → `expression_create` on that language.
      */
     resolveLanguage?: string;
-
-    /**
-     * Literal-language storage selector. Not defaulted; combined with
-     * `resolveLanguage` to pick the storage mode:
-     *   - `true` → deterministic `literal:string:X` / `:number:` / `:boolean:` /
-     *     `:json:` IRIs (POS-index friendly). Explicit opt-in to the fast path.
-     *   - `false` → signed-envelope expression on the literal language.
-     *   - unset → deterministic UNLESS `resolveLanguage` is explicitly
-     *     `"literal"` (which selects the signed envelope).
-     * Ignored for a custom `resolveLanguage`. See `effectiveLiteralStorage`.
-     */
-    resolveLiteral?: boolean;
 
     /**
      * Custom Prolog getter to get the value of the property. If not provided, the default getter will be used.
@@ -353,6 +353,37 @@ export interface PropertyOptions {
      * ```
      */
     options?: Array<{ value: string; label?: string }>;
+
+    /**
+     * Natural-language hint that steers the generic LLM extractor when
+     * turning a transcript into typed subject-class instances.  Emitted as
+     * an `ad4m://interpretation_hint` link on the property shape and surfaced
+     * on `ShapeProperty.interpretation_hint` by the Rust model query so the
+     * extractor prompt can quote it verbatim.
+     */
+    interpretationHint?: string;
+
+    /**
+     * Marks this property as the class's **identity** (dedup key) for the
+     * generic LLM interpreter: on re-runs, two proposed instances of the same
+     * class with an equal (normalized/semantic) value on the identity property
+     * are treated as the same instance rather than duplicated. Emitted as an
+     * `ad4m://identity` link on the property shape and read back by the Rust
+     * model query (`ShapeProperty.identity`). At most one property per class
+     * should set this.
+     */
+    identity?: boolean;
+
+    /**
+     * Explicit SHACL `sh:datatype` for the property value. When set, this
+     * overrides auto-inference and — importantly — lets custom `getter`
+     * properties opt into typed-literal decoding. Auto-inference is disabled
+     * for properties with a `getter` (see `shacl-gen.ts`) because such
+     * getters typically return URIs; setting `datatype` explicitly declares
+     * that this getter returns literal values of the given XSD type
+     * (e.g. `"xsd://string"`) and enables the hydration decode gate.
+     */
+    datatype?: string;
 }
 
 
@@ -396,7 +427,7 @@ function applyPropertyMetadata(opts: PropertyOptions) {
  *
  * @description
  * Equivalent to `@Property` but defaults `required` to `false` and does not
- * apply `resolveLiteral` or `initial` defaults.  Use this when a property
+ * apply any `initial` defaults.  Use this when a property
  * may or may not have a value, and you want full control over its configuration.
  *
  * @example
@@ -529,6 +560,14 @@ export interface ModelConfig {
      * This enables efficient bulk deletion (drop entire graph) and scoped queries.
      */
     graph?: boolean;
+
+    /**
+     * Natural-language hint that steers the generic LLM extractor when
+     * turning a transcript into instances of this class.  Emitted as an
+     * `ad4m://interpretation_hint` link on the SHACL shape node and surfaced
+     * on `ModelShape.interpretation_hint` by the Rust model query.
+     */
+    interpretationHint?: string;
 }
 
 /**
@@ -552,8 +591,7 @@ export interface ModelConfig {
  * @Model({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
  *   @Property({
- *     through: "recipe://name",
- *     resolveLiteral: true
+ *     through: "recipe://name"
  *   })
  *   name: string = "";
  * 
@@ -610,6 +648,7 @@ export function Model(opts: ModelConfig) {
                 getRelationsMetadata(target),
                 buildConformanceFilter,
                 seed,
+                opts.interpretationHint,
             ));
         }
 
@@ -629,7 +668,7 @@ export function Model(opts: ModelConfig) {
  * Smart defaults (all overridable):
  * - `required` → `false`
  * - `readOnly` → `false`
- * - `resolveLanguage` / `resolveLiteral` → unset → deterministic literal storage
+ * - `resolveLanguage` → unset → deterministic typed literal storage
  *   (the perf default). Set `resolveLanguage: "literal"` for a signed-envelope
  *   value, or a custom language address to resolve through that language.
  * - `initial` → `undefined` (no link created until a value is explicitly set)
@@ -664,10 +703,11 @@ export function Model(opts: ModelConfig) {
  *   })
  *   role: string = "";
  * 
- *   // Optional property with literal resolution
+ *   // Optional property with signed-envelope literal storage
+ *   // (per-value provenance)
  *   @Property({
  *     through: "user://bio",
- *     resolveLiteral: true
+ *     resolveLanguage: "literal"
  *   })
  *   bio: string = "";
  * }
@@ -677,23 +717,18 @@ export function Model(opts: ModelConfig) {
  * @param {string} opts.through - The predicate URI for the property
  * @param {boolean} [opts.required=false] - Whether the property is required (adds query filters and sentinel initial value)
  * @param {string} [opts.initial] - Initial value (defaults to "literal:string:uninitialized" when required)
- * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic literal, default), "literal" (signed envelope), or a custom language address
- * @param {boolean} [opts.resolveLiteral] - true → deterministic literal: IRIs; false → signed envelope on the literal language; unset → deterministic unless resolveLanguage is "literal"
+ * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic typed literal, the perf default), "literal" (signed envelope), or a custom language address
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
 export function Property(opts: PropertyOptions) {
     const required = opts.required ?? false;
-    // resolveLanguage / resolveLiteral are intentionally NOT defaulted here.
+    // `resolveLanguage` is intentionally NOT defaulted here.
     // The effective storage mode is derived from what the user explicitly set:
-    //   - neither set            → deterministic literal (the perf default)
-    //   - resolveLanguage:"literal" (explicit) → signed literal envelope
-    //   - resolveLiteral:true     → deterministic literal (explicit opt-in)
-    //   - resolveLiteral:false    → signed literal envelope
-    //   - resolveLanguage:<custom>→ expression on that language
-    // Leaving them unset lets us tell "explicitly literal" (envelope) apart from
-    // "unspecified" (deterministic). See effectiveLiteralStorage().
+    //   - unset             → deterministic typed literal (the perf default)
+    //   - "literal"         → signed literal envelope (per-value provenance)
+    //   - <custom address>  → expression on that custom language
     return applyPropertyMetadata({
         ...opts,
         required,
@@ -737,7 +772,7 @@ export function Property(opts: PropertyOptions) {
  *   // Read-only property that resolves to a Literal
  *   @ReadOnly({
  *     through: "post://author",
- *     resolveLiteral: true
+ *     resolveLanguage: "literal"
  *   })
  *   author: string = "";
  * 
@@ -753,8 +788,7 @@ export function Property(opts: PropertyOptions) {
  * @param {PropertyOptions} opts - Property configuration
  * @param {string} opts.through - The predicate URI for the property
  * @param {string} [opts.initial] - Initial value (if property should have one)
- * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic literal, default), "literal" (signed envelope), or a custom language address
- * @param {boolean} [opts.resolveLiteral] - true → deterministic literal: IRIs; false → signed envelope on the literal language; unset → deterministic unless resolveLanguage is "literal"
+ * @param {string} [opts.resolveLanguage] - Value-resolution language: unset (deterministic typed literal, the perf default), "literal" (signed envelope), or a custom language address
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
  */
@@ -821,6 +855,20 @@ export interface RelationOptions {
      * ```
      */
     where?: Where;
+    /**
+     * SHACL `sh:datatype` for the relation's target values. Set when the
+     * relation holds encoded literal values (e.g. `"xsd:string"` for a
+     * `HasMany<string>` that stores plain strings). The executor uses
+     * this to decode `literal:<type>:<value>` wire form on hydration.
+     * Omit for URI relations that point at other model instances.
+     *
+     * @example
+     * ```typescript
+     * @HasMany({ through: "run://source", datatype: "xsd:string" })
+     * sources: string[] = [];
+     * ```
+     */
+    datatype?: string;
 }
 
 /**
@@ -947,6 +995,7 @@ export function HasMany(
             ...(opts.getter && { getter: opts.getter }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
         };
 
         const relKey = key as string;
@@ -1010,6 +1059,7 @@ export function HasOne(
             local: opts.local,
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
         };
 
         const relKey = key as string;
@@ -1080,6 +1130,7 @@ export function BelongsToOne(
             local: opts.local,
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
         };
 
         if (opts.through) {
@@ -1138,6 +1189,7 @@ export function BelongsToMany(
             ...(opts.getter && { getter: opts.getter }),
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
+            ...(opts.datatype && { datatype: opts.datatype }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*

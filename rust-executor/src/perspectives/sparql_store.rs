@@ -181,68 +181,119 @@ fn status_str(status: &Option<LinkStatus>) -> &'static str {
 /// `literal:string:` / `literal:json:` NamedNode forms working in case
 /// any pre-migration link store still feeds them through.
 fn parse_literal_fn(args: &[Term]) -> Option<Term> {
-    use percent_encoding::percent_decode_str;
     if args.len() != 1 {
         return None;
     }
     match &args[0] {
         Term::Literal(l) => {
-            let dt = l.datatype().as_str();
-            if dt == ONT_JSON {
-                if let Ok(json_val) = serde_json::from_str::<Value>(l.value()) {
-                    if let Some(data) = json_val.get("data") {
-                        let data_str = match data {
-                            Value::String(s) => s.clone(),
-                            other => serde_json::to_string(other).unwrap_or_default(),
-                        };
-                        return Some(Literal::new_simple_literal(data_str).into());
-                    }
-                }
-                return Some(Literal::new_simple_literal(l.value()).into());
+            let raw = l.value();
+            let datatype = l.datatype().as_str();
+            if let Some(parsed) = decode_literal_payload(raw, Some(datatype)) {
+                return Some(Literal::new_simple_literal(parsed).into());
             }
-            // xsd:string / xsd:integer / xsd:decimal / xsd:boolean — the
-            // lexical form is already the parsed value.
-            Some(Literal::new_simple_literal(l.value()).into())
+            // Typed-literal fallback: convert to a plain xsd:string with the
+            // same lexical form. Model-query WHERE clauses compare the result
+            // of `<ad4m://fn/parse_literal>(?var)` against a string constant
+            // (`"true"`, `"42"`, …) with SPARQL `=`, which is strict about
+            // datatypes — `"true"^^xsd:boolean = "true"` returns false. The
+            // pre-refactor code always did this simple-literal wrap for the
+            // xsd:* datatypes; without it, boolean/integer/decimal WHEREs
+            // silently return zero rows. Regression covered by
+            // model_query::integration_tests::
+            //   test_full_model_query_signed_expression_boolean_where
+            Some(Literal::new_simple_literal(raw).into())
         }
         Term::NamedNode(n) => {
-            let val = n.as_str();
-            let body = match val.strip_prefix("literal:") {
-                Some(b) => b,
-                None => return Some(args[0].clone()),
-            };
-            if let Some(rest) = body.strip_prefix("string:") {
-                let decoded = percent_decode_str(rest)
-                    .decode_utf8()
-                    .map(|c| c.into_owned())
-                    .unwrap_or_else(|_| rest.to_string());
-                return Some(Literal::new_simple_literal(decoded).into());
+            let raw = n.as_str();
+            if let Some(parsed) = decode_literal_payload(raw, None) {
+                return Some(Literal::new_simple_literal(parsed).into());
             }
-            if let Some(rest) = body.strip_prefix("number:") {
-                return Some(Literal::new_simple_literal(rest).into());
-            }
-            if let Some(rest) = body.strip_prefix("boolean:") {
-                return Some(Literal::new_simple_literal(rest).into());
-            }
-            if let Some(rest) = body.strip_prefix("json:") {
-                let decoded = percent_decode_str(rest)
-                    .decode_utf8()
-                    .map(|c| c.into_owned())
-                    .unwrap_or_else(|_| rest.to_string());
-                if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-                    if let Some(data) = json_val.get("data") {
-                        let data_str = match data {
-                            Value::String(s) => s.clone(),
-                            other => serde_json::to_string(other).unwrap_or(decoded.clone()),
-                        };
-                        return Some(Literal::new_simple_literal(data_str).into());
-                    }
-                }
-                return Some(Literal::new_simple_literal(decoded).into());
-            }
+            // Not a `literal:` URI — hand back the NamedNode unchanged so
+            // callers can still work with e.g. `ad4m://` addresses.
             Some(args[0].clone())
         }
         _ => Some(args[0].clone()),
     }
+}
+
+/// Extract the "parsed value" from a raw literal payload, mirroring the
+/// production language's own `parseLiteral`. Returns `None` when the payload
+/// isn't in one of the recognised envelope shapes — callers then hand back
+/// the original term unchanged.
+///
+/// Recognised shapes, tried in order:
+///   1. `literal:string:<url-encoded>` — URL-decode the tail
+///   2. `literal:number:<n>` / `literal:boolean:<b>` — return the tail
+///   3. `literal:json:<url-encoded JSON>` — URL-decode + parse; if it's a
+///      signed-expression envelope (`{author,timestamp,data,proof}`), return
+///      only `.data`; otherwise return the decoded JSON
+///   4. `datatype == ad4m:json` — parse the value as JSON; if it's an
+///      envelope with `.data`, return `.data`; otherwise return the value
+///   5. Raw JSON that happens to be an envelope with `.data` — return `.data`
+///      (regression guard: envelope-unwrapping used to fire regardless of
+///      datatype, and the mention-detection path in Flux still depends on
+///      that. See PR #880 CI failure on `fix/agent-harness-findings`.)
+fn decode_literal_payload(raw: &str, datatype: Option<&str>) -> Option<String> {
+    use percent_encoding::percent_decode_str;
+
+    if let Some(body) = raw.strip_prefix("literal:") {
+        if let Some(rest) = body.strip_prefix("string:") {
+            return Some(
+                percent_decode_str(rest)
+                    .decode_utf8()
+                    .map(|c| c.into_owned())
+                    .unwrap_or_else(|_| rest.to_string()),
+            );
+        }
+        if let Some(rest) = body.strip_prefix("number:") {
+            return Some(rest.to_string());
+        }
+        if let Some(rest) = body.strip_prefix("boolean:") {
+            return Some(rest.to_string());
+        }
+        if let Some(rest) = body.strip_prefix("json:") {
+            let decoded = percent_decode_str(rest)
+                .decode_utf8()
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| rest.to_string());
+            return Some(unwrap_envelope_or_original(&decoded));
+        }
+        // "literal:" prefix but unknown scheme — return the whole raw string
+        // (matches the pre-refactor "return args[0].clone()" fallback).
+        return None;
+    }
+
+    // No `literal:` prefix — this is the typed-literal storage path. Try
+    // JSON-envelope unwrapping when either the RDF datatype says so or the
+    // raw value happens to be a valid envelope; otherwise the caller keeps
+    // the original term.
+    let is_json_datatype = datatype.map(|d| d == ONT_JSON).unwrap_or(false);
+    if is_json_datatype {
+        return Some(unwrap_envelope_or_original(raw));
+    }
+    if let Some(unwrapped) = try_unwrap_envelope(raw) {
+        return Some(unwrapped);
+    }
+    None
+}
+
+/// Parse `raw` as JSON; if it's an object with a `data` field, return the
+/// field's string value (or a JSON re-serialisation of a non-string value).
+/// Returns `None` when `raw` is not parseable JSON or has no `data` field.
+fn try_unwrap_envelope(raw: &str) -> Option<String> {
+    let json_val = serde_json::from_str::<Value>(raw).ok()?;
+    let data = json_val.get("data")?;
+    Some(match data {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    })
+}
+
+/// As `try_unwrap_envelope`, but returns the original string when unwrapping
+/// fails — used on paths that have already committed to returning *some*
+/// string (e.g. after decoding `literal:json:`).
+fn unwrap_envelope_or_original(raw: &str) -> String {
+    try_unwrap_envelope(raw).unwrap_or_else(|| raw.to_string())
 }
 
 fn strip_html_fn(args: &[Term]) -> Option<Term> {
@@ -1802,555 +1853,6 @@ impl SparqlStore {
         );
         Ok(count)
     }
-
-    /// Rewrite link targets shaped like `literal:json:<signed_envelope>` to
-    /// the typed-literal storage form of their inner `.data` value.
-    ///
-    /// Per-link provenance lives on the RDF 1.2 reifier; the envelope-on-target
-    /// form duplicates that and produces non-deterministic IRIs (the envelope
-    /// signature varies per write) which exact-match WHERE filters can't index.
-    /// We rewrite directly to typed RDF literals (`xsd:string` / `xsd:integer`
-    /// / `xsd:decimal` / `xsd:boolean` / `ad4m://json`) so the migration
-    /// converges on the post-v4 storage shape in a single pass.
-    ///
-    /// The reifier IRI hashes the wire-format target string (kept stable
-    /// across the typed-literal flip), so we can detect "already migrated"
-    /// rows by checking whether the stored object is still a NamedNode whose
-    /// IRI starts with `literal:json:` and parses as an envelope.
-    pub fn migrate_signed_envelopes_to_plain_literals(&self) -> Result<usize, Error> {
-        if self.migration_version() >= 3 {
-            return Ok(0);
-        }
-
-        log::info!("Migrating signed-envelope literal targets to plain literal form");
-
-        use percent_encoding::percent_decode_str;
-
-        // Build the set of predicates whose property explicitly opts into
-        // expression resolution — `resolveLiteral: false` (signed-envelope
-        // literals) or a custom `resolveLanguage`. Flattening their envelopes
-        // would discard the expression-level signature, which is distinct from
-        // and not recoverable from the link-level signature on the reifier. We
-        // skip those predicates so only deterministic-literal (`resolveLiteral`
-        // default/true) properties get normalized to typed literals.
-        //
-        // If the SHACL lookup yields nothing (no shapes, or query error), the
-        // set is empty and every envelope is flattened — the prior behavior.
-        let keep_envelope_predicates: std::collections::HashSet<String> = {
-            let mut set = std::collections::HashSet::new();
-            let query = r#"
-                SELECT ?path ?resolveLiteral ?resolveLanguage WHERE {
-                    ?propUri <sh://path> ?path .
-                    OPTIONAL { ?propUri <ad4m://resolveLiteral> ?resolveLiteral . }
-                    OPTIONAL { ?propUri <ad4m://resolveLanguage> ?resolveLanguage . }
-                }
-            "#;
-            if let Ok(json) = self.query(query) {
-                if let Ok(rows) = serde_json::from_str::<Vec<Value>>(&json) {
-                    for row in &rows {
-                        let path = match row["path"].as_str() {
-                            Some(p) => p.to_string(),
-                            None => continue,
-                        };
-                        // resolveLiteral is stored as `literal:false` / `literal:true`.
-                        let resolve_literal = row["resolveLiteral"].as_str().map(|v| {
-                            let t = v
-                                .strip_prefix("literal://")
-                                .or_else(|| v.strip_prefix("literal:"))
-                                .unwrap_or(v);
-                            t.strip_prefix("boolean:").unwrap_or(t) == "true"
-                        });
-                        // resolveLanguage comes back as its decoded lexical value
-                        // (e.g. "literal" or a custom address); the literal:string:
-                        // forms are also tolerated for older data.
-                        let resolve_language = row["resolveLanguage"].as_str().map(|v| {
-                            let t = v
-                                .strip_prefix("literal://string:")
-                                .or_else(|| v.strip_prefix("literal:string:"))
-                                .unwrap_or(v);
-                            percent_decode_str(t)
-                                .decode_utf8()
-                                .map(|c| c.into_owned())
-                                .unwrap_or_else(|_| t.to_string())
-                        });
-                        let custom_language = matches!(resolve_language.as_deref(), Some(l) if !l.is_empty() && l != "literal");
-                        // Keep the envelope (skip flattening) whenever the property
-                        // is NOT a deterministic literal — mirrors
-                        // ShapeProperty::is_deterministic_literal:
-                        //   custom language, OR resolveLiteral:false, OR an
-                        //   explicit resolveLanguage:"literal" with no resolveLiteral:true.
-                        let keep_envelope = custom_language
-                            || resolve_literal == Some(false)
-                            || (resolve_literal.is_none()
-                                && resolve_language.as_deref() == Some("literal"));
-                        if keep_envelope {
-                            set.insert(path);
-                        }
-                    }
-                }
-            }
-            set
-        };
-
-        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-        let ont_author = NamedNodeRef::new_unchecked(ONT_AUTHOR);
-        let ont_timestamp = NamedNodeRef::new_unchecked(ONT_TIMESTAMP);
-        let ont_proof_key = NamedNodeRef::new_unchecked(ONT_PROOF_KEY);
-        let ont_proof_sig = NamedNodeRef::new_unchecked(ONT_PROOF_SIG);
-        let ont_proof_valid = NamedNodeRef::new_unchecked(ONT_PROOF_VALID);
-        let ont_status = NamedNodeRef::new_unchecked(ONT_STATUS);
-
-        // Collect all reifier quads with their triple terms
-        let reifier_quads: Vec<Quad> = self
-            .store
-            .quads_for_pattern(
-                None,
-                Some(rdf_reifies),
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .filter_map(|r| r.ok())
-            .collect();
-
-        struct LinkToMigrate {
-            reifier_iri: NamedNode,
-            source: String,
-            predicate: String,
-            old_target: String,
-            new_target: String,
-            author: String,
-            timestamp: String,
-            proof_key: String,
-            proof_sig: String,
-            proof_valid: String,
-            status: String,
-        }
-
-        let mut links_to_migrate: Vec<LinkToMigrate> = Vec::new();
-
-        for quad in &reifier_quads {
-            // Extract the triple term from the reifier
-            let (source, predicate, old_target) = match &quad.object {
-                Term::Triple(t) => {
-                    let s = match &t.subject {
-                        NamedOrBlankNode::NamedNode(n) => n.as_str().to_string(),
-                        _ => continue,
-                    };
-                    let p = t.predicate.as_str().to_string();
-                    let o = match &t.object {
-                        Term::NamedNode(n) => n.as_str().to_string(),
-                        _ => continue,
-                    };
-                    (s, p, o)
-                }
-                _ => continue,
-            };
-
-            // Skip predicates whose property explicitly keeps signed-expression
-            // literals (resolveLiteral: false or a custom resolveLanguage) —
-            // flattening would destroy the expression-level signature.
-            if keep_envelope_predicates.contains(&predicate) {
-                continue;
-            }
-
-            // Check if the target is a signed envelope literal:json:
-            if !old_target.starts_with("literal:json:") {
-                continue;
-            }
-
-            // Try to decode and check for signed expression envelope
-            let json_part = &old_target["literal:json:".len()..];
-            let decoded = match percent_decode_str(json_part).decode_utf8() {
-                Ok(d) => d.to_string(),
-                Err(_) => continue,
-            };
-
-            let json_val: serde_json::Value = match serde_json::from_str(&decoded) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Only migrate if it has the signed expression envelope shape
-            let data = match json_val.get("data") {
-                Some(d) if json_val.get("author").is_some() && json_val.get("proof").is_some() => {
-                    d.clone()
-                }
-                _ => continue, // Not a signed envelope, leave as-is
-            };
-
-            // Encode the inner `data` field as a plain literal IRI using the
-            // same canonical encoder that fresh writes flow through
-            // (`perspective_instance::link_target_for_value` → `literal_encode`).
-            // Hand-rolling the format here used to drift (e.g. integer-shaped
-            // floats landed as `literal:number:1.0` while the WHERE builders
-            // probed `literal:number:1`), causing migrated rows to silently
-            // miss equality filters.
-            let new_target = format!("literal:{}", crate::languages::literal_encode(&data));
-
-            if new_target == old_target {
-                continue; // No change needed
-            }
-
-            // Read reifier metadata
-            let reifier_iri = match &quad.subject {
-                NamedOrBlankNode::NamedNode(n) => n.clone(),
-                _ => continue,
-            };
-
-            let get_meta = |pred: NamedNodeRef| -> String {
-                self.store
-                    .quads_for_pattern(
-                        Some(reifier_iri.as_ref().into()),
-                        Some(pred),
-                        None,
-                        Some(GraphNameRef::DefaultGraph),
-                    )
-                    .filter_map(|r| r.ok())
-                    .next()
-                    .map(|q| match &q.object {
-                        Term::Literal(l) => l.value().to_string(),
-                        Term::NamedNode(n) => n.as_str().to_string(),
-                        _ => String::new(),
-                    })
-                    .unwrap_or_default()
-            };
-
-            let author = get_meta(ont_author);
-            let timestamp = get_meta(ont_timestamp);
-            let proof_key = get_meta(ont_proof_key);
-            let proof_sig = get_meta(ont_proof_sig);
-            let proof_valid = get_meta(ont_proof_valid);
-            let status = get_meta(ont_status);
-
-            links_to_migrate.push(LinkToMigrate {
-                reifier_iri,
-                source,
-                predicate,
-                old_target,
-                new_target,
-                author,
-                timestamp,
-                proof_key,
-                proof_sig,
-                proof_valid,
-                status,
-            });
-        }
-
-        let count = links_to_migrate.len();
-        if count == 0 {
-            self.set_migration_version(3)?;
-            return Ok(0);
-        }
-
-        log::info!(
-            "Migrating {} signed expression envelopes to plain literals...",
-            count
-        );
-
-        for link in &links_to_migrate {
-            let source_iri = NamedNode::new_unchecked(&link.source);
-            let predicate_iri = NamedNode::new_unchecked(&link.predicate);
-            let old_target_iri = NamedNode::new_unchecked(&link.old_target);
-            // Land directly on typed-literal storage — collapses what would
-            // otherwise be a v3+v4 chain into a single rewrite pass.
-            let new_target_term = target_to_storage_term(&link.new_target);
-            let new_target_ref: TermRef = match &new_target_term {
-                Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
-                Term::Literal(l) => TermRef::Literal(l.as_ref()),
-                Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-                Term::Triple(_) => continue,
-            };
-
-            // 1. Insert new direct triple
-            self.store.insert(QuadRef::new(
-                source_iri.as_ref(),
-                predicate_iri.as_ref(),
-                new_target_ref,
-                GraphNameRef::DefaultGraph,
-            ))?;
-
-            // 2. Build new reifier IRI (hash uses the wire-format target
-            //    string, which is now `literal:string:X` etc. — distinct from
-            //    the old envelope target, so the reifier identity changes).
-            let new_reifier_iri = {
-                let mut hasher = Sha256::new();
-                hasher.update(link.author.as_bytes());
-                hasher.update(link.source.as_bytes());
-                hasher.update(link.predicate.as_bytes());
-                hasher.update(link.new_target.as_bytes());
-                hasher.update(link.timestamp.as_bytes());
-                let hash = hex::encode(hasher.finalize());
-                NamedNode::new_unchecked(format!("link:{}", &hash[..32]))
-            };
-
-            // 3. Insert new reifier triple
-            let new_triple = Triple::new(
-                source_iri.clone(),
-                predicate_iri.clone(),
-                new_target_term.clone(),
-            );
-            self.store.insert(QuadRef::new(
-                new_reifier_iri.as_ref(),
-                rdf_reifies,
-                TermRef::Triple(&new_triple),
-                GraphNameRef::DefaultGraph,
-            ))?;
-
-            // 4. Insert metadata on new reifier
-            let annotations: &[(&str, &str)] = &[
-                (ONT_AUTHOR, &link.author),
-                (ONT_TIMESTAMP, &link.timestamp),
-                (ONT_PROOF_KEY, &link.proof_key),
-                (ONT_PROOF_SIG, &link.proof_sig),
-                (ONT_PROOF_VALID, &link.proof_valid),
-                (ONT_STATUS, &link.status),
-            ];
-            for (pred_uri, value) in annotations {
-                if value.is_empty() {
-                    continue;
-                }
-                let pred = NamedNodeRef::new_unchecked(pred_uri);
-                let lit = literal(value);
-                self.store.insert(QuadRef::new(
-                    new_reifier_iri.as_ref(),
-                    pred,
-                    TermRef::Literal(lit.as_ref()),
-                    GraphNameRef::DefaultGraph,
-                ))?;
-            }
-
-            // 5. Remove old reifier metadata
-            let old_meta: Vec<Quad> = self
-                .store
-                .quads_for_pattern(
-                    Some(link.reifier_iri.as_ref().into()),
-                    None,
-                    None,
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .filter_map(|r| r.ok())
-                .collect();
-            for q in &old_meta {
-                self.store.remove(q)?;
-            }
-
-            // 6. Remove old direct triple (only if no other reifier references it)
-            let old_triple = Triple::new(
-                source_iri.clone(),
-                predicate_iri.clone(),
-                old_target_iri.clone(),
-            );
-            let other_reifiers = self
-                .store
-                .quads_for_pattern(
-                    None,
-                    Some(rdf_reifies),
-                    Some(TermRef::Triple(&old_triple)),
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .any(|r| r.is_ok());
-            if !other_reifiers {
-                let _ = self.store.remove(&Quad::new(
-                    source_iri,
-                    predicate_iri,
-                    old_target_iri,
-                    GraphName::DefaultGraph,
-                ));
-            }
-        }
-
-        self.set_migration_version(3)?;
-
-        log::info!(
-            "Migration complete: {} signed envelopes converted to plain literals",
-            count
-        );
-        Ok(count)
-    }
-
-    /// Rewrite `literal:*:` URI-shaped targets (`NamedNode`s with IRIs of the
-    /// form `literal:string:X` / `:number:N` / `:boolean:B` / `:json:J`) into
-    /// typed RDF literals (`"X"^^xsd:string`, `"N"^^xsd:integer`, etc.).
-    ///
-    /// Idempotent: only rows whose object is still a NamedNode under the
-    /// `literal:` scheme are rewritten; already-typed-literal storage skips.
-    /// The reifier IRI stays stable because [`make_reifier_iri`] hashes the
-    /// wire-format target string, which is unchanged across this migration.
-    pub fn migrate_iri_literals_to_typed_literals(&self) -> Result<usize, Error> {
-        if self.migration_version() >= 4 {
-            return Ok(0);
-        }
-
-        log::info!("Migrating `literal:*:` IRI-shaped targets to typed RDF literals");
-
-        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-
-        // Collect candidates by walking the reifier triples — they carry the
-        // (source, predicate, object) tuple we need to identify both the
-        // direct triple and the reifier statement.
-        let reifier_quads: Vec<Quad> = self
-            .store
-            .quads_for_pattern(
-                None,
-                Some(rdf_reifies),
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .filter_map(|r| r.ok())
-            .collect();
-
-        struct Rewrite {
-            source: NamedNode,
-            predicate: NamedNode,
-            old_target_iri: NamedNode,
-            new_target_term: Term,
-        }
-
-        let mut rewrites: Vec<Rewrite> = Vec::new();
-
-        for quad in &reifier_quads {
-            let triple = match &quad.object {
-                Term::Triple(t) => t,
-                _ => continue,
-            };
-
-            // Only NamedNode objects are candidates; typed literals are
-            // already in the target shape.
-            let old_target_iri = match &triple.object {
-                Term::NamedNode(n) => n.clone(),
-                _ => continue,
-            };
-
-            let iri = old_target_iri.as_str();
-            if !iri.starts_with("literal:") {
-                continue;
-            }
-            // Only rewrite the four supported scheme bodies; anything else
-            // (`literal:unknown:…`) stays as-is so we don't accidentally
-            // lossy-encode user data.
-            let body = &iri["literal:".len()..];
-            let is_supported = body.starts_with("string:")
-                || body.starts_with("number:")
-                || body.starts_with("boolean:")
-                || body.starts_with("json:");
-            if !is_supported {
-                continue;
-            }
-
-            let new_target_term = target_to_storage_term(iri);
-            // Translation was a no-op (e.g. unparseable number falling back
-            // to a NamedNode) — nothing to do.
-            if matches!(&new_target_term, Term::NamedNode(n) if n.as_str() == iri) {
-                continue;
-            }
-
-            let source = match &triple.subject {
-                NamedOrBlankNode::NamedNode(n) => n.clone(),
-                _ => continue,
-            };
-            let predicate = NamedNode::new_unchecked(triple.predicate.as_str());
-
-            rewrites.push(Rewrite {
-                source,
-                predicate,
-                old_target_iri,
-                new_target_term,
-            });
-        }
-
-        let count = rewrites.len();
-        if count == 0 {
-            self.set_migration_version(4)?;
-            return Ok(0);
-        }
-
-        log::info!(
-            "Rewriting {} IRI-shaped literal targets to typed RDF literals",
-            count
-        );
-
-        for rw in &rewrites {
-            let new_target_ref: TermRef = match &rw.new_target_term {
-                Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
-                Term::Literal(l) => TermRef::Literal(l.as_ref()),
-                Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-                Term::Triple(_) => continue,
-            };
-
-            // 1. Insert the new direct triple (typed-literal object).
-            self.store.insert(QuadRef::new(
-                rw.source.as_ref(),
-                rw.predicate.as_ref(),
-                new_target_ref,
-                GraphNameRef::DefaultGraph,
-            ))?;
-
-            // 2. Rewrite reifier quads: every existing reifier that names the
-            //    old (s, p, old_iri) triple needs its rdf:reifies object
-            //    repointed at the new (s, p, typed_literal) triple. Reifier
-            //    IRI is identity-preserving because the wire-form hash input
-            //    is unchanged.
-            let old_triple = Triple::new(
-                rw.source.clone(),
-                rw.predicate.clone(),
-                rw.old_target_iri.clone(),
-            );
-            let new_triple = Triple::new(
-                rw.source.clone(),
-                rw.predicate.clone(),
-                rw.new_target_term.clone(),
-            );
-            let old_reifier_quads: Vec<Quad> = self
-                .store
-                .quads_for_pattern(
-                    None,
-                    Some(rdf_reifies),
-                    Some(TermRef::Triple(&old_triple)),
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .filter_map(|r| r.ok())
-                .collect();
-            for oq in &old_reifier_quads {
-                self.store.remove(oq)?;
-                self.store.insert(QuadRef::new(
-                    oq.subject.as_ref(),
-                    rdf_reifies,
-                    TermRef::Triple(&new_triple),
-                    GraphNameRef::DefaultGraph,
-                ))?;
-            }
-
-            // 3. Remove the old direct triple (no other reifier should still
-            //    reference it after step 2, but be defensive).
-            let still_referenced = self
-                .store
-                .quads_for_pattern(
-                    None,
-                    Some(rdf_reifies),
-                    Some(TermRef::Triple(&old_triple)),
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .next()
-                .is_some();
-            if !still_referenced {
-                let _ = self.store.remove(&Quad::new(
-                    rw.source.clone(),
-                    rw.predicate.clone(),
-                    rw.old_target_iri.clone(),
-                    GraphName::DefaultGraph,
-                ));
-            }
-        }
-
-        self.set_migration_version(4)?;
-
-        log::info!(
-            "Migration complete: {} IRI-shaped literal targets converted to typed RDF literals",
-            count
-        );
-        Ok(count)
-    }
 }
 
 #[cfg(test)]
@@ -2600,6 +2102,89 @@ mod tests {
 
         // Should have: 1 direct triple + 1 reifier + 6 metadata = 8 quads
         assert_eq!(all_quads.len(), 8, "Expected 8 quads total");
+    }
+
+    /// The canonical storage model needs no migration: a `literal:*` wire target
+    /// is stored as a native typed RDF literal on write and rendered back to the
+    /// exact same wire form on read. This is the round-trip every scalar relies
+    /// on — including `SHACLFlow`'s bookkeeping links, which encode stateName /
+    /// stateValue / actionName as `literal:string:` / `literal:number:` targets
+    /// via the same `Literal` helper the model layer uses, then read them back
+    /// with `Literal.fromUrl(target)` (which requires the `literal:` wire form).
+    /// If this holds, SHACLFlow round-trips on a fresh store with no migration.
+    #[test]
+    fn test_literal_targets_round_trip_to_wire_form_without_migration() {
+        let svc = new_service();
+
+        // SHACLFlow-shaped bookkeeping links (string + number) and an ordinary
+        // model-style string property — all added through the normal write path.
+        svc.add_link(&make_link(
+            "flow://TODO.ready",
+            "ad4m://stateName",
+            "literal:string:ready",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            "flow://TODO.ready",
+            "ad4m://stateValue",
+            "literal:number:0",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            "task://1",
+            "ns://title",
+            "literal:string:Write%20the%20guide",
+        ))
+        .unwrap();
+
+        let by = |source: &str, pred: &str| -> String {
+            svc.get_all_links()
+                .unwrap()
+                .into_iter()
+                .find(|l| l.data.source == source && l.data.predicate.as_deref() == Some(pred))
+                .unwrap_or_else(|| panic!("link {source} {pred} not found"))
+                .data
+                .target
+        };
+
+        // Read returns the exact wire form SHACLFlow / Literal.fromUrl expects…
+        assert_eq!(
+            by("flow://TODO.ready", "ad4m://stateName"),
+            "literal:string:ready"
+        );
+        assert_eq!(
+            by("flow://TODO.ready", "ad4m://stateValue"),
+            "literal:number:0"
+        );
+        assert_eq!(
+            by("task://1", "ns://title"),
+            "literal:string:Write%20the%20guide"
+        );
+
+        // …while the stored term is a native typed literal (indexed WHERE), not a
+        // `literal:*` NamedNode IRI — so no migration is ever needed to reach the
+        // indexed shape.
+        let stored = svc
+            .store
+            .quads_for_pattern(
+                Some(NamedNodeRef::new_unchecked("flow://TODO.ready").into()),
+                Some(NamedNodeRef::new_unchecked("ad4m://stateName")),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .next()
+            .unwrap()
+            .unwrap();
+        match stored.object {
+            Term::Literal(ref l) => {
+                assert_eq!(l.value(), "ready");
+                assert_eq!(
+                    l.datatype().as_str(),
+                    "http://www.w3.org/2001/XMLSchema#string"
+                );
+            }
+            other => panic!("expected a typed literal in storage, got {other:?}"),
+        }
     }
 
     // ── Query Tests ──
@@ -3677,199 +3262,6 @@ mod tests {
 
     /// v4 migration converts every `literal:*:` IRI-shaped object into the
     /// matching typed RDF literal and bumps the version marker.
-    #[test]
-    fn test_migration_v4_rewrites_iri_literals_to_typed_literals() {
-        let svc = new_service();
-        // Seed three rows whose objects are still NamedNode `literal:*:`
-        // IRIs — the shape produced before the typed-literal flip.
-        let make_legacy = |source: &str, predicate: &str, target: &str| {
-            let link = make_link(source, predicate, target);
-            svc.add_link_with_raw_iri_target(&link).unwrap();
-            link
-        };
-        let l_str = make_legacy("ad4m://s1", "ns://p", "literal:string:hello");
-        let l_num = make_legacy("ad4m://s2", "ns://p", "literal:number:42");
-        let l_bool = make_legacy("ad4m://s3", "ns://p", "literal:boolean:true");
-        let _ = (l_str, l_num, l_bool);
-
-        let count = svc.migrate_iri_literals_to_typed_literals().unwrap();
-        assert_eq!(count, 3, "v4 should rewrite all three IRI-shaped literals");
-        assert_eq!(svc.migration_version(), 4);
-
-        // Each direct triple should now hold a typed literal in object
-        // position, matching the storage shape new writes land in.
-        let s_to_dt: Vec<(&str, &str)> = vec![
-            ("ad4m://s1", "http://www.w3.org/2001/XMLSchema#string"),
-            ("ad4m://s2", "http://www.w3.org/2001/XMLSchema#integer"),
-            ("ad4m://s3", "http://www.w3.org/2001/XMLSchema#boolean"),
-        ];
-        for (source, expected_dt) in s_to_dt {
-            let q = svc
-                .store
-                .quads_for_pattern(
-                    Some(NamedNodeRef::new_unchecked(source).into()),
-                    Some(NamedNodeRef::new_unchecked("ns://p")),
-                    None,
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .next()
-                .unwrap()
-                .unwrap();
-            match q.object {
-                Term::Literal(ref l) => assert_eq!(l.datatype().as_str(), expected_dt),
-                other => panic!("expected typed literal for {source}, got {other:?}"),
-            }
-        }
-
-        // Idempotent.
-        let count2 = svc.migrate_iri_literals_to_typed_literals().unwrap();
-        assert_eq!(count2, 0);
-    }
-
-    /// The combined v3 → v4 chain leaves an envelope-form input as a typed
-    /// RDF literal carrying the unwrapped `data` payload.
-    #[test]
-    fn test_migration_v3_then_v4_lands_envelope_data_as_typed_literal() {
-        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-
-        let svc = new_service();
-        let envelope_json = serde_json::json!({
-            "author": "did:key:zTest",
-            "timestamp": "2024-01-01T00:00:00.000Z",
-            "data": "active",
-            "proof": {"key":"#zTest","signature":"sig","valid":true}
-        });
-        let encoded = utf8_percent_encode(
-            &serde_json::to_string(&envelope_json).unwrap(),
-            NON_ALPHANUMERIC,
-        )
-        .to_string();
-        let target = format!("literal:json:{encoded}");
-        svc.add_link_with_raw_iri_target(&make_link("ad4m://item-1", "ns://status", &target))
-            .unwrap();
-
-        // v3 unwraps the envelope and (now) lands directly on typed-literal
-        // storage; v4 is a no-op afterwards.
-        svc.migrate_signed_envelopes_to_plain_literals().unwrap();
-        svc.migrate_iri_literals_to_typed_literals().unwrap();
-
-        // Look up the rewritten direct triple by its new target.
-        let q = svc
-            .store
-            .quads_for_pattern(
-                Some(NamedNodeRef::new_unchecked("ad4m://item-1").into()),
-                Some(NamedNodeRef::new_unchecked("ns://status")),
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .next()
-            .unwrap()
-            .unwrap();
-        match q.object {
-            Term::Literal(ref l) => {
-                assert_eq!(
-                    l.value(),
-                    "active",
-                    "envelope data unwrapped to typed literal"
-                );
-                assert_eq!(
-                    l.datatype().as_str(),
-                    "http://www.w3.org/2001/XMLSchema#string"
-                );
-            }
-            other => panic!("expected typed literal, got {other:?}"),
-        }
-    }
-
-    /// v3 must NOT flatten signed-expression envelopes for properties that opt
-    /// into them (`resolveLiteral: false`) — that would destroy the
-    /// expression-level signature (distinct from the link-level reifier proof).
-    /// A default property's envelope on a sibling predicate is still flattened,
-    /// proving the skip is predicate-scoped, not blanket.
-    #[test]
-    fn test_migration_v3_preserves_envelopes_for_resolve_literal_false() {
-        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-
-        let svc = new_service();
-
-        // SHACL property shape declaring `ns://status` as resolveLiteral:false.
-        svc.add_link(&make_link(
-            "shacl://Item.status",
-            "sh://path",
-            "ns://status",
-        ))
-        .unwrap();
-        svc.add_link(&make_link(
-            "shacl://Item.status",
-            "ad4m://resolveLiteral",
-            "literal:false",
-        ))
-        .unwrap();
-        // `ns://name` has no shape → behaves as a default (flatten) property.
-
-        let envelope = |data: &str| {
-            let json = serde_json::json!({
-                "author": "did:key:zTest",
-                "timestamp": "2024-01-01T00:00:00.000Z",
-                "data": data,
-                "proof": {"key":"#zTest","signature":"sig","valid":true}
-            });
-            let encoded =
-                utf8_percent_encode(&serde_json::to_string(&json).unwrap(), NON_ALPHANUMERIC)
-                    .to_string();
-            format!("literal:json:{encoded}")
-        };
-
-        let status_target = envelope("active");
-        svc.add_link_with_raw_iri_target(&make_link(
-            "ad4m://item-1",
-            "ns://status",
-            &status_target,
-        ))
-        .unwrap();
-        svc.add_link_with_raw_iri_target(&make_link(
-            "ad4m://item-1",
-            "ns://name",
-            &envelope("Widget"),
-        ))
-        .unwrap();
-
-        svc.migrate_signed_envelopes_to_plain_literals().unwrap();
-
-        let object_for = |pred: &str| -> Term {
-            svc.store
-                .quads_for_pattern(
-                    Some(NamedNodeRef::new_unchecked("ad4m://item-1").into()),
-                    Some(NamedNodeRef::new_unchecked(pred)),
-                    None,
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .next()
-                .unwrap()
-                .unwrap()
-                .object
-        };
-
-        // resolveLiteral:false predicate: envelope preserved unchanged.
-        match object_for("ns://status") {
-            Term::NamedNode(n) => assert_eq!(
-                n.as_str(),
-                status_target,
-                "resolveLiteral:false envelope must be left intact"
-            ),
-            other => panic!("expected the envelope NamedNode intact, got {other:?}"),
-        }
-
-        // default predicate: envelope flattened to a typed literal.
-        match object_for("ns://name") {
-            Term::Literal(l) => assert_eq!(l.value(), "Widget", "default envelope flattened"),
-            other => panic!("expected flattened typed literal, got {other:?}"),
-        }
-    }
-
-    /// Simulates the exact multi-user sync scenario from the integration test:
-    /// 4 different users on 2 nodes add links with unique (source, pred, target),
-    /// then a wildcard query_links(None,None,None,...) must return all 5 links.
     #[test]
     fn test_multi_user_sync_wildcard_query() {
         let svc = new_service();
@@ -5049,5 +4441,38 @@ mod tests {
             !result.contains("ad4m://src"),
             "Querying a non-existent named graph should not return default graph data"
         );
+    }
+}
+
+#[cfg(test)]
+mod parse_literal_tests {
+    use super::parse_literal_fn;
+    use oxigraph::model::{Literal, Term};
+
+    fn parsed(value: &str) -> String {
+        let term: Term = Literal::new_simple_literal(value).into();
+        match parse_literal_fn(&[term]) {
+            Some(Term::Literal(l)) => l.value().to_string(),
+            other => panic!("expected a literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_literal_returns_only_the_data_field_not_author() {
+        // A signed message expression: parse_literal must return only `.data`, so
+        // a mention query matching on the parsed target never wakes on the author
+        // DID sitting beside the content. Regression guard for the self-wake path.
+        let v = "literal:json:{\"author\":\"did:key:zAgentDID\",\"timestamp\":\"t\",\"data\":\"weekly harvest report\"}";
+        let out = parsed(v);
+        assert_eq!(out, "weekly harvest report");
+        assert!(
+            !out.contains("zAgentDID"),
+            "author DID must not appear in the matched text: {out}"
+        );
+    }
+
+    #[test]
+    fn string_literal_is_url_decoded() {
+        assert_eq!(parsed("literal:string:hello%20world"), "hello world");
     }
 }

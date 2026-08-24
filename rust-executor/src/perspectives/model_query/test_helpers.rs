@@ -14,7 +14,6 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         is_required: false,
         initial_value: None,
         resolve_language: None,
-        resolve_literal: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -22,10 +21,13 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
-/// Helper: build a ShapeProperty for a collection relation.
+/// Helper: build a ShapeProperty for a URI-valued collection relation
+/// (no `sh:datatype`, so targets pass through byte-for-byte on hydration).
 pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
     ShapeProperty {
         name: name.to_string(),
@@ -35,7 +37,6 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         is_required: false,
         initial_value: None,
         resolve_language: None,
-        resolve_literal: None,
         datatype: None,
         direction: Some("forward".to_string()),
         is_scalar_relation: false,
@@ -43,7 +44,20 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
+}
+
+/// Helper: build a ShapeProperty for a literal-valued collection relation
+/// (declares `sh:datatype`, so `literal:<type>:<value>` wire form is
+/// decoded on hydration — the `@HasMany({ datatype: "xsd:string" })`
+/// case in TypeScript). Use `xsd://string` for the common
+/// `HasMany<string>` scenario.
+pub fn relation_with_datatype(name: &str, predicate: &str, datatype: &str) -> ShapeProperty {
+    let mut p = relation(name, predicate);
+    p.datatype = Some(datatype.to_string());
+    p
 }
 
 /// Helper: build a ShapeProperty for a flag field.
@@ -56,7 +70,6 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         is_required: true,
         initial_value: Some(initial.to_string()),
         resolve_language: None,
-        resolve_literal: None,
         datatype: None,
         direction: None,
         is_scalar_relation: false,
@@ -64,6 +77,8 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
@@ -75,6 +90,7 @@ pub fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
         properties,
         include_relations: Vec::new(),
         has_graph: false,
+        interpretation_hint: None,
     }
 }
 

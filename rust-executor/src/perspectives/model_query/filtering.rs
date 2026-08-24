@@ -1050,6 +1050,7 @@ mod tests {
             properties: vec![],
             include_relations: vec![],
             has_graph: false,
+            interpretation_hint: None,
         }
     }
 

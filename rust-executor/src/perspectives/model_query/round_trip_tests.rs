@@ -428,69 +428,70 @@ fn round_trip_preserves_empty_resolve_language() {
     );
 }
 
-/// The resolveLiteral optimization flag round-trips independently of
-/// resolveLanguage. `false` opts a literal property out of deterministic
-/// storage (routing it through expression_create), so it must survive the
-/// SHACL writer → store → loader pipeline intact.
+/// S1 (generic-interpretation): the natural-language interpretation hint declared on a
+/// subject class and its properties must survive the writer → store → loader
+/// round-trip and surface on `ModelShape.interpretation_hint` /
+/// `ShapeProperty.interpretation_hint`, so the generic LLM extractor can read them
+/// via `get_shape` without re-querying the SHACL graph.
 #[test]
-fn round_trip_preserves_resolve_literal_false() {
+fn round_trip_surfaces_interpretation_hint_on_class_and_property() {
     let shacl_json = r#"{
-        "target_class": "ns://ImagePost",
+        "target_class": "ns://Intention",
+        "interpretation_hint": "A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations.",
         "properties": [
             {
-                "path": "image://data",
-                "name": "image",
+                "path": "ns://title",
+                "name": "title",
                 "datatype": "xsd://string",
-                "resolve_language": "literal",
-                "resolve_literal": false
+                "min_count": 1,
+                "max_count": 1,
+                "interpretation_hint": "Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'."
             }
         ]
     }"#;
-    let shape = round_trip("ImagePost", shacl_json);
-    let prop = shape
+    let shape = round_trip("Intention", shacl_json);
+
+    assert_eq!(
+        shape.interpretation_hint.as_deref(),
+        Some("A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations."),
+        "class-level interpretation hint should surface on ModelShape",
+    );
+
+    let title = shape
         .properties
         .iter()
-        .find(|p| p.name == "image")
-        .expect("image property");
-    assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
+        .find(|p| p.name == "title")
+        .expect("title property");
     assert_eq!(
-        prop.resolve_literal,
-        Some(false),
-        "resolve_literal: false must survive SHACL round-trip alongside resolve_language",
-    );
-    assert!(
-        !prop.is_deterministic_literal(),
-        "resolve_literal: false means the property is not deterministic-literal stored",
+        title.interpretation_hint.as_deref(),
+        Some("Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'."),
+        "per-property interpretation hint should surface on ShapeProperty",
     );
 }
 
-/// The common case: literal language with the optimization enabled round-trips
-/// to a deterministic-literal property.
+/// Absence of a hint must round-trip to `None` (no spurious link, no empty
+/// string) — the extractor treats `None` as "no guidance for this field".
 #[test]
-fn round_trip_preserves_resolve_literal_true() {
+fn round_trip_absent_interpretation_hint_is_none() {
     let shacl_json = r#"{
-        "target_class": "ns://Recipe",
+        "target_class": "ns://Plain",
         "properties": [
-            {
-                "path": "ns://name",
-                "name": "name",
-                "datatype": "xsd://string",
-                "resolve_language": "literal",
-                "resolve_literal": true
-            }
+            { "path": "ns://name", "name": "name", "datatype": "xsd://string" }
         ]
     }"#;
-    let shape = round_trip("Recipe", shacl_json);
-    let prop = shape
+    let shape = round_trip("Plain", shacl_json);
+    assert!(
+        shape.interpretation_hint.is_none(),
+        "no class hint declared → ModelShape.interpretation_hint must be None",
+    );
+    let name = shape
         .properties
         .iter()
         .find(|p| p.name == "name")
         .expect("name property");
-    assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
-    assert_eq!(prop.resolve_literal, Some(true));
     assert!(
-        prop.is_deterministic_literal(),
-        "literal language + resolve_literal: true is deterministic-literal stored",
+        name.interpretation_hint.is_none(),
+        "no property hint declared → ShapeProperty.interpretation_hint must be None",
     );
 }
 
@@ -521,10 +522,11 @@ fn round_trip_preserves_custom_resolve_language() {
     );
 }
 
-/// An explicit `resolveLanguage: "literal"` with no `resolveLiteral` flag selects
-/// the signed-envelope path (NOT deterministic) — the Flux message case.
+/// An explicit `resolveLanguage: "literal"` selects the signed-envelope path
+/// (NOT deterministic) — the Flux message body case. Storage mode is now
+/// derived entirely from `resolveLanguage`.
 #[test]
-fn round_trip_explicit_literal_without_flag_is_envelope() {
+fn round_trip_explicit_literal_is_envelope() {
     let shacl_json = r#"{
         "target_class": "ns://Message",
         "properties": [
@@ -538,17 +540,16 @@ fn round_trip_explicit_literal_without_flag_is_envelope() {
         .find(|p| p.name == "body")
         .expect("body property");
     assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
-    assert_eq!(prop.resolve_literal, None);
     assert!(
         !prop.is_deterministic_literal(),
-        "explicit resolveLanguage:\"literal\" without a flag means the signed-envelope path",
+        "explicit resolveLanguage:\"literal\" means the signed-envelope path",
     );
 }
 
-/// A property with neither resolveLanguage nor resolveLiteral defaults to
-/// deterministic literal storage (the performance default).
+/// A property with no `resolveLanguage` defaults to deterministic typed-literal
+/// storage (the perf default — what a plain `@Property()` gets).
 #[test]
-fn round_trip_no_resolve_options_is_deterministic() {
+fn round_trip_no_resolve_language_is_deterministic() {
     let shacl_json = r#"{
         "target_class": "ns://Channel",
         "properties": [
@@ -562,10 +563,9 @@ fn round_trip_no_resolve_options_is_deterministic() {
         .find(|p| p.name == "name")
         .expect("name property");
     assert_eq!(prop.resolve_language, None);
-    assert_eq!(prop.resolve_literal, None);
     assert!(
         prop.is_deterministic_literal(),
-        "no resolve options → deterministic literal storage (perf default)",
+        "no resolveLanguage → deterministic literal storage (perf default)",
     );
 }
 
@@ -638,7 +638,7 @@ async fn e2e_shacl_shape_with_where_ops() {
         );
     }
 
-    let ts = "1700000000000";
+    let _ts = "1700000000000";
     let items = [
         "test://post-1",
         "test://post-2",
