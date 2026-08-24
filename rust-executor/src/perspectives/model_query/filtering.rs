@@ -163,6 +163,26 @@ pub(super) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool
 /// does case-insensitive substring matching on strings and element-in-array
 /// matching on arrays.
 pub(super) fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
+    // Relation quantifiers are answerable only against the store — they ask
+    // about linked *records*, not about a value already on this instance — so
+    // they are compiled to `FILTER [NOT] EXISTS` and never evaluated here.
+    //
+    // Reaching this point means the compiler declined to push one down (no
+    // resolver, an unknown target class, or a nested clause that would not
+    // compile in full) and the clause fell back to post-hydration filtering.
+    // Fail closed and say so: ignoring the condition would return rows that do
+    // not satisfy the query, which is the failure mode this whole path exists
+    // to avoid.
+    if ops.some.is_some() || ops.none.is_some() {
+        log::warn!(
+            "where: a relation quantifier (`some`/`none`) reached the post-hydration \
+             filter, which cannot evaluate it. Rejecting the row rather than ignoring \
+             the condition. This means the quantifier could not be compiled to SPARQL — \
+             usually an unknown target class on the relation."
+        );
+        return false;
+    }
+
     // NOT
     if let Some(ref not_val) = ops.not {
         match not_val {

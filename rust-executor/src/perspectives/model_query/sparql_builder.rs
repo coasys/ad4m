@@ -18,7 +18,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, SortKey,
+    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, ShapeResolver, SortKey,
     SparqlPagination, WhereCondition,
 };
 use super::utils::{
@@ -97,8 +97,9 @@ pub(super) fn build_instance_sparql(
     shape: &ModelShape,
     query: &ModelQueryInput,
     sparql_pagination: Option<&SparqlPagination>,
+    resolver: Option<&dyn ShapeResolver>,
 ) -> InstanceQueryPlan {
-    let (conformance, where_extra) = build_query_patterns(shape, query);
+    let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
 
     let needed: Vec<&str> = shape
         .properties
@@ -242,8 +243,12 @@ pub(super) fn build_instance_sparql(
 }
 
 /// Build a COUNT SPARQL query that returns the number of conforming instances.
-pub(super) fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) -> Option<String> {
-    let (conformance, where_extra) = build_query_patterns(shape, query);
+pub(super) fn build_count_sparql(
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    resolver: Option<&dyn ShapeResolver>,
+) -> Option<String> {
+    let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
 
     if conformance.trim().is_empty() && where_extra.trim().is_empty() {
         return None;
@@ -274,10 +279,14 @@ pub(super) fn build_count_sparql(shape: &ModelShape, query: &ModelQueryInput) ->
 ///
 /// When this returns `false`, post-hydration Rust-side filtering is required for
 /// the remaining conditions, and SPARQL-level pagination must not be pushed.
-pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) -> bool {
+pub(super) fn all_where_pushable(
+    query: &ModelQueryInput,
+    shape: &ModelShape,
+    resolver: Option<&dyn ShapeResolver>,
+) -> bool {
     match query.where_clause {
         None => true,
-        Some(ref wc) => compile_where_clause(wc, shape).complete,
+        Some(ref wc) => compile_where_clause(wc, shape, resolver).complete,
     }
 }
 
@@ -299,6 +308,7 @@ pub(super) fn all_where_pushable(query: &ModelQueryInput, shape: &ModelShape) ->
 pub(super) fn build_query_patterns(
     shape: &ModelShape,
     query: &ModelQueryInput,
+    resolver: Option<&dyn ShapeResolver>,
 ) -> (String, String) {
     let mut conformance_patterns = Vec::new();
 
@@ -434,7 +444,7 @@ pub(super) fn build_query_patterns(
     let where_patterns = query
         .where_clause
         .as_ref()
-        .map(|wc| compile_where_clause(wc, shape).patterns)
+        .map(|wc| compile_where_clause(wc, shape, resolver).patterns)
         .unwrap_or_default();
 
     let conformance = conformance_patterns.join("\n");
@@ -511,9 +521,10 @@ fn binds_source(patterns: &[String]) -> bool {
 pub(super) fn compile_where_clause(
     wc: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
+    resolver: Option<&dyn ShapeResolver>,
 ) -> CompiledWhere {
     let mut seq = 0usize;
-    compile_where_clause_seq(wc, shape, &mut seq)
+    compile_where_clause_seq(wc, shape, resolver, &mut seq)
 }
 
 /// The recursive body, threading a counter that makes every generated variable
@@ -531,6 +542,7 @@ pub(super) fn compile_where_clause(
 fn compile_where_clause_seq(
     wc: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
+    resolver: Option<&dyn ShapeResolver>,
     seq: &mut usize,
 ) -> CompiledWhere {
     let mut patterns = Vec::new();
@@ -541,7 +553,7 @@ fn compile_where_clause_seq(
             "AND" => match condition {
                 WhereCondition::SubClauses(branches) => {
                     for branch in branches {
-                        let compiled = compile_where_clause_seq(branch, shape, seq);
+                        let compiled = compile_where_clause_seq(branch, shape, resolver, seq);
                         patterns.extend(compiled.patterns);
                         complete &= compiled.complete;
                     }
@@ -553,7 +565,7 @@ fn compile_where_clause_seq(
                     let mut arms = Vec::with_capacity(branches.len());
                     let mut ok = true;
                     for branch in branches {
-                        let compiled = compile_where_clause_seq(branch, shape, seq);
+                        let compiled = compile_where_clause_seq(branch, shape, resolver, seq);
                         if !compiled.complete || !binds_source(&compiled.patterns) {
                             ok = false;
                             break;
@@ -570,7 +582,7 @@ fn compile_where_clause_seq(
             },
             "NOT" => match condition {
                 WhereCondition::SubClause(branch) => {
-                    let compiled = compile_where_clause_seq(branch, shape, seq);
+                    let compiled = compile_where_clause_seq(branch, shape, resolver, seq);
                     if compiled.complete && !compiled.patterns.is_empty() {
                         patterns.push(format!(
                             "    FILTER NOT EXISTS {{\n{}\n    }}",
@@ -582,10 +594,12 @@ fn compile_where_clause_seq(
                 }
                 _ => complete = false,
             },
-            _ => match compile_leaf_condition(prop_name.as_str(), condition, shape, seq) {
-                Some(p) => patterns.extend(p),
-                None => complete = false,
-            },
+            _ => {
+                match compile_leaf_condition(prop_name.as_str(), condition, shape, resolver, seq) {
+                    Some(p) => patterns.extend(p),
+                    None => complete = false,
+                }
+            }
         }
     }
 
@@ -603,6 +617,7 @@ fn compile_leaf_condition(
     prop_name: &str,
     condition: &WhereCondition,
     shape: &ModelShape,
+    resolver: Option<&dyn ShapeResolver>,
     seq: &mut usize,
 ) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
@@ -731,6 +746,33 @@ fn compile_leaf_condition(
                                 ));
                     }
                 }
+            }
+            WhereCondition::Ops(ops) if ops.some.is_some() || ops.none.is_some() => {
+                // A quantifier compiles to an EXISTS group and nothing else, so
+                // any operator sitting beside it would be dropped on the way
+                // out — and the post-hydration layer, which fails closed on a
+                // quantifier, would not catch it either. Decline instead.
+                if ops.not.is_some()
+                    || ops.contains.is_some()
+                    || ops.between.is_some()
+                    || ops.lt.is_some()
+                    || ops.lte.is_some()
+                    || ops.gt.is_some()
+                    || ops.gte.is_some()
+                {
+                    return None;
+                }
+                let (inner, negate) = match (&ops.some, &ops.none) {
+                    (Some(inner), None) => (inner, false),
+                    (None, Some(inner)) => (inner, true),
+                    // Both at once has no single sensible reading, and
+                    // guessing one would be worse than declining.
+                    _ => return None,
+                };
+                let quantified = compile_relation_quantifier(
+                    shape, prop, prop_name, inner, negate, resolver, leaf_id,
+                )?;
+                out.push(quantified);
             }
             _ => {}
         }
@@ -1015,7 +1057,7 @@ mod tests {
     }
 
     fn pagination_subquery(shape: &ModelShape, pg: &SparqlPagination) -> String {
-        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg)) {
+        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -1180,7 +1222,7 @@ mod where_compiler_tests {
             WhereCondition::String("anything".to_string()),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s);
+        let compiled = compile_where_clause(&clause, &s, None);
 
         assert!(compiled.patterns.is_empty(), "nothing can be emitted");
         assert!(
@@ -1194,7 +1236,7 @@ mod where_compiler_tests {
     fn test_unknown_property_is_not_pushable() {
         let s = test_shape();
         let clause = wc(vec![("nope", WhereCondition::String("x".to_string()))]);
-        assert!(!compile_where_clause(&clause, &s).complete);
+        assert!(!compile_where_clause(&clause, &s, None).complete);
     }
 
     #[test]
@@ -1207,7 +1249,7 @@ mod where_compiler_tests {
             ("nope", WhereCondition::String("x".to_string())),
         ]);
 
-        let compiled = compile_where_clause(&clause, &s);
+        let compiled = compile_where_clause(&clause, &s, None);
 
         assert!(!compiled.patterns.is_empty(), "the known key still pushes");
         assert!(!compiled.complete, "but the clause is not fully covered");
@@ -1226,7 +1268,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s);
+        let compiled = compile_where_clause(&clause, &s, None);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -1249,7 +1291,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s);
+        let compiled = compile_where_clause(&clause, &s, None);
 
         assert!(
             compiled.patterns.is_empty(),
@@ -1277,7 +1319,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s);
+        let compiled = compile_where_clause(&clause, &s, None);
 
         assert!(compiled.complete, "an id disjunction must push down");
         let sparql = compiled.patterns.join("\n");
@@ -1307,7 +1349,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s);
+        let compiled = compile_where_clause(&clause, &s, None);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -1325,7 +1367,7 @@ mod where_compiler_tests {
             )])),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s);
+        let compiled = compile_where_clause(&clause, &s, None);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -1347,7 +1389,7 @@ mod where_compiler_tests {
             )])),
         )]);
 
-        assert!(compile_where_clause(&clause, &s).complete);
+        assert!(compile_where_clause(&clause, &s, None).complete);
     }
 
     // ---- AND -------------------------------------------------------------
@@ -1365,7 +1407,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s);
+        let compiled = compile_where_clause(&clause, &s, None);
 
         assert!(!compiled.patterns.is_empty(), "the sound half still pushes");
         assert!(!compiled.complete);
@@ -1389,12 +1431,301 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s);
+        let compiled = compile_where_clause(&clause, &s, None);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
         assert!(sparql.contains("UNION"), "{sparql}");
         assert!(sparql.contains("we://body"), "{sparql}");
+    }
+}
+/// Rename every generated variable in `patterns` so they cannot collide with
+/// the scope they are about to be nested into.
+///
+/// `FILTER EXISTS` shares the enclosing variable scope, so an inner clause
+/// constraining the same property as the outer one would otherwise reuse the
+/// same helper variable and silently correlate the two — the inner condition
+/// would constrain the *outer* row rather than the linked one.
+///
+/// The order matters: helper variables all begin `?_`, and the target variable
+/// this rebases `?source` onto does too, so `?source` must be substituted second
+/// or it would be rewritten twice. Nesting is safe because each pass prefixes
+/// whatever the previous pass produced, so depth keeps the names distinct
+/// without threading a counter.
+fn rebase_into_subquery(patterns: &[String], namespace: &str, target_var: &str) -> Vec<String> {
+    let prefixed = format!("?_{namespace}");
+    patterns
+        .iter()
+        .map(|p| p.replace("?_", &prefixed).replace("?source", target_var))
+        .collect()
+}
+
+/// Compile `{ rel: { some | none: { … } } }` into `FILTER [NOT] EXISTS`.
+///
+/// The nested clause constrains the **linked** record, not this one, so it is
+/// compiled against the target class's shape and rebased onto the variable
+/// bound by the relation triple.
+///
+/// Returns `None` — declining to push down — when the nested clause cannot be
+/// compiled in full. A partial `EXISTS` would match rows the full clause
+/// rejects, and a partial `NOT EXISTS` would reject rows it should keep;
+/// neither is a sound narrowing, so this is all-or-nothing like `OR`.
+///
+/// An **empty** nested clause is the "has any" / "has none" case and needs no
+/// target shape, so it compiles even without a resolver.
+fn compile_relation_quantifier(
+    shape: &ModelShape,
+    prop: &super::types::ShapeProperty,
+    prop_name: &str,
+    inner: &BTreeMap<String, WhereCondition>,
+    negate: bool,
+    resolver: Option<&dyn ShapeResolver>,
+    leaf_id: usize,
+) -> Option<String> {
+    let safe_pred = validate_iri(&prop.predicate).ok()?;
+    // The leaf id keeps two quantifiers on the same relation apart. Each
+    // `FILTER EXISTS` is already its own group, so this is belt-and-braces — but
+    // it costs nothing and removes a case anyone would have to reason about.
+    let namespace = format!(
+        "q{leaf_id}{}",
+        prop_name.replace(|c: char| !c.is_alphanumeric(), "_")
+    );
+    let target_var = format!("?_{namespace}t");
+
+    // A reverse relation is `target → source`, so the linked record is the
+    // subject of the triple rather than its object.
+    let link = if prop.direction.as_deref() == Some("reverse") {
+        format!("        {target_var} <{safe_pred}> ?source .")
+    } else {
+        format!("        ?source <{safe_pred}> {target_var} .")
+    };
+
+    let mut body = vec![link];
+
+    if !inner.is_empty() {
+        // The nested clause names properties of the *target* class, so it can
+        // only be compiled with that class's shape in hand.
+        let target_class = shape
+            .include_relations
+            .iter()
+            .find(|r| r.name == prop_name)
+            .map(|r| r.target_class_name.as_str())
+            .filter(|n| !n.is_empty())?;
+        let target_shape = resolver?.get_shape(target_class).ok()?;
+
+        let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver);
+        if !compiled.complete || compiled.patterns.is_empty() {
+            return None;
+        }
+        body.extend(rebase_into_subquery(
+            &compiled.patterns,
+            &namespace,
+            &target_var,
+        ));
+    }
+
+    let keyword = if negate {
+        "FILTER NOT EXISTS"
+    } else {
+        "FILTER EXISTS"
+    };
+    Some(format!("    {keyword} {{\n{}\n    }}", body.join("\n")))
+}
+
+#[cfg(test)]
+mod relation_quantifier_tests {
+    use super::*;
+    use crate::perspectives::model_query::test_helpers::{
+        prop, relation, shape, StaticShapeResolver,
+    };
+    use crate::perspectives::model_query::types::{ShapeRelation, WhereOps};
+
+    fn wc(pairs: Vec<(&str, WhereCondition)>) -> BTreeMap<String, WhereCondition> {
+        pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+
+    fn ops_with(
+        some: Option<Vec<(&str, WhereCondition)>>,
+        none: Option<Vec<(&str, WhereCondition)>>,
+    ) -> WhereCondition {
+        WhereCondition::Ops(WhereOps {
+            some: some.map(wc),
+            none: none.map(wc),
+            ..Default::default()
+        })
+    }
+
+    /// A Post whose `comments` relation names Comment as its target class.
+    fn post_shape() -> ModelShape {
+        let mut s = shape(
+            "Post",
+            vec![
+                prop("title", "we://title"),
+                relation("comments", "we://comment"),
+            ],
+        );
+        s.include_relations.push(ShapeRelation {
+            name: "comments".to_string(),
+            predicate: "we://comment".to_string(),
+            direction: "forward".to_string(),
+            kind: "hasMany".to_string(),
+            max_count: None,
+            target_class_name: "Comment".to_string(),
+            target_class_uri: String::new(),
+        });
+        s
+    }
+
+    fn comment_shape() -> ModelShape {
+        shape("Comment", vec![prop("body", "we://body")])
+    }
+
+    fn resolver_with_comment() -> StaticShapeResolver {
+        let r = StaticShapeResolver::new();
+        r.register("Comment", comment_shape());
+        r
+    }
+
+    #[test]
+    fn test_some_with_empty_clause_is_existence() {
+        // "has at least one comment" — no target shape needed, so it compiles
+        // even with no resolver available.
+        let s = post_shape();
+        let clause = wc(vec![("comments", ops_with(Some(vec![]), None))]);
+
+        let compiled = compile_where_clause(&clause, &s, None);
+
+        assert!(compiled.complete);
+        let sparql = compiled.patterns.join("\n");
+        assert!(sparql.contains("FILTER EXISTS"), "{sparql}");
+        assert!(sparql.contains("?source <we://comment>"), "{sparql}");
+    }
+
+    #[test]
+    fn test_none_with_empty_clause_is_absence() {
+        let s = post_shape();
+        let clause = wc(vec![("comments", ops_with(None, Some(vec![])))]);
+
+        let compiled = compile_where_clause(&clause, &s, None);
+
+        assert!(compiled.complete);
+        assert!(compiled.patterns.join("\n").contains("FILTER NOT EXISTS"));
+    }
+
+    #[test]
+    fn test_some_with_inner_clause_constrains_the_linked_record() {
+        let s = post_shape();
+        let r = resolver_with_comment();
+        let clause = wc(vec![(
+            "comments",
+            ops_with(
+                Some(vec![("body", WhereCondition::String("spam".to_string()))]),
+                None,
+            ),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, Some(&r));
+
+        assert!(compiled.complete, "the target shape resolves, so it pushes");
+        let sparql = compiled.patterns.join("\n");
+        assert!(sparql.contains("FILTER EXISTS"), "{sparql}");
+        // The nested condition must be rebased onto the linked record's
+        // variable, never left on ?source — otherwise it would constrain the
+        // Post rather than the Comment.
+        assert!(sparql.contains("we://body"), "{sparql}");
+        let body_line = sparql
+            .lines()
+            .find(|l| l.contains("we://body"))
+            .expect("a pattern for the nested condition");
+        assert!(
+            !body_line.contains("?source"),
+            "nested condition must not be left on the outer subject: {body_line}"
+        );
+    }
+
+    #[test]
+    fn an_operator_beside_a_quantifier_declines() {
+        // The EXISTS group carries the quantifier and nothing else, so a `not`
+        // riding along would vanish. `matches_ops` fails closed on the
+        // quantifier rather than applying the `not`, so nothing downstream
+        // would apply it either.
+        let s = post_shape();
+        let r = resolver_with_comment();
+        let clause = wc(vec![(
+            "comments",
+            WhereCondition::Ops(WhereOps {
+                some: Some(BTreeMap::new()),
+                not: Some(Value::String("we://c1".to_string())),
+                ..Default::default()
+            }),
+        )]);
+        assert!(!compile_where_clause(&clause, &s, Some(&r)).complete);
+    }
+
+    #[test]
+    fn test_inner_clause_without_a_resolver_declines() {
+        // Nothing can name Comment's properties without its shape, and a
+        // partial EXISTS would match rows the full clause rejects.
+        let s = post_shape();
+        let clause = wc(vec![(
+            "comments",
+            ops_with(
+                Some(vec![("body", WhereCondition::String("spam".to_string()))]),
+                None,
+            ),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, None);
+
+        assert!(compiled.patterns.is_empty());
+        assert!(!compiled.complete, "must fall back rather than half-push");
+    }
+
+    #[test]
+    fn test_inner_clause_that_cannot_compile_declines() {
+        let s = post_shape();
+        let r = resolver_with_comment();
+        let clause = wc(vec![(
+            "comments",
+            ops_with(
+                Some(vec![(
+                    "unknownProp",
+                    WhereCondition::String("x".to_string()),
+                )]),
+                None,
+            ),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, Some(&r));
+        assert!(!compiled.complete);
+        assert!(compiled.patterns.is_empty());
+    }
+
+    #[test]
+    fn test_reverse_relation_quantifier_reverses_the_triple() {
+        // For a @BelongsTo relation the linked record points *at* this one, so
+        // the existence pattern must have the target as subject.
+        let mut s = post_shape();
+        let mut rel = relation("mentions", "we://mention");
+        rel.direction = Some("reverse".to_string());
+        s.properties.push(rel);
+
+        let clause = wc(vec![("mentions", ops_with(Some(vec![]), None))]);
+        let compiled = compile_where_clause(&clause, &s, None);
+
+        assert!(compiled.complete);
+        let sparql = compiled.patterns.join("\n");
+        assert!(sparql.contains("<we://mention> ?source ."), "{sparql}");
+    }
+
+    #[test]
+    fn test_some_and_none_together_is_refused() {
+        // No single sensible reading; guessing one would be worse than
+        // declining.
+        let s = post_shape();
+        let clause = wc(vec![("comments", ops_with(Some(vec![]), Some(vec![])))]);
+
+        assert!(!compile_where_clause(&clause, &s, None).complete);
     }
 }
 
@@ -1423,7 +1754,7 @@ mod ops_completeness_tests {
                 ..Default::default()
             }),
         )]);
-        assert!(compile_where_clause(&c, &s()).complete);
+        assert!(compile_where_clause(&c, &s(), None).complete);
     }
 
     #[test]
@@ -1438,7 +1769,7 @@ mod ops_completeness_tests {
                 ..Default::default()
             }),
         )]);
-        let compiled = compile_where_clause(&c, &s());
+        let compiled = compile_where_clause(&c, &s(), None);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -1452,7 +1783,7 @@ mod ops_completeness_tests {
                 ..Default::default()
             }),
         )]);
-        assert!(!compile_where_clause(&c, &s()).complete);
+        assert!(!compile_where_clause(&c, &s(), None).complete);
     }
 
     #[test]
@@ -1468,7 +1799,7 @@ mod ops_completeness_tests {
             }),
         )]);
         assert!(
-            !compile_where_clause(&c, &s()).complete,
+            !compile_where_clause(&c, &s(), None).complete,
             "a dropped `not` must not be masked by a rendered `gt`",
         );
     }
@@ -1479,7 +1810,7 @@ mod ops_completeness_tests {
         // to "the property exists", which is not what the Rust filter does for the
         // same clause — it matches everything.
         let c = wc(vec![("title", ops(WhereOps::default()))]);
-        let compiled = compile_where_clause(&c, &s());
+        let compiled = compile_where_clause(&c, &s(), None);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }

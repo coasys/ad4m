@@ -2683,7 +2683,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -2717,7 +2717,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -2751,7 +2751,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -2782,7 +2782,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -2798,7 +2798,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -2818,7 +2818,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -5661,4 +5661,165 @@ async fn test_not_on_a_property_also_constrained_outside() {
         .map(|i| i["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids, vec!["ns://p/2"], "the one without \"beta\"");
+}
+
+/// `some` / `none` filter on the existence of *linked records*, in SPARQL.
+///
+/// This is the question `include`'s own `where` cannot answer: that one filters
+/// the children it returns, never the parents it returns them for. "Posts with
+/// no comments" was therefore not expressible at all — the caller had to fetch
+/// every post with its comments and count in JS.
+#[tokio::test]
+async fn test_relation_quantifiers_filter_by_linked_records() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // post/1 has a spam comment, post/2 has an ordinary one, post/3 has none.
+    for (base, ts) in [
+        ("we://post/1", "1700000000000"),
+        ("we://post/2", "1700000000001"),
+        ("we://post/3", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://post", ts))
+            .unwrap();
+    }
+    for (comment, body, ts) in [
+        ("we://comment/1", "spam", "1700000000010"),
+        ("we://comment/2", "hello", "1700000000011"),
+    ] {
+        store
+            .add_link(&make_link(comment, "we://cflag", "we://comment", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                comment,
+                "we://body",
+                &format!("literal:string:{}", literal_percent_encode(body)),
+                ts,
+            ))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://post/1",
+            "we://comment",
+            "we://comment/1",
+            "1700000000020",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://post/2",
+            "we://comment",
+            "we://comment/2",
+            "1700000000021",
+        ))
+        .unwrap();
+
+    let post_shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            }
+        },
+        "relations": {
+            "comments": {
+                "predicate": "we://comment",
+                "kind": "hasMany",
+                "targetClassName": "Comment"
+            }
+        }
+    }"#;
+    let comment_shape_json = r#"{
+        "className": "Comment",
+        "properties": {
+            "cflag": {
+                "predicate": "we://cflag",
+                "required": true,
+                "flag": true,
+                "initial": "we://comment"
+            },
+            "body": { "predicate": "we://body", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let (resolver, post_shape) = StaticShapeResolver::from_json("Post", post_shape_json).unwrap();
+    resolver.register(
+        "Comment",
+        parse_shape_from_json(comment_shape_json, "Comment").unwrap(),
+    );
+
+    let quantifier =
+        |some: Option<BTreeMap<String, super::types::WhereCondition>>,
+         none: Option<BTreeMap<String, super::types::WhereCondition>>| {
+            ModelQueryInput {
+                where_clause: Some(BTreeMap::from([(
+                    "comments".to_string(),
+                    super::types::WhereCondition::Ops(super::types::WhereOps {
+                        some,
+                        none,
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }
+        };
+
+    let ids = |result: &super::types::ModelQueryResult| -> Vec<String> {
+        let mut v: Vec<String> = result
+            .instances
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+
+    // "has no comments at all"
+    let none_any = super::query::execute_model_query(
+        &store,
+        post_shape.as_ref(),
+        &quantifier(None, Some(BTreeMap::new())),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&none_any), vec!["we://post/3".to_string()]);
+
+    // "has at least one comment"
+    let some_any = super::query::execute_model_query(
+        &store,
+        post_shape.as_ref(),
+        &quantifier(Some(BTreeMap::new()), None),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ids(&some_any),
+        vec!["we://post/1".to_string(), "we://post/2".to_string()]
+    );
+
+    // "has a comment whose body is spam" — the nested clause names a property
+    // of Comment, so it only resolves because the target class is known.
+    let some_spam = super::query::execute_model_query(
+        &store,
+        post_shape.as_ref(),
+        &quantifier(
+            Some(BTreeMap::from([(
+                "body".to_string(),
+                super::types::WhereCondition::String("spam".to_string()),
+            )])),
+            None,
+        ),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&some_spam), vec!["we://post/1".to_string()]);
 }
