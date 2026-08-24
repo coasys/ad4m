@@ -100,7 +100,20 @@ export class ApiClient {
         })
 
         const url = this._getWsUrl()
-        const WsImpl = this._webSocketImpl ?? WebSocket
+        // Fallback order: injected impl → globalThis.WebSocket (browsers, Node ≥ 22) → require('ws') (Node ≤ 20).
+        // globalThis lookup avoids a ReferenceError on Node 18 where `WebSocket` is not a global.
+        const globalWs = (globalThis as any).WebSocket as (new (url: string) => WebSocket) | undefined
+        let WsImpl: new (url: string) => WebSocket
+        if (this._webSocketImpl) {
+            WsImpl = this._webSocketImpl
+        } else if (globalWs) {
+            WsImpl = globalWs
+        } else {
+            // Lazy CommonJS require so bundlers targeting browsers don't try to bundle `ws`.
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const req = eval('require') as NodeRequire
+            WsImpl = req('ws') as new (url: string) => WebSocket
+        }
         const ws = new WsImpl(url)
         this._ws = ws
 
