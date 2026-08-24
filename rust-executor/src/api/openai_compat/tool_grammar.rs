@@ -188,37 +188,39 @@ fn single_tool_call_parser(tool: &ToolDef) -> ArcParser<()> {
 
 /// Compile a JSON-Schema object node into an object parser.
 ///
-/// Honours the schema's `required` array when present: only required
-/// properties are emitted, in schema order, so a constrained call never
-/// forces the model to fabricate values for optional properties. When
-/// `required` is absent, every declared property is emitted (the historical
-/// behavior).
+/// Emits ALL declared properties in schema order, whether required or
+/// optional. Rationale (Lal's PR #911 review, tool_grammar.rs:198): the
+/// earlier "only emit `required[]` members" filter dropped optional
+/// properties from the grammar entirely, so a schema like
+/// `{required: ["title"], properties: {title, hint, base, status}}`
+/// produced a parser that ONLY accepted `{"title": "..."}` — the LLM
+/// couldn't include `hint`, `base`, or `status` even when it had good
+/// data for them, because the grammar rejected those tokens partway
+/// through decoding. For tools where every property is optional
+/// (e.g. `query_links` with `source`/`target`/`predicate`), the parser
+/// collapsed to `{}` and the LLM couldn't filter anything.
 ///
-/// Objects with no emittable properties compile to the empty object `{}`.
+/// Trade-off: the model is now forced to emit values for optional
+/// properties too. In practice small models handle this by producing
+/// empty strings or short defaults, which is a far smaller cost than
+/// losing the ability to express optional args at all.
+///
+/// A follow-up could support true "optional slots" (each optional
+/// property either present or absent) via an `opt()` combinator, but
+/// that's a real grammar-authoring exercise; the always-emit approach
+/// matches pre-2026-08-24 behaviour and unblocks the harness path.
+///
+/// Objects with no declared properties compile to the empty object `{}`.
 fn object_parser(schema: &Value) -> ArcParser<()> {
-    let required: Option<Vec<&str>> = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect());
     match schema.get("properties").and_then(Value::as_object) {
         Some(props) if !props.is_empty() => {
-            let selected: Vec<(&String, &Value)> = props
-                .iter()
-                .filter(|(key, _)| match &required {
-                    Some(req) => req.iter().any(|r| *r == key.as_str()),
-                    None => true,
-                })
-                .collect();
-            if selected.is_empty() {
-                return lit("{}");
-            }
-            let mut parts = selected.into_iter().map(|(key, prop)| {
+            let mut parts = props.iter().map(|(key, prop)| {
                 seq2(
                     lit(format!("{}: ", json_string_literal(key))),
                     value_parser(prop),
                 )
             });
-            let mut body = parts.next().expect("selected non-empty");
+            let mut body = parts.next().expect("props non-empty");
             for part in parts {
                 body = seq2(seq2(body, lit(", ")), part);
             }
@@ -600,10 +602,17 @@ mod tests {
     }
 
     #[test]
-    fn object_parser_honours_required_array() {
-        // Only `title` is required; `hint` and `base` are optional.
-        // Under constrained decoding, the grammar must accept a call with
-        // just `title` and reject one that fabricates the optional fields.
+    fn object_parser_emits_all_properties_ignoring_required_array() {
+        // Regression: earlier the parser filtered to `required[]` and dropped
+        // optional properties entirely — meaning a schema like this produced
+        // a grammar that ONLY accepted `{"title": ...}` and rejected any
+        // attempt to include `hint` or `base`. That defeated the purpose of
+        // declaring optional properties (the LLM couldn't emit them even when
+        // it had good data). Fixed 2026-08-24: emit all declared properties
+        // (Lal's PR #911 review, tool_grammar.rs:198). Trade-off: the LLM
+        // must produce a value for each optional field too; small models
+        // handle this with empty strings or short defaults, which is a far
+        // smaller cost than being unable to express optional args at all.
         let p = obj(json!({
             "type": "object",
             "properties": {
@@ -613,17 +622,18 @@ mod tests {
             },
             "required": ["title"]
         }));
-        assert!(accepts(&p, r#"{"title": "buy milk"}"#));
-        // optional fields are not emittable ⇒ rejected
-        assert!(!accepts(&p, r#"{"title": "x", "hint": "y"}"#));
-        assert!(!accepts(&p, r#"{"title": "x", "hint": "y", "base": "z"}"#));
-        // missing required field ⇒ rejected
+        // Full object with all properties: accepted (was rejected before).
+        assert!(accepts(&p, r#"{"title": "x", "hint": "y", "base": "z"}"#));
+        // Missing an "optional" property: rejected (they're all emitted now).
+        assert!(!accepts(&p, r#"{"title": "buy milk"}"#));
+        // Missing required: still rejected.
         assert!(!accepts(&p, "{}"));
     }
 
     #[test]
     fn object_parser_no_required_emits_all_properties() {
-        // Historical behavior preserved when `required` is absent.
+        // Same shape as above but without `required[]` at all — the parser
+        // must behave identically because `required` is ignored.
         let p = obj(json!({
             "type": "object",
             "properties": {
@@ -636,16 +646,17 @@ mod tests {
     }
 
     #[test]
-    fn object_parser_empty_required_compiles_to_empty_object() {
-        // If `required` is present but empty, no property is emittable,
-        // so the schema collapses to `{}`.
+    fn object_parser_empty_required_still_emits_all_properties() {
+        // `required: []` used to collapse the grammar to `{}`; that was part
+        // of the same "drop optionals" bug. Now `required` is ignored, so a
+        // present-but-empty `required[]` behaves the same as an absent one.
         let p = obj(json!({
             "type": "object",
             "properties": { "x": { "type": "string" } },
             "required": []
         }));
-        assert!(accepts(&p, "{}"));
-        assert!(!accepts(&p, r#"{"x": "y"}"#));
+        assert!(accepts(&p, r#"{"x": "y"}"#));
+        assert!(!accepts(&p, "{}"));
     }
 
     #[test]
