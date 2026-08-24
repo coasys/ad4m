@@ -187,8 +187,8 @@ export interface RunInterpretationObserveOptions {
    * Also emit `llmRequestSent` / `llmResponseReceived` with the raw prompt
    * and response. Default `false`. These never persist on a one-shot pass —
    * there is no `AutoProcessorConfig` to carry a `persistDebug` opt-in, and
-   * writing tens of KB of prompt into the shared graph on every button press
-   * is not a default worth having.
+   * writing tens of KB of prompt into the shared graph on every call is not a
+   * default worth having.
    */
   emitDebugEvents?: boolean;
 }

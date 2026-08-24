@@ -328,8 +328,9 @@ pub async fn run_interpretation(
 /// call site spelling out eleven arguments — nine of which are the defaults
 /// [`run_interpretation`] already picks — so the handler either duplicated
 /// those defaults (and drifted from them) or the one-shot path stayed silent.
-/// It stayed silent, which is why pressing Extract produced no observable
-/// progress at all while a standing watch produced a full step stream.
+/// It stayed silent — so a caller blocked on `runInterpretation` observed no
+/// progress at all, while the same work under a standing watch produced a full
+/// step stream.
 pub async fn run_interpretation_observed(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -352,7 +353,7 @@ pub async fn run_interpretation_observed(
         // Never persists. A one-shot pass has no `AutoProcessorConfig` to
         // carry a `persist_debug` opt-in, and defaulting it on would write
         // tens of KB of prompt into the shared graph — syncing to every peer,
-        // permanently — every time somebody pressed a button.
+        // permanently — on every call.
         false,
         emit_ctx,
     )

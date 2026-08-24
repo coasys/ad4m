@@ -1114,11 +1114,14 @@ async fn run_interpretation_handler(
     /*
        Live observability for a one-shot pass (#903 follow-up).
 
-       A watch pass is fully observable and a button press was not, which is backwards: the press
-       is the one a person is sitting and waiting on. `observation_id` is the caller's own row id
-       (see `RunInterpretationRequest`), used as both `processor_id` and `batch_key` so a consumer
-       merging the two event streams handles a one-shot pass with the code it already has for a
-       watch pass.
+       A watch pass is fully observable; this path was not. The asymmetry is worth closing because
+       `runInterpretation` is synchronous for the caller — it blocks for the whole pass, which is
+       seconds to minutes on a local model — so it is the path where progress reporting is most
+       useful and the only one that had none.
+
+       `observation_id` is the caller's own identifier (see `RunInterpretationRequest`), used as
+       both `processor_id` and `batch_key` so a consumer merging the two event streams handles a
+       one-shot pass with the code it already has for a watch pass.
 
        Absent = every emit below is skipped and this handler behaves exactly as it did.
     */
