@@ -30,9 +30,35 @@
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::types::{Link, LinkStatus};
 
 use super::scalar_string;
 use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
+
+/// Instances already reported as unloadable, so each is complained about once.
+///
+/// The watch loop polls `load_processors` several times a second on every perspective, and a
+/// rejected instance is rejected identically every time — so an unthrottled warning emits the same
+/// line thousands of times a minute, per instance. That is not merely untidy: it buries the log a
+/// person is reading to find out *why*, which is the exact situation the warning exists to serve.
+///
+/// Keyed by instance URI and never cleared. A processor whose config is repaired starts loading and
+/// stops reaching this path at all; one that is deleted never returns. The set is therefore bounded
+/// by the number of distinct broken instances, which is small and finite.
+static REPORTED_BAD_INSTANCES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+/// Whether this is the first time this instance has failed to load.
+fn first_report_for(instance_id: &str) -> bool {
+    REPORTED_BAD_INSTANCES
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(instance_id.to_string()))
+        // A poisoned mutex means another thread panicked mid-report. Log rather than swallow: a
+        // repeated line is a smaller problem than a silent one.
+        .unwrap_or(true)
+}
 
 /// Local subject-class name of a processor config.
 pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
@@ -219,12 +245,14 @@ pub async fn write_processor(
     emit_debug_events_write: Option<bool>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    let Some((first_class, more_classes)) = cfg.interpretation_classes.split_first() else {
+    // Emptiness is still a hard error — a processor with no classes materialises nothing — but the
+    // members themselves are written as links below rather than through the values map.
+    if cfg.interpretation_classes.is_empty() {
         anyhow::bail!(
             "write_processor: `{}` has no interpretation_classes",
             cfg.processor_id
         );
-    };
+    }
     ensure_auto_processor_class(perspective, context).await?;
 
     let node = processor_node(&cfg.processor_id);
@@ -236,7 +264,6 @@ pub async fn write_processor(
     let mut values = serde_json::json!({
         "processorId": cfg.processor_id,
         "sourceScopeQuery": cfg.source_scope_query,
-        "interpretationClasses": first_class,
         "debounceMs": cfg.debounce_ms.to_string(),
         "batchMin": cfg.batch_min.to_string(),
         "batchMax": cfg.batch_max.to_string(),
@@ -303,22 +330,41 @@ pub async fn write_processor(
             )
             .await
             .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
-        // `create_subject` applies one value per property, so the remaining
-        // members of the `interpretation_class` collection go through the same
-        // `addLink` setter one at a time — still on the same batch so they
-        // commit atomically with the base instance.
-        for class in more_classes {
+        /*
+           The classes are written as links, not through the values map.
+
+           `create_subject` and `update_subject` resolve a property by looking up its
+           `ad4m://setter` actions, and a *collection* has none — it carries `ad4m://adder`
+           instead. So every value handed to them for `interpretationClasses` was silently
+           discarded, and the instance came back without the one property `load_processors`
+           requires first. Every scalar landed, so the write reported success and the failure
+           surfaced only as the reader calling the instance malformed, once per watch tick,
+           forever.
+
+           Adding the links directly is what the collection's own `addLink` action would do,
+           and it needs no shape lookup to get there. Same batch as the instance, so the classes
+           and the config it belongs to still commit atomically — a half-written processor is
+           precisely the state that produced this bug.
+
+           `Shared`, matching every other link this class writes: the processor set is neighbourhood
+           state, and a local-only class list would make one peer's view of what to extract differ
+           from everyone else's.
+        */
+        for class in cfg.interpretation_classes.iter() {
             perspective
-                .update_subject(
-                    class_option(),
-                    node.clone(),
-                    serde_json::json!({ "interpretationClasses": class }),
+                .add_link(
+                    Link {
+                        source: node.clone(),
+                        predicate: Some("ad4m://interpretation_class".to_string()),
+                        target: format!("literal:string:{}", class),
+                    },
+                    LinkStatus::Shared,
                     Some(batch_id.clone()),
                     context,
                 )
                 .await
                 .map_err(|e| {
-                    anyhow::anyhow!("write_processor: update_subject(class) failed: {e:#}")
+                    anyhow::anyhow!("write_processor: add_link(interpretation_class) failed: {e:#}")
                 })?;
         }
         Ok(())
@@ -395,11 +441,37 @@ pub async fn load_processors(
     for instance in result["instances"].as_array().into_iter().flatten() {
         match config_from_instance(instance) {
             Some(cfg) => out.push(cfg),
-            None => log::warn!(
-                "load_processors: AutoProcessor instance `{}` has missing / unparseable \
-                 fields; skipping",
-                instance["id"].as_str().unwrap_or("<no id>")
-            ),
+            /*
+               The instance itself, not just the fact that it failed.
+
+               "has missing / unparseable fields" names neither the field nor its value, and this
+               fires once per watch tick forever — so the symptom is an endless stream of a message
+               that cannot be acted on. Diagnosing one meant reading three files and guessing, and
+               the guesses were wrong twice.
+
+               Every branch that returns `None` from `config_from_instance` is a statement about one
+               property's value, so printing the whole instance answers the question outright: which
+               field is absent, and how the ones that are present are actually encoded. That second
+               half matters more than it looks — a scalar that arrives in an unexpected encoding
+               reads as "missing" here, and nothing else in the message would distinguish the two.
+
+               At `warn` alongside the existing line rather than `debug`, because a processor that
+               silently stops running is exactly the situation where nobody has debug logging on
+               yet, and the instance is a few hundred bytes once per skip.
+            */
+            None => {
+                let id = instance["id"].as_str().unwrap_or("<no id>");
+                if first_report_for(id) {
+                    log::warn!(
+                        "load_processors: AutoProcessor instance `{}` has missing / unparseable \
+                         fields; skipping (further occurrences suppressed). Instance as read: {}",
+                        id,
+                        instance
+                    );
+                } else {
+                    log::debug!("load_processors: still skipping `{}`", id);
+                }
+            }
         }
     }
     out.sort_by(|a, b| a.processor_id.cmp(&b.processor_id));

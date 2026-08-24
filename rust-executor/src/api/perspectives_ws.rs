@@ -1111,6 +1111,60 @@ async fn run_interpretation_handler(
         std::collections::HashSet::new()
     };
 
+    /*
+       Live observability for a one-shot pass (#903 follow-up).
+
+       A watch pass is fully observable; this path was not. The asymmetry is worth closing because
+       `runInterpretation` is synchronous for the caller — it blocks for the whole pass, which is
+       seconds to minutes on a local model — so it is the path where progress reporting is most
+       useful and the only one that had none.
+
+       `observation_id` is the caller's own identifier (see `RunInterpretationRequest`), used as
+       both `processor_id` and `batch_key` so a consumer merging the two event streams handles a
+       one-shot pass with the code it already has for a watch pass.
+
+       Absent = every emit below is skipped and this handler behaves exactly as it did.
+    */
+    let observation = body.observation_id.clone();
+    let observer_did = match observation.as_ref() {
+        // Best-effort: telemetry must never be the reason a pass refuses to run, so an
+        // unresolvable DID downgrades to no observation rather than to an error.
+        Some(_) => crate::agent::did_for_context(&agent_context).ok(),
+        None => None,
+    };
+    let observe = observation.as_ref().zip(observer_did.as_ref());
+    let emit_ctx = observe
+        .filter(|_| body.emit_debug_events.unwrap_or(false))
+        .map(
+            |(id, did)| crate::perspectives::auto_processor::events::InterpretationEmitContext {
+                perspective_uuid: uuid.clone(),
+                processor_id: id.clone(),
+                agent_did: did.clone(),
+                // No source item ids: the caller supplied the transcript directly rather than the
+                // watcher gathering it, so there is nothing to list. `batch_key` carries the identity
+                // instead — which is why it is a separate field rather than derived from these.
+                item_ids: Vec::new(),
+                batch_key: id.clone(),
+            },
+        );
+
+    if let Some((id, did)) = observe {
+        emit_one_shot_step(
+            &uuid,
+            id,
+            did,
+            crate::perspectives::auto_processor::events::AutoProcessorStep::RunningInterpretation,
+        )
+        .await;
+        emit_one_shot_phase(
+            &uuid,
+            id,
+            did,
+            crate::perspectives::auto_processor::events::NeighbourhoodPhase::Claimed,
+        )
+        .await;
+    }
+
     // Bound the LLM call: a stalled provider must not pin a WS request slot
     // indefinitely. Matches the pattern used by `query_sparql` /
     // `model_query_handler` / `evaluate_getters_handler`, but with a longer
@@ -1118,7 +1172,7 @@ async fn run_interpretation_handler(
     // `RUN_INTERPRETATION_TIMEOUT_SECS`).
     let bases = match tokio::time::timeout(
         Duration::from_secs(RUN_INTERPRETATION_TIMEOUT_SECS),
-        crate::perspectives::interpretation::run_interpretation(
+        crate::perspectives::interpretation::run_interpretation_observed(
             &mut perspective,
             &shapes,
             &transcript,
@@ -1130,17 +1184,36 @@ async fn run_interpretation_handler(
             // `None` keeps the whole-perspective dedup set — the
             // pre-scope default that #883 originally added the plumbing for.
             body.existing_scope.as_ref(),
+            emit_ctx.as_ref(),
         ),
     )
     .await
     {
         Ok(Ok(bases)) => bases,
-        Ok(Err(e)) => return Err(WsRpcError::internal(e.to_string())),
+        Ok(Err(e)) => {
+            // Both failure arms close the row before returning. A consumer that opened one on
+            // `Claimed` and never heard again would show a pass running forever — and the two
+            // cases a person most wants to see reported (the model errored, the model hung) are
+            // exactly the two that would hang the UI instead.
+            if let Some((id, did)) = observe {
+                emit_one_shot_abandoned(&uuid, id, did, &e.to_string()).await;
+            }
+            return Err(WsRpcError::internal(e.to_string()));
+        }
         Err(_) => {
             log::warn!(
                 "run_interpretation timed out after {}s",
                 RUN_INTERPRETATION_TIMEOUT_SECS
             );
+            if let Some((id, did)) = observe {
+                emit_one_shot_abandoned(
+                    &uuid,
+                    id,
+                    did,
+                    &format!("timed out after {RUN_INTERPRETATION_TIMEOUT_SECS}s"),
+                )
+                .await;
+            }
             return Err(WsRpcError {
                 code: 408,
                 message: format!(
@@ -1182,7 +1255,103 @@ async fn run_interpretation_handler(
         }
     }
 
+    // Emitted after the mint-scope links are written, not before: `Processed` carries the bases,
+    // and a consumer that reads it as "these records exist and are attached" would be reading it
+    // half a write early if it fired the moment interpretation returned.
+    if let Some((id, did)) = observe {
+        emit_one_shot_bases(&uuid, id, did, &bases).await;
+        emit_one_shot_phase(
+            &uuid,
+            id,
+            did,
+            crate::perspectives::auto_processor::events::NeighbourhoodPhase::Finished,
+        )
+        .await;
+    }
+
     Ok(serde_json::to_value(bases)?)
+}
+
+/*
+   One-shot telemetry helpers.
+
+   Separate functions rather than the `signal!` macro the watcher uses, because the two differ in
+   what they can assume: the watcher has a `cfg`, a claim and a gathered batch in scope, and its
+   macro reads all three. Here there is one caller-supplied id standing in for all of it.
+
+   `processor_id` and `batch_key` are deliberately the same value. The pair means "which standing
+   processor" and "which batch of its work" — a distinction a one-shot pass does not have, and
+   collapsing them is more honest than minting a second id that would always be 1:1 with the first.
+*/
+
+/// A lifecycle step with no payload beyond identity.
+async fn emit_one_shot_step(
+    uuid: &str,
+    observation_id: &str,
+    did: &str,
+    step: crate::perspectives::auto_processor::events::AutoProcessorStep,
+) {
+    use crate::perspectives::auto_processor::events::{emit, AutoProcessorEvent};
+    emit(
+        AutoProcessorEvent::new(uuid, observation_id, step)
+            .with_agent_did(did)
+            .with_batch_key(observation_id),
+    )
+    .await;
+}
+
+/// `Processed`, carrying what the pass wrote.
+async fn emit_one_shot_bases(uuid: &str, observation_id: &str, did: &str, bases: &[String]) {
+    use crate::perspectives::auto_processor::events::{
+        emit, AutoProcessorEvent, AutoProcessorStep,
+    };
+    emit(
+        AutoProcessorEvent::new(uuid, observation_id, AutoProcessorStep::Processed)
+            .with_agent_did(did)
+            .with_batch_key(observation_id)
+            .with_bases(bases),
+    )
+    .await;
+}
+
+/// A perspective-scoped phase transition, so peers see the pass without seeing its payload.
+async fn emit_one_shot_phase(
+    uuid: &str,
+    observation_id: &str,
+    did: &str,
+    phase: crate::perspectives::auto_processor::events::NeighbourhoodPhase,
+) {
+    use crate::perspectives::auto_processor::events::{
+        emit_neighbourhood_state, AutoProcessorNeighbourhoodState,
+    };
+    emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+        uuid,
+        observation_id,
+        did,
+        observation_id,
+        phase,
+    ))
+    .await;
+}
+
+/// Both halves of a failure: the reason on the owner's stream, the bare fact on everyone's.
+///
+/// Split that way because `detail` is where an LLM provider's error text ends up, and that can
+/// name a model, an endpoint or an account. The neighbourhood stream carries no free-form field
+/// at all, which is what keeps this honest — peers learn the pass ended without committing, and
+/// the person who ran it learns why.
+async fn emit_one_shot_abandoned(uuid: &str, observation_id: &str, did: &str, reason: &str) {
+    use crate::perspectives::auto_processor::events::{
+        emit, AutoProcessorEvent, AutoProcessorStep, NeighbourhoodPhase,
+    };
+    emit(
+        AutoProcessorEvent::new(uuid, observation_id, AutoProcessorStep::Failed)
+            .with_agent_did(did)
+            .with_batch_key(observation_id)
+            .with_detail(reason),
+    )
+    .await;
+    emit_one_shot_phase(uuid, observation_id, did, NeighbourhoodPhase::Abandoned).await;
 }
 
 /// Register a neighbourhood auto-processor on a perspective. Writes the

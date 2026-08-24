@@ -477,12 +477,22 @@ pub async fn run_one_pass(
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
     let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
+    /*
+       Derived once, up here, rather than at the claim below where it used to be.
+
+       Every signal this pass emits carries it, including the ones emitted *before* a claim is
+       attempted (`BatchReady`, `NotCandidate`, `AwaitingAuthor`, `BackedOff`). Computing it at
+       the claim would have left exactly the stand-down signals — the ones a consumer most wants
+       to attribute to a batch — as the only ones it could not join to a row.
+    */
+    let batch_key_hex = batch_key(&item_ids);
     macro_rules! signal {
         ($step:expr) => {
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
-                    .with_items(&item_ids),
+                    .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex),
             )
             .await
         };
@@ -491,6 +501,7 @@ pub async fn run_one_pass(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
                     .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex)
                     .with_detail($d),
             )
             .await
@@ -500,6 +511,7 @@ pub async fn run_one_pass(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
                     .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex)
                     .with_bases($b),
             )
             .await
@@ -602,7 +614,6 @@ pub async fn run_one_pass(
     // from `AutoProcessorStep::Claimed` above (which is DID-scoped and
     // carries the batch payload) — this one is delivered to every reader
     // of the perspective, and carries only the claimant + batch key.
-    let batch_key_hex = batch_key(&item_ids);
     emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
         &uuid,
         &cfg.processor_id,
@@ -712,6 +723,7 @@ pub async fn run_one_pass(
             processor_id: cfg.processor_id.clone(),
             agent_did: me.clone(),
             item_ids: item_ids.clone(),
+            batch_key: batch_key_hex.clone(),
         });
     let outcome = run_interpretation_with_strategy_and_model(
         perspective,
@@ -775,6 +787,7 @@ pub async fn run_one_pass(
     let ev = AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::Processed)
         .with_agent_did(&me)
         .with_items(&item_ids)
+        .with_batch_key(&batch_key_hex)
         .with_bases(&bases);
     emit(ev).await;
     // Neighbourhood-state: pass complete on this executor. Consumers use
