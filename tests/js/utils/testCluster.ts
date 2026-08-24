@@ -14,7 +14,7 @@
 
 import { ChildProcess } from "node:child_process";
 import { Ad4mClient } from "@coasys/ad4m";
-import { baseUrl, startExecutor, gracefulShutdown, sleep } from "./utils";
+import { baseUrl, startExecutor, gracefulShutdown, pollUntil } from "./utils";
 
 export interface NodeConfig {
     apiPort: number;
@@ -77,22 +77,15 @@ export class TestCluster {
      * Poll the API endpoint until it responds, with exponential backoff.
      */
     private async waitForApi(port: number, adminCredential: string, timeoutMs: number = 60000): Promise<Ad4mClient> {
-        const start = Date.now();
-        let lastError: Error | null = null;
-
-        while (Date.now() - start < timeoutMs) {
+        let client: Ad4mClient | null = null;
+        await pollUntil(async () => {
             try {
-                const client = new Ad4mClient(baseUrl(port), adminCredential, false);
-                // Try a simple query to verify connectivity
+                client = new Ad4mClient(baseUrl(port), adminCredential, false);
                 await client.runtime.info();
-                return client;
-            } catch (e: any) {
-                lastError = e;
-                await sleep(1000);
-            }
-        }
-
-        throw new Error(`API endpoint on port ${port} not ready after ${timeoutMs}ms: ${lastError?.message}`);
+                return true;
+            } catch { return false; }
+        }, { timeoutMs, intervalMs: 1000, label: `API endpoint on port ${port} ready` });
+        return client!;
     }
 
     /**
@@ -100,25 +93,12 @@ export class TestCluster {
      * Falls back to runtime.info() if runtimeReadiness is not available.
      */
     async waitForReadiness(node: ClusterNode, timeoutMs: number = 120000): Promise<void> {
-        const start = Date.now();
-
-        while (Date.now() - start < timeoutMs) {
+        await pollUntil(async () => {
             try {
-                // Try the runtimeReadiness probe first (added in this PR)
                 const result = await node.client.runtime.info();
-                if (result.isInitialized && result.isUnlocked) {
-                    // TODO: Switch to runtimeReadiness GQL query once the Ad4mClient
-                    // exposes it. For now, runtime.info() isInitialized+isUnlocked is
-                    // a reasonable proxy (readiness probe checks the same underlying state).
-                    return;
-                }
-            } catch (e) {
-                // Not ready yet
-            }
-            await sleep(2000);
-        }
-
-        throw new Error(`Node on port ${node.apiPort} not fully ready after ${timeoutMs}ms`);
+                return !!(result.isInitialized && result.isUnlocked);
+            } catch { return false; }
+        }, { timeoutMs, intervalMs: 2000, label: `node on port ${node.apiPort} fully ready` });
     }
 
     /**

@@ -22,7 +22,7 @@
 import { PerspectiveProxy, Perspective, Link, LinkQuery } from "@coasys/ad4m";
 import { Ad4mModel, Model, Property } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
-import { sleep } from "../utils/utils";
+import { pollUntil } from "../utils/utils";
 import { waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
@@ -66,7 +66,6 @@ export default function crossPeerShapeSyncTests(testContext: TestContext) {
         );
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
         await testContext.makeAllNodesKnown();
-        await sleep(2000);
 
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
@@ -114,22 +113,14 @@ export default function crossPeerShapeSyncTests(testContext: TestContext) {
        * engine budget expiry then retry, up to a 90s ceiling.
        */
       async function waitUntilFindAllSucceeds(p: PerspectiveProxy): Promise<CrossPeerNote[]> {
-        const deadline = Date.now() + 90_000;
-        let lastError: unknown = null;
-        while (Date.now() < deadline) {
+        let results: CrossPeerNote[] = [];
+        await pollUntil(async () => {
           try {
-            const results = await CrossPeerNote.findAll(p);
-            if (results.length > 0) return results;
-          } catch (e) {
-            lastError = e;
-          }
-          await sleep(2000);
-        }
-        throw new Error(
-          `CrossPeerNote.findAll on the non-registering peer never succeeded within 90s. Last error: ${
-            lastError ? String(lastError) : "empty result set"
-          }`,
-        );
+            results = await CrossPeerNote.findAll(p);
+            return results.length > 0;
+          } catch { return false; }
+        }, { timeoutMs: 90000, intervalMs: 2000, label: "CrossPeerNote.findAll succeeds on non-registering peer" });
+        return results;
       }
     });
   };

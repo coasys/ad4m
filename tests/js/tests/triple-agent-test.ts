@@ -1,7 +1,7 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import fs from "fs";
 import { TestContext } from './test-context'
-import { sleep } from '../utils/utils'
+import { pollUntil } from '../utils/utils'
 import { expect } from "chai";
 import { v4 as uuidv4 } from 'uuid';
 
@@ -36,8 +36,6 @@ export default function tripleAgentTests(testContext: TestContext) {
                 expect(jimP1!.neighbourhood!.linkLanguage).to.be.equal(socialContext.address);
                 expect(jimP1!.neighbourhood!.meta.links.length).to.be.equal(0);
 
-                await sleep(1000)
-
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
@@ -49,17 +47,12 @@ export default function tripleAgentTests(testContext: TestContext) {
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
-                await sleep(1000)
-
-                let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                let tries = 1
-
-                while(bobLinks.length < 10 && tries < 20) {
-                    console.log("Bob retrying getting links...");
-                    await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                    tries++
-                }
+                let bobLinks: any[] = [];
+                await pollUntil(async () => {
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
+                    console.log(`Bob has ${bobLinks.length}/10 links`);
+                    return bobLinks.length >= 10;
+                }, { timeoutMs: 20000, intervalMs: 1000, label: "bob receives 10 links from alice" });
                 
                 expect(bobLinks.length).to.be.equal(10)
 
@@ -74,15 +67,12 @@ export default function tripleAgentTests(testContext: TestContext) {
                 await bob.perspective.addLink(bobP1.uuid, {source: 'ad4m://root', target: 'test://test'})
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
-                let jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                let jimRetries = 1
-
-                while(jimLinks.length < 20 && jimRetries < 20) {
-                    console.log("Jim retrying getting links...");
-                    await sleep(1000)
-                    jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                    jimRetries++
-                }
+                let jimLinks: any[] = [];
+                await pollUntil(async () => {
+                    jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
+                    console.log(`Jim has ${jimLinks.length}/20 links`);
+                    return jimLinks.length >= 20;
+                }, { timeoutMs: 20000, intervalMs: 1000, label: "jim receives 20 links" });
                 
                 expect(jimLinks.length).to.be.equal(20)
 
@@ -98,45 +88,34 @@ export default function tripleAgentTests(testContext: TestContext) {
                 await jim.perspective.addLink(jimP1.uuid, {source: 'ad4m://root', target: 'test://test'})
                 await jim.perspective.addLink(jimP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
-                let aliceLinks = await alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                tries = 1
-
-                while(aliceLinks.length < 30 && tries < 20) {
-                    console.log("Alice retrying getting links...");
-                    await sleep(1000)
-                    aliceLinks = await alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                    tries++
-                }
+                let aliceLinks: any[] = [];
+                await pollUntil(async () => {
+                    aliceLinks = await alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
+                    console.log(`Alice has ${aliceLinks.length}/30 links`);
+                    return aliceLinks.length >= 30;
+                }, { timeoutMs: 20000, intervalMs: 1000, label: "alice receives 30 links" });
                 
                 expect(aliceLinks.length).to.be.equal(30)
 
 
 
 
-                bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                tries = 1
-
-                while(bobLinks.length < 30 && tries < 20) {
-                    console.log("Bob retrying getting links...");
-                    await sleep(1000)
-                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                    tries++
-                }
+                await pollUntil(async () => {
+                    bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
+                    console.log(`Bob has ${bobLinks.length}/30 links`);
+                    return bobLinks.length >= 30;
+                }, { timeoutMs: 20000, intervalMs: 1000, label: "bob receives 30 links" });
                 
                 expect(bobLinks.length).to.be.equal(30)
 
 
 
 
-                jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                tries = 1
-
-                while(jimLinks.length < 30 && tries < 20) {
-                    console.log("Jim retrying getting links...");
-                    await sleep(1000)
-                    jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
-                    tries++
-                }
+                await pollUntil(async () => {
+                    jimLinks = await jim.perspective.queryLinks(jimP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
+                    console.log(`Jim has ${jimLinks.length}/30 links`);
+                    return jimLinks.length >= 30;
+                }, { timeoutMs: 20000, intervalMs: 1000, label: "jim receives 30 links" });
                 
                 expect(jimLinks.length).to.be.equal(30)
                 
