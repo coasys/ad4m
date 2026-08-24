@@ -44,29 +44,47 @@ impl ToolProvider for Ad4mToolProvider {
     }
 
     async fn call(&self, name: &str, args: Value) -> Result<String> {
-        // Case-insensitive fallback: some models (e.g. Gemma-3 12B) lowercase
-        // tool names even when the surface spells them `Task_propose_create`.
-        // Try the exact name first (fast path, avoids listing tools); on a
-        // miss, scan the current tool list for a case-insensitive hit and
-        // dispatch with the canonical spelling.
-        match self.handler.call_tool_by_name(name, args.clone()).await {
-            Ok(text) => Ok(text),
-            Err(e) => {
-                let tools = self.handler.list_tool_schemas().await;
-                if let Some(canonical) = tools
-                    .iter()
-                    .find(|t| t.name.eq_ignore_ascii_case(name))
-                    .map(|t| t.name.clone())
-                {
-                    if canonical != name {
-                        self.handler.call_tool_by_name(&canonical, args).await
-                    } else {
-                        Err(e)
-                    }
-                } else {
-                    Err(e)
-                }
-            }
-        }
+        // Case-insensitive name resolution BEFORE dispatch, not as a retry
+        // on error. Rationale (Lal's PR #911 review, provider_impl.rs:55):
+        // if the tool exists under the LLM's spelling but errors partway
+        // through a side-effectful path (permission denied after inserting a
+        // link, network timeout mid-write), an on-error retry would
+        // re-dispatch with the same args — potentially double-writing. The
+        // earlier match-on-Err retry gated only on "canonical name differs
+        // from what was called" which still permits double-dispatch when the
+        // model happened to lowercase a name.
+        //
+        // Resolve first: look up the canonical spelling in the current tool
+        // list. Dispatch exactly once with the canonical name (or the
+        // caller's name if no case-insensitive candidate exists — in which
+        // case the underlying handler's own "unknown tool" error is what
+        // surfaces).
+        let tools = self.handler.list_tool_schemas().await;
+        let canonical = tools
+            .iter()
+            .find(|t| t.name.eq_ignore_ascii_case(name))
+            .map(|t| t.name.as_str())
+            .unwrap_or(name);
+        self.handler.call_tool_by_name(canonical, args).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai_service::harness::provider::ToolProvider;
+    // Note: exercising the ToolProvider impl in isolation requires an
+    // `Ad4mMcpHandler` (which pulls in the full MCP + PerspectiveInstance
+    // stack); regression coverage for the "no retry on error" contract lives
+    // in the e2e scenarios (which run the full stack against real perspectives
+    // + a real LLM). The behavioural change is trivially reviewable in the
+    // diff — the earlier `match Err(_) => { ... retry ... }` branch is gone.
+    #[test]
+    fn provider_impl_module_compiles() {
+        // Marker test — the harness module's own scripted-LLM tests hit the
+        // dispatch path via a fake provider (see provider.rs tests). This
+        // file's impl over the real handler is covered end-to-end.
+        fn _assert_send_sync<T: Send + Sync>() {}
+        _assert_send_sync::<Ad4mToolProvider>();
     }
 }
