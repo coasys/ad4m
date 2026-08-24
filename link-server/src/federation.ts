@@ -80,11 +80,11 @@ export class FederationManager {
   }
 
   private signPayload(payload: string): Promise<string> {
-    return signHex(Buffer.from(this.identity.privateKey, "hex"), payload);
+    return signHex(new Uint8Array(Buffer.from(this.identity.privateKey, "hex")), payload);
   }
 
   private verifyPeerSignature(publicKeyHex: string, payload: string, signatureHex: string): Promise<boolean> {
-    return verifyHex(Buffer.from(publicKeyHex, "hex"), payload, signatureHex);
+    return verifyHex(new Uint8Array(Buffer.from(publicKeyHex, "hex")), payload, signatureHex);
   }
 
   // ---- peer management ----
