@@ -98,6 +98,12 @@ describe("MCP Authentication HTTP Tests", function() {
         // ChildProcess handle is stale or kill() missed a grandchild process.
         killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
         deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        // Force-exit: open handles (WebSocket subscriptions, EventSource
+        // polyfill) keep the Node event loop alive after all tests pass.
+        // mocha --exit should handle this, but the CI step timeout fires
+        // first and SIGTERMs the process (exit 143).
+        await pollUntil(() => false, { timeoutMs: 500 }).catch(() => {});
+        process.exit(0);
     });
 
     // ========================================================================

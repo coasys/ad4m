@@ -112,6 +112,10 @@ describe("MCP mcporter Integration Tests", function() {
         }
         killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
         deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        // Force-exit: open handles keep the Node event loop alive after
+        // all tests pass, causing CI SIGTERM (exit 143).
+        await pollUntil(() => false, { timeoutMs: 500 }).catch(() => {});
+        process.exit(0);
     });
 
     // ========================================================================

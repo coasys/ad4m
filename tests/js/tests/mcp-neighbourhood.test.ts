@@ -85,6 +85,10 @@ describe("MCP Neighbourhood Integration Tests", function () {
             if (!executorProcess.killed) executorProcess.kill('SIGKILL');
         }
         killByPorts([API_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT]);
+        // Force-exit: open handles keep the Node event loop alive after
+        // all tests pass, causing CI SIGTERM (exit 143).
+        await pollUntil(() => false, { timeoutMs: 500 }).catch(() => {});
+        process.exit(0);
     });
 
     // ========================================================================
