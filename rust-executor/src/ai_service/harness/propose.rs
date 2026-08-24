@@ -326,39 +326,28 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
             ));
         }
 
-        // Base URI: honour caller-supplied `base` if present (lets the LLM
-        // reference the instance from a later propose_link_child in the same
-        // turn without a round-trip), else mint one under base_prefix.
-        // Bounce placeholder/template-copy `base` values (`<uri>`, `unknown`,
-        // etc.) — otherwise they become the literal URI and later reads panic
-        // (observed 2026-08-24 attempts 3 & 8 of harness_intention_links_to_
-        // seeded_beliefs where `base: "<uri>"` was passed through).
-        let base = match args.get("base").and_then(|v| v.as_str()) {
-            Some(s) => {
-                if let Some(bad) = placeholder_uri(s) {
-                    return Err(anyhow!(
-                        "{}_propose_create: `base` looks like a placeholder ({}). \
-                         Omit `base` to have one auto-minted, or supply a real \
-                         URI (e.g. `soa://ext/{}/<uuid>`).",
-                        lower_class,
-                        bad,
-                        lower_class
-                    ));
-                }
-                s.to_string()
-            }
-            None => format!(
-                "{}{}{}/{}",
-                self.base_prefix,
-                if self.base_prefix.ends_with('/') {
-                    ""
-                } else {
-                    "/"
-                },
-                lower_class,
-                Uuid::new_v4()
-            ),
-        };
+        // Base URI is always auto-minted, never LLM-supplied. Earlier the
+        // schema exposed a `base` field the LLM could override to reference
+        // a fresh instance from a follow-up propose_link_child in the same
+        // pass, but small local models used the field to invent trivially
+        // short URIs (`soa://ext/intention/12345`, observed 2026-08-24
+        // scenario E attempt 6 on Marvin's gemma3:12b) which passed the
+        // scheme whitelist, got written with a partial link set, and then
+        // failed model-query conformance on read-back — a real footgun for
+        // no real user benefit, since the LLM sees the minted URI in the
+        // ack (`"proposed create: soa://ext/intention/<uuid>"`) and can
+        // use that verbatim as `parent` in a follow-up propose_link_child.
+        let base = format!(
+            "{}{}{}/{}",
+            self.base_prefix,
+            if self.base_prefix.ends_with('/') {
+                ""
+            } else {
+                "/"
+            },
+            lower_class,
+            Uuid::new_v4()
+        );
 
         self.buffer.push(InterpretationOp::Create {
             base: base.clone(),
@@ -582,13 +571,11 @@ fn placeholder_uri(uri: &str) -> Option<&'static str> {
 
 fn propose_create_schema(c: &ClassProposeShape) -> ToolSchema {
     let mut props = serde_json::Map::new();
-    props.insert(
-        "base".to_string(),
-        json!({
-            "type": "string",
-            "description": "Optional URI for the new instance. Prefer to OMIT this field — the tool auto-mints a fresh URI and returns it in the response, which you then pass verbatim as `parent` to a follow-up propose_link_child call. Only supply `base` if you truly need a specific URI (e.g. `soa://ext/task/abc123`); NEVER supply a template placeholder like `<uri>` or `unknown` — those are rejected.",
-        }),
-    );
+    // No `base` field: the URI is always auto-minted. Historically we let
+    // the LLM override it, but small local models invented trivially short
+    // URIs (`.../intention/12345`) that passed scheme validation but failed
+    // model-query conformance on read-back — the LLM sees the minted URI in
+    // the ack anyway, so exposing the field only creates footguns.
     for (prop_name, type_desc) in &c.scalar_props {
         let required_marker = if c.required.contains(prop_name) {
             "* (required) "
@@ -812,17 +799,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propose_create_honours_caller_supplied_base() {
+    async fn propose_create_ignores_caller_supplied_base_and_auto_mints() {
+        // Regression against the earlier "honour caller-supplied base" behaviour
+        // that let small local models poison a pass with trivially short URIs
+        // that failed model-query conformance on read-back. Auto-mint always.
         let (p, buf) = provider(vec![task_shape()]);
         p.call(
             "task_propose_create",
-            json!({"base": "soa://caller/t1", "title": "T"}),
+            json!({"base": "soa://caller/12345", "title": "T"}),
         )
         .await
         .unwrap();
         let drained = buf.drain();
         match &drained[0] {
-            InterpretationOp::Create { base, .. } => assert_eq!(base, "soa://caller/t1"),
+            InterpretationOp::Create { base, .. } => {
+                assert!(
+                    base.starts_with("ns://test/task/"),
+                    "caller-supplied `base` must be ignored; got {base}"
+                );
+            }
             other => panic!("expected Create, got {other:?}"),
         }
     }
@@ -1016,50 +1011,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propose_create_bounces_placeholder_base() {
-        // Small models (gemma3:12b) copy the schema example verbatim —
-        // observed 2026-08-24 attempts 3 & 8 of
-        // harness_intention_links_to_seeded_beliefs where `base: "<uri>"`
-        // was passed through, minted as the actual base, and the
-        // subsequent read-back panicked. Bounce these on the create side
-        // so the crash surface never opens.
-        for bad in [
+    async fn propose_create_always_auto_mints_ignoring_any_llm_base() {
+        // Regression: earlier passes accepted `base` from the LLM and only
+        // bounced obvious placeholders (`<uri>`, `unknown`, empty). Small
+        // models slipped by with URIs that looked real but weren't (e.g.
+        // `.../intention/12345`) and later crashed model-query read-back.
+        // Now `base` is ignored regardless of value — always UUID under
+        // base_prefix — and the crash surface is closed structurally.
+        for llm_supplied in [
             "<uri>",
-            "<URI>",
-            "<TARGET>",
             "unknown",
-            "ad4m://obj/unknown",
-            "belief_query:foo",
             "",
+            "soa://ext/task/12345",
+            "soa://ext/task/my-explicit-id",
+            "belief_query:foo",
         ] {
             let (p, buf) = provider(vec![task_shape()]);
-            let err = p
-                .call("task_propose_create", json!({"title": "x", "base": bad}))
+            let out = p
+                .call(
+                    "task_propose_create",
+                    json!({"title": "x", "base": llm_supplied}),
+                )
                 .await
-                .unwrap_err();
-            let s = err.to_string();
+                .unwrap();
             assert!(
-                s.contains("placeholder"),
-                "base={bad} should bounce as placeholder: {s}"
+                out.starts_with("proposed create: ns://test/task/"),
+                "base={llm_supplied}: expected auto-mint, got {out}"
             );
-            assert_eq!(buf.len(), 0, "buffer must stay empty on placeholder base");
+            assert_eq!(buf.len(), 1);
+            match &buf.drain()[0] {
+                InterpretationOp::Create { base, .. } => {
+                    assert!(
+                        base.starts_with("ns://test/task/")
+                            && base.len() > "ns://test/task/".len() + 30,
+                        "base={llm_supplied}: expected auto-minted uuid path, got {base}"
+                    );
+                    assert_ne!(base, llm_supplied, "must NOT honour LLM-supplied base");
+                }
+                _ => panic!(),
+            }
         }
-    }
-
-    #[tokio::test]
-    async fn propose_create_accepts_real_base_uri() {
-        // Sanity: after tightening the base check, LLM-supplied real URIs
-        // with known schemes still flow through.
-        let (p, buf) = provider(vec![task_shape()]);
-        let out = p
-            .call(
-                "task_propose_create",
-                json!({"title": "x", "base": "soa://ext/task/my-explicit-id"}),
-            )
-            .await
-            .unwrap();
-        assert!(out.contains("soa://ext/task/my-explicit-id"), "{out}");
-        assert_eq!(buf.len(), 1);
     }
 
     #[tokio::test]
