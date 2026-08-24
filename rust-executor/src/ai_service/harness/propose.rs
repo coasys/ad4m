@@ -234,22 +234,38 @@ where
     }
 
     async fn call(&self, name: &str, args: Value) -> Result<String> {
-        // Order matters: `_propose_link_child` is a strict suffix of a
-        // hypothetical `_propose_child_create` in some future rename, so we
-        // check the more-specific longer suffix first. Belt-and-braces —
-        // today there's no conflict.
+        // Dispatch order matters when suffixes could collide. Longest
+        // wins: `_propose_link_child` is checked before `_create` (which
+        // could otherwise consume something like `<class>_link_child_
+        // create` if we ever added it).
         if let Some(class_name) = strip_class_suffix(name, "_propose_link_child") {
             return self.handle_propose_link_child(&class_name, args);
         }
-        if let Some(class_name) = strip_class_suffix(name, "_propose_create") {
-            return self.handle_propose_create(&class_name, args);
+        if let Some(class_name) = strip_class_suffix(name, "_create") {
+            // `<class>_create` was previously named `<class>_propose_create`.
+            // Nico's PR #911 review renamed to the LLM's natural verb —
+            // small models kept reaching for the short form and needed an
+            // alias-loop to redirect it back. Taking the short name
+            // directly drops that whole family of aliases. The read-only
+            // filter hides AD4M's dynamic MCP `<class>_create` from the
+            // inner surface, so there's no collision on the classes THIS
+            // provider owns.
+            //
+            // Fall-through: static MCP tools whose name happens to end in
+            // `_create` (e.g. `create_property_expression`) are NOT ours
+            // to intercept — dispatch to the inner provider so the real
+            // handler runs. `find_class` returns None for a prefix that
+            // isn't a registered class, so we fall through cleanly.
+            if self.find_class(&class_name).is_some() {
+                return self.handle_propose_create(&class_name, args);
+            }
         }
-        // Alias handling for hallucinated CRUD verbs (see comment on
-        // `matches_alias` below). Both alias families need to know whether
-        // the LLM's name already exists in the inner (filtered) surface,
-        // so we fetch that ONCE up front instead of re-enumerating on every
-        // iteration of the two class loops (Lal's PR #911 review,
-        // propose.rs:234 — 1 tools() enumeration total, was up to 2·N).
+        // `<class>_add_<relation>` alias family: gemma3:12b in CI job
+        // 22282 reached for this shape when it wanted to link, because
+        // that's how a CRUD API would name a relation-adder. The real
+        // tool is `<class>_propose_link_child`; return an actionable
+        // redirect naming the correct tool + the predicate hint the LLM
+        // likely intended (derived from the tail).
         let name_lc = name.to_lowercase();
         let inner_tool_names: Vec<String> = self
             .inner
@@ -263,40 +279,6 @@ where
                 .iter()
                 .any(|n| n.eq_ignore_ascii_case(target))
         };
-        // Small local models (gemma3:12b in CI) reliably hallucinate the
-        // dynamic CRUD verbs from AD4M's MCP surface — `<class>_create`,
-        // `add_<class>`, `<class>_add` — because that's what a CRUD API
-        // "should" look like. Even when we filter those tools out and
-        // publish the explicit `<class>_propose_create` name, gemma3
-        // reaches for the shorter familiar form and, when it hits an
-        // error, gives up in plain text instead of retrying with the
-        // longer name (observed 8/8 attempts in CI job 22266 on
-        // `45a363b94` — a helpful redirect message didn't rescue it).
-        //
-        // Fix: alias the hallucinated forms transparently. If the LLM
-        // calls a class-prefixed create-shaped verb that is NOT in the
-        // inner (filtered) surface, dispatch to handle_propose_create
-        // for that class. Overlay semantics are preserved — the buffer
-        // still queues an InterpretationOp gated by the human-divergence
-        // check on apply. Small models get their "obvious" verb; the
-        // extraction pass proceeds without stalling.
-        for c in &self.classes {
-            let lower = c.class_name.to_lowercase();
-            let matches_alias = name_lc == format!("{lower}_create")
-                || name_lc == format!("create_{lower}")
-                || name_lc == format!("{lower}_new")
-                || name_lc == format!("new_{lower}")
-                || name_lc == format!("add_{lower}")
-                || name_lc == format!("{lower}_add");
-            if !matches_alias {
-                continue;
-            }
-            if inner_has(name) {
-                break;
-            }
-            log::warn!("harness: aliasing hallucinated tool `{name}` → `{lower}_propose_create`");
-            return self.handle_propose_create(&lower, args);
-        }
         // Second alias family: `<class>_add_<relation>` (e.g.
         // `extintention_add_basedon`). CI job 22282 attempts 1-4 showed
         // gemma3:12b reaching for this shape when it wants to attach a
@@ -326,9 +308,9 @@ where
             }
             return Err(anyhow!(
                 "tool `{name}` is not available. To link a {class} to a related \
-                 instance, call `{lower}_propose_link_child` with `parent` = the \
+                 instance, call `{lower}_propose_link_child` with `{lower}_uri` = the \
                  {class} URI, `predicate` = the relation IRI (e.g. `soa://{relation_tail}` \
-                 if that matches the class definition), and `child` = the target URI. \
+                 if that matches the class definition), and `linked_uri` = the target URI. \
                  Discover real URIs with the target class's `_query` tool first — \
                  never invent placeholder URIs.",
                 class = c.class_name
@@ -373,7 +355,7 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
             .collect();
         if !missing.is_empty() {
             return Err(anyhow!(
-                "{}_propose_create missing required fields: {}",
+                "{}_create missing required fields: {}",
                 lower_class,
                 missing
                     .iter()
@@ -392,7 +374,7 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
         // scheme whitelist, got written with a partial link set, and then
         // failed model-query conformance on read-back — a real footgun for
         // no real user benefit, since the LLM sees the minted URI in the
-        // ack (`"proposed create: soa://ext/intention/<uuid>"`) and can
+        // ack (`"created: soa://ext/intention/<uuid>"`) and can
         // use that verbatim as `parent` in a follow-up propose_link_child.
         let base = format!(
             "{}{}{}/{}",
@@ -412,7 +394,7 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
             values,
         });
 
-        Ok(format!("proposed create: {base}"))
+        Ok(format!("created: {base}"))
     }
 
     fn handle_propose_link_child(&self, lower_class: &str, args: Value) -> Result<String> {
@@ -571,12 +553,17 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
 
 /// Case-insensitive class-name extract: `Task_propose_create` → `task`.
 /// Returns None if the string doesn't end with the suffix or nothing is
-/// left before it. Matches the lowercase form because dynamic tool names
-/// are always emitted lowercase (see `dynamic.rs::make_create_tool`).
+/// left before it. Case-insensitive on both the suffix and the class
+/// prefix so a small model spelling the class as `Task_Create` or
+/// `TASK_create` still lands on the right handler.
 fn strip_class_suffix(name: &str, suffix: &str) -> Option<String> {
-    name.strip_suffix(suffix)
-        .filter(|prefix| !prefix.is_empty())
-        .map(|s| s.to_lowercase())
+    let name_lower = name.to_lowercase();
+    let suffix_lower = suffix.to_lowercase();
+    let prefix = name_lower.strip_suffix(&suffix_lower)?;
+    if prefix.is_empty() {
+        return None;
+    }
+    Some(prefix.to_string())
 }
 
 /// If `uri` matches an obvious placeholder pattern the LLM might invent
@@ -712,18 +699,26 @@ fn propose_create_schema(c: &ClassProposeShape) -> ToolSchema {
     });
 
     ToolSchema {
-        name: format!("{}_propose_create", c.class_name.to_lowercase()),
+        // Tool name is the LLM's natural verb: `<class>_create`. Nico's
+        // PR #911 review renamed this from `<class>_propose_create` —
+        // small local models kept reaching for the short form and needed
+        // aliasing back to the long name; taking the short name directly
+        // drops the alias family entirely. Semantic is unchanged: the
+        // result is still staged in the pass buffer and applied through
+        // the overlay's human-divergence gate at pass end.
+        name: format!("{}_create", c.class_name.to_lowercase()),
         description: format!(
-            "Propose creating a new {class} instance. The proposal is buffered — \
-             it becomes visible in the perspective (subject to the overlay's \
-             human-divergence gate) after the interpretation pass completes.\n\
+            "Create a new {class} instance. The creation is staged in the \
+             interpretation pass buffer and becomes visible in the \
+             perspective (subject to the overlay's human-divergence gate) \
+             after the pass completes.\n\
              \n\
-             The response is a string starting with `proposed create: ` followed \
-             by the newly-minted URI (for example `proposed create: soa://ext/{lower}/9c616970-…`). \
+             The response is a string starting with `created: ` followed \
+             by the newly-minted URI (for example `created: soa://ext/{lower}/9c616970-…`). \
              Extract the URI part after the prefix and pass it verbatim as \
-             `parent` (or `child`) in follow-up `{lower}_propose_link_child` \
-             calls in the same pass — that URI is how you link this new \
-             instance to related instances.",
+             `{lower}_uri` (or `linked_uri`) in follow-up \
+             `{lower}_propose_link_child` calls in the same pass — that \
+             URI is how you link this new instance to related instances.",
             class = c.class_name,
             lower = c.class_name.to_lowercase()
         ),
@@ -791,7 +786,7 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
                     "URI of the `{class}` instance that OWNS the relation (SOURCE side of the link). \
                      MUST be a real URI you already have on hand: either the URI returned by a \
                      `{class_lower}_query` in this same pass (extract from its JSON `id`/`uri` field), \
-                     or the URI part of a `proposed create: <URI>` response from `{class_lower}_propose_create`. \
+                     or the URI part of a `created: <URI>` response from `{class_lower}_create`. \
                      Do NOT copy schema-example placeholders like `<uri>` or `ad4m://obj/unknown` — \
                      those are rejected. Do NOT paste tool names or query text as URIs.",
                     class = c.class_name,
@@ -801,7 +796,7 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
             "predicate": predicate_schema,
             "linked_uri": {
                 "type": "string",
-                "description": "URI of the instance being linked TO via `predicate` (TARGET side of the link). Same URI-sourcing rules as the source-side field: use a URI returned by the target class's `_query` (JSON `id`/`uri`) or a URI from a prior `_propose_create` in this same pass. NEVER invent or copy schema placeholders.",
+                "description": "URI of the instance being linked TO via `predicate` (TARGET side of the link). Same URI-sourcing rules as the source-side field: use a URI returned by the target class's `_query` (JSON `id`/`uri`) or a URI from a prior `_create` in this same pass. NEVER invent or copy schema placeholders.",
             },
         },
         "required": [source_field.clone(), "predicate", "linked_uri"],
@@ -837,7 +832,7 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
              **DIRECTION — READ CAREFULLY:** `{source_field}` MUST be the `{class}` (source of the link, the side that OWNS the relation). `linked_uri` MUST be the related instance (target of the link). Do NOT invert. Example: if `{class}` has relation `basedOn → Belief`, then `{source_field}` = the {class}'s URI, `linked_uri` = the Belief's URI.\n\
              \n\
              **Workflow — always in this order:**\n\
-             1. Call `_query` for each side to discover real URIs (or reuse a URI from a prior `_propose_create` in this same pass).\n\
+             1. Call `_query` for each side to discover real URIs (or reuse a URI from a prior `_create` in this same pass).\n\
              2. Call this tool with those real URIs. Placeholders like `ad4m://obj/unknown` are rejected — the pass makes no progress if you invent URIs.{rel_hint}",
             class = c.class_name,
             source_field = source_field,
@@ -932,7 +927,7 @@ mod tests {
         // parent/child directions swapped, poisoning downstream link queries.
         let (p, _) = provider(vec![task_shape()]);
         let names: Vec<String> = p.tools().await.into_iter().map(|t| t.name).collect();
-        assert_eq!(names, vec!["task_propose_create"]);
+        assert_eq!(names, vec!["task_create"]);
     }
 
     #[tokio::test]
@@ -941,7 +936,7 @@ mod tests {
         let names: Vec<String> = p.tools().await.into_iter().map(|t| t.name).collect();
         assert_eq!(
             names,
-            vec!["intention_propose_create", "intention_propose_link_child"]
+            vec!["intention_create", "intention_propose_link_child"]
         );
     }
 
@@ -950,12 +945,12 @@ mod tests {
         let (p, buf) = provider(vec![task_shape()]);
         let out = p
             .call(
-                "task_propose_create",
+                "task_create",
                 json!({"title": "Write PR body", "status": "todo"}),
             )
             .await
             .unwrap();
-        assert!(out.starts_with("proposed create: ns://test/task/"), "{out}");
+        assert!(out.starts_with("created: ns://test/task/"), "{out}");
         assert_eq!(buf.len(), 1);
         let drained = buf.drain();
         match &drained[0] {
@@ -983,7 +978,7 @@ mod tests {
         // that failed model-query conformance on read-back. Auto-mint always.
         let (p, buf) = provider(vec![task_shape()]);
         p.call(
-            "task_propose_create",
+            "task_create",
             json!({"base": "soa://caller/12345", "title": "T"}),
         )
         .await
@@ -1004,7 +999,7 @@ mod tests {
     async fn propose_create_errors_on_missing_required_field() {
         let (p, buf) = provider(vec![task_shape()]);
         let err = p
-            .call("task_propose_create", json!({"status": "todo"}))
+            .call("task_create", json!({"status": "todo"}))
             .await
             .unwrap_err();
         assert!(
@@ -1021,7 +1016,7 @@ mod tests {
         // aborting on every model imperfection.
         let (p, buf) = provider(vec![task_shape()]);
         p.call(
-            "task_propose_create",
+            "task_create",
             json!({"title": "T", "deadline": "2026-01-01"}),
         )
         .await
@@ -1171,57 +1166,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_class_on_propose_errors() {
+    async fn unknown_class_on_propose_link_child_errors() {
+        // `_propose_link_child` still requires a known class (the schema
+        // publishes it per-registered-class); an unknown prefix bounces
+        // with an actionable error naming the classes this provider does
+        // own. `_create` follows a different rule — it falls through to
+        // the inner provider for unknown classes so static tools whose
+        // name happens to end in `_create` (e.g. AD4M's
+        // `create_property_expression`) still dispatch.
         let (p, _) = provider(vec![task_shape()]);
         let err = p
-            .call("nothing_propose_create", json!({"title": "x"}))
+            .call("nothing_propose_link_child", json!({}))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no registered class"), "{err}");
     }
 
     #[tokio::test]
-    async fn hallucinated_create_verb_is_aliased_to_propose_create() {
-        // gemma3:12b reaches for `task_create` (not `task_propose_create`)
-        // — the harness should transparently dispatch to propose_create so
-        // the pass makes progress instead of stalling on tool-not-found.
-        for verb in [
-            "task_create",
-            "create_task",
-            "task_new",
-            "new_task",
-            "add_task",
-            "task_add",
-        ] {
-            let (p, buf) = provider(vec![task_shape()]);
-            let out = p
-                .call(verb, json!({"title": "x"}))
-                .await
-                .unwrap_or_else(|e| panic!("verb `{verb}` should have aliased through: {e}"));
-            assert!(out.contains("proposed create"), "verb `{verb}`: {out}");
-            assert_eq!(buf.len(), 1, "verb `{verb}` should have queued 1 op");
-        }
-    }
-
-    #[tokio::test]
-    async fn hallucinated_create_verb_is_case_insensitive() {
+    async fn create_dispatches_directly_no_alias_needed() {
+        // After Nico's PR #911 rename (2026-08-25) the tool IS named
+        // `<class>_create` — the LLM's natural CRUD verb. What used to be
+        // a whole family of hallucinated variants (`create_task`,
+        // `task_new`, `add_task`, ...) resolved to an alias loop; now the
+        // natural short name dispatches directly and the alias code is
+        // gone. This test pins the single-verb happy path.
         let (p, buf) = provider(vec![task_shape()]);
-        let out = p.call("Task_Create", json!({"title": "x"})).await.unwrap();
-        assert!(out.contains("proposed create"), "{out}");
+        let out = p.call("task_create", json!({"title": "x"})).await.unwrap();
+        assert!(out.contains("created:"), "{out}");
         assert_eq!(buf.len(), 1);
     }
 
     #[tokio::test]
-    async fn hallucinated_verb_for_unknown_class_falls_through() {
-        // If the create-shaped verb doesn't match any offered class, it
-        // must delegate to the inner provider — otherwise we'd silently
-        // swallow real tool calls.
+    async fn create_dispatch_is_case_insensitive() {
+        // `strip_class_suffix` lower-cases the prefix so the model can
+        // spell the class in any case (`Task_Create`, `TASK_create`, …)
+        // and still land on the right handler.
+        let (p, buf) = provider(vec![task_shape()]);
+        let out = p.call("Task_Create", json!({"title": "x"})).await.unwrap();
+        assert!(out.contains("created:"), "{out}");
+        assert_eq!(buf.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_verb_for_unknown_class_falls_through() {
+        // A `_create` call on a class this provider doesn't know about
+        // must delegate to the inner provider so we don't silently swallow
+        // real tool calls — e.g. AD4M's `create_property_expression`, which
+        // starts with `create_` but is a legitimate static tool.
         let (p, buf) = provider(vec![task_shape()]);
         let out = p.call("stranger_create", json!({})).await.unwrap();
-        assert_eq!(
-            out, "inner:stranger_create",
-            "unknown-class verb should fall through to inner"
-        );
+        assert_eq!(out, "inner:stranger_create");
         assert_eq!(buf.len(), 0);
     }
 
@@ -1307,14 +1301,11 @@ mod tests {
         ] {
             let (p, buf) = provider(vec![task_shape()]);
             let out = p
-                .call(
-                    "task_propose_create",
-                    json!({"title": "x", "base": llm_supplied}),
-                )
+                .call("task_create", json!({"title": "x", "base": llm_supplied}))
                 .await
                 .unwrap();
             assert!(
-                out.starts_with("proposed create: ns://test/task/"),
+                out.starts_with("created: ns://test/task/"),
                 "base={llm_supplied}: expected auto-mint, got {out}"
             );
             assert_eq!(buf.len(), 1);
