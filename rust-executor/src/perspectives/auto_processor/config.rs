@@ -30,6 +30,7 @@
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::types::{Link, LinkStatus};
 
 use super::scalar_string;
 use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
@@ -244,12 +245,14 @@ pub async fn write_processor(
     emit_debug_events_write: Option<bool>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    let Some((first_class, more_classes)) = cfg.interpretation_classes.split_first() else {
+    // Emptiness is still a hard error — a processor with no classes materialises nothing — but the
+    // members themselves are written as links below rather than through the values map.
+    if cfg.interpretation_classes.is_empty() {
         anyhow::bail!(
             "write_processor: `{}` has no interpretation_classes",
             cfg.processor_id
         );
-    };
+    }
     ensure_auto_processor_class(perspective, context).await?;
 
     let node = processor_node(&cfg.processor_id);
@@ -261,7 +264,6 @@ pub async fn write_processor(
     let mut values = serde_json::json!({
         "processorId": cfg.processor_id,
         "sourceScopeQuery": cfg.source_scope_query,
-        "interpretationClasses": first_class,
         "debounceMs": cfg.debounce_ms.to_string(),
         "batchMin": cfg.batch_min.to_string(),
         "batchMax": cfg.batch_max.to_string(),
@@ -328,22 +330,41 @@ pub async fn write_processor(
             )
             .await
             .map_err(|e| anyhow::anyhow!("write_processor: create_subject failed: {e:#}"))?;
-        // `create_subject` applies one value per property, so the remaining
-        // members of the `interpretation_class` collection go through the same
-        // `addLink` setter one at a time — still on the same batch so they
-        // commit atomically with the base instance.
-        for class in more_classes {
+        /*
+           The classes are written as links, not through the values map.
+
+           `create_subject` and `update_subject` resolve a property by looking up its
+           `ad4m://setter` actions, and a *collection* has none — it carries `ad4m://adder`
+           instead. So every value handed to them for `interpretationClasses` was silently
+           discarded, and the instance came back without the one property `load_processors`
+           requires first. Every scalar landed, so the write reported success and the failure
+           surfaced only as the reader calling the instance malformed, once per watch tick,
+           forever.
+
+           Adding the links directly is what the collection's own `addLink` action would do,
+           and it needs no shape lookup to get there. Same batch as the instance, so the classes
+           and the config it belongs to still commit atomically — a half-written processor is
+           precisely the state that produced this bug.
+
+           `Shared`, matching every other link this class writes: the processor set is neighbourhood
+           state, and a local-only class list would make one peer's view of what to extract differ
+           from everyone else's.
+        */
+        for class in cfg.interpretation_classes.iter() {
             perspective
-                .update_subject(
-                    class_option(),
-                    node.clone(),
-                    serde_json::json!({ "interpretationClasses": class }),
+                .add_link(
+                    Link {
+                        source: node.clone(),
+                        predicate: Some("ad4m://interpretation_class".to_string()),
+                        target: format!("literal:string:{}", class),
+                    },
+                    LinkStatus::Shared,
                     Some(batch_id.clone()),
                     context,
                 )
                 .await
                 .map_err(|e| {
-                    anyhow::anyhow!("write_processor: update_subject(class) failed: {e:#}")
+                    anyhow::anyhow!("write_processor: add_link(interpretation_class) failed: {e:#}")
                 })?;
         }
         Ok(())
