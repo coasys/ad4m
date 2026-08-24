@@ -1,6 +1,6 @@
 // Residual lazy-loaded ESM / JS sources for the AD4M custom Deno snapshot.
 //
-// deno 2.9 does NOT embed unconsumed `lazy_loaded_esm` / `lazy_loaded_js`
+// Deno 2.9 does NOT embed unconsumed `lazy_loaded_esm` / `lazy_loaded_js`
 // sources (e.g. `node:buffer`) into the V8 snapshot blob — the snapshot
 // only records the specifier list. At runtime,
 // `add_residual_lazy_loaded_sources` populates the module map from the
@@ -14,18 +14,30 @@
 // They live next to the snapshot binary (at the workspace root) and are
 // listed in the workspace's `.gitignore` because they must be regenerated
 // whenever the snapshot changes.
+//
+// Chicken-and-egg handling:
+//
+// * Compiling the `generate_snapshot` binary itself pulls this file into
+//   the crate graph, so a clean CI checkout would fail with "file not
+//   found" on the include! below before the generator has ever run.
+// * We therefore expose two empty fallback tables under the
+//   `generate_snapshot` feature and only include! the generated tables
+//   in the ordinary build.  The generator binary doesn't consume the
+//   tables — it only writes them — so the empty stubs are safe.
+// * After `pnpm run build-deno-snapshot` writes the real tables, the
+//   next `cargo build` picks them up because the feature flag is no
+//   longer set.
 
-// Fallback empty tables — used when the residual files haven't been
-// generated yet (e.g. clean checkout before first `generate_snapshot`
-// run). Cargo `include!` errors on missing files, so we do a compile-time
-// existence check via `cfg_attr` on a companion build-script-created
-// marker isn't practical here; the simplest robust path is to keep the
-// generator writing the files to a fixed location and to include them
-// unconditionally. If the files don't exist yet, the build breaks with a
-// clear "file not found" pointing at CUSTOM_DENO_SNAPSHOT.residual_esm.rs.
+#[cfg(feature = "generate_snapshot")]
+pub static RESIDUAL_LAZY_ESM_SOURCES: &[(&str, &str)] = &[];
+#[cfg(feature = "generate_snapshot")]
+pub static RESIDUAL_LAZY_JS_SOURCES: &[(&str, &str)] = &[];
+
 // Paths are relative to THIS file. The generator (`bin/generate_snapshot.rs`)
 // is always executed from the `rust-executor/` package dir (that's cwd for
 // `cargo run -p ad4m-executor --bin generate_snapshot`), so the files land
 // two levels up from here: `rust-executor/CUSTOM_DENO_SNAPSHOT.residual_*.rs`.
+#[cfg(not(feature = "generate_snapshot"))]
 include!("../../CUSTOM_DENO_SNAPSHOT.residual_esm.rs");
+#[cfg(not(feature = "generate_snapshot"))]
 include!("../../CUSTOM_DENO_SNAPSHOT.residual_js.rs");
