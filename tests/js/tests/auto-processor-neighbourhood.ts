@@ -139,9 +139,13 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         await pollUntil(async () => {
             try {
                 const bobLinks = await bobP.get(new LinkQuery({ source: `ad4m://autoprocessor/${processorId}` }));
-                return bobLinks.length > 0;
+                // The config has 6+ required properties (processor_id, source_scope_query,
+                // interpretation_class, debounce_ms, batch_max, claim_ttl_ms). Poll until
+                // all required links sync — passing on the first link lets the watcher
+                // load a partial config and race the claim mechanism.
+                return bobLinks.length >= 6;
             } catch { return false; }
-        }, { timeoutMs: 180000, intervalMs: 500, label: "AutoProcessorConfig syncs to Bob" });
+        }, { timeoutMs: 180000, intervalMs: 500, label: "AutoProcessorConfig fully syncs to Bob" });
 
         return { aliceP, bobP, events };
       }

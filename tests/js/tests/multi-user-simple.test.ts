@@ -1845,28 +1845,45 @@ describe("Multi-User Simple integration tests", () => {
             // All other users join the neighbourhood
             console.log("Node 1 User 2 joining...");
             await node1User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000); // K2 space initialization after DNA install
 
             console.log("Node 2 User 1 joining...");
             await node2User1Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000); // K2 space initialization after DNA install
 
             console.log("Node 2 User 2 joining...");
             await node2User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000); // K2 space initialization after DNA install
 
-            // Re-exchange agent infos with retry to handle K2 space initialization delays (Holochain 0.7.0)
-            console.log("Re-exchanging agent infos with retry for K2 space readiness...");
-            await pollUntil(async () => {
+            // Re-exchange agent infos with retry to handle K2 space initialization
+            // delays (Holochain 0.7.0). After users join and link language installs,
+            // new DNA/K2 spaces get created. Repeated exchanges (not breaking on
+            // first success) push additional K2 agent info that the DHT needs to
+            // gossip peer keys across nodes. The inter-attempt sleep also serves as
+            // propagation time — there is no observable "K2 ready" state to poll for.
+            console.log("Re-exchanging agent infos for K2 space readiness...");
+            for (let attempt = 1; attempt <= 5; attempt++) {
                 try {
+                    console.log(`Agent info exchange attempt ${attempt}/5`);
                     const node1AgentInfos = await adminAd4mClient!.runtime.hcAgentInfos();
                     const node2AgentInfos = await node2AdminClient!.runtime.hcAgentInfos();
                     await adminAd4mClient!.runtime.hcAddAgentInfos(node2AgentInfos);
                     await node2AdminClient!.runtime.hcAddAgentInfos(node1AgentInfos);
-                    console.log("✅ Agent info exchange successful");
-                    return true;
+                    console.log(`✅ Agent info exchange attempt ${attempt} successful`);
                 } catch (error) {
-                    console.log("⚠️ Agent info exchange failed:", error);
-                    return false;
+                    console.log(`⚠️ Agent info exchange attempt ${attempt} failed:`, error);
                 }
-            }, { timeoutMs: 30000, intervalMs: 3000, label: "K2 agent info exchange" });
+                if (attempt < 5) {
+                    await sleep(3000);
+                }
+            }
+
+            // DHT gossip propagation: the K2 network needs time to distribute
+            // agent keys and owners lists across nodes after the exchanges above.
+            // No observable state exists to poll — otherAgents() IS that poll,
+            // and it needs this preceding propagation window.
+            console.log("Waiting for neighbourhood sync and owners list updates...");
+            await sleep(15000);
 
             // Get neighbourhood proxies for each user
             const node1User1Perspectives = await node1User1Client!.perspective.all();
