@@ -64,14 +64,26 @@ async function titleOf(p: PerspectiveProxy, base: string): Promise<string | unde
 }
 
 /**
- * Remove all ExtIntention instances (and any links they carry) from `p`.
- * Beliefs seeded in `before()` are left in place — they're the reference
- * state the LLM is supposed to discover on the next attempt.
+ * Remove all ExtIntention instances and any ExtBelief instances the previous
+ * attempt materialized. Seeded beliefs (identified by `seededBeliefUris`) are
+ * left in place — they're the reference state the LLM is supposed to discover
+ * on the next attempt. Purging non-seeded beliefs matters because the dedup
+ * check downstream (`dupTitles`) would otherwise fire against beliefs a failed
+ * attempt already created with a seeded title, permanently poisoning later
+ * attempts.
  */
-async function purgeIntentions(p: PerspectiveProxy): Promise<void> {
+async function purgeGenerated(
+  p: PerspectiveProxy,
+  seededBeliefUris: Set<string>,
+): Promise<void> {
   const intentions = await ExtIntention.findAll(p);
-  for (const intent of intentions) {
-    const outgoing = await p.get(new LinkQuery({ source: intent.id }));
+  const beliefs = await ExtBelief.findAll(p);
+  const generatedBases = [
+    ...intentions.map((i) => i.id),
+    ...beliefs.map((b) => b.id).filter((id) => !seededBeliefUris.has(id)),
+  ];
+  for (const base of generatedBases) {
+    const outgoing = await p.get(new LinkQuery({ source: base }));
     for (const link of outgoing) {
       try {
         await p.remove(link);
@@ -102,6 +114,14 @@ describe("perspective.runInterpretationWithHarness (WS + real LLM)", function ()
         signal: AbortSignal.timeout(3000),
       });
       if (!probe.ok) throw new Error(`probe ${probe.status}`);
+      // Gate on the specific model too — an endpoint that answers /v1/models
+      // but doesn't host MODEL would still fail the first LLM call. Skip
+      // instead of failing the run.
+      const body = (await probe.json()) as { data?: Array<{ id?: string }> };
+      const ids = (body.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
+      if (!ids.includes(MODEL)) {
+        throw new Error(`model ${MODEL} not present in /v1/models (have: ${ids.join(", ") || "none"})`);
+      }
     } catch (e) {
       console.log(`Skipping harness e2e — LLM endpoint ${BASE_URL} unreachable: ${(e as Error).message}`);
       this.skip();
@@ -156,10 +176,14 @@ describe("perspective.runInterpretationWithHarness (WS + real LLM)", function ()
     let lastError: any = null;
     for (let attempt = 1; attempt <= HARNESS_E2E_MAX_ATTEMPTS; attempt++) {
       if (attempt > 1) {
-        // Clear any intentions the previous attempt landed so this attempt
-        // sees the same starting state (seeded beliefs only). Mirrors the
-        // Rust helper's "fresh perspective per attempt" property.
-        await purgeIntentions(p);
+        // Clear any intentions AND any non-seeded beliefs the previous
+        // attempt landed so this attempt sees the same starting state
+        // (seeded beliefs only). Mirrors the Rust helper's "fresh
+        // perspective per attempt" property. Purging beliefs (not just
+        // intentions) is critical: a failed attempt that recreated a
+        // seeded-title belief would otherwise leave a duplicate in place
+        // and poison the `dupTitles` dedup check on every later attempt.
+        await purgeGenerated(p, seededBeliefUris);
       }
 
       try {

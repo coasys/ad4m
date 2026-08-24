@@ -552,6 +552,8 @@ pub struct RunInterpretationRequest {
     pub base_prefix: String,
     /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
     /// `None`/empty selects all subject classes registered in the perspective.
+    #[serde(default)]
+    #[ts(optional)]
     pub classes: Option<Vec<String>>,
     /// Optional parent-scope filter for the dedup lookup: when set, only
     /// existing instances of the target classes that live under this scope
@@ -586,6 +588,8 @@ pub struct RunInterpretationWithHarnessRequest {
     pub base_prefix: String,
     /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
     /// `None`/empty selects all subject classes registered in the perspective.
+    #[serde(default)]
+    #[ts(optional)]
     pub classes: Option<Vec<String>>,
     /// Upper bound on tool calls the harness will make in one pass. Reaching
     /// the bound forces a final-answer step (no more tools). Must be > 0 —
