@@ -389,7 +389,9 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     await pollUntil(async () => {
                         aliceOnline = await aliceNH!.onlineAgents()
                         bobOnline = await bobNH!.onlineAgents()
-                        return aliceOnline.length >= 1 && bobOnline.length >= 1
+                        return aliceOnline.length >= 1 && bobOnline.length >= 1 &&
+                            (aliceOnline[0]?.status?.data?.links?.length ?? 0) >= 1 &&
+                            (bobOnline[0]?.status?.data?.links?.length ?? 0) >= 1
                     }, { label: "alice + bob see each other's online status" })
 
                     expect(aliceOnline.length).to.be.equal(1)
