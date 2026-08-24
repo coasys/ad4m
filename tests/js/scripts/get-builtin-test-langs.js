@@ -4,7 +4,11 @@ import unzipper from "https://esm.sh/v135/unzipper@0.10.14";
 import path from "node:path";
 import os from "node:os";
 
-const languages = {
+// --local flag: use all-local bootstrap languages (no Holochain)
+const useLocal = Deno.args.includes("--local");
+
+// Holochain mode (default): HC agent/p-diff-sync/perspective + local persistence blobs
+const hcLanguages = {
   "agent-expression-store": {
     bundle: "../../bootstrap-languages/agent-language/build/bundle.js",
   },
@@ -22,7 +26,30 @@ const languages = {
   }
 };
 
+// Local mode: all languages from bootstrap-languages/local/ (no Holochain)
+const localLanguages = {
+  "agent-expression-store": {
+    bundle: "../../bootstrap-languages/local/agent-language.js",
+  },
+  languages: {
+    bundle: "../../bootstrap-languages/local/language-language.js",
+  },
+  "neighbourhood-store": {
+    bundle: "../../bootstrap-languages/local/neighbourhood-language.js",
+  },
+  "perspective-diff-sync": {
+    bundle: "../../bootstrap-languages/local/link-language.js",
+  },
+  "perspective-language": {
+    bundle: "../../bootstrap-languages/local/perspective-language.js",
+  }
+};
+
+const languages = useLocal ? localLanguages : hcLanguages;
+
 async function main() {
+  console.log(`get-builtin-test-langs: ${useLocal ? "LOCAL" : "HOLOCHAIN"} mode`);
+
   for (const lang in languages) {
     const targetDir = fs.readFileSync('./scripts/download-languages-path').toString()
     const dir = path.join(targetDir, lang)

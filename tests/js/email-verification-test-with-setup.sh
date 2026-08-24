@@ -52,8 +52,15 @@ echo "  - Building test languages..."
 echo "  - Preparing test directory..."
 ./scripts/prepareTestDirectory.sh
 
+# Pass --local flag through to get-builtin-test-langs if provided
+LANG_FLAGS=""
+if [[ "$*" == *"--local"* ]]; then
+    LANG_FLAGS="--local"
+    echo "  - Using LOCAL bootstrap languages (no Holochain)"
+fi
+
 echo "  - Getting builtin test languages..."
-deno run --allow-all scripts/get-builtin-test-langs.js
+deno run --allow-all scripts/get-builtin-test-langs.js $LANG_FLAGS
 
 echo "  - Injecting language language..."
 pnpm run inject-language-language

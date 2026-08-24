@@ -163,6 +163,7 @@ export async function startExecutor(dataPath: string,
     relayUrl?: string,
     enableMcp: boolean = false,
     mcpPort?: number,
+    runHolochain: boolean = true,
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
@@ -214,6 +215,7 @@ export async function startExecutor(dataPath: string,
         '--language-language-only', String(languageLanguageOnly),
         '--run-dapp-server', 'false',
     ];
+    if (!runHolochain) { args.push('--run-holochain', 'false'); }
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
     if (enableMcp) { args.push('--enable-mcp', 'true'); }
     if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }

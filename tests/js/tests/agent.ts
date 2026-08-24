@@ -1,5 +1,5 @@
 import { Perspective, LinkExpression, Link, ExpressionProof, EntanglementProofInput } from "@coasys/ad4m";
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import { sleep } from '../utils/utils'
 import { expect } from "chai";
 import * as sinon from "sinon";

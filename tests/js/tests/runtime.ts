@@ -1,4 +1,4 @@
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import fs from "fs";
 import { expect } from "chai";
 import { NotificationInput, TriggeredNotification } from '@coasys/ad4m';
