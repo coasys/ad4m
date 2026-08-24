@@ -111,6 +111,17 @@ async function publish() {
         }
         injectSystemLanguages();
         injectLangAliasHashes();
+
+        // Copy published language bundles to a shared directory so test executors
+        // with different data paths can find them on disk. In HC mode the HC DHT
+        // handles distribution; in local mode there is no shared network, so we
+        // use a filesystem copy instead.
+        const publishAgentLangsDir = path.resolve(appDataPath, "ad4m", "languages");
+        const sharedLangsDir = path.resolve(TEST_DIR, "published-languages");
+        if (fs.existsSync(publishAgentLangsDir)) {
+            fs.copySync(publishAgentLangsDir, sharedLangsDir, { overwrite: true });
+            console.log(`Copied published languages to ${sharedLangsDir}`);
+        }
     } finally {
         // Always kill the executor on the way out — success or failure.
         // Uses TCP:LISTEN filter so we only kill the listening server (the executor),

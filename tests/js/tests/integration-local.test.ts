@@ -53,6 +53,16 @@ describe("Local integration tests (no Holochain)", function () {
         if(!fs.existsSync(appDataPath))
             fs.mkdirSync(appDataPath)
 
+        // Pre-populate language bundles from the publish step.
+        // In HC mode the HC DHT distributes published languages across agents;
+        // in local mode there is no shared network, so we copy them on disk.
+        const publishedLangsDir = path.join(TEST_DIR, 'published-languages');
+        const testLangsDir = path.join(appDataPath, 'ad4m', 'languages');
+        if (fs.existsSync(publishedLangsDir)) {
+            fs.ensureDirSync(testLangsDir);
+            fs.copySync(publishedLangsDir, testLangsDir, { overwrite: true });
+        }
+
         // No HC local services — executor runs with --run-holochain false.
         // HC proxy/bootstrap URLs are ignored but we pass defaults since the
         // params are positional.
@@ -82,7 +92,7 @@ describe("Local integration tests (no Holochain)", function () {
 
     describe('Agent / Agent-Setup', agentTests(testContext))
     describe('Artificial Intelligence', aiTests(testContext))
-    describe('Runtime', runtimeTests(testContext))
+    describe('Runtime', runtimeTests(testContext, { hasHolochain: false }))
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
     describe('Social DNA', socialDNATests(testContext))

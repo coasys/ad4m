@@ -5,9 +5,11 @@ import { sleep } from "../utils/utils";
 export class TestContext {
     #alice: Ad4mClient | undefined
     #bob: Ad4mClient | undefined
+    #jim: Ad4mClient | undefined
 
     #aliceCore: ChildProcess | undefined
     #bobCore: ChildProcess | undefined
+    #jimCore: ChildProcess | undefined
 
     get ad4mClient(): Ad4mClient {
       return this.#alice!
@@ -21,12 +23,20 @@ export class TestContext {
       return this.#bob!
     }
 
+    get jim(): Ad4mClient {
+      return this.#jim!
+    }
+
     set alice(client: Ad4mClient) {
       this.#alice = client
     }
 
     set bob(client: Ad4mClient) {
       this.#bob = client
+    }
+
+    set jim(client: Ad4mClient) {
+      this.#jim = client
     }
 
     set aliceCore(aliceCore: ChildProcess) {
@@ -37,7 +47,12 @@ export class TestContext {
       this.#bobCore = bobCore
     }
 
+    set jimCore(jimCore: ChildProcess) {
+      this.#jimCore = jimCore
+    }
+
     async makeAllNodesKnown() {
+      let lastError: unknown;
       for (let attempt = 1; attempt <= 5; attempt++) {
         try {
           const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
@@ -46,13 +61,42 @@ export class TestContext {
           await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
           await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
           console.log(`Agent info exchange attempt ${attempt} successful`);
+          lastError = undefined;
           break;
         } catch (error) {
+          lastError = error;
           console.log(`Agent info exchange attempt ${attempt} failed:`, error);
           if (attempt < 5) {
             await sleep(3000);
           }
         }
       }
+      if (lastError) throw lastError;
+    }
+
+    async makeAllThreeNodesKnown() {
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        try {
+          const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
+          const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
+          const jimAgentInfo = await this.#jim!.runtime.hcAgentInfos();
+
+          const allInfos = [...aliceAgentInfo, ...bobAgentInfo, ...jimAgentInfo];
+          await this.#alice!.runtime.hcAddAgentInfos([...bobAgentInfo, ...jimAgentInfo]);
+          await this.#bob!.runtime.hcAddAgentInfos([...aliceAgentInfo, ...jimAgentInfo]);
+          await this.#jim!.runtime.hcAddAgentInfos([...aliceAgentInfo, ...bobAgentInfo]);
+          console.log(`Three-node agent info exchange attempt ${attempt} successful`);
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+          console.log(`Three-node agent info exchange attempt ${attempt} failed:`, error);
+          if (attempt < 5) {
+            await sleep(3000);
+          }
+        }
+      }
+      if (lastError) throw lastError;
     }
 }
