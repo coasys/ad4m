@@ -813,8 +813,27 @@ export interface RelationOptions {
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "SELECT ?target WHERE { ?target <flux://has_reply> <Base> . }"
      *
-     * Mutually exclusive with `through` and `target`. When `getter` is provided the
-     * relation is read-only (no adder/remover actions are generated).
+     * Mutually exclusive with `through` — a getter replaces link-based resolution,
+     * so there is no predicate to add to or remove from. When `getter` is provided
+     * the relation is read-only (no adder/remover actions are generated).
+     *
+     * **Combines with `target`**, which names the class the traversal's values
+     * hydrate into — without it `include` has no shape to resolve and the relation
+     * can only return bare URIs. Also combines with `where`, applied as a
+     * post-getter filter against the target class.
+     *
+     * @example Traversing a reified edge — a connection stored as a record rather
+     * than a predicate, so no `through` can express it:
+     * ```typescript
+     * @HasMany({
+     *   getter: `SELECT ?target WHERE {
+     *     ?citation <paper://cites_from> <Base> .
+     *     ?citation <paper://cites_to> ?target .
+     *   }`,
+     *   target: () => Paper,
+     * })
+     * cited: Paper[] = [];
+     * ```
      */
     getter?: string;
     /** Whether the link is stored locally (not shared on the network) */
@@ -904,19 +923,38 @@ function resolveRelationArgs(
                 '(with optional `target`) for standard link-based relations.'
             );
         }
-        if (opts.target) {
-            throw new Error(
-                'Relation decorator: `getter` and `target` are mutually exclusive. ' +
-                '`target` auto-generates a conformance getter from the model shape; ' +
-                'providing both is contradictory.'
-            );
-        }
-        if (opts.where) {
-            throw new Error(
-                'Relation decorator: `where` and `getter` are mutually exclusive. ' +
-                'Use `where` for DSL-based filtering, or `getter` for raw getter expression.'
-            );
-        }
+        // `target` and `where` are NOT mutually exclusive with `getter`.
+        //
+        // `target` does two separable jobs: it auto-derives a conformance
+        // getter, and it names the class the relation's values hydrate into.
+        // Only the first conflicts with an explicit getter, and `buildSHACL`
+        // already resolves that on its own — an explicit getter wins the getter
+        // slot, while `sh:class` / `ad4m:targetClassName` are emitted from
+        // `target` independently.
+        //
+        // Refusing the pair cost the one thing a custom getter is for. A getter
+        // expresses a traversal the link-shaped DSL cannot — most usefully
+        // through a reified edge, where the connection is a record rather than
+        // a predicate:
+        //
+        //     @HasMany({
+        //       getter: "SELECT ?target WHERE { \
+        //                  ?citation <paper://cites_from> <Base> . \
+        //                  ?citation <paper://cites_to> ?target . }",
+        //       target: () => Paper,
+        //     })
+        //     cited: Paper[] = [];
+        //
+        // Without `target` the relation has no target class, so `include` on it
+        // resolves a shape named "" and fails — leaving a traversal that can
+        // only ever return bare URIs. With it, the values hydrate like any other
+        // relation, because getters are evaluated before include resolution.
+        //
+        // `where` is the same story: the executor applies post-getter where
+        // filters specifically to getter-backed relations
+        // (`apply_where_filter_to_relation`), and emitting `wherePredicates`
+        // needs `target` to resolve the target's metadata — so the runtime is
+        // built for all three together and only this check said otherwise.
         return opts;
     }
 
