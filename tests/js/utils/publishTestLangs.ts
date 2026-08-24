@@ -138,6 +138,7 @@ async function publish() {
             "neighbourhood-store": "neighbourhoodLanguage",
             "perspective-diff-sync": "perspectiveDiffSync",
             "perspective-language": "perspectiveLanguage",
+            "server-link-language": "serverLinkLanguage",
         };
         for (const [langFolder, hashKey] of Object.entries(langFolderToHash)) {
             const srcBundle = path.join(publishLanguagesPath, langFolder, "build", "bundle.js");
