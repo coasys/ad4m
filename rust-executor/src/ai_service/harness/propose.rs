@@ -93,16 +93,31 @@ pub struct ClassProposeShape {
     /// the tool schema's `required[]` so the LLM can't propose a fresh
     /// instance missing a mandatory field.
     pub required: Vec<String>,
-    /// Relations declared on the class as `(name, predicate_uri)` — e.g.
-    /// `("basedOn", "ns://basedOn")`. Feeds the `_propose_link_child` schema's
-    /// `predicate` enum so the LLM must pick a canonical URI, and drives
-    /// dispatch-time normalization when it sends a variant like `basedOn` or
-    /// `soa:basedOn`. Observed 2026-08-24 harness_intention_links_to_seeded_
-    /// beliefs attempt 8: LLM linked to all three seeded beliefs but used
-    /// predicate `soa:basedOn` instead of the SDNA-declared `ns://basedOn`, so
-    /// `LinkQuery { predicate: "ns://basedOn" }` returned zero and the assertion
-    /// failed despite the write being correct in spirit.
-    pub relations: Vec<(String, String)>,
+    /// Relations declared on the class — the enum of predicates the LLM can
+    /// legally pick for `_propose_link_child` on instances of this class.
+    /// Also drives dispatch-time normalization (LLM sends `basedOn` /
+    /// `soa:basedOn` → canonical `ns://basedOn`).
+    pub relations: Vec<RelationInfo>,
+}
+
+/// One relation on a `ClassProposeShape` — the harness's per-relation view
+/// of a SHACL property that points to another class. The `hint` field
+/// (from the property's `ad4m://interpretation_hint` link) is what makes
+/// `basedOn` mean "prior beliefs this intention derives from" instead of
+/// just "some link" in the tool schema description.
+#[derive(Debug, Clone)]
+pub struct RelationInfo {
+    /// Property name as declared in SHACL, e.g. `basedOn`.
+    pub name: String,
+    /// Canonical predicate URI, e.g. `ns://basedOn`. This is what lands in
+    /// the actual `Link.predicate` and what `LinkQuery { predicate: … }`
+    /// matches on.
+    pub predicate: String,
+    /// Natural-language meaning of the relation, from the SDNA's
+    /// `interpretationHint`. Rendered into the `_propose_link_child`
+    /// `predicate` field description so the LLM knows which relation
+    /// applies to which situation.
+    pub hint: Option<String>,
 }
 
 /// Extract a [`ClassProposeShape`] from a loaded SHACL class. Filters out
@@ -122,11 +137,20 @@ pub fn class_propose_shape_from_shacl(class: &ShaclClass) -> ClassProposeShape {
         .collect();
     // Relations = properties with a typed target class (sh:class) and a
     // predicate URI. Covers hasMany (basedOn → Belief) and hasOne alike.
-    let relations: Vec<(String, String)> = class
+    // Carry `interpretation_hint` alongside — the harness renders it into
+    // the propose_link_child schema so the LLM knows *what* each relation
+    // means, not just that it exists.
+    let relations: Vec<RelationInfo> = class
         .properties
         .iter()
         .filter(|p| p.class.is_some())
-        .filter_map(|p| p.predicate.clone().map(|pred| (p.name.clone(), pred)))
+        .filter_map(|p| {
+            p.predicate.clone().map(|pred| RelationInfo {
+                name: p.name.clone(),
+                predicate: pred,
+                hint: p.interpretation_hint.clone(),
+            })
+        })
         .collect();
     ClassProposeShape {
         class_name: class.name.clone(),
@@ -465,7 +489,7 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
                     let valid = class_shape
                         .relations
                         .iter()
-                        .map(|(name, uri)| format!("`{uri}` (relation `{name}`)"))
+                        .map(|r| format!("`{}` (relation `{}`)", r.predicate, r.name))
                         .collect::<Vec<_>>()
                         .join(", ");
                     return Err(anyhow!(
@@ -567,14 +591,14 @@ fn strip_class_suffix(name: &str, suffix: &str) -> Option<String> {
 /// canonical SHACL URI on success, `None` when the predicate can't be
 /// matched to any declared relation — the caller turns that into an
 /// actionable error naming the valid predicates.
-fn resolve_relation_predicate(relations: &[(String, String)], raw: &str) -> Option<String> {
+fn resolve_relation_predicate(relations: &[RelationInfo], raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    for (_, canonical) in relations {
-        if canonical == trimmed {
-            return Some(canonical.clone());
+    for r in relations {
+        if r.predicate == trimmed {
+            return Some(r.predicate.clone());
         }
     }
     let local_of = |s: &str| -> String {
@@ -587,12 +611,12 @@ fn resolve_relation_predicate(relations: &[(String, String)], raw: &str) -> Opti
     if raw_local.is_empty() {
         return None;
     }
-    for (name, canonical) in relations {
-        if name.eq_ignore_ascii_case(&raw_local) {
-            return Some(canonical.clone());
+    for r in relations {
+        if r.name.eq_ignore_ascii_case(&raw_local) {
+            return Some(r.predicate.clone());
         }
-        if local_of(canonical).eq_ignore_ascii_case(&raw_local) {
-            return Some(canonical.clone());
+        if local_of(&r.predicate).eq_ignore_ascii_case(&raw_local) {
+            return Some(r.predicate.clone());
         }
     }
     None
@@ -707,11 +731,21 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
             "description": "Predicate IRI for the link. Use the exact predicate URI from the class's relation definition — invented variants like `soa:basedOn` when the class declares `ns://basedOn` will be rejected."
         })
     } else {
-        let allowed: Vec<&str> = c.relations.iter().map(|(_, uri)| uri.as_str()).collect();
+        let allowed: Vec<&str> = c.relations.iter().map(|r| r.predicate.as_str()).collect();
+        // Per-predicate description: `URI (relation "name" — interpretation hint)`.
+        // The hint (from RelationOptions.interpretationHint / SHACL
+        // ad4m://interpretation_hint) is what tells the LLM which relation
+        // applies semantically. Without it the LLM has to guess from the
+        // predicate name alone (e.g. `basedOn` is ambiguous — "based on
+        // what"?). When hint is absent, fall back to the bare "name → target
+        // class" phrasing.
         let pretty = c
             .relations
             .iter()
-            .map(|(name, uri)| format!("`{uri}` (relation `{name}` → target class)"))
+            .map(|r| match &r.hint {
+                Some(hint) => format!("`{}` (relation `{}` — {})", r.predicate, r.name, hint),
+                None => format!("`{}` (relation `{}` → target class)", r.predicate, r.name),
+            })
             .collect::<Vec<_>>()
             .join(", ");
         json!({
@@ -771,7 +805,12 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
         let list = c
             .relations
             .iter()
-            .map(|(name, uri)| format!("  - `{name}` → predicate `{uri}`"))
+            .map(|r| match &r.hint {
+                Some(hint) => {
+                    format!("  - `{}` → predicate `{}` — {hint}", r.name, r.predicate)
+                }
+                None => format!("  - `{}` → predicate `{}`", r.name, r.predicate),
+            })
             .collect::<Vec<_>>()
             .join("\n");
         format!("\n\n**Declared relations on `{class}` (pick `predicate` from these URIs exactly):**\n{list}", class = c.class_name)
@@ -838,7 +877,24 @@ mod tests {
                 ("owner".into(), "string, optional".into()),
             ],
             required: vec!["title".into()],
-            relations: vec![("basedOn".into(), "ns://basedOn".into())],
+            relations: vec![RelationInfo {
+                name: "basedOn".into(),
+                predicate: "ns://basedOn".into(),
+                hint: Some("The prior beliefs this intention derives from.".into()),
+            }],
+        }
+    }
+
+    fn intention_shape_without_hint() -> ClassProposeShape {
+        ClassProposeShape {
+            class_name: "Intention".into(),
+            scalar_props: vec![("title".into(), "string, required, max 1".into())],
+            required: vec!["title".into()],
+            relations: vec![RelationInfo {
+                name: "basedOn".into(),
+                predicate: "ns://basedOn".into(),
+                hint: None,
+            }],
         }
     }
 
@@ -1416,12 +1472,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn propose_link_child_schema_carries_relation_interpretation_hint() {
+        // When the SDNA declared a per-relation interpretation hint, it
+        // should appear in the predicate-field description alongside the URI
+        // and relation name — this is what tells the LLM what the relation
+        // means semantically, not just that it exists. Without it the model
+        // has to guess from the predicate name (`basedOn` is ambiguous —
+        // "based on what?"). Pulled into #911 from the deferred
+        // feature/relation-interpretation-hints branch per Nico's 2026-08-24
+        // ask ("do that in this PR already").
+        let (p, _buf) = provider(vec![intention_shape()]); // hint = "The prior beliefs..."
+        let tools = p.tools().await;
+        let link = tools
+            .into_iter()
+            .find(|t| t.name == "intention_propose_link_child")
+            .expect("intention_propose_link_child should be advertised");
+        let predicate_desc = link.parameters["properties"]["predicate"]["description"]
+            .as_str()
+            .expect("predicate.description must be a string");
+        assert!(
+            predicate_desc.contains("The prior beliefs this intention derives from."),
+            "predicate description must render the relation's interpretation hint; got: {predicate_desc}"
+        );
+        // Class-level description also lists the relation with its hint (the
+        // "Declared relations" section) so the LLM sees the hint in both
+        // places — right before it drafts the call.
+        assert!(
+            link.description
+                .contains("The prior beliefs this intention derives from."),
+            "tool description must also render the hint; got: {}",
+            link.description
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_link_child_schema_omits_hint_gracefully_when_absent() {
+        // SDNA with a relation but no declared interpretation hint — the
+        // schema falls back to the bare "name → target class" phrasing
+        // instead of dangling an empty `— ` marker.
+        let (p, _buf) = provider(vec![intention_shape_without_hint()]);
+        let tools = p.tools().await;
+        let link = tools
+            .into_iter()
+            .find(|t| t.name == "intention_propose_link_child")
+            .unwrap();
+        let predicate_desc = link.parameters["properties"]["predicate"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            predicate_desc.contains("`basedOn`"),
+            "still names the relation: {predicate_desc}"
+        );
+        assert!(
+            !predicate_desc.contains("— )"),
+            "no empty hint marker leaks through: {predicate_desc}"
+        );
+    }
+
     #[test]
     fn resolve_relation_predicate_covers_documented_variants() {
         // Pure-function coverage of the resolver — cheaper regression net
         // than the tokio-driven decorator tests above, and readable as a
         // spec of what forms we accept.
-        let rels = vec![("basedOn".to_string(), "ns://basedOn".to_string())];
+        let rels = vec![RelationInfo {
+            name: "basedOn".into(),
+            predicate: "ns://basedOn".into(),
+            hint: None,
+        }];
         for accepted in [
             "ns://basedOn",
             "basedOn",

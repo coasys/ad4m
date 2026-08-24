@@ -57,6 +57,15 @@ export interface RelationMetadataEntry {
      * instances — those pass through byte-for-byte.
      */
     datatype?: string;
+    /**
+     * Natural-language hint describing what this relation MEANS semantically.
+     * Emitted as an `ad4m://interpretation_hint` link on the SHACL property
+     * node; read back by the Rust harness and rendered into the
+     * `_propose_link_child` tool's `predicate` field description. Mirror of
+     * the same field on `RelationOptions` (the decorator arg); this is the
+     * memoized registry copy.
+     */
+    interpretationHint?: string;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -861,6 +870,25 @@ export interface RelationOptions {
      * ```
      */
     datatype?: string;
+    /**
+     * Natural-language hint describing what this relation MEANS semantically —
+     * the sentence-level rationale for when to use it, not just its structural
+     * shape. Emitted as an `ad4m://interpretation_hint` link on the SHACL
+     * property node; read back by the Rust harness (`ClassProposeShape.
+     * relations[N].hint`) and rendered into the `_propose_link_child` tool's
+     * `predicate` field description so the LLM knows which relation applies
+     * to which situation instead of guessing from the predicate name alone.
+     *
+     * @example
+     * ```typescript
+     * @HasMany(() => Belief, {
+     *   through: "ns://basedOn",
+     *   interpretationHint: "The prior beliefs this intention derives from.",
+     * })
+     * basedOn: Belief[] = [];
+     * ```
+     */
+    interpretationHint?: string;
 }
 
 /**
@@ -988,6 +1016,7 @@ export function HasMany(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         const relKey = key as string;
@@ -1052,6 +1081,7 @@ export function HasOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         const relKey = key as string;
@@ -1123,6 +1153,7 @@ export function BelongsToOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         if (opts.through) {
@@ -1182,6 +1213,7 @@ export function BelongsToMany(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*
