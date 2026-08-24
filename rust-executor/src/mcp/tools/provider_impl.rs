@@ -72,7 +72,6 @@ impl ToolProvider for Ad4mToolProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai_service::harness::provider::ToolProvider;
     // Note: exercising the ToolProvider impl in isolation requires an
     // `Ad4mMcpHandler` (which pulls in the full MCP + PerspectiveInstance
     // stack); regression coverage for the "no retry on error" contract lives

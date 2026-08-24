@@ -127,14 +127,23 @@ impl CompletionSource for OpenAiCompatBridge {
             })
             .collect();
 
-        // When the model emitted tool calls, wire content is `""` — the
-        // model's tool-call block already went into the extracted vec, so
-        // leaving `content` as the raw text would double it into the next
-        // prompt turn. When it emitted plain text, content is that text.
+        // Preserve residual assistant text alongside tool_calls.
+        //
+        // Small local models often emit a short pre-thought before the call
+        // block — e.g. `I need to look up the task first.\n<tool_call>{...}
+        // </tool_call>`. The earlier "blank content on tool-call turn"
+        // dropped that scratchpad, so the next iteration's prompt lost the
+        // model's own reasoning about WHY it made this call (Lal's PR #911
+        // review, harness_bridge.rs:130). Strip only the `<tool_call>...
+        // </tool_call>` blocks; keep everything else as content on the
+        // assistant message the harness loop appends.
+        //
+        // When no tool_calls were emitted, the entire text is the answer —
+        // pass it through verbatim.
         let content = if tool_calls.is_empty() {
             result.text
         } else {
-            String::new()
+            strip_tool_call_blocks(&result.text)
         };
 
         Ok(HarnessCompletion {
@@ -159,6 +168,55 @@ fn harness_schema_to_tool_def(s: &ToolSchema) -> ToolDef {
     }
 }
 
+/// Return `text` with every `<tool_call>…</tool_call>` block removed,
+/// preserving the residual assistant scratchpad. Used to keep the model's
+/// pre-thought (e.g. `"I need to look up the task first."`) in
+/// `HarnessCompletion.content` on a tool-call turn without also re-emitting
+/// the call block into the next prompt (which would look like the model was
+/// re-issuing the same call).
+///
+/// Whitespace collapse: consecutive blank lines left behind by removed
+/// blocks are folded to a single newline and the whole string is trimmed,
+/// so an all-block reply returns `""` (existing behaviour).
+fn strip_tool_call_blocks(text: &str) -> String {
+    const OPEN: &str = "<tool_call>";
+    const CLOSE: &str = "</tool_call>";
+
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(OPEN) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + OPEN.len()..];
+        match after.find(CLOSE) {
+            Some(end) => rest = &after[end + CLOSE.len()..],
+            // Unterminated block — drop the rest to avoid re-emitting a
+            // half-parsed call. Matches `extract_tool_calls`'s tolerance.
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+
+    // Fold ≥2 consecutive newlines to a single newline (residual whitespace
+    // from removed blocks); then trim edges so a pure-block reply is `""`.
+    let mut collapsed = String::with_capacity(out.len());
+    let mut prev_was_newline = false;
+    for ch in out.chars() {
+        if ch == '\n' {
+            if !prev_was_newline {
+                collapsed.push(ch);
+            }
+            prev_was_newline = true;
+        } else {
+            collapsed.push(ch);
+            prev_was_newline = false;
+        }
+    }
+    collapsed.trim().to_string()
+}
+
 /// Fold one harness-shape JSON message into `(role, text)` for the
 /// `prompt_messages` API. Mirrors `chat::flatten_message` but consumes raw
 /// `serde_json::Value` (that's what the harness loop constructs) instead
@@ -180,11 +238,23 @@ fn flatten_json_message(m: &Value) -> Result<(String, String)> {
 
     match role {
         // Tool result → a `<tool_response>` block folded into a user turn,
-        // since the underlying chat template has no tool role.
-        "tool" => Ok((
-            "user".to_string(),
-            format!("<tool_response>\n{content}\n</tool_response>"),
-        )),
+        // since the underlying chat template has no tool role. Includes the
+        // `tool_call_id` when present so parallel tool_calls in one round
+        // can be correlated back to their invocations on the next prompt
+        // (Lal's PR #911 review, harness_bridge.rs:186). Absent id → bare
+        // `<tool_response>` for backwards-compat with earlier turns and
+        // hand-written test messages.
+        "tool" => {
+            let block = match m.get("tool_call_id").and_then(|v| v.as_str()) {
+                Some(id) if !id.is_empty() => {
+                    let id_encoded =
+                        serde_json::to_string(id).unwrap_or_else(|_| "\"\"".to_string());
+                    format!("<tool_response id={id_encoded}>\n{content}\n</tool_response>")
+                }
+                _ => format!("<tool_response>\n{content}\n</tool_response>"),
+            };
+            Ok(("user".to_string(), block))
+        }
         // Assistant turn that carried tool_calls → re-render them in the
         // Qwen `<tool_call>` convention so the model sees its own prior
         // invocations on this turn's prompt.
@@ -232,5 +302,113 @@ fn flatten_json_message(m: &Value) -> Result<(String, String)> {
             Ok(("assistant".to_string(), text))
         }
         _ => Ok((role.to_string(), content)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn strip_tool_call_blocks_preserves_pre_and_post_thought() {
+        let text = "I need to look up the task first.\n\
+                    <tool_call>\n{\"name\": \"query\", \"arguments\": {}}\n</tool_call>\n\
+                    Then I will link.";
+        let residual = strip_tool_call_blocks(text);
+        assert!(
+            residual.contains("I need to look up the task first."),
+            "pre-thought lost: {residual}"
+        );
+        assert!(
+            residual.contains("Then I will link."),
+            "post-thought lost: {residual}"
+        );
+        assert!(
+            !residual.contains("<tool_call>"),
+            "call block leaked into content: {residual}"
+        );
+    }
+
+    #[test]
+    fn strip_tool_call_blocks_multiple_calls_returns_only_scratchpad() {
+        let text = "First, query beliefs.\n\
+                    <tool_call>\n{\"name\":\"q1\",\"arguments\":{}}\n</tool_call>\n\
+                    Second, query intentions.\n\
+                    <tool_call>\n{\"name\":\"q2\",\"arguments\":{}}\n</tool_call>";
+        let residual = strip_tool_call_blocks(text);
+        assert!(residual.contains("First, query beliefs."), "{residual}");
+        assert!(residual.contains("Second, query intentions."), "{residual}");
+        assert!(!residual.contains("q1"), "{residual}");
+        assert!(!residual.contains("q2"), "{residual}");
+    }
+
+    #[test]
+    fn strip_tool_call_blocks_all_block_reply_returns_empty() {
+        let text = "<tool_call>\n{\"name\":\"q\",\"arguments\":{}}\n</tool_call>";
+        assert_eq!(strip_tool_call_blocks(text), "");
+    }
+
+    #[test]
+    fn strip_tool_call_blocks_plain_text_pass_through() {
+        assert_eq!(strip_tool_call_blocks("Hello world"), "Hello world");
+    }
+
+    #[test]
+    fn strip_tool_call_blocks_unterminated_block_is_dropped_from_the_open_tag() {
+        // Truncated stream — keep prefix, drop the malformed remainder so it
+        // can't re-appear in the next prompt as a broken call.
+        let text = "before\n<tool_call>\n{\"name\": \"q\", \"arguments\":";
+        let residual = strip_tool_call_blocks(text);
+        assert!(residual.contains("before"), "{residual}");
+        assert!(!residual.contains("<tool_call>"), "{residual}");
+        assert!(!residual.contains("\"name\": \"q\""), "{residual}");
+    }
+
+    #[test]
+    fn flatten_tool_message_carries_tool_call_id_when_present() {
+        let msg = json!({
+            "role": "tool",
+            "tool_call_id": "call_abc123",
+            "content": "42",
+        });
+        let (role, body) = flatten_json_message(&msg).unwrap();
+        assert_eq!(role, "user");
+        assert!(
+            body.contains("id=\"call_abc123\""),
+            "tool_call_id must round-trip into <tool_response id=...>; got: {body}"
+        );
+        assert!(body.contains("\n42\n"), "content lost: {body}");
+    }
+
+    #[test]
+    fn flatten_tool_message_without_id_falls_back_to_bare_tag() {
+        let msg = json!({
+            "role": "tool",
+            "content": "42",
+        });
+        let (role, body) = flatten_json_message(&msg).unwrap();
+        assert_eq!(role, "user");
+        assert!(
+            !body.contains("id="),
+            "no id key should mean no id attribute; got: {body}"
+        );
+        assert!(body.starts_with("<tool_response>\n"), "{body}");
+    }
+
+    #[test]
+    fn flatten_tool_message_id_is_json_encoded_to_survive_quotes() {
+        let msg = json!({
+            "role": "tool",
+            "tool_call_id": "call_\"weird\"_id",
+            "content": "x",
+        });
+        let (_, body) = flatten_json_message(&msg).unwrap();
+        // The encoded id has escaped quotes inside a quoted string — the
+        // block must stay parseable if the model reads it back.
+        assert!(
+            body.contains("id=\"call_\\\"weird\\\"_id\""),
+            "malformed encoding: {body}"
+        );
     }
 }
