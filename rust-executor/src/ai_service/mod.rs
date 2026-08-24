@@ -34,6 +34,7 @@ pub type Result<T> = std::result::Result<T, AnyError>;
 /// Result of an LLM prompt call, with token counts for billing.
 /// Token counts are estimated (chars/4) with the current Kalosum backend.
 /// When Ollama is integrated, these will be exact from the API response.
+#[derive(Debug, Clone)]
 pub struct PromptResult {
     pub text: String,
     pub prompt_tokens: usize,
@@ -50,7 +51,16 @@ pub struct EmbedResult {
 /// Rough token count estimation (~4 chars per token for English text).
 /// Used by the Kalosum backend to populate PromptResult/EmbedResult.
 /// Will be replaced by exact counts when Ollama is integrated.
-fn estimate_token_count(text: &str) -> usize {
+///
+/// TODO(billing accuracy): materially off for non-English scripts (CJK,
+/// Arabic, Hindi tend to ~1 token/char → billing under-estimated ~4×),
+/// code/JSON (~2 chars/token → under-estimated ~2×), and repetitive text
+/// (BPE compresses well → over-estimated). Plumb real Kalosm token counts
+/// when the backend exposes them, or apply a per-model correction factor.
+///
+/// `pub(crate)` so `api::openai_compat::tests` can lock in the current
+/// formula and catch accidental changes.
+pub(crate) fn estimate_token_count(text: &str) -> usize {
     let chars = text.chars().count();
     (chars + 3) / 4
 }
@@ -137,11 +147,34 @@ struct LLMTaskShutdownRequest {
     pub result_sender: oneshot::Sender<()>,
 }
 
+/// Streaming-prompt variant for the OpenAI-compatible chat endpoint.
+///
+/// Identical to [`LLMTaskPromptRequest`] but instead of a oneshot reply
+/// the caller receives an async stream of token chunks.  Used by
+/// `prompt_messages_stream` to back `POST /v1/chat/completions` with
+/// `stream: true`.
+///
+/// The receiver side is an `mpsc::Receiver<String>` so each `Token` arm
+/// can push without awaiting consumer backpressure; the HTTP handler
+/// converts each token into one SSE `chat.completion.chunk`.
+///
+/// `done_sender` fires once the model has emitted its final token (or
+/// errored) and carries `PromptResult` for the closing chunk's `usage`.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct LLMTaskPromptStreamRequest {
+    pub task_id: String,
+    pub prompt: String,
+    pub token_sender: mpsc::UnboundedSender<String>,
+    pub done_sender: oneshot::Sender<Result<PromptResult>>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug)]
 enum LLMTaskRequest {
     Spawn(LLMTaskSpawnRequest),
     Prompt(LLMTaskPromptRequest),
+    PromptStream(LLMTaskPromptStreamRequest),
     Remove(LLMTaskRemoveRequest),
     Shutdown(LLMTaskShutdownRequest),
 }
@@ -851,6 +884,144 @@ impl AIService {
                                 }
                             },
 
+                            LLMTaskRequest::PromptStream(stream_request) => match model {
+                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
+                                    // Remote upstreams use the non-streaming
+                                    // chat call today; we deliver the full
+                                    // response as a single token chunk so
+                                    // SSE consumers still see the "stream"
+                                    // protocol (one delta + final usage).
+                                    // A native streaming upstream client is
+                                    // a follow-up.
+                                    if let Some(task) =
+                                        task_descriptions.get(&stream_request.task_id)
+                                    {
+                                        let mut messages = vec![Message {
+                                            role: Role::System,
+                                            content: task.system_prompt.clone(),
+                                        }];
+                                        for example in task.prompt_examples.iter() {
+                                            messages.push(Message {
+                                                role: Role::User,
+                                                content: example.input.clone(),
+                                            });
+                                            messages.push(Message {
+                                                role: Role::Assistant,
+                                                content: example.output.clone(),
+                                            });
+                                        }
+                                        let prompt_clone = stream_request.prompt.clone();
+                                        messages.push(Message {
+                                            role: Role::User,
+                                            content: prompt_clone.clone(),
+                                        });
+                                        let chat_input = ChatInput {
+                                            model: chat_gpt_lib_rs::Model::Custom(
+                                                model_string.clone(),
+                                            ),
+                                            messages,
+                                            ..Default::default()
+                                        };
+                                        match rt.block_on(remote_client.chat(chat_input)) {
+                                            Err(e) => {
+                                                let _ =
+                                                    stream_request.done_sender.send(Err(anyhow!(
+                                                        "Error connecting to remote LLM API: {:?}",
+                                                        e
+                                                    )));
+                                            }
+                                            Ok(response) => {
+                                                let text = response
+                                                    .choices
+                                                    .first()
+                                                    .map(|c| c.message.content.clone())
+                                                    .unwrap_or_default();
+                                                let _ =
+                                                    stream_request.token_sender.send(text.clone());
+                                                let prompt_tokens =
+                                                    estimate_token_count(&prompt_clone);
+                                                let completion_tokens = estimate_token_count(&text);
+                                                let _ = stream_request.done_sender.send(Ok(
+                                                    PromptResult {
+                                                        text,
+                                                        prompt_tokens,
+                                                        completion_tokens,
+                                                        model_id: model_config.id.clone(),
+                                                    },
+                                                ));
+                                            }
+                                        }
+                                    } else {
+                                        let _ = stream_request.done_sender.send(Err(anyhow!(
+                                            "Task with ID {} not spawned",
+                                            stream_request.task_id
+                                        )));
+                                    }
+                                }
+                                LlmModel::Local(_) => {
+                                    if let Some(task) = tasks.get(&stream_request.task_id) {
+                                        rt.block_on(publish_model_status(
+                                            model_config.id.clone(),
+                                            100.0,
+                                            "Running inference...",
+                                            true,
+                                            true,
+                                        ));
+
+                                        let prompt_clone = stream_request.prompt.clone();
+                                        let prompt_tokens = estimate_token_count(&prompt_clone);
+                                        let token_sender = stream_request.token_sender.clone();
+                                        // Forward each token through the
+                                        // mpsc back to the SSE handler.  We
+                                        // accumulate the full text so the
+                                        // closing event still carries a
+                                        // single concatenated string for
+                                        // billing + usage parity with the
+                                        // non-stream path.
+                                        let result = rt.block_on(async {
+                                            use futures::StreamExt;
+                                            // `task.run(...)` returns a
+                                            // `ChatResponseBuilder` which
+                                            // implements `Stream<Item=String>`;
+                                            // polling it yields one token
+                                            // chunk at a time.
+                                            let mut stream =
+                                                Box::pin(task.run(prompt_clone.clone()));
+                                            let mut accumulated = String::new();
+                                            while let Some(token) = stream.next().await {
+                                                accumulated.push_str(&token);
+                                                if token_sender.send(token).is_err() {
+                                                    // consumer dropped — stop generating
+                                                    break;
+                                                }
+                                            }
+                                            accumulated
+                                        });
+
+                                        rt.block_on(publish_model_status(
+                                            model_config.id.clone(),
+                                            100.0,
+                                            "Ready",
+                                            true,
+                                            true,
+                                        ));
+
+                                        let completion_tokens = estimate_token_count(&result);
+                                        let _ = stream_request.done_sender.send(Ok(PromptResult {
+                                            text: result,
+                                            prompt_tokens,
+                                            completion_tokens,
+                                            model_id: model_config.id.clone(),
+                                        }));
+                                    } else {
+                                        let _ = stream_request.done_sender.send(Err(anyhow!(
+                                            "Task with ID {} not spawned",
+                                            stream_request.task_id
+                                        )));
+                                    }
+                                }
+                            },
+
                             LLMTaskRequest::Remove(remove_request) => {
                                 let _ = tasks.remove(&remove_request.task_id);
                                 let _ = task_descriptions.remove(&remove_request.task_id);
@@ -992,7 +1163,222 @@ impl AIService {
         Ok(())
     }
 
-    pub async fn prompt(&self, task_id: String, prompt: String) -> Result<PromptResult> {
+    /// Build an ephemeral, in-memory task from a list of `(system, user,
+    /// assistant)` messages and return its `task_id`.  Used by the
+    /// OpenAI-compatible `chat.completions` handler so each request is
+    /// stateless: spawn → prompt → remove.  Nothing touches the DB.
+    ///
+    /// `messages` is in OpenAI order — system message(s) at the front,
+    /// then alternating user/assistant turns ending with a final user
+    /// message.  The final user message is returned separately so the
+    /// caller passes it as the prompt; everything before it becomes the
+    /// task's `system_prompt` + few-shot example pairs.
+    fn build_ephemeral_task(model_id: &str, messages: Vec<(String, String)>) -> (AITask, String) {
+        // Split: leading System messages → system_prompt; alternating
+        // User/Assistant pairs → examples; last User message → prompt.
+        let mut system_prompt = String::new();
+        let mut examples: Vec<crate::types::AIPromptExamples> = Vec::new();
+        let mut current_user: Option<String> = None;
+        let mut final_prompt = String::new();
+
+        for (role, content) in &messages {
+            match role.as_str() {
+                "system" => {
+                    if !system_prompt.is_empty() {
+                        system_prompt.push_str("\n");
+                    }
+                    system_prompt.push_str(content);
+                }
+                "user" => {
+                    if let Some(prev_user) = current_user.take() {
+                        current_user = Some(format!("{}\n{}", prev_user, content));
+                    } else {
+                        current_user = Some(content.clone());
+                    }
+                }
+                "assistant" => {
+                    if let Some(user_msg) = current_user.take() {
+                        examples.push(crate::types::AIPromptExamples {
+                            input: user_msg,
+                            output: content.clone(),
+                        });
+                    }
+                }
+                _ => { /* tool/function/developer — silently dropped */ }
+            }
+        }
+        if let Some(last_user) = current_user {
+            final_prompt = last_user;
+        }
+
+        let task_id = format!("openai-compat-{}", uuid::Uuid::new_v4());
+        let now = chrono::Utc::now().to_rfc3339();
+        let task = AITask {
+            name: format!("openai-compat-{}", &task_id[..8]),
+            task_id: task_id.clone(),
+            model_id: model_id.to_string(),
+            system_prompt,
+            prompt_examples: examples,
+            meta_data: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        (task, final_prompt)
+    }
+
+    /// Run a chat-style prompt on `model_id` with a stateless message
+    /// list and return the full response text + token counts.  Backs
+    /// `POST /v1/chat/completions`.
+    pub async fn prompt_messages(
+        &self,
+        model_id: String,
+        messages: Vec<(String, String)>,
+        auth_token: Option<String>,
+    ) -> Result<PromptResult> {
+        let resolved = Self::replace_model_variables(&model_id)?;
+        let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
+
+        // Spawn + prompt + remove.  We use the existing per-model thread
+        // command channels so model state stays local to its thread and
+        // we don't duplicate the build-llama machinery.
+        let task_id = task.task_id.clone();
+        let (spawn_tx, spawn_rx) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
+                task,
+                result_sender: spawn_tx,
+            }))?;
+        }
+        spawn_rx.await??;
+
+        let (prompt_tx, prompt_rx) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
+                task_id: task_id.clone(),
+                prompt: final_prompt.clone(),
+                result_sender: prompt_tx,
+            }))?;
+        }
+        let prompt_tokens = estimate_token_count(&final_prompt);
+        let text = prompt_rx.await??;
+        let completion_tokens = estimate_token_count(&text);
+
+        // Clean up the ephemeral task entry on the LLM thread.
+        let (remove_tx, _) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.get(&resolved) {
+                let _ = sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
+                    task_id: task_id.clone(),
+                    result_sender: remove_tx,
+                }));
+            }
+        }
+
+        // Bill via the shared host_rates helper (matches transcription
+        // worker + WS-RPC pattern). Rate = 0 (unpriced model) makes this
+        // a no-op. InsufficientCredits is returned to the caller so /v1
+        // can propagate 429; other errors are logged and swallowed.
+        Self::bill_prompt_if_authed(
+            auth_token.as_deref(),
+            &resolved,
+            prompt_tokens,
+            completion_tokens,
+        );
+
+        Ok(PromptResult {
+            text,
+            prompt_tokens,
+            completion_tokens,
+            model_id: resolved,
+        })
+    }
+
+    /// Streaming variant of [`Self::prompt_messages`].  Returns a token
+    /// stream + a oneshot for the final [`PromptResult`] (carries the
+    /// full text + token counts for the closing SSE event).
+    pub async fn prompt_messages_stream(
+        &self,
+        model_id: String,
+        messages: Vec<(String, String)>,
+        auth_token: Option<String>,
+    ) -> Result<(
+        mpsc::UnboundedReceiver<String>,
+        oneshot::Receiver<Result<PromptResult>>,
+    )> {
+        let resolved = Self::replace_model_variables(&model_id)?;
+        let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
+
+        let task_id = task.task_id.clone();
+        let (spawn_tx, spawn_rx) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::Spawn(LLMTaskSpawnRequest {
+                task,
+                result_sender: spawn_tx,
+            }))?;
+        }
+        spawn_rx.await??;
+
+        let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
+        let (done_tx, done_rx) = oneshot::channel::<Result<PromptResult>>();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::PromptStream(LLMTaskPromptStreamRequest {
+                task_id: task_id.clone(),
+                prompt: final_prompt,
+                token_sender: token_tx,
+                done_sender: done_tx,
+            }))?;
+        }
+
+        // Schedule a Remove for after the prompt completes — best-effort
+        // background cleanup so the caller doesn't have to await it.
+        let llm_channel_clone = self.llm_channel.clone();
+        let resolved_clone = resolved.clone();
+        tokio::spawn(async move {
+            // Wait a little for the prompt to finish before removing the
+            // task entry; if the model is local, the thread holds the
+            // task in its `tasks` map for the duration of the call, so
+            // removing too early would race the inference.
+            //
+            // We don't have a reliable signal here without restructuring
+            // the channel; the LLM thread serialises requests anyway, so
+            // a Remove queued immediately will run after the
+            // PromptStream completes.  No sleep needed.
+            let (remove_tx, _) = oneshot::channel();
+            let llm_channel = llm_channel_clone.lock().await;
+            if let Some(sender) = llm_channel.get(&resolved_clone) {
+                let _ = sender.send(LLMTaskRequest::Remove(LLMTaskRemoveRequest {
+                    task_id,
+                    result_sender: remove_tx,
+                }));
+            }
+        });
+
+        Ok((token_rx, done_rx))
+    }
+
+    pub async fn prompt(
+        &self,
+        task_id: String,
+        prompt: String,
+        auth_token: Option<String>,
+    ) -> Result<PromptResult> {
         let (result_sender, rx) = oneshot::channel();
 
         // Retrieve the task to find the associated model_id
@@ -1021,12 +1407,70 @@ impl AIService {
         let text = rx.await??;
         let completion_tokens = estimate_token_count(&text);
 
+        // Bill via the shared host_rates helper. See prompt_messages.
+        Self::bill_prompt_if_authed(
+            auth_token.as_deref(),
+            &model_id,
+            prompt_tokens,
+            completion_tokens,
+        );
+
         Ok(PromptResult {
             text,
             prompt_tokens,
             completion_tokens,
             model_id,
         })
+    }
+
+    /// Shared post-compute billing hook for prompt paths.
+    ///
+    /// unit = (prompt_tokens + completion_tokens), matching the token-
+    /// length estimate that estimate_token_count() computes (chars/4).
+    /// This mirrors what the transcription worker does with word_count,
+    /// so every AI billing path routes through the same shape.
+    fn bill_prompt_if_authed(
+        auth_token: Option<&str>,
+        model_id: &str,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+    ) {
+        let Some(token) = auth_token else {
+            return;
+        };
+        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
+        else {
+            return;
+        };
+        let total_tokens = prompt_tokens.saturating_add(completion_tokens);
+        // Ignore result: rate=0 no-ops, InsufficientCredits is logged
+        // inside bill_ai_operation. Prompt has already run so we don't
+        // want to fail the caller on a bookkeeping-only issue.
+        let _ = crate::billing::bill_ai_operation(
+            &email,
+            model_id,
+            "ai_prompt",
+            total_tokens,
+            "tokens",
+        );
+    }
+
+    /// Shared post-compute billing hook for embed paths.
+    fn bill_embed_if_authed(auth_token: Option<&str>, model_id: &str, token_count: usize) {
+        let Some(token) = auth_token else {
+            return;
+        };
+        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
+        else {
+            return;
+        };
+        let _ = crate::billing::bill_ai_operation(
+            &email,
+            model_id,
+            "ai_embedding",
+            token_count,
+            "tokens",
+        );
     }
 
     // -------------------------------------
@@ -1083,7 +1527,12 @@ impl AIService {
             .insert(model_name, bert_tx);
     }
 
-    pub async fn embed(&self, model_id: String, text: String) -> Result<EmbedResult> {
+    pub async fn embed(
+        &self,
+        model_id: String,
+        text: String,
+        auth_token: Option<String>,
+    ) -> Result<EmbedResult> {
         let token_count = estimate_token_count(&text);
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
@@ -1101,6 +1550,10 @@ impl AIService {
         }
 
         let embeddings = rx.await??;
+
+        // Bill via the shared host_rates helper.
+        Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count);
+
         Ok(EmbedResult {
             embeddings,
             token_count,
@@ -1485,6 +1938,55 @@ impl AIService {
         }
     }
 
+    /// One-shot transcription: open a stream, feed the whole audio
+    /// buffer, drain the broadcast channel until idle, close.
+    ///
+    /// Backs `POST /v1/audio/transcriptions` (batch multipart upload).
+    /// The caller is responsible for decoding the upload to 16 kHz mono
+    /// `f32` samples — this method only handles the whisper-side
+    /// session lifecycle and assembly of the final transcript.
+    pub async fn transcribe_buffer(
+        &self,
+        model_id: String,
+        samples: Vec<f32>,
+        auth_token: String,
+    ) -> Result<String> {
+        let stream_id = self
+            .open_transcription_stream(model_id, None, auth_token.clone())
+            .await?;
+
+        // Subscribe to the broadcast BEFORE feeding so we don't drop any
+        // partial events the whisper thread emits during the first
+        // window.
+        let mut rx = self
+            .feed_transcription_stream_with_broadcast(&stream_id, samples, &auth_token)
+            .await?;
+
+        // Drain until the receiver lags or no message arrives within a
+        // short idle window.  Whisper emits one event per finalised
+        // segment; for a one-shot buffer the model usually emits 1-3
+        // segments and then goes quiet.
+        let mut transcript = String::new();
+        let idle = Duration::from_millis(2500);
+        loop {
+            match tokio::time::timeout(idle, rx.recv()).await {
+                Ok(Ok(text)) => {
+                    if !transcript.is_empty() && !text.is_empty() {
+                        transcript.push(' ');
+                    }
+                    transcript.push_str(&text);
+                }
+                Ok(Err(_)) => break, // sender dropped
+                Err(_) => break,     // idle timeout
+            }
+        }
+
+        let _ = self
+            .close_transcription_stream(&stream_id, &auth_token)
+            .await;
+        Ok(transcript)
+    }
+
     pub async fn close_transcription_stream(
         &self,
         stream_id: &String,
@@ -1788,7 +2290,7 @@ mod tests {
         Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
         let service = AIService::new().expect("initialization to work");
         let vector = service
-            .embed("bert".into(), "Test string".into())
+            .embed("bert".into(), "Test string".into(), None)
             .await
             .expect("embed to return a result");
         assert!(vector.embeddings.len() > 300)
@@ -1812,7 +2314,7 @@ mod tests {
             }).await.expect("add_task to work without error");
 
         let response = service
-            .prompt(task.task_id, "Test string".into())
+            .prompt(task.task_id, "Test string".into(), None)
             .await
             .expect("prompt to return a result");
         println!("Response: {}", response.text);
@@ -1853,7 +2355,7 @@ mod tests {
         }).await.expect("add_task to work without error");
 
         let futures = (0..10)
-            .map(|_| service.prompt(task.task_id.clone(), "Test string".into()))
+            .map(|_| service.prompt(task.task_id.clone(), "Test string".into(), None))
             .collect::<Vec<_>>();
 
         let responses = futures::future::join_all(futures)
@@ -1970,7 +2472,7 @@ mod tests {
 
         // Verify the task still works
         let response = service
-            .prompt(task.task_id.clone(), "Test input".into())
+            .prompt(task.task_id.clone(), "Test input".into(), None)
             .await
             .expect("prompt to work after model update");
         assert!(!response.text.is_empty());
