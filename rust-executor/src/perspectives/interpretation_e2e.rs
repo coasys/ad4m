@@ -1078,6 +1078,7 @@ async fn link_under_channel(
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("link subgroup under channel");

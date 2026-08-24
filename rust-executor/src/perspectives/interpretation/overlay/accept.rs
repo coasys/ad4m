@@ -310,6 +310,7 @@ mod tests {
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("add_links");
