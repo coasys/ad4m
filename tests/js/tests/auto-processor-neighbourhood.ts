@@ -17,7 +17,7 @@
 import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
-import { pollUntil } from "../utils/utils";
+import { pollUntil, sleep } from "../utils/utils";
 import { waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
@@ -93,6 +93,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
 
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
         await testContext.makeAllNodesKnown();
+        await sleep(2000); // K2 space initialization after join + agent info exchange
 
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
