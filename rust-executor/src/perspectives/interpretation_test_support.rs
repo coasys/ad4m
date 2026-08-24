@@ -496,6 +496,17 @@ pub(crate) async fn run_harness_e2e(
     Vec<ModelShape>,
     Vec<(String, Vec<Link>)>,
 ) {
+    // Surface the harness `log::warn!` diagnostics (round=, tool_calls=,
+    // content_preview=) added in commit 5c34ed868. Without an env_logger
+    // init, tests are blind to the LLM's per-round choices — observed
+    // 2026-08-24 when harness_intention_links_to_seeded_beliefs failed
+    // 8/8 and the placements list alone couldn't tell us which tool the
+    // model was reaching for. `try_init` makes this idempotent across
+    // scenarios, and defaulting RUST_LOG to `warn` if unset keeps output
+    // scoped to what the harness explicitly emits.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(false) // route to stderr so --nocapture shows it
+        .try_init();
     let (mut perspective, shapes, ctx) = setup_interpretation_e2e(class_sdnas).await;
     let placements =
         run_interpretation_harness_e2e(&mut perspective, &shapes, transcript, &ctx, max_tool_calls)

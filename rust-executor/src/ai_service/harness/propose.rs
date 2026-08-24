@@ -310,23 +310,36 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
         // Base URI: honour caller-supplied `base` if present (lets the LLM
         // reference the instance from a later propose_link_child in the same
         // turn without a round-trip), else mint one under base_prefix.
-        let base = args
-            .get("base")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                format!(
-                    "{}{}{}/{}",
-                    self.base_prefix,
-                    if self.base_prefix.ends_with('/') {
-                        ""
-                    } else {
-                        "/"
-                    },
-                    lower_class,
-                    Uuid::new_v4()
-                )
-            });
+        // Bounce placeholder/template-copy `base` values (`<uri>`, `unknown`,
+        // etc.) — otherwise they become the literal URI and later reads panic
+        // (observed 2026-08-24 attempts 3 & 8 of harness_intention_links_to_
+        // seeded_beliefs where `base: "<uri>"` was passed through).
+        let base = match args.get("base").and_then(|v| v.as_str()) {
+            Some(s) => {
+                if let Some(bad) = placeholder_uri(s) {
+                    return Err(anyhow!(
+                        "{}_propose_create: `base` looks like a placeholder ({}). \
+                         Omit `base` to have one auto-minted, or supply a real \
+                         URI (e.g. `soa://ext/{}/<uuid>`).",
+                        lower_class,
+                        bad,
+                        lower_class
+                    ));
+                }
+                s.to_string()
+            }
+            None => format!(
+                "{}{}{}/{}",
+                self.base_prefix,
+                if self.base_prefix.ends_with('/') {
+                    ""
+                } else {
+                    "/"
+                },
+                lower_class,
+                Uuid::new_v4()
+            ),
+        };
 
         self.buffer.push(InterpretationOp::Create {
             base: base.clone(),
@@ -419,14 +432,26 @@ fn strip_class_suffix(name: &str, suffix: &str) -> Option<String> {
 /// for real-looking URIs (which is not a proof of existence — just that
 /// the URI is worth attempting).
 ///
-/// Recognised: empty string, trailing `unknown` / `placeholder` /
-/// `example` / `...` / `xxx` / `todo` (case-insensitive) — the tail after
-/// the last `/` or `:` is checked so `ad4m://obj/unknown` and plain
-/// `unknown` both bounce.
+/// Recognised:
+/// - empty string
+/// - angle-bracket-wrapped template like `<uri>`, `<URI>`, `<target>` —
+///   small models (gemma3:12b) copy schema-example placeholders verbatim
+///   (observed 2026-08-24 harness_intention_links_to_seeded_beliefs
+///   attempts 3 & 8 where `base: "<uri>"` became the base URI and the
+///   subsequent read-back panicked)
+/// - trailing `unknown` / `placeholder` / `example` / `...` / `xxx` /
+///   `todo` (case-insensitive) — the tail after the last `/` or `:` is
+///   checked so `ad4m://obj/unknown` and plain `unknown` both bounce
+/// - unknown-scheme "URIs" like `belief_query:...` (a tool-name + query
+///   pasted as URI, observed same test attempt 7) — only ad4m/soa/
+///   literal/https/http/urn schemes are accepted for link URIs
 fn placeholder_uri(uri: &str) -> Option<&'static str> {
     let trimmed = uri.trim();
     if trimmed.is_empty() {
         return Some("empty");
+    }
+    if trimmed.len() >= 3 && trimmed.starts_with('<') && trimmed.ends_with('>') {
+        return Some("template-placeholder (angle brackets)");
     }
     let tail = trimmed
         .rsplit(|c: char| c == '/' || c == ':')
@@ -446,6 +471,23 @@ fn placeholder_uri(uri: &str) -> Option<&'static str> {
             });
         }
     }
+    // Scheme whitelist for link URIs. `belief_query:Local-first...` gets
+    // through the tail check because `local-first...` isn't in the bad
+    // list, but the scheme `belief_query` is nonsense — the LLM likely
+    // pasted a tool name + query as the URI. If the string has an `:`
+    // (any scheme-like separator), the part before must be a known scheme.
+    // Strings without any `:` (bare tokens) are not rejected here — the
+    // tail check above catches the common bare placeholders.
+    if let Some(colon_at) = trimmed.find(':') {
+        let scheme = &trimmed[..colon_at].to_ascii_lowercase();
+        let is_known = matches!(
+            scheme.as_str(),
+            "ad4m" | "soa" | "literal" | "https" | "http" | "urn" | "did"
+        );
+        if !is_known {
+            return Some("unknown-scheme (not ad4m/soa/literal/https/http/urn/did)");
+        }
+    }
     None
 }
 
@@ -457,7 +499,7 @@ fn propose_create_schema(c: &ClassProposeShape) -> ToolSchema {
         "base".to_string(),
         json!({
             "type": "string",
-            "description": "Optional URI for the new instance. Auto-minted from base_prefix if omitted; supply one when you need to reference this instance from a follow-up propose_link_child in the same turn.",
+            "description": "Optional URI for the new instance. Prefer to OMIT this field — the tool auto-mints a fresh URI and returns it in the response, which you then pass verbatim as `parent` to a follow-up propose_link_child call. Only supply `base` if you truly need a specific URI (e.g. `soa://ext/task/abc123`); NEVER supply a template placeholder like `<uri>` or `unknown` — those are rejected.",
         }),
     );
     for (prop_name, type_desc) in &c.scalar_props {
@@ -488,9 +530,12 @@ fn propose_create_schema(c: &ClassProposeShape) -> ToolSchema {
              it becomes visible in the perspective (subject to the overlay's \
              human-divergence gate) after the interpretation pass completes.\n\
              \n\
-             The response is `proposed create: <uri>` — save that URI verbatim \
-             if you need to pass it as `parent` to a follow-up \
-             `{lower}_propose_link_child` call in the same pass.",
+             The response is a string starting with `proposed create: ` followed \
+             by the newly-minted URI (for example `proposed create: soa://ext/{lower}/9c616970-…`). \
+             Extract the URI part after the prefix and pass it verbatim as \
+             `parent` (or `child`) in follow-up `{lower}_propose_link_child` \
+             calls in the same pass — that URI is how you link this new \
+             instance to related instances.",
             class = c.class_name,
             lower = c.class_name.to_lowercase()
         ),
@@ -504,15 +549,15 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
         "properties": {
             "parent": {
                 "type": "string",
-                "description": "URI of the parent instance. MUST be a real URI: either one returned by a `_query` tool in this same pass, or one just returned by `_propose_create` (its `proposed create: <uri>` result). NEVER invent a URI like `ad4m://obj/unknown` — placeholders are rejected.",
+                "description": "URI of the parent instance. MUST be a real URI you already have on hand: either the URI returned by a `_query` tool in this same pass (extract from its JSON `id`/`uri` field), or the URI part of a `proposed create: <URI>` response from `_propose_create`. Do NOT copy schema-example placeholders like `<uri>` or `ad4m://obj/unknown` — those are rejected. Do NOT paste tool names or query text as URIs.",
             },
             "predicate": {
                 "type": "string",
-                "description": "Predicate IRI for the link (e.g. `soa://basedOn`, `rdfs:member`). Use the exact predicate name from the class relationship definition; it appears in the class description as `<predicate>` → <Target>.",
+                "description": "Predicate IRI for the link (e.g. `soa://basedOn`, `rdfs:member`). Use the exact predicate name from the class relationship definition — it appears as `<predicate>` → <Target> in the class description.",
             },
             "child": {
                 "type": "string",
-                "description": "URI of the child instance. Same rules as `parent`: use a URI returned by `_query` or a URI you just created via `_propose_create`. NEVER invent placeholder URIs.",
+                "description": "URI of the child instance. Same rules as `parent`: use a URI returned by `_query` (from the JSON response's `id`/`uri` field) or a URI from a prior `_propose_create` in this same pass. NEVER invent or copy schema placeholders.",
             },
         },
         "required": ["parent", "predicate", "child"],
@@ -622,13 +667,13 @@ mod tests {
         let (p, buf) = provider(vec![task_shape()]);
         p.call(
             "task_propose_create",
-            json!({"base": "ns://caller/t1", "title": "T"}),
+            json!({"base": "soa://caller/t1", "title": "T"}),
         )
         .await
         .unwrap();
         let drained = buf.drain();
         match &drained[0] {
-            InterpretationOp::Create { base, .. } => assert_eq!(base, "ns://caller/t1"),
+            InterpretationOp::Create { base, .. } => assert_eq!(base, "soa://caller/t1"),
             other => panic!("expected Create, got {other:?}"),
         }
     }
@@ -674,9 +719,9 @@ mod tests {
         p.call(
             "task_propose_link_child",
             json!({
-                "parent": "ns://project/p1",
+                "parent": "soa://project/p1",
                 "predicate": "rdfs:member",
-                "child": "ns://task/t1",
+                "child": "soa://task/t1",
             }),
         )
         .await
@@ -684,11 +729,11 @@ mod tests {
         let drained = buf.drain();
         match &drained[0] {
             InterpretationOp::AddLinks { source, links } => {
-                assert_eq!(source, "ns://project/p1");
+                assert_eq!(source, "soa://project/p1");
                 assert_eq!(links.len(), 1);
-                assert_eq!(links[0].source, "ns://project/p1");
+                assert_eq!(links[0].source, "soa://project/p1");
                 assert_eq!(links[0].predicate.as_deref(), Some("rdfs:member"));
-                assert_eq!(links[0].target, "ns://task/t1");
+                assert_eq!(links[0].target, "soa://task/t1");
             }
             other => panic!("expected AddLinks, got {other:?}"),
         }
@@ -760,9 +805,11 @@ mod tests {
     #[tokio::test]
     async fn propose_link_child_bounces_placeholder_parent_and_child() {
         // Small models (gemma3:12b) invent placeholder URIs when they
-        // skip the query step — observed on CI job 22282 attempts 5/7/8.
-        // Rejecting these with a specific redirect (naming the class-
-        // specific `_query` tool) gives the LLM an actionable next step.
+        // skip the query step — observed on CI job 22282 attempts 5/7/8
+        // and 2026-08-24 harness_intention_links_to_seeded_beliefs
+        // attempts 3, 7, 8. Rejecting these with a specific redirect
+        // (naming the class-specific `_query` tool) gives the LLM an
+        // actionable next step.
         for bad in [
             "ad4m://obj/unknown",
             "unknown",
@@ -770,6 +817,11 @@ mod tests {
             "ad4m://obj/example",
             "ad4m://obj/...",
             "",
+            "<uri>",
+            "<URI>",
+            "<target>",
+            "belief_query:Local-first beats cloud-first",
+            "belief_query:Small models",
         ] {
             let (p, buf) = provider(vec![task_shape()]);
             let err = p
@@ -777,8 +829,8 @@ mod tests {
                     "task_propose_link_child",
                     json!({
                         "parent": bad,
-                        "predicate": "rdfs:member",
-                        "child": "ns://real/child",
+                        "predicate": "soa://member",
+                        "child": "soa://real/child",
                     }),
                 )
                 .await
@@ -789,14 +841,20 @@ mod tests {
             assert_eq!(buf.len(), 0, "buffer must not accumulate on placeholder");
         }
 
-        for bad in ["ad4m://obj/unknown", "unknown", ""] {
+        for bad in [
+            "ad4m://obj/unknown",
+            "unknown",
+            "",
+            "<uri>",
+            "belief_query:foo",
+        ] {
             let (p, buf) = provider(vec![task_shape()]);
             let err = p
                 .call(
                     "task_propose_link_child",
                     json!({
-                        "parent": "ns://real/parent",
-                        "predicate": "rdfs:member",
+                        "parent": "soa://real/parent",
+                        "predicate": "soa://member",
                         "child": bad,
                     }),
                 )
@@ -806,6 +864,53 @@ mod tests {
             assert!(s.contains("placeholder"), "child={bad}: {s}");
             assert_eq!(buf.len(), 0, "buffer must not accumulate on placeholder");
         }
+    }
+
+    #[tokio::test]
+    async fn propose_create_bounces_placeholder_base() {
+        // Small models (gemma3:12b) copy the schema example verbatim —
+        // observed 2026-08-24 attempts 3 & 8 of
+        // harness_intention_links_to_seeded_beliefs where `base: "<uri>"`
+        // was passed through, minted as the actual base, and the
+        // subsequent read-back panicked. Bounce these on the create side
+        // so the crash surface never opens.
+        for bad in [
+            "<uri>",
+            "<URI>",
+            "<TARGET>",
+            "unknown",
+            "ad4m://obj/unknown",
+            "belief_query:foo",
+            "",
+        ] {
+            let (p, buf) = provider(vec![task_shape()]);
+            let err = p
+                .call("task_propose_create", json!({"title": "x", "base": bad}))
+                .await
+                .unwrap_err();
+            let s = err.to_string();
+            assert!(
+                s.contains("placeholder"),
+                "base={bad} should bounce as placeholder: {s}"
+            );
+            assert_eq!(buf.len(), 0, "buffer must stay empty on placeholder base");
+        }
+    }
+
+    #[tokio::test]
+    async fn propose_create_accepts_real_base_uri() {
+        // Sanity: after tightening the base check, LLM-supplied real URIs
+        // with known schemes still flow through.
+        let (p, buf) = provider(vec![task_shape()]);
+        let out = p
+            .call(
+                "task_propose_create",
+                json!({"title": "x", "base": "soa://ext/task/my-explicit-id"}),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("soa://ext/task/my-explicit-id"), "{out}");
+        assert_eq!(buf.len(), 1);
     }
 
     #[tokio::test]
