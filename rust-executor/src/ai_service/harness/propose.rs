@@ -93,6 +93,16 @@ pub struct ClassProposeShape {
     /// the tool schema's `required[]` so the LLM can't propose a fresh
     /// instance missing a mandatory field.
     pub required: Vec<String>,
+    /// Relations declared on the class as `(name, predicate_uri)` — e.g.
+    /// `("basedOn", "ns://basedOn")`. Feeds the `_propose_link_child` schema's
+    /// `predicate` enum so the LLM must pick a canonical URI, and drives
+    /// dispatch-time normalization when it sends a variant like `basedOn` or
+    /// `soa:basedOn`. Observed 2026-08-24 harness_intention_links_to_seeded_
+    /// beliefs attempt 8: LLM linked to all three seeded beliefs but used
+    /// predicate `soa:basedOn` instead of the SDNA-declared `ns://basedOn`, so
+    /// `LinkQuery { predicate: "ns://basedOn" }` returned zero and the assertion
+    /// failed despite the write being correct in spirit.
+    pub relations: Vec<(String, String)>,
 }
 
 /// Extract a [`ClassProposeShape`] from a loaded SHACL class. Filters out
@@ -110,10 +120,19 @@ pub fn class_propose_shape_from_shacl(class: &ShaclClass) -> ClassProposeShape {
         .filter(|p| !p.is_collection)
         .map(|p| p.name.clone())
         .collect();
+    // Relations = properties with a typed target class (sh:class) and a
+    // predicate URI. Covers hasMany (basedOn → Belief) and hasOne alike.
+    let relations: Vec<(String, String)> = class
+        .properties
+        .iter()
+        .filter(|p| p.class.is_some())
+        .filter_map(|p| p.predicate.clone().map(|pred| (p.name.clone(), pred)))
+        .collect();
     ClassProposeShape {
         class_name: class.name.clone(),
         scalar_props,
         required,
+        relations,
     }
 }
 
@@ -355,22 +374,52 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
         // they're linking under — we accept ANY class the provider knows
         // about (link semantics don't depend on which class registered
         // the tool). Reject unknown classes to catch typos early.
-        if self.find_class(lower_class).is_none() {
-            return Err(anyhow!(
-                "no registered class `{lower_class}` for propose_link_child"
-            ));
-        }
+        let class_shape = self.find_class(lower_class).ok_or_else(|| {
+            anyhow!("no registered class `{lower_class}` for propose_link_child")
+        })?;
 
         let parent = args
             .get("parent")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("propose_link_child: missing `parent` (URI of parent)"))?
             .to_string();
-        let predicate = args
+        let raw_predicate = args
             .get("predicate")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("propose_link_child: missing `predicate` (link predicate IRI)"))?
             .to_string();
+        // Normalize predicate against the class's declared relations, when the
+        // class has any. Accepted forms → canonical SHACL URI:
+        //   - Exact URI match (`ns://basedOn` → `ns://basedOn`)
+        //   - Local-name match after `/` or `:` (`basedOn`, `soa:basedOn`,
+        //     `rdfs:basedOn`, `ns://basedOn`)
+        // Anything else is rejected with an actionable error listing the
+        // valid predicates for this class. Rationale: gemma3:12b writes
+        // `soa:basedOn` when the SDNA declares `ns://basedOn`, so the write
+        // lands under the wrong predicate and downstream queries miss it
+        // (observed 2026-08-24 harness_intention_links_to_seeded_beliefs
+        // attempt 8 — all three seeded beliefs linked but under `soa:basedOn`).
+        let predicate = if class_shape.relations.is_empty() {
+            raw_predicate.clone()
+        } else {
+            match resolve_relation_predicate(&class_shape.relations, &raw_predicate) {
+                Some(canonical) => canonical,
+                None => {
+                    let valid = class_shape
+                        .relations
+                        .iter()
+                        .map(|(name, uri)| format!("`{uri}` (relation `{name}`)"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(anyhow!(
+                        "{lower_class}_propose_link_child: `predicate` `{raw_predicate}` \
+                         is not a declared relation on class `{}`. Valid predicates: {valid}. \
+                         Use the exact URI shown — do not abbreviate or re-scheme.",
+                        class_shape.class_name
+                    ));
+                }
+            }
+        };
         let child = args
             .get("child")
             .and_then(|v| v.as_str())
@@ -445,6 +494,47 @@ fn strip_class_suffix(name: &str, suffix: &str) -> Option<String> {
 /// - unknown-scheme "URIs" like `belief_query:...` (a tool-name + query
 ///   pasted as URI, observed same test attempt 7) — only ad4m/soa/
 ///   literal/https/http/urn schemes are accepted for link URIs
+/// Resolve an LLM-supplied `predicate` string against a class's declared
+/// relations. Accepts exact URI matches and local-name matches (the tail
+/// after the last `/` or `:` — so `basedOn`, `soa:basedOn`, `ns://basedOn`
+/// all resolve to `ns://basedOn` when SHACL declared that URI). Returns the
+/// canonical SHACL URI on success, `None` when the predicate can't be
+/// matched to any declared relation — the caller turns that into an
+/// actionable error naming the valid predicates.
+fn resolve_relation_predicate(
+    relations: &[(String, String)],
+    raw: &str,
+) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    for (_, canonical) in relations {
+        if canonical == trimmed {
+            return Some(canonical.clone());
+        }
+    }
+    let local_of = |s: &str| -> String {
+        s.rsplit(|c: char| c == '/' || c == ':')
+            .next()
+            .unwrap_or(s)
+            .to_string()
+    };
+    let raw_local = local_of(trimmed).to_ascii_lowercase();
+    if raw_local.is_empty() {
+        return None;
+    }
+    for (name, canonical) in relations {
+        if name.eq_ignore_ascii_case(&raw_local) {
+            return Some(canonical.clone());
+        }
+        if local_of(canonical).eq_ignore_ascii_case(&raw_local) {
+            return Some(canonical.clone());
+        }
+    }
+    None
+}
+
 fn placeholder_uri(uri: &str) -> Option<&'static str> {
     let trimmed = uri.trim();
     if trimmed.is_empty() {
@@ -544,6 +634,37 @@ fn propose_create_schema(c: &ClassProposeShape) -> ToolSchema {
 }
 
 fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
+    // Predicate schema: if the class declares relations, restrict `predicate`
+    // to the exact URIs SHACL knows about (grammar-constrained decoding then
+    // makes it impossible for the LLM to invent a variant like `soa:basedOn`
+    // when the canonical form is `ns://basedOn`). Without relations declared
+    // we fall back to the old free-form string so callers of legacy classes
+    // still work.
+    let predicate_schema = if c.relations.is_empty() {
+        json!({
+            "type": "string",
+            "description": "Predicate IRI for the link. Use the exact predicate URI from the class's relation definition — invented variants like `soa:basedOn` when the class declares `ns://basedOn` will be rejected."
+        })
+    } else {
+        let allowed: Vec<&str> = c.relations.iter().map(|(_, uri)| uri.as_str()).collect();
+        let pretty = c
+            .relations
+            .iter()
+            .map(|(name, uri)| format!("`{uri}` (relation `{name}` → target class)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        json!({
+            "type": "string",
+            "enum": allowed,
+            "description": format!(
+                "Exact predicate URI declared on this class. One of: {pretty}. \
+                 Do NOT abbreviate (`basedOn`) or re-scheme (`soa:basedOn`) — the \
+                 SHACL-declared URI is the only valid value; anything else is \
+                 rejected."
+            )
+        })
+    };
+
     let parameters = json!({
         "type": "object",
         "properties": {
@@ -551,10 +672,7 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
                 "type": "string",
                 "description": "URI of the parent instance. MUST be a real URI you already have on hand: either the URI returned by a `_query` tool in this same pass (extract from its JSON `id`/`uri` field), or the URI part of a `proposed create: <URI>` response from `_propose_create`. Do NOT copy schema-example placeholders like `<uri>` or `ad4m://obj/unknown` — those are rejected. Do NOT paste tool names or query text as URIs.",
             },
-            "predicate": {
-                "type": "string",
-                "description": "Predicate IRI for the link (e.g. `soa://basedOn`, `rdfs:member`). Use the exact predicate name from the class relationship definition — it appears as `<predicate>` → <Target> in the class description.",
-            },
+            "predicate": predicate_schema,
             "child": {
                 "type": "string",
                 "description": "URI of the child instance. Same rules as `parent`: use a URI returned by `_query` (from the JSON response's `id`/`uri` field) or a URI from a prior `_propose_create` in this same pass. NEVER invent or copy schema placeholders.",
@@ -563,6 +681,23 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
         "required": ["parent", "predicate", "child"],
     });
 
+    // Class description enumerates the declared relations inline so the LLM
+    // sees "relation name + canonical predicate + target class direction"
+    // before it drafts a tool call — the two most common failure modes on
+    // gemma3:12b were (a) inventing a predicate variant, (b) linking with a
+    // relation that isn't declared on the class.
+    let rel_hint = if c.relations.is_empty() {
+        String::new()
+    } else {
+        let list = c
+            .relations
+            .iter()
+            .map(|(name, uri)| format!("  - `{name}` → predicate `{uri}`"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\n**Declared relations on `{class}` (pick `predicate` from these URIs exactly):**\n{list}", class = c.class_name)
+    };
+
     ToolSchema {
         name: format!("{}_propose_link_child", c.class_name.to_lowercase()),
         description: format!(
@@ -570,8 +705,9 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
              \n\
              **Workflow — always in this order:**\n\
              1. Call `<class>_query` for each side to discover real URIs (or use a URI from a prior `_propose_create` in this same pass).\n\
-             2. Call this tool with those real URIs. Placeholders like `ad4m://obj/unknown` are rejected — the pass makes no progress if you invent URIs.",
-            class = c.class_name
+             2. Call this tool with those real URIs. Placeholders like `ad4m://obj/unknown` are rejected — the pass makes no progress if you invent URIs.{rel_hint}",
+            class = c.class_name,
+            rel_hint = rel_hint,
         ),
         parameters,
     }
@@ -605,6 +741,22 @@ mod tests {
                 ("status".into(), "string, optional".into()),
             ],
             required: vec!["title".into()],
+            relations: Vec::new(),
+        }
+    }
+
+    /// Shape with a declared relation — mirrors the
+    /// harness_intention_links_to_seeded_beliefs Scenario D fixture so the
+    /// predicate-normalization tests exercise the real shape.
+    fn intention_shape() -> ClassProposeShape {
+        ClassProposeShape {
+            class_name: "Intention".into(),
+            scalar_props: vec![
+                ("title".into(), "string, required, max 1".into()),
+                ("owner".into(), "string, optional".into()),
+            ],
+            required: vec!["title".into()],
+            relations: vec![("basedOn".into(), "ns://basedOn".into())],
         }
     }
 
@@ -943,5 +1095,133 @@ mod tests {
         let out = p.call("stranger_add_thing", json!({})).await.unwrap();
         assert_eq!(out, "inner:stranger_add_thing");
         assert_eq!(buf.len(), 0);
+    }
+
+    // ── predicate normalization (relations enum) ──────────────────────────
+
+    #[tokio::test]
+    async fn link_child_schema_enums_predicate_when_class_has_relations() {
+        // Class with declared relations MUST advertise `predicate` as an
+        // enum of the canonical URIs — grammar-constrained decoding then
+        // makes it impossible for the LLM to write `soa:basedOn` when the
+        // SDNA declared `ns://basedOn`.
+        let schema = propose_link_child_schema(&intention_shape());
+        let params = &schema.parameters;
+        let pred = &params["properties"]["predicate"];
+        assert_eq!(pred["type"], "string");
+        let enum_vals: Vec<&str> = pred["enum"]
+            .as_array()
+            .expect("predicate enum should be an array when relations are declared")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(enum_vals, vec!["ns://basedOn"]);
+        let desc = schema.description.to_lowercase();
+        assert!(
+            desc.contains("basedon") && desc.contains("ns://basedon"),
+            "description should enumerate declared relations: {}",
+            schema.description
+        );
+    }
+
+    #[tokio::test]
+    async fn link_child_schema_predicate_stays_freeform_without_relations() {
+        // Legacy shapes without declared relations keep the free-form
+        // predicate string — no enum surprise for existing callers.
+        let schema = propose_link_child_schema(&task_shape());
+        let pred = &schema.parameters["properties"]["predicate"];
+        assert_eq!(pred["type"], "string");
+        assert!(
+            pred.get("enum").is_none(),
+            "predicate must not carry an enum when the class has no declared relations"
+        );
+    }
+
+    #[tokio::test]
+    async fn link_child_normalizes_local_name_to_canonical_predicate() {
+        // Bare local name `basedOn` → declared URI `ns://basedOn`. Exercises
+        // the exact failure mode observed 2026-08-24 attempt 8 (LLM wrote
+        // `soa:basedOn` when the SDNA declared `ns://basedOn`).
+        let (p, buf) = provider(vec![intention_shape()]);
+        let variants = ["basedOn", "soa:basedOn", "rdfs:basedOn", "ns://basedOn"];
+        for variant in variants {
+            buf.drain();
+            let _ = p
+                .call(
+                    "intention_propose_link_child",
+                    json!({
+                        "parent": "soa://ext/intention/parent",
+                        "predicate": variant,
+                        "child": "soa://existing/belief/1",
+                    }),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("variant `{variant}` should normalize, got err: {e:#}"));
+            let ops = buf.drain();
+            assert_eq!(ops.len(), 1, "variant `{variant}`");
+            match &ops[0] {
+                InterpretationOp::AddLinks { links, .. } => {
+                    assert_eq!(
+                        links[0].predicate.as_deref(),
+                        Some("ns://basedOn"),
+                        "variant `{variant}` should normalize to canonical URI"
+                    );
+                }
+                other => panic!("expected AddLinks, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn link_child_rejects_undeclared_predicate_with_valid_list() {
+        // Any predicate the class doesn't declare is rejected with an
+        // actionable error naming the valid predicates — the LLM can
+        // recover in the next tool call rather than bailing in plain text.
+        let (p, _buf) = provider(vec![intention_shape()]);
+        let err = p
+            .call(
+                "intention_propose_link_child",
+                json!({
+                    "parent": "soa://ext/intention/parent",
+                    "predicate": "ns://randomlyInvented",
+                    "child": "soa://existing/belief/1",
+                }),
+            )
+            .await
+            .expect_err("undeclared predicate must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("ns://basedOn"), "err should list valid predicates: {msg}");
+        assert!(
+            msg.contains("randomlyInvented"),
+            "err should echo the bad predicate for context: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_relation_predicate_covers_documented_variants() {
+        // Pure-function coverage of the resolver — cheaper regression net
+        // than the tokio-driven decorator tests above, and readable as a
+        // spec of what forms we accept.
+        let rels = vec![("basedOn".to_string(), "ns://basedOn".to_string())];
+        for accepted in [
+            "ns://basedOn",
+            "basedOn",
+            "BasedOn",
+            "soa:basedOn",
+            "rdfs:basedOn",
+            "ns://basedOn ",
+        ] {
+            assert_eq!(
+                resolve_relation_predicate(&rels, accepted).as_deref(),
+                Some("ns://basedOn"),
+                "should accept `{accepted}`"
+            );
+        }
+        for rejected in ["", "   ", "invented", "ns://otherRelation"] {
+            assert!(
+                resolve_relation_predicate(&rels, rejected).is_none(),
+                "should reject `{rejected}`"
+            );
+        }
     }
 }
