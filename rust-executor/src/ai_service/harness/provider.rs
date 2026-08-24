@@ -232,23 +232,101 @@ fn merge_bound_into_args(args: &mut Value, bindings: &std::collections::BTreeMap
 /// `readonly_filter_excludes_add_delete_set` pins the current expected
 /// behaviour.
 pub fn is_read_only(t: &ToolSchema) -> bool {
-    const WRITE_PREFIXES: &[&str] = &["add_", "remove_", "delete_", "create_", "update_", "set_"];
-    // Per-class dynamic write verbs (see mcp::tools::dynamic): `<class>_create`,
-    // `<class>_delete`, `<class>_set_<prop>`, `<class>_add_to_<coll>`,
-    // `<class>_remove_from_<coll>`.
-    const WRITE_SUFFIXES: &[&str] = &["_create", "_delete"];
-    const WRITE_INFIXES: &[&str] = &["_set_", "_add_to_", "_remove_from_"];
+    // Write-adjacent verb tokens: if ANY `_`-separated token in the tool name
+    // matches one of these, the tool is treated as a writer. Token-based
+    // (not substring/prefix) so namespaced tools like
+    // `neighbourhood_publish_from_perspective` are caught even though
+    // `publish` isn't at position 0. Audited against every `async fn` in
+    // rust-executor/src/mcp/tools/*.rs on 2026-08-24 (Lal's PR #911 review):
+    //   add / remove / delete / create / update / set — CRUD verbs, both
+    //     static (add_link, delete_subject) and dynamic per-class
+    //     (`<class>_add_<coll>`, `<class>_set_<prop>`, ...).
+    //   publish / join / leave — neighbourhood mutations.
+    //   send / signal — inter-agent side-effects.
+    //   revoke / grant — capability rotation.
+    //   install / uninstall / clone — language lifecycle.
+    //   signup / login / logout — auth writes.
+    //   generate / mint — mint new artifacts.
+    //   store / save — persist to state.
+    //   request — creates a pending request record.
+    //   start / run — flow lifecycle mutations (`flow_start_*`, `flow_run_action`).
+    //
+    // The earlier prefix/suffix/infix approach (`_add_to_`, `_remove_from_`)
+    // was a copy-paste mismatch against dynamic.rs's real emissions
+    // (`_add_<coll>`, `_remove_<coll>`) so every collection mutator silently
+    // leaked through the read-only cut (Lal's 2026-08-24 review,
+    // provider.rs:240). Token-based fixes it structurally.
+    const WRITE_VERBS: &[&str] = &[
+        // CRUD
+        "add",
+        "remove",
+        "delete",
+        "create",
+        "update",
+        "set",
+        // neighbourhood + p2p mutations
+        "publish",
+        "join",
+        "leave",
+        "send",
+        "signal",
+        // auth + capabilities
+        "revoke",
+        "grant",
+        "signup",
+        "login",
+        "logout",
+        // language lifecycle
+        "install",
+        "uninstall",
+        "clone",
+        // mint / persist
+        "generate",
+        "mint",
+        "store",
+        "save",
+        // side-effect creators
+        "request",
+        // flow lifecycle
+        "start",
+        "run",
+    ];
 
-    if WRITE_PREFIXES.iter().any(|p| t.name.starts_with(p)) {
-        return false;
+    // Some read tools legitimately contain a write verb as part of their
+    // subject (`request_type`, `run_id`, ...) but at the CORE the tool is
+    // a read. Guard: if the leading token itself starts a well-known read
+    // verb, trust it. This is the tie-breaker; token match still wins if
+    // it's on a subsequent segment (`neighbourhood_publish_*`).
+    const READ_LEADERS: &[&str] = &["list", "get", "query", "read", "find", "search"];
+
+    let tokens: Vec<&str> = t.name.split('_').collect();
+    if tokens.is_empty() {
+        return true;
     }
-    if WRITE_SUFFIXES.iter().any(|s| t.name.ends_with(s)) {
-        return false;
+    let leader = tokens[0].to_lowercase();
+    let leader_is_read = READ_LEADERS.iter().any(|r| leader == *r);
+
+    let mut writer_hit = None;
+    for (i, tok) in tokens.iter().enumerate() {
+        let low = tok.to_lowercase();
+        if WRITE_VERBS.iter().any(|v| low == *v) {
+            writer_hit = Some(i);
+            break;
+        }
     }
-    if WRITE_INFIXES.iter().any(|i| t.name.contains(i)) {
-        return false;
+
+    match (writer_hit, leader_is_read) {
+        // No write token found → read.
+        (None, _) => true,
+        // Write token IS the leader → definitely a writer.
+        (Some(0), _) => false,
+        // Write token is downstream AND leader is a read verb (`get`, `list`,
+        // ...) → tool is a read (e.g. `get_publish_config` if such existed).
+        // Downstream writers with a non-read leader are writers
+        // (`neighbourhood_publish_from_perspective`).
+        (Some(_), true) => true,
+        (Some(_), false) => false,
     }
-    true
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────
@@ -394,10 +472,40 @@ mod tests {
         assert!(!kept.contains(&"Task_create".to_string()), "_create suffix");
         assert!(!kept.contains(&"Task_delete".to_string()), "_delete suffix");
         assert!(!kept.contains(&"Task_set_title".to_string()), "_set_ infix");
+        // Real dynamic emissions (see mcp/tools/dynamic.rs make_collection_add_
+        // /make_collection_remove_tool): `<class>_add_<coll>` and
+        // `<class>_remove_<coll>` — NOT the `_add_to_`/`_remove_from_` variants
+        // the earlier filter had. Regression against Lal's 2026-08-24 review.
         assert!(
-            !kept.contains(&"Task_add_to_tags".to_string()),
-            "_add_to_ infix"
+            !kept.contains(&"Task_add_tags".to_string()),
+            "_add_ infix (real dynamic collection-adder shape)"
         );
+        assert!(
+            !kept.contains(&"Task_remove_tags".to_string()),
+            "_remove_ infix (real dynamic collection-remover shape)"
+        );
+        // Additional write-adjacent static verbs the MCP surface exposes
+        // (audited by grep'ing async fn under rust-executor/src/mcp/tools/*.rs
+        // 2026-08-24). If any of these leak into a read-only interpretation
+        // pass, the LLM could publish neighbourhoods / send signals / rotate
+        // capability tokens as a side-effect of a "read" turn.
+        for write_tool in [
+            "neighbourhood_publish_from_perspective",
+            "neighbourhood_join_from_url",
+            "clone_link_language",
+            "signup",
+            "login_email",
+            "generate_jwt",
+            "revoke_capability", // hypothetical; guard against future adds
+            "flow_start_task",
+            "flow_run_action",
+        ] {
+            let t = ToolSchema::zero_arg(write_tool, "");
+            assert!(
+                !is_read_only(&t),
+                "write-adjacent static tool `{write_tool}` must not pass is_read_only"
+            );
+        }
     }
 
     #[tokio::test]
