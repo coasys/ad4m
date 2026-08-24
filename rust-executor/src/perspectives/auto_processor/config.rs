@@ -670,6 +670,7 @@ mod tests {
             LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("seed partial");

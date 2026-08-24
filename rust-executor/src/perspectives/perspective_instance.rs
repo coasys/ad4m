@@ -170,6 +170,7 @@ mod inbound_touches_shacl_tests {
                 invalid: Some(false),
             },
             status: Some(LinkStatus::Shared),
+            graph: None,
         }
     }
 

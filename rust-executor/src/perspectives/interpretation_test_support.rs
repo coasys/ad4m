@@ -174,6 +174,7 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
                     invalid: Some(false),
                 },
                 status: None,
+                graph: None,
             })
             .unwrap();
     }
@@ -621,7 +622,7 @@ pub(crate) async fn model_instances(
 ) -> Vec<serde_json::Value> {
     let query = serde_json::json!({ "properties": props }).to_string();
     let result_json = perspective
-        .model_query(class, &query)
+        .model_query(class, &query, None)
         .await
         .unwrap_or_else(|e| panic!("model_instances: model_query({class}) failed: {e:#}"));
     let v: serde_json::Value = serde_json::from_str(&result_json).unwrap_or_else(|e| {
@@ -929,6 +930,7 @@ pub(crate) async fn seed_message(
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed_message body");
@@ -942,6 +944,7 @@ pub(crate) async fn seed_message(
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("seed_message author");

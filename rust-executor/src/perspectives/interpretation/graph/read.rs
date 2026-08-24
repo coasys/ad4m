@@ -442,6 +442,7 @@ mod tests {
             LinkStatus::Local,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("seed envelope body link");
@@ -491,6 +492,7 @@ mod tests {
                 LinkStatus::Local,
                 None,
                 &ctx,
+                None,
             )
             .await
             .expect("seed link");
@@ -599,6 +601,7 @@ mod tests {
                     LinkStatus::Local,
                     None,
                     &ctx,
+                    None,
                 )
                 .await
                 .expect("parent link");
