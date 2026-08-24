@@ -34,6 +34,31 @@ use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClas
 use super::scalar_string;
 use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
 
+/// Instances already reported as unloadable, so each is complained about once.
+///
+/// The watch loop polls `load_processors` several times a second on every perspective, and a
+/// rejected instance is rejected identically every time — so an unthrottled warning emits the same
+/// line thousands of times a minute, per instance. That is not merely untidy: it buries the log a
+/// person is reading to find out *why*, which is the exact situation the warning exists to serve.
+///
+/// Keyed by instance URI and never cleared. A processor whose config is repaired starts loading and
+/// stops reaching this path at all; one that is deleted never returns. The set is therefore bounded
+/// by the number of distinct broken instances, which is small and finite.
+static REPORTED_BAD_INSTANCES: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
+/// Whether this is the first time this instance has failed to load.
+fn first_report_for(instance_id: &str) -> bool {
+    REPORTED_BAD_INSTANCES
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(instance_id.to_string()))
+        // A poisoned mutex means another thread panicked mid-report. Log rather than swallow: a
+        // repeated line is a smaller problem than a silent one.
+        .unwrap_or(true)
+}
+
 /// Local subject-class name of a processor config.
 pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
 /// Target-class URI of [`AUTO_PROCESSOR_CLASS`] — used to detect prior
@@ -395,11 +420,37 @@ pub async fn load_processors(
     for instance in result["instances"].as_array().into_iter().flatten() {
         match config_from_instance(instance) {
             Some(cfg) => out.push(cfg),
-            None => log::warn!(
-                "load_processors: AutoProcessor instance `{}` has missing / unparseable \
-                 fields; skipping",
-                instance["id"].as_str().unwrap_or("<no id>")
-            ),
+            /*
+               The instance itself, not just the fact that it failed.
+
+               "has missing / unparseable fields" names neither the field nor its value, and this
+               fires once per watch tick forever — so the symptom is an endless stream of a message
+               that cannot be acted on. Diagnosing one meant reading three files and guessing, and
+               the guesses were wrong twice.
+
+               Every branch that returns `None` from `config_from_instance` is a statement about one
+               property's value, so printing the whole instance answers the question outright: which
+               field is absent, and how the ones that are present are actually encoded. That second
+               half matters more than it looks — a scalar that arrives in an unexpected encoding
+               reads as "missing" here, and nothing else in the message would distinguish the two.
+
+               At `warn` alongside the existing line rather than `debug`, because a processor that
+               silently stops running is exactly the situation where nobody has debug logging on
+               yet, and the instance is a few hundred bytes once per skip.
+            */
+            None => {
+                let id = instance["id"].as_str().unwrap_or("<no id>");
+                if first_report_for(id) {
+                    log::warn!(
+                        "load_processors: AutoProcessor instance `{}` has missing / unparseable \
+                         fields; skipping (further occurrences suppressed). Instance as read: {}",
+                        id,
+                        instance
+                    );
+                } else {
+                    log::debug!("load_processors: still skipping `{}`", id);
+                }
+            }
         }
     }
     out.sort_by(|a, b| a.processor_id.cmp(&b.processor_id));
