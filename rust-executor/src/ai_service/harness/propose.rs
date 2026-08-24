@@ -184,7 +184,20 @@ where
         let mut out = self.inner.tools().await;
         for c in &self.classes {
             out.push(propose_create_schema(c));
-            out.push(propose_link_child_schema(c));
+            // Only advertise `_propose_link_child` for classes that DECLARE at
+            // least one relation. Without this gate the tool degenerates into
+            // a wildcard link-writer (any predicate, any parent/child) — and
+            // gemma3:12b reliably calls the WRONG side, e.g. writes
+            // `belief_propose_link_child(parent=belief, predicate=basedOn,
+            // child=intention)`. The link then lands with source=belief,
+            // target=intention, and `LinkQuery { source: intention,
+            // predicate: basedOn }` returns zero. Observed 2026-08-24
+            // CI job 22735 (Scenario E) — 8/8 attempts failed with links
+            // in the wrong direction because Belief has no `basedOn`
+            // relation, only Intention does.
+            if !c.relations.is_empty() {
+                out.push(propose_link_child_schema(c));
+            }
         }
         out
     }
@@ -250,6 +263,13 @@ where
         // Return an actionable redirect naming the correct tool + the
         // predicate hint the LLM likely intended (derived from the tail).
         for c in &self.classes {
+            // Same gate as the `tools()` advertisement: classes with no
+            // declared relations don't get `_propose_link_child`, so
+            // redirecting them to a nonexistent tool would just deadlock
+            // the LLM. Skip → falls through to the inner provider's error.
+            if c.relations.is_empty() {
+                continue;
+            }
             let lower = c.class_name.to_lowercase();
             let add_prefix = format!("{lower}_add_");
             let Some(relation_tail) = name_lc.strip_prefix(&add_prefix) else {
@@ -366,6 +386,34 @@ impl<P: ToolProvider + ?Sized> ProposeWritesProvider<P> {
         let class_shape = self
             .find_class(lower_class)
             .ok_or_else(|| anyhow!("no registered class `{lower_class}` for propose_link_child"))?;
+
+        // Defensive: `_propose_link_child` isn't advertised for classes
+        // without declared relations (see `tools()` above), so a call landing
+        // here means the LLM guessed a tool name that isn't in the surface.
+        // Return an actionable error naming a class that DOES declare
+        // relations, if any — so the LLM has somewhere to redirect to.
+        if class_shape.relations.is_empty() {
+            let with_relations: Vec<String> = self
+                .classes
+                .iter()
+                .filter(|c| !c.relations.is_empty())
+                .map(|c| format!("`{}_propose_link_child`", c.class_name.to_lowercase()))
+                .collect();
+            let hint = if with_relations.is_empty() {
+                "No class in this pass declares a relation — this tool is unavailable".to_string()
+            } else {
+                format!(
+                    "Only these classes declare relations you can link through: {}",
+                    with_relations.join(", ")
+                )
+            };
+            return Err(anyhow!(
+                "{lower_class}_propose_link_child is not a valid tool — class `{}` \
+                 declares no relations. {hint}. Remember: the class that OWNS the \
+                 relation is the `parent`; the referenced instance is the `child`.",
+                class_shape.class_name
+            ));
+        }
 
         let parent = args
             .get("parent")
@@ -758,12 +806,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_lists_two_synthetics_per_class_plus_inner() {
+    async fn tools_lists_propose_create_for_relationless_class() {
+        // Regression against CI job 22735 (Scenario E, 2026-08-24) — the
+        // `_propose_link_child` tool must NOT be advertised for classes
+        // without declared relations. gemma3:12b would call it with the
+        // parent/child directions swapped, poisoning downstream link queries.
         let (p, _) = provider(vec![task_shape()]);
+        let names: Vec<String> = p.tools().await.into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["task_propose_create"]);
+    }
+
+    #[tokio::test]
+    async fn tools_lists_both_synthetics_for_class_with_relations() {
+        let (p, _) = provider(vec![intention_shape()]);
         let names: Vec<String> = p.tools().await.into_iter().map(|t| t.name).collect();
         assert_eq!(
             names,
-            vec!["task_propose_create", "task_propose_link_child"]
+            vec!["intention_propose_create", "intention_propose_link_child"]
         );
     }
 
@@ -859,13 +918,16 @@ mod tests {
 
     #[tokio::test]
     async fn propose_link_child_appends_add_links_op() {
-        let (p, buf) = provider(vec![task_shape()]);
+        // Uses intention_shape (has `basedOn` relation) because Task has none
+        // and no longer advertises `_propose_link_child` after the Scenario E
+        // fix — the relationless-class test above is the deliberate flip side.
+        let (p, buf) = provider(vec![intention_shape()]);
         p.call(
-            "task_propose_link_child",
+            "intention_propose_link_child",
             json!({
-                "parent": "soa://project/p1",
-                "predicate": "rdfs:member",
-                "child": "soa://task/t1",
+                "parent": "soa://intention/i1",
+                "predicate": "ns://basedOn",
+                "child": "soa://belief/b1",
             }),
         )
         .await
@@ -873,14 +935,44 @@ mod tests {
         let drained = buf.drain();
         match &drained[0] {
             InterpretationOp::AddLinks { source, links } => {
-                assert_eq!(source, "soa://project/p1");
+                assert_eq!(source, "soa://intention/i1");
                 assert_eq!(links.len(), 1);
-                assert_eq!(links[0].source, "soa://project/p1");
-                assert_eq!(links[0].predicate.as_deref(), Some("rdfs:member"));
-                assert_eq!(links[0].target, "soa://task/t1");
+                assert_eq!(links[0].source, "soa://intention/i1");
+                assert_eq!(links[0].predicate.as_deref(), Some("ns://basedOn"));
+                assert_eq!(links[0].target, "soa://belief/b1");
             }
             other => panic!("expected AddLinks, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn propose_link_child_errors_when_class_has_no_relations() {
+        // Defensive backstop: `_propose_link_child` isn't advertised for
+        // relationless classes, but if the LLM guesses the name anyway the
+        // dispatch handler must return a redirect naming a class that DOES
+        // declare relations rather than silently accepting any predicate.
+        let (p, buf) = provider(vec![task_shape(), intention_shape()]);
+        let err = p
+            .call(
+                "task_propose_link_child",
+                json!({
+                    "parent": "soa://project/p1",
+                    "predicate": "rdfs:member",
+                    "child": "soa://task/t1",
+                }),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("declares no relations"),
+            "expected 'declares no relations' hint, got: {err}"
+        );
+        assert!(
+            err.contains("intention_propose_link_child"),
+            "must redirect to a class that DOES declare relations, got: {err}"
+        );
+        assert_eq!(buf.len(), 0, "buffer must not accumulate on rejected link");
     }
 
     #[tokio::test]
@@ -967,13 +1059,13 @@ mod tests {
             "belief_query:Local-first beats cloud-first",
             "belief_query:Small models",
         ] {
-            let (p, buf) = provider(vec![task_shape()]);
+            let (p, buf) = provider(vec![intention_shape()]);
             let err = p
                 .call(
-                    "task_propose_link_child",
+                    "intention_propose_link_child",
                     json!({
                         "parent": bad,
-                        "predicate": "soa://member",
+                        "predicate": "ns://basedOn",
                         "child": "soa://real/child",
                     }),
                 )
@@ -992,13 +1084,13 @@ mod tests {
             "<uri>",
             "belief_query:foo",
         ] {
-            let (p, buf) = provider(vec![task_shape()]);
+            let (p, buf) = provider(vec![intention_shape()]);
             let err = p
                 .call(
-                    "task_propose_link_child",
+                    "intention_propose_link_child",
                     json!({
                         "parent": "soa://real/parent",
-                        "predicate": "soa://member",
+                        "predicate": "ns://basedOn",
                         "child": bad,
                     }),
                 )
@@ -1059,20 +1151,38 @@ mod tests {
         // `extintention_add_basedon`) when it wants to attach a relation.
         // CI job 22282 attempts 1-4 stalled on this shape because the
         // filtered-inner error was too generic. Redirect must name the
-        // real tool + a plausible predicate hint.
-        let (p, buf) = provider(vec![task_shape()]);
+        // real tool + a plausible predicate hint. Only fires for classes
+        // that DO declare relations — redirecting relationless classes
+        // to a nonexistent `_propose_link_child` would deadlock the LLM.
+        let (p, buf) = provider(vec![intention_shape()]);
         let err = p
-            .call("task_add_owner", json!({}))
+            .call("intention_add_basedon", json!({}))
             .await
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("task_propose_link_child"),
+            err.contains("intention_propose_link_child"),
             "redirect must name the real tool: {err}"
         );
-        assert!(err.contains("soa://owner"), "predicate hint missing: {err}");
+        assert!(
+            err.contains("soa://basedon"),
+            "predicate hint missing: {err}"
+        );
         assert!(err.contains("_query"), "must guide toward query: {err}");
         assert_eq!(buf.len(), 0, "redirect must not touch the buffer");
+    }
+
+    #[tokio::test]
+    async fn hallucinated_add_relation_verb_for_relationless_class_falls_through() {
+        // Regression against CI job 22735 (Scenario E, 2026-08-24) — the
+        // add-relation redirect must SKIP classes without declared relations
+        // because they no longer advertise `_propose_link_child`. Falling
+        // through to the inner provider surfaces the real "tool not found"
+        // error, which is at least honest.
+        let (p, buf) = provider(vec![task_shape()]);
+        let out = p.call("task_add_owner", json!({})).await.unwrap();
+        assert_eq!(out, "inner:task_add_owner");
+        assert_eq!(buf.len(), 0);
     }
 
     #[tokio::test]
