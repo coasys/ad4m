@@ -45,6 +45,9 @@ const localLanguages = {
   },
   "perspective-language": {
     bundle: "../../bootstrap-languages/local/perspective-language.js",
+  },
+  "server-link-language": {
+    bundle: "../../bootstrap-languages/server-link-language/build/bundle.js"
   }
 };
 
