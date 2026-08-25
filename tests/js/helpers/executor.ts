@@ -69,6 +69,9 @@ export async function startAgent(
     /** When set, starts the executor in admin-credential mode and connects
      *  the returned client using that credential as the bearer token. */
     adminCredential?: string;
+    /** Skip Holochain startup. Defaults to false when LOCAL_MODE env var
+     *  is set, true otherwise. */
+    runHolochain?: boolean;
   } = {},
 ): Promise<AgentHandle> {
   const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
@@ -83,6 +86,7 @@ export async function startAgent(
   fs.rmSync(appDataPath, { recursive: true, force: true });
 
   const bootstrapSeedPath = opts.bootstrapSeedPath ?? BOOTSTRAP_SEED;
+  const runHolochain = opts.runHolochain ?? (process.env.LOCAL_MODE !== 'true');
 
   const executorProcess = await startExecutor(
     appDataPath,
@@ -92,6 +96,12 @@ export async function startAgent(
     hcAppPort,
     false,
     opts.adminCredential,
+    undefined,   // proxyUrl
+    undefined,   // bootstrapUrl
+    undefined,   // relayUrl
+    false,       // enableMcp
+    undefined,   // mcpPort
+    runHolochain,
   );
   _activeExecutors.add(executorProcess);
 
