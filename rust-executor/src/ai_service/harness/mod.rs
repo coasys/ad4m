@@ -143,6 +143,27 @@ impl Default for HarnessConfig {
     }
 }
 
+/// Per-completion credit gate. When set on `run_with_tools`, the loop
+/// calls `check()` before every `CompletionSource::complete` and breaks
+/// early if it errors. Closes the accounting hole James flagged: the
+/// WS-RPC handler only used to check credits ONCE at entry and reserve
+/// on `bases.len()` at exit, so a pass could burn up-to-`max_tool_calls`
+/// completions after the caller's credits ran out — the individual
+/// `bill_prompt_if_authed` calls inside `AIService::prompt_messages` log
+/// an `InsufficientCredits` warning but don't stop the loop.
+///
+/// Fire-and-forget style: `Ok` means "keep going", `Err` means "stop
+/// now, deliver whatever the pass already produced". The engine turns
+/// early-break into a partial return rather than a hard failure — the
+/// completions the caller already paid for are still surfaced.
+///
+/// Passed as `Option<Arc<dyn CreditGate>>` so tests + local Ollama runs
+/// (rate=0, no billing) skip the check entirely.
+#[async_trait::async_trait]
+pub trait CreditGate: Send + Sync {
+    async fn check(&self) -> Result<()>;
+}
+
 /// The interpretation-pass tool-calling loop.
 ///
 /// `initial_messages` is the caller-built prompt — for interpretation, this
@@ -164,6 +185,7 @@ pub async fn run_with_tools(
     completions: Arc<dyn CompletionSource>,
     config: HarnessConfig,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    credit_gate: Option<Arc<dyn CreditGate>>,
 ) -> Result<String> {
     let mut messages = initial_messages;
     // Budget is enforced per *dispatched tool call*, not per round: a single
@@ -175,6 +197,23 @@ pub async fn run_with_tools(
 
     while calls_used < config.max_tool_calls as usize {
         round += 1;
+        // Credit gate — checked BEFORE each completion so a caller who
+        // ran out mid-loop doesn't get charged for further LLM work.
+        // Empty content lets the engine surface whatever the buffer has
+        // so far without a hard error (matches how `bill_prompt_if_authed`
+        // logs `InsufficientCredits` on the fire-and-forget deduction
+        // path — the pass halts, it doesn't crash).
+        if let Some(ref gate) = credit_gate {
+            if let Err(e) = gate.check().await {
+                log::warn!(
+                    "harness: credit gate refused round {round} \
+                     (calls_used={calls_used}/{cap}): {e}. \
+                     Halting the loop; caller receives what the buffer holds.",
+                    cap = config.max_tool_calls,
+                );
+                return Ok(String::new());
+            }
+        }
         let tools = provider.tools().await;
         let tool_count = tools.len();
         let completion = completions.complete(model_id, &messages, tools).await?;
@@ -254,6 +293,16 @@ pub async fn run_with_tools(
     // Budget exhausted — force a final answer with no tools advertised.
     // The system nudge tells the LLM why it can't call another tool; the
     // empty `tools` on the next call makes it structurally impossible.
+    // Final completion is also gated: no free ride on the wind-down turn.
+    if let Some(ref gate) = credit_gate {
+        if let Err(e) = gate.check().await {
+            log::warn!(
+                "harness: credit gate refused final wind-down completion: {e}. \
+                 Returning empty content; buffer holds whatever the loop produced.",
+            );
+            return Ok(String::new());
+        }
+    }
     messages.push(json!({
         "role": "system",
         "content": format!(
@@ -410,6 +459,7 @@ mod tests {
             llm.clone(),
             HarnessConfig::default(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -435,6 +485,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig::default(),
+            None,
             None,
         )
         .await
@@ -487,6 +538,7 @@ mod tests {
             llm.clone(),
             HarnessConfig::default(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -524,6 +576,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig { max_tool_calls: 3 },
+            None,
             None,
         )
         .await
@@ -596,6 +649,7 @@ mod tests {
             llm.clone(),
             HarnessConfig { max_tool_calls: 3 },
             None,
+            None,
         )
         .await
         .unwrap();
@@ -647,6 +701,7 @@ mod tests {
             provider,
             llm.clone(),
             HarnessConfig::default(),
+            None,
             None,
         )
         .await
@@ -712,6 +767,7 @@ mod tests {
             llm.clone(),
             HarnessConfig::default(),
             Some(&ctx),
+            None,
         )
         .await
         .unwrap();
@@ -794,6 +850,7 @@ mod tests {
             llm.clone(),
             HarnessConfig::default(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -816,5 +873,103 @@ mod tests {
             !saw_tool_event,
             "no ToolCall/ToolResult must land when emit_ctx is None"
         );
+    }
+
+    /// Credit gate that starts open and closes after N successful checks.
+    /// Simulates a caller who runs out mid-loop.
+    struct FiniteCreditGate {
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl CreditGate for FiniteCreditGate {
+        async fn check(&self) -> Result<()> {
+            let n = self
+                .remaining
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                Err(anyhow::anyhow!("Insufficient compute credits"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_halts_when_credit_gate_refuses_midloop() {
+        // Regression for James's review (2026-08-25): a pass that ends
+        // with zero bases used to burn every completion after entry
+        // regardless of the caller's remaining budget. The credit gate
+        // now checks BEFORE each `complete` call and halts the loop as
+        // soon as the gate refuses. The scripted LLM here would happily
+        // walk 4 rounds if allowed; the gate is preloaded with 2 allowed
+        // checks, so only rounds 1+2 land and the pass exits early.
+        let script = vec![
+            tool_call_turn("c1", "noop", json!({})),
+            tool_call_turn("c2", "noop", json!({})),
+            tool_call_turn("c3", "noop", json!({})),
+            plain_answer("hi"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("noop", "")],
+        });
+        let gate = Arc::new(FiniteCreditGate {
+            remaining: std::sync::atomic::AtomicUsize::new(2),
+        });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            provider,
+            llm.clone(),
+            HarnessConfig { max_tool_calls: 4 },
+            None,
+            Some(gate),
+        )
+        .await
+        .unwrap();
+
+        // Early-halt returns empty content; the caller drains whatever
+        // the ProposalBuffer holds (in this echoing test — nothing).
+        assert_eq!(out, "");
+        // Two completions consumed BEFORE the gate said no on round 3.
+        assert_eq!(
+            llm.call_count(),
+            2,
+            "loop must halt on the third round's pre-check, not spin through the whole script"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_with_tools_no_credit_gate_matches_baseline() {
+        // Ensures `Some(gate)` vs `None` is a strict superset — with
+        // `None`, behavior is exactly as before the gate landed. Same
+        // scripted LLM as above; without the gate, the loop walks all
+        // rounds and returns the final plain answer.
+        let script = vec![
+            tool_call_turn("c1", "noop", json!({})),
+            tool_call_turn("c2", "noop", json!({})),
+            plain_answer("done"),
+        ];
+        let llm = Arc::new(ScriptedLLM::new(script));
+        let provider = Arc::new(EchoProvider {
+            tools: vec![ToolSchema::zero_arg("noop", "")],
+        });
+
+        let out = run_with_tools(
+            "m",
+            vec![user_message("go")],
+            provider,
+            llm.clone(),
+            HarnessConfig { max_tool_calls: 4 },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out, "done");
+        assert_eq!(llm.call_count(), 3);
     }
 }

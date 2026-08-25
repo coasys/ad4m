@@ -480,7 +480,14 @@ pub(crate) async fn run_interpretation_harness_e2e(
         // asserted on here; scenario E's own tests would attach one if we
         // add event-shape assertions in a follow-up).
         None,
+        // Real-LLM test-support: matches the WS-RPC one-shot semantic,
+        // dedup-on-drain off (scenarios rely on the LLM's own `_query`
+        // discipline, which is exactly what the scenario asserts on).
         false,
+        // No per-completion credit gate: local Ollama runs at rate=0 so
+        // the ledger deltas are zero regardless, and asserting on
+        // billing side-effects is not part of these scenarios.
+        None,
     )
     .await
     .expect("run_interpretation_with_harness against real LLM to succeed");

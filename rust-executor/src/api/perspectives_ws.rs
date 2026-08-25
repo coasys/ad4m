@@ -85,6 +85,44 @@ fn reserve_credits(user_email: &Option<String>, amount: f64) -> Result<(), WsRpc
 
 const DEFAULT_LINK_WRITE: f64 = 0.25;
 
+/// Adapter that implements the harness's `CreditGate` trait against the
+/// per-user credit ledger. Each `check()` (a) refuses if the ledger says
+/// insufficient, and (b) reserves `DEFAULT_LINK_WRITE` from the ledger
+/// so the mid-loop opportunity cost is accounted for — not just the
+/// bases the pass eventually lands.
+///
+/// Rationale (James's review 2026-08-25): the old shape was
+/// `check_credits` once at entry, then `reserve_credits(bases.len() * DEFAULT_LINK_WRITE)`
+/// at exit. Up-to-`max_tool_calls + 1` completions in between hit
+/// neither, and `AIService::bill_prompt_if_authed` is a
+/// fire-and-forget deduction that logs on `InsufficientCredits` but
+/// doesn't halt the loop. A pass that ends with zero bases used to be
+/// free regardless of how many completions it burned.
+struct WsHarnessCreditGate {
+    user_email: Option<String>,
+}
+
+impl WsHarnessCreditGate {
+    fn new(user_email: Option<String>) -> Self {
+        Self { user_email }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ai_service::harness::CreditGate for WsHarnessCreditGate {
+    async fn check(&self) -> anyhow::Result<()> {
+        // Pre-check: cheap "credits > 0" gate. Free hosting / free-access
+        // paths short-circuit inside `check_credits`.
+        check_credits(&self.user_email).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        // Reserve the per-completion opportunity cost. Fire-and-forget
+        // wrt success — the ledger deduction happens atomically and any
+        // downstream `InsufficientCredits` will fail the NEXT `check`.
+        reserve_credits(&self.user_email, DEFAULT_LINK_WRITE)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        Ok(())
+    }
+}
+
 fn parse_link_status(s: Option<&str>) -> LinkStatus {
     match s {
         Some("shared" | "SHARED") => LinkStatus::Shared,
@@ -1407,6 +1445,17 @@ async fn run_interpretation_with_harness_handler(
             }
         });
 
+    // Per-completion credit gate — bounds the pass to the caller's
+    // available budget across the whole tool-calling loop. Replaces the
+    // entry-only `check_credits` guard which used to leave up-to-
+    // `max_tool_calls + 1` completions unmetered after credits ran out.
+    // Reserves `DEFAULT_LINK_WRITE` per gate call (same rate the pass'
+    // exit accounting uses for each landed base) so the accounting
+    // stays proportional to the mid-loop opportunity cost.
+    let credit_gate: Option<std::sync::Arc<dyn crate::ai_service::harness::CreditGate>> = Some(
+        std::sync::Arc::new(WsHarnessCreditGate::new(ctx.user_email.clone())),
+    );
+
     let bases = match tokio::time::timeout(
         Duration::from_secs(RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS),
         crate::perspectives::interpretation::run_interpretation_with_harness_and_model(
@@ -1421,7 +1470,12 @@ async fn run_interpretation_with_harness_handler(
             body.max_tool_calls,
             auth_token,
             emit_ctx.as_ref(),
+            // WS-RPC is the one-shot path — dedup-on-drain stays off; the
+            // caller reaches for the harness specifically to trust the LLM
+            // to `_query` before proposing. The auto-processor watcher is
+            // the caller that passes `true`.
             false,
+            credit_gate,
         ),
     )
     .await

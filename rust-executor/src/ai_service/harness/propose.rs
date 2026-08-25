@@ -108,10 +108,10 @@ pub struct ClassProposeShape {
 }
 
 /// One relation on a `ClassProposeShape` — the harness's per-relation view
-/// of a SHACL property that points to another class. The `hint` field
-/// (from the property's `ad4m://interpretation_hint` link) is what makes
-/// `basedOn` mean "prior beliefs this intention derives from" instead of
-/// just "some link" in the tool schema description.
+/// of a SHACL property that points to another entity (not a literal). The
+/// `hint` field (from the property's `ad4m://interpretation_hint` link) is
+/// what makes `basedOn` mean "prior beliefs this intention derives from"
+/// instead of just "some link" in the tool schema description.
 #[derive(Debug, Clone)]
 pub struct RelationInfo {
     /// Property name as declared in SHACL, e.g. `basedOn`.
@@ -125,6 +125,12 @@ pub struct RelationInfo {
     /// `predicate` field description so the LLM knows which relation
     /// applies to which situation.
     pub hint: Option<String>,
+    /// SHACL `sh:class` target when the relation is typed. `None` for
+    /// deliberately untyped relations (a "mentions" edge between records
+    /// of any two classes — legitimate modelling for connections no schema
+    /// anticipated). Rendered into the tool description as "→ target
+    /// class" when known; otherwise omitted.
+    pub target_class: Option<String>,
 }
 
 /// Extract a [`ClassProposeShape`] from a loaded SHACL class. Filters out
@@ -142,20 +148,45 @@ pub fn class_propose_shape_from_shacl(class: &ShaclClass) -> ClassProposeShape {
         .filter(|p| !p.is_collection)
         .map(|p| p.name.clone())
         .collect();
-    // Relations = properties with a typed target class (sh:class) and a
-    // predicate URI. Covers hasMany (basedOn → Belief) and hasOne alike.
-    // Carry `interpretation_hint` alongside — the harness renders it into
-    // the propose_link_child schema so the LLM knows *what* each relation
-    // means, not just that it exists.
+    // Relations = properties that point to another *entity* (not a
+    // literal). Both typed (`sh:class` → target class known) and untyped
+    // relations qualify — the untyped case (a "mentions" or generic
+    // connection edge whose target class the schema didn't nail down) is
+    // a legitimate modelling choice, and it's exactly the kind of edge an
+    // interpretation pass most wants to propose. Filtering only on
+    // `.class.is_some()` would drop those and starve the class of any
+    // `_propose_link_child` tool at all.
+    //
+    // Distinguish from scalar-literal properties by the SHACL signal for
+    // "this points to a resource": either `sh:class` is set (typed) OR
+    // `sh:nodeKind` is `sh:IRI`. Properties with a `xsd:*` datatype fall
+    // through as scalars — those are set inline on `_create`, not linked
+    // post-hoc.
+    let is_relation_shape = |p: &crate::mcp::shacl::ShaclProperty| {
+        if p.predicate.is_none() {
+            return false;
+        }
+        if p.datatype.is_some() {
+            return false;
+        }
+        if p.class.is_some() {
+            return true;
+        }
+        p.node_kind
+            .as_deref()
+            .map(|nk| nk.contains("IRI"))
+            .unwrap_or(false)
+    };
     let relations: Vec<RelationInfo> = class
         .properties
         .iter()
-        .filter(|p| p.class.is_some())
+        .filter(|p| is_relation_shape(p))
         .filter_map(|p| {
             p.predicate.clone().map(|pred| RelationInfo {
                 name: p.name.clone(),
                 predicate: pred,
                 hint: p.interpretation_hint.clone(),
+                target_class: p.class.clone(),
             })
         })
         .collect();
@@ -581,9 +612,11 @@ fn strip_class_suffix(name: &str, suffix: &str) -> Option<String> {
 /// - trailing `unknown` / `placeholder` / `example` / `...` / `xxx` /
 ///   `todo` (case-insensitive) — the tail after the last `/` or `:` is
 ///   checked so `ad4m://obj/unknown` and plain `unknown` both bounce
-/// - unknown-scheme "URIs" like `belief_query:...` (a tool-name + query
-///   pasted as URI, observed same test attempt 7) — only ad4m/soa/
-///   literal/https/http/urn schemes are accepted for link URIs
+/// - malformed-scheme "URIs" like `belief_query:...` (a tool-name + query
+///   pasted as URI, observed same test attempt 7) — any RFC-3986 well-
+///   formed scheme is accepted (so `flux://…`, `we://…`, and any
+///   perspective-defined namespace pass), but a `_` in the scheme
+///   position marks the paste class and rejects it
 /// Resolve an LLM-supplied `predicate` string against a class's declared
 /// relations. Accepts exact URI matches and local-name matches (the tail
 /// after the last `/` or `:` — so `basedOn`, `soa:basedOn`, `ns://basedOn`
@@ -648,24 +681,43 @@ fn placeholder_uri(uri: &str) -> Option<&'static str> {
             });
         }
     }
-    // Scheme whitelist for link URIs. `belief_query:Local-first...` gets
-    // through the tail check because `local-first...` isn't in the bad
-    // list, but the scheme `belief_query` is nonsense — the LLM likely
-    // pasted a tool name + query as the URI. If the string has an `:`
-    // (any scheme-like separator), the part before must be a known scheme.
-    // Strings without any `:` (bare tokens) are not rejected here — the
-    // tail check above catches the common bare placeholders.
+    // Scheme-syntax check. RFC 3986: scheme = ALPHA *( ALPHA / DIGIT / "+"
+    // / "-" / "." ). A well-formed scheme lets any app-defined namespace
+    // through (`flux://…`, `we://…`, `mycustom://…`) — the harness has no
+    // business enforcing which namespaces are legitimate. What it catches
+    // is the failure mode: the LLM pasted a tool name + query as the URI
+    // (`belief_query:Local-first…`). Tool names contain `_`, RFC-3986
+    // schemes don't — that alone rejects the paste class without a
+    // hardcoded namespace list.
+    //
+    // Whitelisting a small set (`ad4m|soa|literal|https|http|urn|did`)
+    // used to double as a paste-catcher, but it bounced every legitimate
+    // perspective-defined scheme along with the pastes — Flux and We
+    // perspectives couldn't link a child at all. This is the denylist
+    // James's review asked for: reject only the shape the LLM confuses,
+    // accept anything RFC-well-formed.
     if let Some(colon_at) = trimmed.find(':') {
-        let scheme = &trimmed[..colon_at].to_ascii_lowercase();
-        let is_known = matches!(
-            scheme.as_str(),
-            "ad4m" | "soa" | "literal" | "https" | "http" | "urn" | "did"
-        );
-        if !is_known {
-            return Some("unknown-scheme (not ad4m/soa/literal/https/http/urn/did)");
+        let scheme = &trimmed[..colon_at];
+        if !is_well_formed_scheme(scheme) {
+            return Some("malformed-scheme (looks like a pasted tool name or invalid syntax)");
         }
     }
     None
+}
+
+/// RFC 3986 scheme validator: first byte ALPHA, remaining ALPHA / DIGIT /
+/// `+` / `-` / `.`. `_` is deliberately rejected — it distinguishes a real
+/// scheme from a pasted tool name (`belief_query`, `intention_get`) without
+/// having to enumerate legitimate namespaces.
+fn is_well_formed_scheme(scheme: &str) -> bool {
+    let mut bytes = scheme.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
 }
 
 // ── tool schemas ──────────────────────────────────────────────────────────
@@ -750,9 +802,17 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
         let pretty = c
             .relations
             .iter()
-            .map(|r| match &r.hint {
-                Some(hint) => format!("`{}` (relation `{}` — {})", r.predicate, r.name, hint),
-                None => format!("`{}` (relation `{}` → target class)", r.predicate, r.name),
+            .map(|r| {
+                let arrow = match &r.target_class {
+                    Some(tc) => format!(" → `{tc}`"),
+                    None => String::from(" (untyped target — any URI)"),
+                };
+                match &r.hint {
+                    Some(hint) => {
+                        format!("`{}` (relation `{}`{arrow} — {hint})", r.predicate, r.name)
+                    }
+                    None => format!("`{}` (relation `{}`{arrow})", r.predicate, r.name),
+                }
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -813,11 +873,20 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
         let list = c
             .relations
             .iter()
-            .map(|r| match &r.hint {
-                Some(hint) => {
-                    format!("  - `{}` → predicate `{}` — {hint}", r.name, r.predicate)
+            .map(|r| {
+                let arrow = match &r.target_class {
+                    Some(tc) => format!(" → `{tc}`"),
+                    None => String::from(" (untyped — target may be any URI)"),
+                };
+                match &r.hint {
+                    Some(hint) => {
+                        format!(
+                            "  - `{}` → predicate `{}`{arrow} — {hint}",
+                            r.name, r.predicate
+                        )
+                    }
+                    None => format!("  - `{}` → predicate `{}`{arrow}", r.name, r.predicate),
                 }
-                None => format!("  - `{}` → predicate `{}`", r.name, r.predicate),
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -889,6 +958,7 @@ mod tests {
                 name: "basedOn".into(),
                 predicate: "ns://basedOn".into(),
                 hint: Some("The prior beliefs this intention derives from.".into()),
+                target_class: Some("Belief".into()),
             }],
         }
     }
@@ -902,6 +972,7 @@ mod tests {
                 name: "basedOn".into(),
                 predicate: "ns://basedOn".into(),
                 hint: None,
+                target_class: Some("Belief".into()),
             }],
         }
     }
@@ -1572,6 +1643,127 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn propose_link_child_surfaces_untyped_relations() {
+        // Regression for James's review point: a relation declared with a
+        // predicate but no `sh:class` (deliberately untyped — "mentions
+        // any record") used to be filtered out by
+        // `class_propose_shape_from_shacl`, which meant the class got no
+        // `_propose_link_child` tool AT ALL. Now the tool surface includes
+        // it, and the schema description marks the target as untyped so
+        // the LLM knows any URI is legal.
+        let mut shape = intention_shape();
+        shape.relations = vec![RelationInfo {
+            name: "mentions".into(),
+            predicate: "ns://mentions".into(),
+            hint: Some("Anything the intention references, no target class.".into()),
+            target_class: None,
+        }];
+        let (p, _buf) = provider(vec![shape]);
+        let tools = p.tools().await;
+        let link = tools
+            .into_iter()
+            .find(|t| t.name == "intention_propose_link_child")
+            .expect("class with untyped relation still gets a link tool");
+        let predicate_desc = link.parameters["properties"]["predicate"]["description"]
+            .as_str()
+            .unwrap();
+        // The predicate is enum-constrained to the declared URI...
+        let enum_vals: Vec<&str> = link.parameters["properties"]["predicate"]["enum"]
+            .as_array()
+            .expect("enum-constrained predicate")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(enum_vals, vec!["ns://mentions"]);
+        // ...and the description flags the untyped target so the LLM
+        // doesn't waste a `_query` looking for the "right" class first.
+        assert!(
+            predicate_desc.contains("untyped"),
+            "untyped target flagged in predicate description: {predicate_desc}"
+        );
+        // Class-level description mentions "untyped" too.
+        assert!(
+            link.description.contains("untyped"),
+            "untyped target flagged in class description: {}",
+            link.description
+        );
+    }
+
+    #[test]
+    fn class_propose_shape_from_shacl_includes_untyped_iri_relations() {
+        use crate::mcp::shacl::{ShaclClass, ShaclProperty};
+        // Two relations declared on the class: one with sh:class (typed),
+        // one with sh:nodeKind=sh:IRI but no sh:class (untyped). Both
+        // must land in `relations`; a literal-typed scalar must NOT.
+        let class = ShaclClass {
+            name: "Note".into(),
+            name_lower: "note".into(),
+            shape_uri: None,
+            all_predicates: vec![],
+            properties: vec![
+                // Typed relation — has sh:class.
+                ShaclProperty {
+                    name: "author".into(),
+                    is_collection: false,
+                    predicate: Some("ns://author".into()),
+                    datatype: None,
+                    min_count: None,
+                    max_count: None,
+                    node_kind: Some("sh://IRI".into()),
+                    getter: None,
+                    class: Some("Person".into()),
+                    resolve_language: None,
+                    interpretation_hint: None,
+                },
+                // Untyped IRI relation — no sh:class, nodeKind = IRI.
+                ShaclProperty {
+                    name: "mentions".into(),
+                    is_collection: true,
+                    predicate: Some("ns://mentions".into()),
+                    datatype: None,
+                    min_count: None,
+                    max_count: None,
+                    node_kind: Some("sh://IRI".into()),
+                    getter: None,
+                    class: None,
+                    resolve_language: None,
+                    interpretation_hint: None,
+                },
+                // Literal-typed scalar — must NOT be surfaced as a relation.
+                ShaclProperty {
+                    name: "title".into(),
+                    is_collection: false,
+                    predicate: Some("ns://title".into()),
+                    datatype: Some("xsd://string".into()),
+                    min_count: Some(1),
+                    max_count: Some(1),
+                    node_kind: Some("sh://Literal".into()),
+                    getter: None,
+                    class: None,
+                    resolve_language: None,
+                    interpretation_hint: None,
+                },
+            ],
+        };
+        let shape = class_propose_shape_from_shacl(&class);
+        let rel_names: Vec<&str> = shape.relations.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            rel_names,
+            vec!["author", "mentions"],
+            "typed AND untyped relations both surface; literal scalar does not"
+        );
+        assert_eq!(
+            shape.relations[1].target_class, None,
+            "untyped relation carries target_class=None"
+        );
+        assert_eq!(
+            shape.relations[0].target_class.as_deref(),
+            Some("Person"),
+            "typed relation carries target_class=Some"
+        );
+    }
+
     #[test]
     fn resolve_relation_predicate_covers_documented_variants() {
         // Pure-function coverage of the resolver — cheaper regression net
@@ -1581,6 +1773,7 @@ mod tests {
             name: "basedOn".into(),
             predicate: "ns://basedOn".into(),
             hint: None,
+            target_class: Some("Belief".into()),
         }];
         for accepted in [
             "ns://basedOn",
@@ -1601,6 +1794,70 @@ mod tests {
                 resolve_relation_predicate(&rels, rejected).is_none(),
                 "should reject `{rejected}`"
             );
+        }
+    }
+
+    #[test]
+    fn placeholder_uri_accepts_app_defined_schemes() {
+        // Regression for James's review point: the old whitelist
+        // (ad4m|soa|literal|https|http|urn|did) bounced every perspective
+        // whose instances lived under an app-defined namespace. Now any
+        // RFC-3986 well-formed scheme passes — the harness stops taking a
+        // position on which namespaces are "real".
+        for accepted in [
+            "flux://channel/xyz",
+            "we://applet/abc",
+            "mycustom://foo/bar",
+            "app.example://x",
+            "ad4m://obj/uuid-1234",
+            "soa://ext/task/xyz",
+            "https://example.org/thing",
+            "did:key:z6Mk...",
+            "urn:uuid:12345",
+            // Bare tokens without ':' are only rejected via the tail check
+            // — this one has no matching bad-tail so it goes through.
+            "bare-token-no-colon",
+        ] {
+            assert!(
+                placeholder_uri(accepted).is_none(),
+                "should accept `{accepted}`, got {:?}",
+                placeholder_uri(accepted)
+            );
+        }
+    }
+
+    #[test]
+    fn placeholder_uri_rejects_tool_name_paste_shape() {
+        // The failure mode this check exists for: small models paste a
+        // tool name where a URI belongs (`belief_query:foo`). An `_` in
+        // the scheme position marks this class — no real RFC-3986 scheme
+        // contains one.
+        for rejected in [
+            "belief_query:Local-first beats cloud-first",
+            "belief_query:foo",
+            "intention_get:bar",
+            "task_list:baz",
+            // Empty scheme (leading colon):
+            ":something",
+            // Scheme with number-lead (RFC 3986 requires ALPHA first):
+            "9scheme:body",
+        ] {
+            assert!(
+                matches!(placeholder_uri(rejected), Some(msg) if msg.contains("malformed-scheme") || msg.contains("empty") || msg.contains("placeholder")),
+                "should reject `{rejected}`, got {:?}",
+                placeholder_uri(rejected)
+            );
+        }
+    }
+
+    #[test]
+    fn is_well_formed_scheme_matches_rfc_3986() {
+        // Spec-shape sanity: alpha first, then alphanumerics + `+`/`-`/`.`
+        for ok in ["http", "https", "did", "urn", "app.name", "x-scheme", "a+b"] {
+            assert!(is_well_formed_scheme(ok), "should accept `{ok}`");
+        }
+        for bad in ["", "9http", "http_", "app_name", "http space", "hö"] {
+            assert!(!is_well_formed_scheme(bad), "should reject `{bad}`");
         }
     }
 }

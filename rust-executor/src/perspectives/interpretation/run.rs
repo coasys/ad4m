@@ -804,6 +804,7 @@ pub async fn run_interpretation_with_harness_and_model(
     auth_token: Option<String>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     dedup_on_drain: bool,
+    credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
 ) -> anyhow::Result<Vec<String>> {
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
@@ -933,6 +934,7 @@ pub async fn run_interpretation_with_harness_and_model(
         bridge,
         HarnessConfig { max_tool_calls },
         emit_ctx,
+        credit_gate,
     )
     .await?;
 

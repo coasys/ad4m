@@ -767,6 +767,11 @@ pub async fn run_one_pass(
                 // re-proposed instances must collapse to updates (not
                 // unbounded duplicate creates). James Weir PR #911 review.
                 true,
+                // No per-pass credit gate on the auto-processor path:
+                // the watcher runs as an internal service (no user
+                // session to bill against) and each completion still
+                // fire-and-forgets bill_prompt_if_authed via AIService.
+                None,
             )
             .await?;
             (bases, None)
