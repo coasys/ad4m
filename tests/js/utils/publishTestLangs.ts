@@ -16,6 +16,7 @@ const publishLanguagesPath = path.resolve(TEST_DIR, "languages");
 const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootstrapSeed.json');
 const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
 const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
+const serverLinkLanguageHashPath = path.resolve(__dirname, '..', 'scripts', 'server-link-language-hash');
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -23,13 +24,19 @@ const languagesToPublish = {
     "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
+    // SERVER_URL + ROOM_ID match the //!@ad4m-template-variable declarations in
+    // bootstrap-languages/server-link-language/index.ts. `name` + `description`
+    // aren't code-templated — they get through to the language meta so tests
+    // can assert on `socialContext.name` the same way they do for p-diff-sync.
+    "server-link-language": {name: "server-link-language", description: "", possibleTemplateParams: ["SERVER_URL", "ROOM_ID", "name", "description"]} as LanguageMetaInput,
 }
 
 const languageHashes = {
     "agentLanguage": "",
     "perspectiveLanguage": "",
     "neighbourhoodLanguage": "",
-    "perspectiveDiffSync": ""
+    "perspectiveDiffSync": "",
+    "serverLinkLanguage": ""
 }
 
 // Kill the listening process on each port (TCP:LISTEN filter ensures we only
@@ -66,6 +73,7 @@ function injectSystemLanguages() {
 
 function injectLangAliasHashes() {
     fs.writeFileSync(perspectiveDiffSyncHashPath, languageHashes["perspectiveDiffSync"]);
+    fs.writeFileSync(serverLinkLanguageHashPath, languageHashes["serverLinkLanguage"]);
 }
 
 async function publish() {
@@ -104,6 +112,9 @@ async function publish() {
             if (language === "perspective-diff-sync") {
                 languageHashes["perspectiveDiffSync"] = publishedLang.address;
             }
+            if (language === "server-link-language") {
+                languageHashes["serverLinkLanguage"] = publishedLang.address;
+            }
         }
         injectSystemLanguages();
         injectLangAliasHashes();
@@ -123,6 +134,7 @@ async function publish() {
             "neighbourhood-store": "neighbourhoodLanguage",
             "perspective-diff-sync": "perspectiveDiffSync",
             "perspective-language": "perspectiveLanguage",
+            "server-link-language": "serverLinkLanguage",
         };
         for (const [langFolder, hashKey] of Object.entries(langFolderToHash)) {
             const srcBundle = path.join(publishLanguagesPath, langFolder, "build", "bundle.js");

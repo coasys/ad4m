@@ -103,32 +103,6 @@ async function setupRoomKey(): Promise<void> {
     }
 }
 
-/**
- * Pushes a diff to the server with a single short retry. Never throws —
- * a failure here means the link is safely stored locally but not yet
- * synced; it will NOT be automatically resent (no persistent outbox in
- * this version, see AGENTS.md "Known limitations").
- */
-async function commitWithRetry(diff: PerspectiveDiff): Promise<void> {
-    try {
-        await syncModule.commit(diff);
-        return;
-    } catch (err) {
-        console.error("[server-link-language] commit push failed, retrying once:", err);
-    }
-    try {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        await syncModule.commit(diff);
-    } catch (err) {
-        console.error(
-            "[server-link-language] commit push failed after retry — link is saved locally but was " +
-            "NOT synced to the server and will not be automatically retried.",
-            err,
-        );
-        getRuntime().emitSyncStateChange("NotSynced");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Language definition
 // ---------------------------------------------------------------------------
@@ -208,7 +182,11 @@ const language = defineLanguage({
                 },
                 onClose() {
                     telepresenceModule.clearOnlineAgents();
-                    getRuntime().emitSyncStateChange("NotSynced");
+                    // Must match a PerspectiveState variant the executor accepts
+                    // (rust-executor/src/types/domain.rs::PerspectiveState).
+                    // "NotSynced" does not exist — the correct variant for
+                    // "language installed, known to be behind" follows.
+                    getRuntime().emitSyncStateChange("LinkLanguageInstalledButNotSynced");
                 },
                 onReconnecting(attempt, delayMs) {
                     console.log(
@@ -218,7 +196,10 @@ const language = defineLanguage({
             },
         });
 
-        telepresenceModule.initTelepresence({ send: (msg) => wsClient!.send(msg) });
+        telepresenceModule.initTelepresence({
+            send: (msg) => wsClient!.send(msg),
+            getMyDid: () => myDid,
+        });
 
         try {
             await auth.authenticate();
@@ -240,6 +221,19 @@ const language = defineLanguage({
     },
 
     async teardown() {
+        // Drain any pending batched commits BEFORE we tear down auth/adapters.
+        // enqueueCommitBatched schedules a microtask flush that reads `deps()`
+        // (auth token, transport) at flush time — if teardown resets those
+        // first, the pending flush's POST fails and flushBatch drops the batch.
+        try {
+            await syncModule.drainCommitBatch();
+        } catch (err) {
+            console.error(
+                "[server-link-language] teardown: draining batched commits failed; " +
+                "some writes may not have reached the server:",
+                err,
+            );
+        }
         if (wsClient) {
             wsClient.close();
             wsClient = null;
@@ -279,8 +273,12 @@ const language = defineLanguage({
             // 1. Store links locally (plaintext, always — see src/sync.ts module doc).
             store.applyDiff(diff);
 
-            // 2. Push to the server (encrypted on the wire if this room has E2E enabled).
-            await commitWithRetry(diff);
+            // 2. Queue the push to the server. `enqueueCommitBatched` returns
+            //    immediately after appending to the batch; the actual POST
+            //    happens on a microtask flush, so a tight loop of addLink()
+            //    calls collapses into one POST (see the batching block in
+            //    sync.ts for why).
+            syncModule.enqueueCommitBatched(diff);
 
             // 3. Emit so local subscribers see it immediately.
             getRuntime().emitPerspectiveDiff(diff);

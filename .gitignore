@@ -82,3 +82,4 @@ ui/src-tauri/gen/schemas/macOS-schema.json
 .claude
 # Overnight watchdog scratch — logs and repro scripts, not source
 .overnight-status/
+.codegraph/

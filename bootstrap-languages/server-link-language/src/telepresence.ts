@@ -9,6 +9,10 @@ import type { ClientWsMessage, DID, OnlineAgent, ServerWsMessage } from "./types
 
 export interface TelepresenceDeps {
     send: (msg: ClientWsMessage) => void;
+    /** Local DID. The server broadcasts the full room roster (including us)
+     * on every `set-online-status`, so we must filter self out client-side.
+     * `""` (never set) means no filter — safe fallback for tests. */
+    getMyDid: () => string;
 }
 
 let _deps: TelepresenceDeps | null = null;
@@ -59,7 +63,36 @@ export async function setOnlineStatus(status: unknown): Promise<void> {
 }
 
 export async function getOnlineAgents(): Promise<OnlineAgent[]> {
-    return Array.from(onlineAgents.values());
+    // - Drop self. The server rebroadcasts the FULL room roster (including
+    //   the caller) on every `set-online-status`, so without this the local
+    //   agent appears in its own `onlineAgents` list.
+    // - Substitute an empty PerspectiveExpression for peers we've only seen
+    //   via `peer-joined` but who haven't yet called `setOnlineStatus`.
+    //   Semantics: they ARE online and should be visible, they just don't
+    //   have a status to show yet. Also required by the executor's schema
+    //   (rust-executor/src/types/domain.rs::OnlineAgent), which serialises
+    //   `status: PerspectiveExpression` as non-optional — returning a bare
+    //   `{did}` triggers `RpcError: RPC error 500: missing field \`status\``.
+    const myDid = deps().getMyDid();
+    return Array.from(onlineAgents.values())
+        .filter((a) => a.did !== myDid)
+        .map((a) => (a.status !== undefined ? a : { did: a.did, status: emptyPerspectiveExpression() }));
+}
+
+/**
+ * A structurally-valid but empty `PerspectiveExpression` — matches
+ * `#[derive(Default)]` on the executor's Rust type
+ * (rust-executor/src/types/domain.rs::PerspectiveExpression). Used as the
+ * placeholder status for peers we know are online but who haven't yet
+ * broadcast one.
+ */
+function emptyPerspectiveExpression(): Record<string, unknown> {
+    return {
+        author: "",
+        data: { links: [] },
+        proof: { key: "", signature: "" },
+        timestamp: "",
+    };
 }
 
 export async function sendSignal(remoteAgentDid: DID, payload: unknown): Promise<object> {

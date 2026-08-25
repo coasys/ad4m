@@ -77,6 +77,9 @@ commands:
       - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
+      - run:
+          name: Build link-server
+          command: pnpm --filter @coasys/link-server install && pnpm --filter @coasys/link-server build
 
   setup_local_integration_test_environment:
     description: "Setup integration test environment with local-only bootstrap languages (no Holochain)"
