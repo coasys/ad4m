@@ -105,29 +105,13 @@ describe("perspective.runInterpretationWithHarness (WS + real LLM)", function ()
   let seededBeliefUris: Set<string>;
 
   before(async function () {
-    // LLM availability gate — see file header. The test needs a reachable
-    // OpenAI-compatible endpoint at BASE_URL (Ollama on Marvin locally; a
-    // tunnel from a dev box). Skip cleanly on runners without it so the
-    // whole suite doesn't fail on environments that just don't have the
-    // hardware.
-    try {
-      const probe = await fetch(BASE_URL.replace(/\/v1\/?$/, "") + "/v1/models", {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (!probe.ok) throw new Error(`probe ${probe.status}`);
-      // Gate on the specific model too — an endpoint that answers /v1/models
-      // but doesn't host MODEL would still fail the first LLM call. Skip
-      // instead of failing the run.
-      const body = (await probe.json()) as { data?: Array<{ id?: string }> };
-      const ids = (body.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
-      if (!ids.includes(MODEL)) {
-        throw new Error(`model ${MODEL} not present in /v1/models (have: ${ids.join(", ") || "none"})`);
-      }
-    } catch (e) {
-      console.log(`Skipping harness e2e — LLM endpoint ${BASE_URL} unreachable: ${(e as Error).message}`);
-      this.skip();
-    }
-
+    // Ollama-backed default LLM. On the Marvin CI runner MODEL is
+    // pre-installed; from a dev box, tunnel to it. Match the classic
+    // `run-interpretation.test.ts` approach: `addModel` sets up the
+    // provider record and any subsequent LLM call either works or fails
+    // loudly. No pre-flight probe / skip — a missing model on a runner
+    // that's supposed to have it is a real regression to surface, not
+    // silently pass (Nico's PR #911 review, 2026-08-25).
     const agent = await startAgent("run-interpretation-harness");
     ad4m = agent.client;
     stop = agent.stop;
@@ -315,28 +299,8 @@ describe("perspective.runInterpretationWithHarness — relation interpretation h
   let opposingBeliefUris: Set<string>;
 
   before(async function () {
-    // Same LLM availability gate as the sibling describe — skip cleanly
-    // on runners without a reachable Ollama-compatible endpoint hosting
-    // the requested MODEL.
-    try {
-      const probe = await fetch(BASE_URL.replace(/\/v1\/?$/, "") + "/v1/models", {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (!probe.ok) throw new Error(`probe ${probe.status}`);
-      const body = (await probe.json()) as { data?: Array<{ id?: string }> };
-      const ids = (body.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
-      if (!ids.includes(MODEL)) {
-        throw new Error(
-          `model ${MODEL} not present in /v1/models (have: ${ids.join(", ") || "none"})`,
-        );
-      }
-    } catch (e) {
-      console.log(
-        `Skipping harness relation-hint e2e — LLM endpoint ${BASE_URL} unreachable: ${(e as Error).message}`,
-      );
-      this.skip();
-    }
-
+    // Same as the sibling describe: `addModel` + let it fail loudly on
+    // runners that are supposed to have the model but don't. No skip.
     const agent = await startAgent("run-interpretation-harness-relation-hints");
     ad4m = agent.client;
     stop = agent.stop;
@@ -522,25 +486,8 @@ describe("perspective.runInterpretationWithHarness — tool-call events", functi
   let p: PerspectiveProxy;
 
   before(async function () {
-    try {
-      const probe = await fetch(BASE_URL.replace(/\/v1\/?$/, "") + "/v1/models", {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (!probe.ok) throw new Error(`probe ${probe.status}`);
-      const body = (await probe.json()) as { data?: Array<{ id?: string }> };
-      const ids = (body.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
-      if (!ids.includes(MODEL)) {
-        throw new Error(
-          `model ${MODEL} not present in /v1/models (have: ${ids.join(", ") || "none"})`,
-        );
-      }
-    } catch (e) {
-      console.log(
-        `Skipping tool-call events e2e — LLM endpoint ${BASE_URL} unreachable: ${(e as Error).message}`,
-      );
-      this.skip();
-    }
-
+    // Same as the sibling describes: `addModel` + let it fail loudly on
+    // runners that are supposed to have the model but don't. No skip.
     const agent = await startAgent("run-interpretation-harness-events");
     ad4m = agent.client;
     stop = agent.stop;
