@@ -65,7 +65,15 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   const identity = await ensureServerIdentity(db);
 
   const app = Fastify({ logger: opts.logger ?? false });
-  await app.register(websocketPlugin);
+  await app.register(websocketPlugin, {
+    options: {
+      // Cap inbound WebSocket frames at 1 MiB — link diffs and telepresence
+      // signals are small JSON payloads; anything larger signals a misbehaving
+      // client or an attack. The `ws` library closes the socket with 1009
+      // (message too big) when a frame exceeds this limit.
+      maxPayload: 1 * 1024 * 1024,
+    },
+  });
 
   const auth = new AuthManager(db, { jwtExpirySeconds: opts.jwtExpirySeconds });
   const challenges = new ChallengeStore();
@@ -106,7 +114,7 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   federation.start();
 
   app.addHook("onClose", async () => {
-    federation.stop();
+    await federation.stop();
     challenges.close();
     telepresence.close();
     rateLimits.authIp.close();

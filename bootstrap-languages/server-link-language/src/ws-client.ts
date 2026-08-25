@@ -71,6 +71,13 @@ export class WsClient {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
+        if (this.sendQueue.length > 0) {
+            console.warn(
+                `[server-link-language] WsClient.close(): dropping ${this.sendQueue.length} ` +
+                "queued outbound message(s) — they were enqueued while the socket was disconnected " +
+                "and will not be delivered.",
+            );
+        }
         this.sendQueue = [];
         this.connected = false;
         if (this.conn) {

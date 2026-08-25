@@ -67,6 +67,8 @@ export class FederationManager {
   private fetchImpl: typeof fetch;
   private log: (msg: string, err?: unknown) => void;
   private timer?: NodeJS.Timeout;
+  /** Tracks an in-flight reconcileAll() so stop() can await it. */
+  private reconcileInFlight: Promise<void> | null = null;
 
   constructor(deps: FederationDeps) {
     this.db = deps.db;
@@ -282,15 +284,26 @@ export class FederationManager {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      void this.reconcileAll();
+      this.reconcileInFlight = this.reconcileAll().finally(() => {
+        this.reconcileInFlight = null;
+      });
     }, this.reconcileIntervalMs);
     this.timer.unref();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
+    }
+    // Await any reconcileAll() already in flight so it finishes before
+    // the caller proceeds to close the DB.
+    if (this.reconcileInFlight) {
+      try {
+        await this.reconcileInFlight;
+      } catch {
+        // Best-effort — the caller (server.close()) is shutting down anyway.
+      }
     }
   }
 

@@ -5,6 +5,11 @@ interface AgentEntry {
   status?: unknown;
 }
 
+interface PendingOffline {
+  timer: NodeJS.Timeout;
+  onExpired: () => void;
+}
+
 /**
  * Online/offline presence tracking, decoupled from the WebSocket transport
  * by design: this module owns grace-period timers and the in-memory agent
@@ -17,7 +22,7 @@ interface AgentEntry {
  */
 export class TelepresenceManager {
   private graceMs: number;
-  private offlineTimers = new Map<string, NodeJS.Timeout>();
+  private offlineTimers = new Map<string, PendingOffline>();
   /** roomId → did → agent entry */
   private agents = new Map<string, Map<string, AgentEntry>>();
 
@@ -43,9 +48,9 @@ export class TelepresenceManager {
 
   cancelPendingOffline(roomId: string, did: string): void {
     const k = this.key(roomId, did);
-    const timer = this.offlineTimers.get(k);
-    if (timer) {
-      clearTimeout(timer);
+    const pending = this.offlineTimers.get(k);
+    if (pending) {
+      clearTimeout(pending.timer);
       this.offlineTimers.delete(k);
     }
   }
@@ -65,7 +70,7 @@ export class TelepresenceManager {
       onExpired();
     }, this.graceMs);
     timer.unref();
-    this.offlineTimers.set(k, timer);
+    this.offlineTimers.set(k, { timer, onExpired });
   }
 
   setStatus(roomId: string, did: string, status: unknown): void {
@@ -88,7 +93,16 @@ export class TelepresenceManager {
   }
 
   close(): void {
-    for (const timer of this.offlineTimers.values()) clearTimeout(timer);
+    // Fire pending onExpired callbacks so callers (ws.ts) can broadcast
+    // `peer-left` for agents still in their grace period at shutdown.
+    for (const pending of this.offlineTimers.values()) {
+      clearTimeout(pending.timer);
+      try {
+        pending.onExpired();
+      } catch {
+        // Best-effort during shutdown.
+      }
+    }
     this.offlineTimers.clear();
     this.agents.clear();
   }

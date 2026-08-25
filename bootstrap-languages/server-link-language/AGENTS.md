@@ -17,14 +17,10 @@ Scaffolded from `ad4m-link-language-template` (pure/impure adapter
 separation, esbuild + Deno bundling, Node/tsx unit tests). See `README.md`
 for the full architecture writeup.
 
-**Imported into the `ad4m` monorepo** (`bootstrap-languages/server-link-language/`)
-from the standalone `server-link-language` repo. The standalone repo remains
-the canonical dev copy for now; changes made here should be ported back.
-`package.json`'s `@coasys/ad4m-ldk` dependency is `workspace:*` (was
-`link:../ad4m/ad4m-ldk/js` in the standalone repo), and the `ad4m-ldk`
-resolution in `esbuild.ts`/`tsconfig.json` was repointed from the standalone
-repo's sibling-checkout layout (`../ad4m/ad4m-ldk/...`) to the monorepo's
-own layout (`../../ad4m-ldk/...`, same convention every other
+Lives in the `ad4m` monorepo at `bootstrap-languages/server-link-language/`.
+`package.json`'s `@coasys/ad4m-ldk` dependency uses `workspace:*`, and the
+`ad4m-ldk` resolution in `esbuild.ts`/`tsconfig.json` points to the
+monorepo's own layout (`../../ad4m-ldk/...`, same convention every other
 `bootstrap-languages/*` package uses) — see "Build / test / typecheck"
 below.
 
