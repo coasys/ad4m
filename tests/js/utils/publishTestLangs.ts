@@ -5,7 +5,7 @@ import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
 import { baseUrl, sleep, startExecutor } from "./utils";
-import { getFreePorts } from "../helpers/ports.js";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -75,6 +75,10 @@ async function publish() {
     const setupPorts = [apiPort, hcAdminPort, hcAppPort];
     console.log(`Setup ports: ${setupPorts.join('/')}`);
 
+    // Register with the port cleanup registry so cleanup.js can kill the
+    // executor if this process is killed ungracefully (SIGKILL, runner cancel).
+    registerPorts(setupPorts);
+
     createTestingAgent();
 
     const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, apiPort, hcAdminPort, hcAppPort, true);
@@ -137,6 +141,7 @@ async function publish() {
         // NOT this node process which has an outbound connection to that port.
         console.log(`Killing executor on ports ${setupPorts.join('/')}...`);
         killExecutorPorts(setupPorts);
+        deregisterPorts(setupPorts);
         await sleep(1000);
     }
 
