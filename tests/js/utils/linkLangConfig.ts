@@ -74,11 +74,13 @@ export async function pollUntil(
 ): Promise<void> {
     const { timeoutMs = 15000, intervalMs = 200, label = "condition" } = opts;
     const deadline = Date.now() + timeoutMs;
+    let lastError: unknown;
     while (Date.now() < deadline) {
         try {
             if (await predicate()) return;
-        } catch { /* treat as "not yet" */ }
+        } catch (err) { lastError = err; /* treat as "not yet" */ }
         await sleep(intervalMs);
     }
-    throw new Error(`pollUntil timed out after ${timeoutMs}ms waiting for: ${label}`);
+    const suffix = lastError ? ` (last error: ${lastError instanceof Error ? lastError.message : String(lastError)})` : "";
+    throw new Error(`pollUntil timed out after ${timeoutMs}ms waiting for: ${label}${suffix}`);
 }

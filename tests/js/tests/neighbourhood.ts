@@ -164,15 +164,14 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 await sleep(1000)
 
-                // Create 1500 links; pause every 50 to let the pending-diffs queue drain
-                // and prevent the link-server from being overwhelmed.
+                // Create 1500 links as fast as possible — the batching system
+                // (enqueueCommitBatched → coalesceDiffs) coalesces the burst
+                // into a small number of POSTs. No artificial throttling: this
+                // exercises the continuous-burst path end-to-end.
                 for(let i = 0; i < 1500; i++) {
                     console.log("Alice adding link ", i)
                     const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: `test://test/${i}`})
                     console.log("Link expression:", link)
-                    if (i > 0 && i % 50 === 0) {
-                        await sleep(200)
-                    }
                 }
 
                 console.log("wait 15s for initial sync")

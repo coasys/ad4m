@@ -54,8 +54,8 @@ export async function startLinkServer(readyTimeoutMs = 15000): Promise<LinkServe
             // canonicalLinkPayload builds a different JSON envelope (all fields
             // inline including author + timestamp). Verification fails on every
             // executor-produced link. Auth is still enforced (JWT bound to DID);
-            // link signature is defense-in-depth on top. Unify the schemes in a
-            // follow-up so this env var can be removed.
+            // link signature is defense-in-depth on top.
+            // Tracked: https://github.com/coasys/ad4m/issues/916
             env: {
                 ...process.env,
                 PORT: String(port),

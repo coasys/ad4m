@@ -181,6 +181,7 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
 //     already reflects every write (index.ts applies before enqueueing);
 //     there is no automatic re-push path — a hard-failed batch requires
 //     external recovery (teardown + rejoin, or a future re-push flow).
+//     Tracked: https://github.com/coasys/ad4m/issues/917
 // ---------------------------------------------------------------------------
 
 const MAX_COMMIT_ATTEMPTS = 3;
@@ -229,14 +230,19 @@ async function flushBatch(): Promise<void> {
         const ok = await commitSegmentWithRetries(segment);
         if (!ok) {
             const remaining = segments.length - i - 1;
+            const droppedSummary = remaining > 0
+                ? segments.slice(i + 1).map((s, idx) =>
+                    `  segment ${i + 2 + idx}: ${s.additions.length} adds, ${s.removals.length} removes`)
+                    .join("\n")
+                : "";
             console.error(
                 `[server-link-language] batched flush aborted: segment ${i + 1}/${segments.length} ` +
                 `failed after ${MAX_COMMIT_ATTEMPTS} attempts (${segment.additions.length} adds, ` +
                 `${segment.removals.length} removes)` +
                 (remaining > 0
-                    ? `; skipping ${remaining} downstream segment(s) to avoid divergent partial-apply.`
+                    ? `; skipping ${remaining} downstream segment(s) to avoid divergent partial-apply:\n${droppedSummary}`
                     : ".") +
-                ` Local store already reflects all writes; server is behind. ` +
+                `\nLocal store already reflects all writes; server is behind. ` +
                 `The language has no automatic re-push path — a subsequent sync() only PULLS.`,
             );
             emitSyncStateSafe("LinkLanguageInstalledButNotSynced");
