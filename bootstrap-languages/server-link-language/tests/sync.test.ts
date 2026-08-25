@@ -631,11 +631,14 @@ describe("sync: enqueueCommitBatched", () => {
             proof: { signature: "sig-X", key: "k" },
         };
         syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
-        await syncModule.drainCommitBatch();
+        // Await one flush cycle only — drainCommitBatch would re-schedule
+        // the permanently-failing segment indefinitely.
+        await syncModule._awaitInflightForTests();
         assert.equal(posts.length, 3, "first flush must attempt all 3 retries");
 
         // Now the server recovers. The chain must still be live — the
-        // next enqueue must actually POST.
+        // next enqueue must actually POST. The re-enqueued X from the
+        // failed flush coalesces with Y into one successful commit.
         shouldFail = false;
         const Y: LinkExpression = {
             author: "did:key:zAuthor",
@@ -645,8 +648,12 @@ describe("sync: enqueueCommitBatched", () => {
         };
         syncModule.enqueueCommitBatched({ additions: [Y], removals: [] });
         await syncModule.drainCommitBatch();
-        assert.equal(posts.length, 4, "chain must still be live after the poisoning attempt");
-        assert.deepEqual(posts[3].additions[0].data, Y.data);
+        assert.ok(posts.length > 3, "chain must still be live after the poisoning attempt");
+        const successfulAdds = posts.slice(3).flatMap((p: any) => p.additions);
+        assert.ok(
+            successfulAdds.some((a: any) => a.data.source === "y"),
+            "Y must appear in a successful commit after the chain survived",
+        );
     });
 
     it("re-enqueues failed segments for the next flush cycle", async () => {
