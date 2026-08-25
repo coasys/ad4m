@@ -93,6 +93,21 @@ const expression = await ad4m.expression.create(
 // Returns: QmIPFSHash://unique-address
 ```
 
+#### Link languages: Holochain or self-hosted
+
+Perspective sync between agents in a neighbourhood is handled by a **link
+language**. The default, `bootstrap-languages/p-diff-sync`, syncs over
+Holochain — fully P2P, no server required. For communities that would rather
+run their own lightweight server than join a Holochain DHT,
+[`bootstrap-languages/server-link-language`](bootstrap-languages/server-link-language/)
+is a drop-in alternative that syncs through a companion
+[`link-server`](link-server/) (Fastify + SQLite, self-hostable on small
+hardware) over HTTP + WebSocket. Both implement the same link-language
+interface (`perspective-commit`, `perspective-sync`, `perspective-query`,
+`peers`, `telepresence`) and are interchangeable when publishing a
+neighbourhood — see each package's README for setup and its AGENTS.md for
+architecture notes and known limitations.
+
 ### 2. Expressions: Agent-Authored Data
 
 Every piece of data in AD4M is an Expression – a cryptographically signed statement by an agent. This creates a web of verifiable claims rather than "objective" data:
@@ -253,6 +268,7 @@ ad4m/
 ├── rust-client/          # Rust client library (ad4m-client on crates.io)
 ├── executor/             # JavaScript executor: agent state, perspectives, languages, expressions
 ├── bootstrap-languages/  # Core Languages required for AD4M to function
+├── link-server/          # Self-hosted link-persistence server (Fastify/SQLite) for bootstrap-languages/server-link-language
 ├── cli/                 # Command line tools (ad4m on crates.io)
 ├── connect/            # Library for connecting apps to AD4M with capability management
 ├── dapp/              # DApp server for blockchain integration
