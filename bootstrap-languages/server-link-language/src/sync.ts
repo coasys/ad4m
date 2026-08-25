@@ -237,17 +237,12 @@ async function flushBatch(): Promise<void> {
                 `for next flush cycle:\n${requeueSummary}`,
             );
             _pendingQueue.unshift(...requeue);
-            if (!_flushScheduled) {
-                _flushScheduled = true;
-                _inflight = _inflight
-                    .then(() => flushBatch())
-                    .catch((err) => {
-                        console.error(
-                            "[server-link-language] re-enqueued batch flush crashed:",
-                            err,
-                        );
-                    });
-            }
+            // Do NOT auto-schedule a re-flush here. The failed segments
+            // stay in _pendingQueue and get picked up naturally when the
+            // next enqueueCommitBatched arrives (which schedules a flush
+            // that includes them via coalescing). This prevents unbounded
+            // retry storms when the server stays down — the sync state
+            // emission below lets the executor know we lag.
             emitSyncStateSafe("LinkLanguageInstalledButNotSynced");
             return;
         }
@@ -394,6 +389,14 @@ export function _resetBatchStateForTests(): void {
     _pendingQueue = [];
     _flushScheduled = false;
     _inflight = Promise.resolve();
+}
+
+/** Test-only: await the current in-flight flush without the drain loop.
+ * Unlike drainCommitBatch (which re-schedules until the queue empties),
+ * this resolves after exactly one flush cycle — useful when testing
+ * failure paths where the queue never empties. */
+export async function _awaitInflightForTests(): Promise<void> {
+    await _inflight;
 }
 
 // ---------------------------------------------------------------------------
