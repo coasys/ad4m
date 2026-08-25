@@ -1,5 +1,5 @@
 import { Link, LinkQuery, SHACLFlow } from "@coasys/ad4m";
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import { expect } from "chai";
 import { sleep } from "../utils/utils";
 

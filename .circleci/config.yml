@@ -48,7 +48,7 @@ commands:
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"
 
   setup_integration_test_environment:
-    description: "Setup common integration test environment"
+    description: "Setup integration test environment with Holochain bootstrap languages"
     steps:
       - fix_workdir
       - checkout
@@ -80,6 +80,36 @@ commands:
       - run:
           name: Build link-server
           command: pnpm --filter @coasys/link-server install && pnpm --filter @coasys/link-server build
+
+  setup_local_integration_test_environment:
+    description: "Setup integration test environment with local-only bootstrap languages (no Holochain)"
+    steps:
+      - fix_workdir
+      - checkout
+      - run:
+          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
+          command: |
+            mkdir -p target/release
+            rm -f target/release/ad4m target/release/ad4m-executor
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m target/release/ad4m
+            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m-executor target/release/ad4m-executor
+      - setup_env
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build core package
+          command: cd ./core && pnpm run build
+      - run:
+          name: Clear stale bootstrap-language build cache (cross-branch shared workdir)
+          command: |
+            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
+      - run:
+          name: Build bootstrap languages
+          command: pnpm run build-languages
 
 jobs:
   build-and-test:
@@ -139,17 +169,46 @@ jobs:
           command: pnpm test
           no_output_timeout: 30m
 
-  integration-tests-js:
+  integration-tests-local:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_local_integration_test_environment
+      - run:
+          name: Run local integration tests (no Holochain)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-local 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
+  integration-tests-holochain:
     machine: true
     resource_class: coasys/marvin
     steps:
       - setup_integration_test_environment
       - run:
-          name: Run integration tests
+          name: Run Holochain integration tests (Alice + Bob)
           command: |
             mkdir -p /tmp/test-artifacts
             set -o pipefail
-            cd ./tests/js && pnpm run test-main 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-holochain 2>&1 | tee /tmp/test-artifacts/mocha.log
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
@@ -163,7 +222,6 @@ jobs:
               cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
               cp -r "$ad4m_dir/holochain" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
             done
-            # Capture port state for debugging
             lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
       - store_artifacts:
           when: always
@@ -184,19 +242,19 @@ jobs:
     machine: true
     resource_class: coasys/marvin
     steps:
-      - setup_integration_test_environment
+      - setup_local_integration_test_environment
       - run:
-          name: Run email-verification integration tests
-          command: cd ./tests/js && ./email-verification-test-with-setup.sh
+          name: Run email-verification integration tests (local)
+          command: cd ./tests/js && ./email-verification-test-with-setup.sh --local
           no_output_timeout: 30m
 
   integration-tests-mcp:
     machine: true
     resource_class: coasys/marvin
     steps:
-      - setup_integration_test_environment
+      - setup_local_integration_test_environment
       - run:
-          name: Run MCP integration tests
+          name: Run MCP integration tests (local)
           command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
 
@@ -204,9 +262,9 @@ jobs:
     machine: true
     resource_class: coasys/marvin
     steps:
-      - setup_integration_test_environment
+      - setup_local_integration_test_environment
       - run:
-          name: Run Ad4mModel unit + integration tests
+          name: Run Ad4mModel unit + integration tests (local)
           command: cd ./tests/js && pnpm run test-model
           no_output_timeout: 30m
 
@@ -254,7 +312,10 @@ workflows:
     jobs:
       - build-and-test
       - plugin-ad4m-tests
-      - integration-tests-js:
+      - integration-tests-local:
+          requires:
+            - build-and-test
+      - integration-tests-holochain:
           requires:
             - build-and-test
       - integration-tests-multi-user-simple:

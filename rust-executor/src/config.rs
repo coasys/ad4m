@@ -80,6 +80,9 @@ pub struct Ad4mConfig {
     pub hc_bootstrap_url: Option<String>,
     pub hc_relay_url: Option<String>,
     pub connect_holochain: Option<bool>,
+    /// When false, skip Holochain conductor startup entirely.
+    /// Bootstrap languages must not depend on Holochain (use local bootstrap languages).
+    pub run_holochain: Option<bool>,
     pub admin_credential: Option<String>,
     pub localhost: Option<bool>,
     pub auto_permit_cap_requests: Option<bool>,
@@ -127,6 +130,9 @@ impl Ad4mConfig {
         if self.connect_holochain.is_none() {
             self.connect_holochain = Some(false);
         }
+        if self.run_holochain.is_none() {
+            self.run_holochain = Some(true);
+        }
         if self.hc_proxy_url.is_none() {
             self.hc_proxy_url = Some("ws://bootstrap.ad4m.dev:4433".to_string());
         }
@@ -173,6 +179,7 @@ impl Default for Ad4mConfig {
             hc_bootstrap_url: None,
             hc_relay_url: None,
             connect_holochain: None,
+            run_holochain: None,
             admin_credential: None,
             localhost: None,
             auto_permit_cap_requests: None,
