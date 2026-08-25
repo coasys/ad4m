@@ -335,6 +335,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
@@ -413,6 +414,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
@@ -503,6 +505,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
@@ -561,6 +564,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
@@ -634,6 +638,7 @@ mod tests {
             source_window_ms: Some(1), // 1ms — anything not stamped this millisecond is old
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
@@ -691,6 +696,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
