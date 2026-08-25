@@ -57,6 +57,8 @@ export interface RelationMetadataEntry {
      * instances — those pass through byte-for-byte.
      */
     datatype?: string;
+    /** CRDT ordering config — see `RelationOptions.ordering`. */
+    ordering?: { strategy: 'linkedList' };
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -861,6 +863,33 @@ export interface RelationOptions {
      * ```
      */
     datatype?: string;
+    /**
+     * Give this collection a user-controlled order that survives concurrent edits.
+     *
+     * A `@HasMany` is a set of links, and hydration sorts them by link timestamp.
+     * That is right for an append-only collection — a transcript, a message
+     * thread — where timestamp order *is* the order. It cannot express a sequence
+     * somebody chose: a kanban column, a playlist, the blocks of a post.
+     *
+     * With this set, the executor derives ordering links from the array on save
+     * and reconstructs the order on read. Nothing about how you write the
+     * relation changes — assign the array in the order you want and save.
+     *
+     * Ordering lives in the executor rather than here so that *every* writer gets
+     * it: the ORM, MCP agents, raw GraphQL callers, another app sharing the
+     * neighbourhood. Implemented client-side it would order only what this client
+     * wrote.
+     *
+     * @example
+     * ```typescript
+     * @HasMany(() => Task, {
+     *   through: "kanban://has_task",
+     *   ordering: { strategy: "linkedList" },
+     * })
+     * tasks: Task[] = [];
+     * ```
+     */
+    ordering?: { strategy: 'linkedList' };
 }
 
 /**
@@ -988,6 +1017,7 @@ export function HasMany(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.ordering && { ordering: opts.ordering }),
         };
 
         const relKey = key as string;
@@ -1052,6 +1082,7 @@ export function HasOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.ordering && { ordering: opts.ordering }),
         };
 
         const relKey = key as string;
@@ -1131,6 +1162,7 @@ export function BelongsToOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.ordering && { ordering: opts.ordering }),
         };
 
         if (opts.through) {
@@ -1190,6 +1222,7 @@ export function BelongsToMany(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.ordering && { ordering: opts.ordering }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*
