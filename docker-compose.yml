@@ -1,0 +1,31 @@
+services:
+  ad4m:
+    build:
+      context: .
+      args:
+        INCLUDE_WE: "${INCLUDE_WE:-true}"
+        INCLUDE_MODELS: "${INCLUDE_MODELS:-false}"
+    ports:
+      - "13000:12000"   # WS-RPC API (direct, for non-browser clients)
+      - "3101:${MCP_PORT:-3001}"     # MCP server
+      - "8180:${WE_PORT:-8080}"      # WE frontend + API reverse proxy (Caddy)
+    volumes:
+      - ad4m-data:/data
+    environment:
+      - ADMIN_CREDENTIAL=${ADMIN_CREDENTIAL:-}
+      - AGENT_PASSPHRASE=${AGENT_PASSPHRASE:-}
+      - ENABLE_MULTI_USER=${ENABLE_MULTI_USER:-}
+      - ENABLE_MCP=${ENABLE_MCP:-}
+      - MCP_PORT=${MCP_PORT:-3001}
+      - RUN_HOLOCHAIN=${RUN_HOLOCHAIN:-}
+      - WE_PORT=${WE_PORT:-8080}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:12000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  ad4m-data:

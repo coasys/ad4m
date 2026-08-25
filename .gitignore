@@ -5,6 +5,7 @@
 !skills/ad4m/waker/*.js
 !bootstrap-languages/local/*.js
 bootstrap-languages/local/dist/
+docker/seed-output/
 build/*
 node_modules
 !executor/src/rollup-plugin-hc-dna.js
@@ -80,5 +81,6 @@ benchmarks/results/
 ui/src-tauri/gen/schemas/macOS-schema.json
 
 .claude
+.codegraph/
 # Overnight watchdog scratch — logs and repro scripts, not source
 .overnight-status/
