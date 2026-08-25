@@ -24,10 +24,12 @@ pub mod auth;
 pub mod children;
 pub mod dynamic;
 pub mod flows;
+pub mod harness_bridge;
 pub mod languages;
 pub mod neighbourhoods;
 pub mod perspectives;
 pub mod profiles;
+pub mod provider_impl;
 pub mod subjects;
 pub mod subscriptions;
 
