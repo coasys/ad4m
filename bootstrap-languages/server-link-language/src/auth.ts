@@ -16,6 +16,10 @@ export interface AuthSession {
 
 let _session: AuthSession | null = null;
 let _x25519PublicKeyHex: string | null = null;
+/** In-flight authenticate() promise — prevents two concurrent callers from
+ * each consuming a fresh challenge (the second would overwrite the first's
+ * token before it's used). */
+let _authInFlight: Promise<AuthSession> | null = null;
 
 /**
  * Decodes a JWT's payload WITHOUT verifying its signature — we only read
@@ -64,12 +68,21 @@ export async function authenticate(): Promise<AuthSession> {
  * Returns a token guaranteed valid for at least `skewMs` more milliseconds
  * (default 30s), transparently re-authenticating if there is no cached
  * session, the cached token is expired, or it's about to expire.
+ *
+ * Uses an in-flight promise cache so two concurrent callers (e.g. WS
+ * reconnect + batched flush) share the same authenticate() round-trip
+ * instead of each consuming a separate challenge.
  */
 export async function getValidToken(skewMs = 30_000): Promise<string> {
     if (_session && (_session.expiresAt === null || _session.expiresAt - Date.now() > skewMs)) {
         return _session.token;
     }
-    const session = await authenticate();
+    if (_authInFlight) {
+        const session = await _authInFlight;
+        return session.token;
+    }
+    _authInFlight = authenticate().finally(() => { _authInFlight = null; });
+    const session = await _authInFlight;
     return session.token;
 }
 
@@ -93,4 +106,5 @@ export function getX25519PublicKeyHex(): string {
 export function resetAuth(): void {
     _session = null;
     _x25519PublicKeyHex = null;
+    _authInFlight = null;
 }

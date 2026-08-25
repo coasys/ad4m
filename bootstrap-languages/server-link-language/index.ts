@@ -215,7 +215,9 @@ const language = defineLanguage({
 
         // Always attempt to connect, even if the steps above failed: getUrl()
         // re-authenticates internally, and the reconnect loop retries with backoff.
-        void wsClient.connect();
+        void wsClient.connect().catch((err) => {
+            console.error("[server-link-language] initial websocket connect failed:", err);
+        });
 
         console.log(`[server-link-language] init complete: did=${myDid}, room=${ROOM_ID}`);
     },
@@ -261,6 +263,12 @@ const language = defineLanguage({
                 throw new Error(
                     "server-link-language: not configured (SERVER_URL/ROOM_ID template variables unfilled)",
                 );
+            }
+            if (roomKeyStatus === "error") {
+                // Retry once before refusing — the initial failure may have
+                // been a transient network/auth issue that has since resolved.
+                console.log("[server-link-language] retrying E2E room key acquisition before commit...");
+                await setupRoomKey();
             }
             if (roomKeyStatus === "error") {
                 throw new Error(

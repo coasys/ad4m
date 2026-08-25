@@ -230,7 +230,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const claims = request.authClaims!;
       const query = request.query as { since?: string };
       const parsedSince = query.since !== undefined ? Number.parseInt(query.since, 10) : 0;
-      const since = Number.isFinite(parsedSince) ? parsedSince : 0;
+      const since = Number.isFinite(parsedSince) ? Math.max(parsedSince, 0) : 0;
       const rows = ctx.db.getDiffsSinceParsed(claims.roomId, since);
       const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);

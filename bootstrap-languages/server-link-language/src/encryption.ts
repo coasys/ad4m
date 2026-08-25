@@ -81,6 +81,8 @@ export function bytesToHex(bytes: Uint8Array): string {
     return out;
 }
 
+const HEX_PAIR = /^[0-9a-fA-F]{2}$/;
+
 export function hexToBytes(hex: string): Uint8Array {
     const clean = hex.trim();
     if (clean.length % 2 !== 0) {
@@ -89,11 +91,10 @@ export function hexToBytes(hex: string): Uint8Array {
     const out = new Uint8Array(clean.length / 2);
     for (let i = 0; i < out.length; i++) {
         const byte = clean.substring(i * 2, i * 2 + 2);
-        const parsed = parseInt(byte, 16);
-        if (Number.isNaN(parsed)) {
+        if (!HEX_PAIR.test(byte)) {
             throw new Error(`hexToBytes: invalid hex byte "${byte}" at offset ${i * 2}`);
         }
-        out[i] = parsed;
+        out[i] = parseInt(byte, 16);
     }
     return out;
 }
