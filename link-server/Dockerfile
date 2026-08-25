@@ -26,4 +26,6 @@ VOLUME /data
 # PORT, DATA_DIR, AUTO_ADMIT, SKIP_LINK_VERIFICATION read from env vars
 # (see src/index.ts parseArgs). Defaults: port 3456, data ./data.
 ENV DATA_DIR=/data
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD node -e "fetch('http://localhost:3456/health').then(r=>{if(!r.ok)throw r.status}).catch(()=>process.exit(1))"
 CMD ["node", "dist/index.js"]

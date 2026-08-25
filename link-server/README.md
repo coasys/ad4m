@@ -15,10 +15,41 @@ npx @coasys/link-server --port 3456 --data ./my-data
 Or with Docker:
 
 ```bash
-docker compose up
+cd link-server
+docker compose up -d
 ```
 
 The server generates its own ed25519 identity keypair on first run (`<data-dir>/data.sqlite`, `server_identity` table) and creates rooms on demand — there's no separate provisioning step.
+
+## Run with Docker
+
+Build and start the server:
+
+```bash
+cd link-server
+docker compose up -d
+```
+
+The server listens on port 3456 and stores data in a named Docker volume (`link-server-data`). Override settings with environment variables:
+
+```bash
+PORT=4000 AUTO_ADMIT=true docker compose up -d
+```
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PORT` | `3456` | Listen port (host and container) |
+| `AUTO_ADMIT` | `false` | Admit every authenticating agent automatically |
+| `SELF_URL` | — | Externally-reachable base URL (for federation) |
+
+The Dockerfile includes a `HEALTHCHECK` that polls `GET /health` every 30 seconds. Use `docker inspect` or `docker compose ps` to confirm the container reports healthy.
+
+To stop:
+
+```bash
+docker compose down        # stop the container (data persists in the volume)
+docker compose down -v     # stop and delete the data volume
+```
 
 ## Usage
 
