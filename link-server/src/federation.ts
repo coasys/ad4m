@@ -2,7 +2,6 @@ import { signHex, verifyHex, verifyLinkExpression } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
 import {
   canonicalFederationPayload,
-  computeRevision,
   type FederateRequestBody,
   type LinkExpression,
   type PerspectiveDiff,
@@ -228,7 +227,7 @@ export class FederationManager {
       ok: true,
       response: {
         diffs: missing.length > 0 ? [{ additions: missing, removals: [] }] : [],
-        revision: computeRevision(this.db.getActiveHashes(roomId)),
+        revision: this.db.getRoomRevision(roomId),
         sequence: this.db.getMaxSequence(roomId),
       },
     };
@@ -238,7 +237,7 @@ export class FederationManager {
 
   private async reconcileWithPeer(roomId: string, peerUrl: string): Promise<void> {
     const linkHashes = this.db.getActiveHashes(roomId);
-    const revision = computeRevision(linkHashes);
+    const revision = this.db.getRoomRevision(roomId);
     const payload = canonicalFederationPayload("reconcile", roomId, { revision, linkHashes });
     const serverSignature = await this.signPayload(payload);
     const body: ReconcileRequestBody = {

@@ -1,80 +1,18 @@
 import { createHash, randomBytes as nodeRandomBytes } from "node:crypto";
 import * as ed from "@noble/ed25519";
+import { base58 } from "@scure/base";
 import { SignJWT, jwtVerify, errors as joseErrors } from "jose";
 import type { LinkServerDB } from "./db.js";
 import { canonicalLinkPayload, type LinkExpression } from "./types.js";
 
 /**
- * DID key handling, ed25519 sign/verify, base58btc codec, challenge-response
- * and JWT session issuance/verification.
+ * DID key handling, ed25519 sign/verify, challenge-response and JWT session
+ * issuance/verification.
  *
  * AD4M identities are `did:key:z...` strings. The multibase 'z' prefix means
  * base58btc; decoding that payload yields a 2-byte multicodec prefix
  * (0xed, 0x01 for ed25519-pub) followed by the raw 32-byte public key.
  */
-
-const BASE58_ALPHABET =
-  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-const BASE58_MAP: Record<string, number> = {};
-for (let i = 0; i < BASE58_ALPHABET.length; i++) {
-  BASE58_MAP[BASE58_ALPHABET[i]] = i;
-}
-
-export function base58btcEncode(bytes: Uint8Array): string {
-  if (bytes.length === 0) return "";
-  let zeros = 0;
-  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
-
-  const digits: number[] = [0];
-  for (let i = zeros; i < bytes.length; i++) {
-    let carry = bytes[i];
-    for (let j = 0; j < digits.length; j++) {
-      carry += digits[j] << 8;
-      digits[j] = carry % 58;
-      carry = Math.floor(carry / 58);
-    }
-    while (carry > 0) {
-      digits.push(carry % 58);
-      carry = Math.floor(carry / 58);
-    }
-  }
-
-  let result = "1".repeat(zeros);
-  for (let k = digits.length - 1; k >= 0; k--) {
-    result += BASE58_ALPHABET[digits[k]];
-  }
-  return result;
-}
-
-export function base58btcDecode(str: string): Uint8Array {
-  if (str.length === 0) return new Uint8Array(0);
-  let zeros = 0;
-  while (zeros < str.length && str[zeros] === "1") zeros++;
-
-  const bytes: number[] = [0];
-  for (let i = zeros; i < str.length; i++) {
-    const value = BASE58_MAP[str[i]];
-    if (value === undefined) {
-      throw new Error(`invalid base58 character: ${str[i]}`);
-    }
-    let carry = value;
-    for (let j = 0; j < bytes.length; j++) {
-      carry += bytes[j] * 58;
-      bytes[j] = carry & 0xff;
-      carry >>= 8;
-    }
-    while (carry > 0) {
-      bytes.push(carry & 0xff);
-      carry >>= 8;
-    }
-  }
-
-  const result = new Uint8Array(zeros + bytes.length);
-  for (let i = 0; i < bytes.length; i++) {
-    result[zeros + i] = bytes[bytes.length - 1 - i];
-  }
-  return result;
-}
 
 const ED25519_MULTICODEC_PREFIX = new Uint8Array([0xed, 0x01]);
 
@@ -98,7 +36,7 @@ export function didToPublicKey(did: string): Uint8Array {
   if (!multibase.startsWith("z")) {
     throw new Error(`unsupported multibase (expected base58btc 'z'): ${did}`);
   }
-  const decoded = base58btcDecode(multibase.slice(1));
+  const decoded = base58.decode(multibase.slice(1));
   if (
     decoded.length !== 34 ||
     decoded[0] !== ED25519_MULTICODEC_PREFIX[0] ||
@@ -117,7 +55,7 @@ export function publicKeyToDid(pubkey: Uint8Array): string {
   const prefixed = new Uint8Array(34);
   prefixed.set(ED25519_MULTICODEC_PREFIX, 0);
   prefixed.set(pubkey, 2);
-  return `did:key:z${base58btcEncode(prefixed)}`;
+  return `did:key:z${base58.encode(prefixed)}`;
 }
 
 function toBytes(message: string | Uint8Array): Uint8Array {

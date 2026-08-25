@@ -14,12 +14,14 @@ CREATE TABLE IF NOT EXISTS rooms (
   id TEXT PRIMARY KEY,
   admin_did TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  e2e_enabled INTEGER DEFAULT 0
+  e2e_enabled INTEGER DEFAULT 0,
+  revision TEXT
 );
 CREATE TABLE IF NOT EXISTS acl (
   room_id TEXT,
   did TEXT,
   added_at TEXT,
+  x25519_public_key TEXT,
   PRIMARY KEY (room_id, did)
 );
 CREATE TABLE IF NOT EXISTS links (
@@ -42,14 +44,6 @@ CREATE TABLE IF NOT EXISTS sessions (
   room_id TEXT,
   did TEXT,
   expires_at TEXT
-);
-CREATE TABLE IF NOT EXISTS online_agents (
-  room_id TEXT,
-  did TEXT,
-  status TEXT,
-  ws_id TEXT,
-  updated_at TEXT,
-  PRIMARY KEY (room_id, did)
 );
 CREATE TABLE IF NOT EXISTS room_keys (
   room_id TEXT,
@@ -80,12 +74,14 @@ export interface RoomRow {
   admin_did: string;
   created_at: string;
   e2e_enabled: number;
+  revision: string | null;
 }
 
 export interface AclRow {
   room_id: string;
   did: string;
   added_at: string;
+  x25519_public_key: string | null;
 }
 
 export interface LinkRow {
@@ -109,14 +105,6 @@ export interface SessionRow {
   room_id: string;
   did: string;
   expires_at: string;
-}
-
-export interface OnlineAgentRow {
-  room_id: string;
-  did: string;
-  status: string | null;
-  ws_id: string | null;
-  updated_at: string;
 }
 
 export interface RoomKeyRow {
@@ -176,7 +164,21 @@ export class LinkServerDB {
         "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled) VALUES (?, ?, ?, 0)"
       )
       .run(roomId, adminDid, createdAt);
-    return { id: roomId, admin_did: adminDid, created_at: createdAt, e2e_enabled: 0 };
+    return { id: roomId, admin_did: adminDid, created_at: createdAt, e2e_enabled: 0, revision: null };
+  }
+
+  /** Returns the cached revision for a room, or recomputes it if not yet cached. */
+  getRoomRevision(roomId: string): string {
+    const room = this.getRoom(roomId);
+    if (room?.revision) return room.revision;
+    // First call or legacy room without a cached revision — compute and cache it.
+    const revision = computeRevision(this.getActiveHashes(roomId));
+    if (room) {
+      this.raw
+        .prepare("UPDATE rooms SET revision = ? WHERE id = ?")
+        .run(revision, roomId);
+    }
+    return revision;
   }
 
   setE2eEnabled(roomId: string, enabled: boolean): void {
@@ -212,6 +214,19 @@ export class LinkServerDB {
     this.raw
       .prepare("DELETE FROM acl WHERE room_id = ? AND did = ?")
       .run(roomId, did);
+  }
+
+  setX25519PublicKey(roomId: string, did: string, x25519PublicKey: string): void {
+    this.raw
+      .prepare("UPDATE acl SET x25519_public_key = ? WHERE room_id = ? AND did = ?")
+      .run(x25519PublicKey, roomId, did);
+  }
+
+  getX25519PublicKey(roomId: string, did: string): string | null {
+    const row = this.raw
+      .prepare("SELECT x25519_public_key FROM acl WHERE room_id = ? AND did = ?")
+      .get(roomId, did) as { x25519_public_key: string | null } | undefined;
+    return row?.x25519_public_key ?? null;
   }
 
   // ---- links (active OR-Set) ----
@@ -345,6 +360,9 @@ export class LinkServerDB {
       }
       this.appendDiff(roomId, sequence, JSON.stringify(diff), authorDid);
       const revision = computeRevision(this.getActiveHashes(roomId));
+      this.raw
+        .prepare("UPDATE rooms SET revision = ? WHERE id = ?")
+        .run(revision, roomId);
       return { sequence, revision };
     });
     return run();
@@ -379,47 +397,6 @@ export class LinkServerDB {
     this.raw
       .prepare("DELETE FROM sessions WHERE room_id = ? AND did = ?")
       .run(roomId, did);
-  }
-
-  // ---- online agents (telepresence) ----
-
-  upsertOnline(roomId: string, did: string, wsId: string): void {
-    const existing = this.raw
-      .prepare("SELECT status FROM online_agents WHERE room_id = ? AND did = ?")
-      .get(roomId, did) as { status: string | null } | undefined;
-    this.raw
-      .prepare(
-        `INSERT INTO online_agents (room_id, did, status, ws_id, updated_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(room_id, did) DO UPDATE SET ws_id = excluded.ws_id, updated_at = excluded.updated_at`
-      )
-      .run(roomId, did, existing?.status ?? null, wsId, new Date().toISOString());
-  }
-
-  setOnlineStatus(roomId: string, did: string, status: unknown): void {
-    this.raw
-      .prepare(
-        `UPDATE online_agents SET status = ?, updated_at = ? WHERE room_id = ? AND did = ?`
-      )
-      .run(JSON.stringify(status), new Date().toISOString(), roomId, did);
-  }
-
-  setOffline(roomId: string, did: string): void {
-    this.raw
-      .prepare("DELETE FROM online_agents WHERE room_id = ? AND did = ?")
-      .run(roomId, did);
-  }
-
-  getOnlineAgents(roomId: string): OnlineAgentRow[] {
-    return this.raw
-      .prepare("SELECT * FROM online_agents WHERE room_id = ?")
-      .all(roomId) as OnlineAgentRow[];
-  }
-
-  getOnlineAgent(roomId: string, did: string): OnlineAgentRow | undefined {
-    return this.raw
-      .prepare("SELECT * FROM online_agents WHERE room_id = ? AND did = ?")
-      .get(roomId, did) as OnlineAgentRow | undefined;
   }
 
   // ---- room keys (E2E) ----

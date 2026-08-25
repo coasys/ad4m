@@ -78,7 +78,7 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
 
   const auth = new AuthManager(db, { jwtExpirySeconds: opts.jwtExpirySeconds });
   const challenges = new ChallengeStore();
-  const telepresence = new TelepresenceManager(db, { graceMs: opts.telepresenceGraceMs });
+  const telepresence = new TelepresenceManager({ graceMs: opts.telepresenceGraceMs });
   const ws = new WsManager(auth, telepresence);
   const federation = new FederationManager({
     db,

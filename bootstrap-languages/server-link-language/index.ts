@@ -24,12 +24,7 @@ import { WsClient } from "./src/ws-client.js";
 import { decodeSealedEnvelope, deriveX25519KeyPair, openRoomKeyEnvelope } from "./src/encryption.js";
 
 import {
-    initAgent,
-    initConfig,
-    initRuntime,
-    initStorage,
-    initTransport,
-    initWebSocketFactory,
+    initAdapters,
     getAgent,
     getConfig,
     getRuntime,
@@ -145,11 +140,13 @@ const language = defineLanguage({
     isPublic: true,
 
     async init() {
-        initStorage(new DenoStorageAdapter());
-        initTransport(new DenoTransport());
-        initAgent(new DenoAgentAdapter());
-        initRuntime(new DenoRuntimeAdapter());
-        initWebSocketFactory(new DenoWebSocketFactory());
+        initAdapters({
+            storage: new DenoStorageAdapter(),
+            transport: new DenoTransport(),
+            agent: new DenoAgentAdapter(),
+            runtime: new DenoRuntimeAdapter(),
+            wsFactory: new DenoWebSocketFactory(),
+        });
 
         myDid = getAgent().did();
         store.initStore(hash);
@@ -163,7 +160,7 @@ const language = defineLanguage({
             return;
         }
 
-        initConfig({ serverUrl: SERVER_URL, roomId: ROOM_ID });
+        initAdapters({ config: { serverUrl: SERVER_URL, roomId: ROOM_ID } });
         const config = getConfig();
 
         syncModule.initSync({

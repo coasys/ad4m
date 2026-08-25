@@ -3,17 +3,13 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import type { AuthManager } from "./auth.js";
 import type { TelepresenceManager } from "./telepresence.js";
-import type { ClientWsMessage, ServerWsMessage } from "./types.js";
+import type { ClientWsMessage, RoomParams, ServerWsMessage } from "./types.js";
 
 interface Connection {
   id: string;
   did: string;
   roomId: string;
   socket: WebSocket;
-}
-
-interface RoomParams {
-  roomId: string;
 }
 
 /**
