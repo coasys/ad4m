@@ -131,6 +131,10 @@ export function computeRevision(linkHashes: string[]): string {
   return sha256Hex(sorted.join(","));
 }
 
+export interface RoomParams {
+  roomId: string;
+}
+
 export interface AuthClaims {
   did: string;
   roomId: string;

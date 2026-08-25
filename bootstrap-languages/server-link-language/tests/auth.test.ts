@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
 import type { AgentAdapter, Transport, TransportResponse } from "../src/adapters.js";
-import { initAgent, initConfig, initTransport, resetAdapters } from "../src/adapters.js";
+import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as auth from "../src/auth.js";
 
 // ---------------------------------------------------------------------------
@@ -56,9 +56,11 @@ function makeJwt(payload: Record<string, unknown>): string {
 
 function setup(transport: Transport, did = "did:key:zTestAgent"): void {
     resetAdapters();
-    initTransport(transport);
-    initAgent(new MockAgent(did));
-    initConfig({ serverUrl: "https://server.example", roomId: "room-123" });
+    initAdapters({
+        transport,
+        agent: new MockAgent(did),
+        config: { serverUrl: "https://server.example", roomId: "room-123" },
+    });
     auth.resetAuth();
 }
 
@@ -214,7 +216,7 @@ describe("auth: getValidToken", () => {
 describe("auth: getX25519PublicKeyHex", () => {
     it("is deterministic and memoized across calls", () => {
         resetAdapters();
-        initAgent(new MockAgent("did:key:zXAgent"));
+        initAdapters({ agent: new MockAgent("did:key:zXAgent") });
         auth.resetAuth();
 
         const k1 = auth.getX25519PublicKeyHex();
@@ -225,12 +227,12 @@ describe("auth: getX25519PublicKeyHex", () => {
 
     it("differs between agents", () => {
         resetAdapters();
-        initAgent(new MockAgent("did:key:zAgentOne"));
+        initAdapters({ agent: new MockAgent("did:key:zAgentOne") });
         auth.resetAuth();
         const k1 = auth.getX25519PublicKeyHex();
 
         resetAdapters();
-        initAgent(new MockAgent("did:key:zAgentTwo"));
+        initAdapters({ agent: new MockAgent("did:key:zAgentTwo") });
         auth.resetAuth();
         const k2 = auth.getX25519PublicKeyHex();
 

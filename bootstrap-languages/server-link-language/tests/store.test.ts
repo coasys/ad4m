@@ -8,7 +8,7 @@ import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import type { StorageAdapter } from "../src/adapters.js";
-import { initStorage } from "../src/adapters.js";
+import { initAdapters } from "../src/adapters.js";
 import * as store from "../src/store.js";
 import type { LinkExpression } from "../src/types.js";
 
@@ -35,7 +35,7 @@ function simpleHash(data: string): string {
 }
 
 function setup(): void {
-    initStorage(new MockStorage());
+    initAdapters({ storage: new MockStorage() });
     store.initStore(simpleHash);
 }
 

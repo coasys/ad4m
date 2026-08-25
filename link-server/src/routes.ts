@@ -6,11 +6,11 @@ import type { FederateResult, FederationIdentity, FederationManager } from "./fe
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import {
-  computeRevision,
   isEncryptedLinkData,
   type FederateRequestBody,
   type LinkExpression,
   type ReconcileRequestBody,
+  type RoomParams,
 } from "./types.js";
 import type { WsManager } from "./ws.js";
 
@@ -29,10 +29,6 @@ export interface RouteContext {
     roomJwt: SlidingWindowLimiter;
     commitJwt: SlidingWindowLimiter;
   };
-}
-
-interface RoomParams {
-  roomId: string;
 }
 
 function bearerToken(request: FastifyRequest): string | undefined {
@@ -105,7 +101,12 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: ipRateLimit(ctx.rateLimits.authIp) },
     async (request, reply) => {
       const { roomId } = request.params as RoomParams;
-      const body = request.body as { did?: string; challenge?: string; signature?: string } | null;
+      const body = request.body as {
+        did?: string;
+        challenge?: string;
+        signature?: string;
+        x25519PublicKey?: string;
+      } | null;
 
       if (!body || typeof body.did !== "string") {
         return reply.code(400).send({ error: "did is required" });
@@ -152,6 +153,14 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
             .code(403)
             .send({ error: "not authorized for this room; ask the admin to add your DID to the ACL" });
         }
+      }
+
+      // Store the agent's derived X25519 public key for E2E room-key
+      // sealing. The language sends this during step 2 of the DID
+      // challenge-response — the one point where DID ownership has
+      // already been verified.
+      if (typeof body.x25519PublicKey === "string" && body.x25519PublicKey.length === 64) {
+        ctx.db.setX25519PublicKey(roomId, body.did, body.x25519PublicKey);
       }
 
       const { token, expiresAt } = await ctx.auth.issueSession(body.did, roomId);
@@ -223,7 +232,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const parsedSince = query.since !== undefined ? Number.parseInt(query.since, 10) : 0;
       const since = Number.isFinite(parsedSince) ? parsedSince : 0;
       const rows = ctx.db.getDiffsSinceParsed(claims.roomId, since);
-      const revision = computeRevision(ctx.db.getActiveHashes(claims.roomId));
+      const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);
       return reply.send({ diffs: rows.map((r) => r.diff), revision, sequence });
     }
@@ -235,7 +244,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     async (request, reply) => {
       const claims = request.authClaims!;
       const links = ctx.db.getActiveLinks(claims.roomId);
-      const revision = computeRevision(ctx.db.getActiveHashes(claims.roomId));
+      const revision = ctx.db.getRoomRevision(claims.roomId);
       return reply.send({ links, revision });
     }
   );
@@ -245,7 +254,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const revision = computeRevision(ctx.db.getActiveHashes(claims.roomId));
+      const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);
       return reply.send({ revision, sequence });
     }

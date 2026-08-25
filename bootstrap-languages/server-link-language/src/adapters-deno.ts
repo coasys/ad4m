@@ -52,6 +52,10 @@ export class DenoTransport implements Transport {
                 body: responseText || "",
             };
         } catch (err: unknown) {
+            // LDK debt: httpFetch throws on non-2xx, encoding the HTTP status
+            // in the Error.message string instead of returning a response
+            // object. This regex scrapes the status code out. The proper fix
+            // belongs in @coasys/ad4m-ldk (httpFetch should return {status, body}).
             const errMsg = err instanceof Error ? err.message : String(err);
             const match = errMsg.match(/http_fetch\s+\S+\s+\S+\s+->\s+(\d+):\s*(.*)?$/s);
             if (match) {

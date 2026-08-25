@@ -9,7 +9,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import type { RoomConfig, StorageAdapter, Transport, TransportResponse } from "../src/adapters.js";
-import { initConfig, initStorage, initTransport, resetAdapters } from "../src/adapters.js";
+import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
 import { encryptLinkForWire, generateRoomKey } from "../src/encryption.js";
@@ -81,9 +81,7 @@ function setup(transport: MockTransport): void {
     // Wipe any leftover batch state so a previous test's queued diff can't
     // flush against this test's transport.
     syncModule._resetBatchStateForTests();
-    initStorage(new MockStorage());
-    initTransport(transport);
-    initConfig(config);
+    initAdapters({ storage: new MockStorage(), transport, config });
     store.initStore(simpleHash);
 
     emittedDiffs = [];
