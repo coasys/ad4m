@@ -16,7 +16,7 @@ import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlayInfo } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -561,8 +561,30 @@ export class PerspectiveProxy {
      * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
      * @param classes local names of the subject classes to extract into; omit for all
      */
-    async runInterpretation(transcript: TranscriptTurn[], basePrefix: string, classes?: string[]): Promise<string[]> {
-        return await this.#client.runInterpretation(this.#handle.uuid, transcript, basePrefix, classes)
+    async runInterpretation(
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        classes?: string[],
+        options?: {
+            existingScope?: RawScope,
+            mintScope?: RawScope,
+            /** Report progress while the pass runs — see {@link RunInterpretationObserveOptions}. */
+            observe?: RunInterpretationObserveOptions,
+        },
+    ): Promise<string[]> {
+        // Grouped into an options bag rather than continuing the client's positional list.
+        // The scopes were already unreachable from here for that reason, and a fourth, fifth and
+        // sixth positional parameter would have made `undefined, undefined, { … }` the normal way
+        // to ask for the only one of them most callers want.
+        return await this.#client.runInterpretation(
+            this.#handle.uuid,
+            transcript,
+            basePrefix,
+            classes,
+            options?.existingScope,
+            options?.mintScope,
+            options?.observe,
+        )
     }
 
     /**
@@ -604,6 +626,19 @@ export class PerspectiveProxy {
     /** Subscribe to this perspective's auto-processor step signals. */
     async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
         return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+    }
+
+    /**
+     * Subscribe to this perspective's auto-processor neighbourhood-state
+     * events — fires when this executor claims / finishes / abandons a
+     * batch. Perspective-scoped, so a UI can render "someone is
+     * auto-processing this" without receiving the batch payload. See
+     * `AutoProcessorNeighbourhoodStateEvent`.
+     */
+    async addAutoProcessorNeighbourhoodStateListener(
+        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
+    ): Promise<void> {
+        return await this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb)
     }
 
     /**
