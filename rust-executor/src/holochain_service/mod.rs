@@ -619,7 +619,11 @@ impl HolochainService {
                 space_hash,
                 override_cfg.bootstrap_url.as_ref().map(|u| u.as_str()),
                 override_cfg.relay_url.as_ref().map(|u| u.as_str()),
-                if override_cfg.base64_auth_material.is_some() { "yes" } else { "no" },
+                if override_cfg.base64_auth_material.is_some() {
+                    "yes"
+                } else {
+                    "no"
+                },
             );
         }
         info!("Starting holochain conductor with config: {:#?}", config);
@@ -767,10 +771,8 @@ impl HolochainService {
         // Total wait budget is ~11s per DNA (start_peer_monitoring caps at
         // 10s internally + 1s slack for the state write to settle). This
         // parallels the JoinComplete wait above.
-        let dna_hashes: std::collections::HashSet<_> = app_cell_ids
-            .iter()
-            .map(|c| c.dna_hash().clone())
-            .collect();
+        let dna_hashes: std::collections::HashSet<_> =
+            app_cell_ids.iter().map(|c| c.dna_hash().clone()).collect();
         let bootstrap_timeout = std::time::Duration::from_secs(11);
         let poll_interval = std::time::Duration::from_millis(200);
         for dna_hash in &dna_hashes {
