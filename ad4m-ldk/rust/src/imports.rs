@@ -56,9 +56,9 @@ extern "C" {
     // Thin wrapper around Deno's native fetch(). `headers_json` is a JSON
     // string of `{ "Header": "Value", ... }` (empty string for no
     // headers), `body` is a raw request body string (empty for GET/HEAD).
-    // Returns the response body as a string and rejects with a non-2xx
-    // message on error. Callers JSON-encode/decode on either side as
-    // needed.
+    // Returns `{ status: number, body: string }` — the caller decides
+    // how to handle non-2xx status codes. Only rejects on network-level
+    // failures (DNS, connection refused, etc.).
     #[wasm_bindgen(js_name = "httpFetch", catch)]
     pub async fn http_fetch(
         url: &str,
@@ -195,8 +195,43 @@ pub fn agent_create_signed_expression_typed<T: Serialize + ?Sized>(data: &T) -> 
     }
 }
 
+/// Response from `http_fetch_typed`.
+pub struct HttpFetchResponse {
+    pub status: u16,
+    pub body: String,
+}
+
+impl HttpFetchResponse {
+    /// Returns `true` when the status code falls in the 200–299 range.
+    pub fn ok(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+}
+
+/// Typed wrapper around `http_fetch` — extracts `{ status, body }` from
+/// the JS response object. Only returns `Err` on network-level failures;
+/// HTTP error codes (4xx, 5xx) appear in the `Ok` variant's `status` field.
+pub async fn http_fetch_typed(
+    url: &str,
+    method: &str,
+    headers_json: &str,
+    body: &str,
+) -> Result<HttpFetchResponse, JsValue> {
+    let v = http_fetch(url, method, headers_json, body).await?;
+    let status = js_sys::Reflect::get(&v, &JsValue::from_str("status"))
+        .ok()
+        .and_then(|s| s.as_f64())
+        .unwrap_or(0.0) as u16;
+    let resp_body = js_sys::Reflect::get(&v, &JsValue::from_str("body"))
+        .ok()
+        .and_then(|b| b.as_string())
+        .unwrap_or_default();
+    Ok(HttpFetchResponse { status, body: resp_body })
+}
+
 /// POST a JSON-serializable body to `url` and return the response body as
-/// a String. Sets `Content-Type: application/json` automatically.
+/// a String. Sets `Content-Type: application/json` automatically. Returns
+/// `Err` on non-2xx status codes or network failures.
 pub async fn http_post_json<T: Serialize + ?Sized>(
     url: &str,
     body: &T,
@@ -204,13 +239,25 @@ pub async fn http_post_json<T: Serialize + ?Sized>(
     let body_s = serde_json::to_string(body)
         .map_err(|e| JsValue::from_str(&format!("http_post_json serialize: {}", e)))?;
     let headers = "{\"Content-Type\":\"application/json\"}";
-    let v = http_fetch(url, "POST", headers, &body_s).await?;
-    Ok(v.as_string().unwrap_or_default())
+    let resp = http_fetch_typed(url, "POST", headers, &body_s).await?;
+    if !resp.ok() {
+        return Err(JsValue::from_str(&format!(
+            "http_post_json POST {} -> {}: {}",
+            url, resp.status, resp.body
+        )));
+    }
+    Ok(resp.body)
 }
 
-/// GET `url` with an optional query string (appended as `?k=v&...` if
-/// non-empty) and return the response body as a String.
+/// GET `url` and return the response body as a String. Returns `Err` on
+/// non-2xx status codes or network failures.
 pub async fn http_get(url: &str) -> Result<String, JsValue> {
-    let v = http_fetch(url, "GET", "", "").await?;
-    Ok(v.as_string().unwrap_or_default())
+    let resp = http_fetch_typed(url, "GET", "", "").await?;
+    if !resp.ok() {
+        return Err(JsValue::from_str(&format!(
+            "http_get GET {} -> {}: {}",
+            url, resp.status, resp.body
+        )));
+    }
+    Ok(resp.body)
 }
