@@ -148,7 +148,35 @@ if [[ "$HC_INSTALL_NEEDED" == "1" ]]; then
     cd "$SRC_DIR"
     if ! git cat-file -e "$REV^{commit}" 2>/dev/null; then
         echo "install-hc-toolchain: fetching full history to reach $REV"
-        git fetch --unshallow 2>/dev/null || git fetch --depth 500
+        # First try to unshallow the existing refspec set.
+        git fetch --unshallow 2>/dev/null || git fetch --depth 500 2>/dev/null || true
+        # If the rev still isn't reachable, the clone was made against a
+        # different branch/refspec than the one we're pointing at now.
+        # Explicitly fetch the target rev by name (branch or tag), then
+        # fall back to fetching the raw rev via +refs/*:refs/remotes/origin/*.
+        if ! git cat-file -e "$REV^{commit}" 2>/dev/null; then
+            if [[ -n "$BRANCH" ]]; then
+                echo "install-hc-toolchain: fetching branch $BRANCH explicitly"
+                git fetch origin "$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null || true
+            fi
+            if [[ -n "$TAG" ]]; then
+                echo "install-hc-toolchain: fetching tag $TAG explicitly"
+                git fetch origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+            fi
+        fi
+        if ! git cat-file -e "$REV^{commit}" 2>/dev/null; then
+            echo "install-hc-toolchain: fetching rev $REV directly"
+            git fetch origin "$REV" 2>/dev/null || true
+        fi
+        if ! git cat-file -e "$REV^{commit}" 2>/dev/null; then
+            # Last resort: nuke the shallow clone and start over. Only
+            # takes ~15s and guarantees we can reach any rev on any branch.
+            echo "install-hc-toolchain: rev $REV still unreachable; re-cloning $SRC_DIR fresh"
+            cd "$REPO_ROOT"
+            rm -rf "$SRC_DIR"
+            git clone "$GIT_URL" "$SRC_DIR"
+            cd "$SRC_DIR"
+        fi
     fi
     git checkout -- Cargo.toml 2>/dev/null || true
     git checkout "$REV"
