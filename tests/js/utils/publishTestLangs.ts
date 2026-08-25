@@ -5,6 +5,7 @@ import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
 import { baseUrl, sleep, startExecutor } from "./utils";
+import { getFreePorts } from "../helpers/ports.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,12 +16,6 @@ const publishLanguagesPath = path.resolve(TEST_DIR, "languages");
 const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootstrapSeed.json');
 const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
 const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
-// Allow env-var override so concurrent CI jobs can each use a unique port range
-// and avoid stomping on each other during the setup phase.
-// Defaults: 15700/15701/15702 (used by integration-tests-js / test-main)
-const apiPort = parseInt(process.env.AD4M_SETUP_API_PORT || '15700', 10);
-const hcAdminPort = parseInt(process.env.AD4M_SETUP_HC_ADMIN_PORT || '15701', 10);
-const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || '15702', 10);
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -74,14 +69,11 @@ function injectLangAliasHashes() {
 }
 
 async function publish() {
+    // Allocate random free ports to avoid collisions with stale executors
+    // from previous CI jobs on the same self-hosted runner.
+    const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
     const setupPorts = [apiPort, hcAdminPort, hcAppPort];
-
-    // Pre-clean: kill any orphaned executor from a previous CI job that may be
-    // squatting on our ports. Self-hosted runners reuse workdirs between jobs
-    // and don't clean up automatically.
-    console.log(`Pre-cleaning ports ${setupPorts.join('/')} before starting executor...`);
-    killExecutorPorts(setupPorts);
-    await sleep(500);
+    console.log(`Setup ports: ${setupPorts.join('/')}`);
 
     createTestingAgent();
 
