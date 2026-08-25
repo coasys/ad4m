@@ -92,12 +92,18 @@ async function publish() {
 
     createTestingAgent();
 
-    // Publishing setup runs a temporary LOCAL kitsune2-bootstrap-srv so the
-    // setup executor never talks to dev-test-bootstrap2 (super old). See
+    const runHolochain = !localMode;
+    console.log(`Publishing executor: runHolochain=${runHolochain}${localMode ? ' (LOCAL_MODE)' : ''}`);
+
+    // When running with Holochain, start a temporary LOCAL kitsune2-bootstrap-srv
+    // so the setup executor never talks to dev-test-bootstrap2 (super old). See
     // Nico's 2026-08-26 voice note + utils.ts:startExecutor comment.
-    const localServices = await runHcLocalServices();
-    if (!localServices.bootstrapUrl || !localServices.proxyUrl) {
-        throw new Error("publishTestLangs: runHcLocalServices did not yield bootstrap/proxy URLs");
+    let localServices: { bootstrapUrl?: string; proxyUrl?: string; process?: any } = {};
+    if (runHolochain) {
+        localServices = await runHcLocalServices();
+        if (!localServices.bootstrapUrl || !localServices.proxyUrl) {
+            throw new Error("publishTestLangs: runHcLocalServices did not yield bootstrap/proxy URLs");
+        }
     }
     const executorProcess = await startExecutor(
         appDataPath,
@@ -107,8 +113,14 @@ async function publish() {
         undefined,
         localServices.proxyUrl,
         localServices.bootstrapUrl,
+        undefined,
+        false,
+        undefined,
+        runHolochain,
     );
-    (executorProcess as any).__localServicesProcess = localServices.process;
+    if (localServices.process) {
+        (executorProcess as any).__localServicesProcess = localServices.process;
+    }
 
     try {
         const ad4mClient = new Ad4mClient(baseUrl(apiPort));
