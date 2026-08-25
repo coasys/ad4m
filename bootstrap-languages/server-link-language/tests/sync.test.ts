@@ -609,9 +609,7 @@ describe("sync: enqueueCommitBatched", () => {
         );
         resetAdapters();
         syncModule._resetBatchStateForTests();
-        initStorage(new MockStorage());
-        initTransport(transport);
-        initConfig(config);
+        initAdapters({ storage: new MockStorage(), transport, config });
         store.initStore(simpleHash);
         emittedDiffs = [];
         syncStates = [];
