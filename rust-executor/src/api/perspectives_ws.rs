@@ -1379,6 +1379,34 @@ async fn run_interpretation_with_harness_handler(
         Some(ctx.auth_token.clone())
     };
 
+    // Live-debug event surface: same shape as the classic single-shot
+    // handler. `observation_id` names both `processor_id` and `batch_key`
+    // on the emitted events so a subscribed UI can correlate this pass's
+    // events to the caller-supplied id. `emit_debug_events` is a
+    // dead-letter without an observation_id (nothing to key against), so
+    // gate on both.
+    let observer_did = match &body.observation_id {
+        Some(_) => crate::agent::did_for_context(&agent_context).ok(),
+        None => None,
+    };
+    let emit_ctx = body
+        .observation_id
+        .as_ref()
+        .zip(observer_did.as_ref())
+        .filter(|_| body.emit_debug_events.unwrap_or(false))
+        .map(|(id, did)| {
+            crate::perspectives::auto_processor::events::InterpretationEmitContext {
+                perspective_uuid: uuid.clone(),
+                processor_id: id.clone(),
+                agent_did: did.clone(),
+                // No source item ids — WS-RPC caller supplies the transcript
+                // directly rather than the watcher gathering it. `batch_key`
+                // carries the identity instead.
+                item_ids: Vec::new(),
+                batch_key: id.clone(),
+            }
+        });
+
     let bases = match tokio::time::timeout(
         Duration::from_secs(RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS),
         crate::perspectives::interpretation::run_interpretation_with_harness_and_model(
@@ -1392,11 +1420,7 @@ async fn run_interpretation_with_harness_handler(
             None,
             body.max_tool_calls,
             auth_token,
-            // One-shot WS-RPC caller: no persistent processor id, no batch,
-            // so no InterpretationEmitContext to attach. External clients that
-            // want live tool-call events use the auto-processor path (which
-            // has a processor_id + batch_key to correlate on).
-            None,
+            emit_ctx.as_ref(),
         ),
     )
     .await

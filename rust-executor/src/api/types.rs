@@ -632,6 +632,20 @@ pub struct RunInterpretationWithHarnessRequest {
     #[serde(default)]
     #[ts(optional, type = "any")]
     pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Present: the pass emits `ToolCall` / `ToolResult` events on the
+    /// `auto-processor-event` topic carrying this value as both
+    /// `processor_id` and `batch_key`, so a subscribed UI can render the
+    /// harness loop live. Absent: the pass is silent (fast headless path).
+    /// Same wire-shape as `RunInterpretationRequest.observation_id`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub observation_id: Option<String>,
+    /// Enable per-tool-call `ToolCall` + `ToolResult` events on the
+    /// auto-processor topic. Dead-letter without `observation_id` (nothing
+    /// to key against); the server gates on both.
+    #[serde(default)]
+    #[ts(optional)]
+    pub emit_debug_events: Option<bool>,
 }
 
 /// Register a neighbourhood auto-processor on a perspective. The executor's
@@ -700,14 +714,17 @@ pub struct AddAutoProcessorRequest {
     /// at watch time.
     #[serde(default)]
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
-    /// Tool-call budget for the interpretation-pass harness. Omit or `0` =
-    /// single-shot LLM path (original behaviour). Positive `N` = engage the
-    /// tool-calling harness and cap it at `N` calls per pass.
+    /// Tool-call budget for the interpretation-pass harness this processor
+    /// runs. Omit / `0` → single-shot LLM path. `N > 0` → engage the
+    /// tool-calling harness with a cap of N calls per pass. Round-tripped
+    /// through the SDNA via `AutoProcessorConfig.maxToolCalls`.
     #[serde(default)]
     pub max_tool_calls: Option<u32>,
-    /// Enable full debug observability: persists the raw LLM prompt +
-    /// response on the pass's `InterpretationRun` node AND emits
-    /// `LlmRequestSent` / `LlmResponseReceived` mid-pass events.
+    /// Enable full debug observability on the auto-processor's passes:
+    /// persist raw LLM prompt/response on the InterpretationRun +
+    /// emit `LlmRequestSent` / `LlmResponseReceived` (classic) and
+    /// `ToolCall` / `ToolResult` (harness) events. Round-tripped through
+    /// the SDNA via `AutoProcessorConfig.emitDebugEvents`.
     #[serde(default)]
     pub emit_debug_events: Option<bool>,
 }

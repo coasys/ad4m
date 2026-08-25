@@ -318,11 +318,29 @@ export class PerspectiveClient {
         classes?: string[],
         modelOverride?: string,
         existingScope?: RawScope,
+        // Optional live-debug event surface — same shape/semantics as the
+        // single-shot `runInterpretation`. `observationId` names the
+        // `processor_id` + `batch_key` on emitted `ToolCall` / `ToolResult`
+        // events so a subscribed UI can correlate them to this pass.
+        // `emitDebugEvents` is a dead-letter without an observationId
+        // (nothing to key against); the server gates on both.
+        observationId?: string,
+        emitDebugEvents?: boolean,
     ): Promise<string[]> {
         const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<string[]>(
             'perspective.runInterpretationWithHarness',
-            { uuid, transcript, basePrefix, maxToolCalls, classes, modelOverride, existingScope },
+            {
+                uuid,
+                transcript,
+                basePrefix,
+                maxToolCalls,
+                classes,
+                modelOverride,
+                existingScope,
+                observationId,
+                emitDebugEvents,
+            },
             RUN_INTERPRETATION_TIMEOUT_MS,
         )
     }

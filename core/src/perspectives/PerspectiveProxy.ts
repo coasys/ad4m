@@ -609,6 +609,14 @@ export class PerspectiveProxy {
         maxToolCalls: number,
         classes?: string[],
         modelOverride?: string,
+        // Optional live-debug observability. When both `observationId` and
+        // `emitDebugEvents` are supplied, every dispatched tool call fires
+        // `ToolCall` + `ToolResult` events on the `auto-processor-event`
+        // topic keyed by `observationId`. Subscribe with
+        // {@link addAutoProcessorEventListener} to render the harness loop
+        // live in a UI. Absent = fast headless path (no telemetry cost).
+        observationId?: string,
+        emitDebugEvents?: boolean,
     ): Promise<string[]> {
         return await this.#client.runInterpretationWithHarness(
             this.#handle.uuid,
@@ -617,6 +625,9 @@ export class PerspectiveProxy {
             maxToolCalls,
             classes,
             modelOverride,
+            undefined,
+            observationId,
+            emitDebugEvents,
         )
     }
 

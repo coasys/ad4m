@@ -29,6 +29,7 @@
 
 import { expect } from "chai";
 import { Ad4mClient, LinkQuery, PerspectiveProxy } from "@coasys/ad4m";
+import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
 import { ExtBelief, ExtIntention } from "./interpretation-models.js";
 
@@ -486,5 +487,207 @@ describe("perspective.runInterpretationWithHarness — relation interpretation h
       }
     }
     throw lastError;
+  });
+});
+
+/**
+ * Full-stack integration test for tool-call events on the
+ * `auto-processor-event` topic. Proves the harness loop's
+ * `ToolCall` / `ToolResult` emissions reach a subscribed TS client
+ * with the expected payload fields (`toolName`, `toolArgsJson`,
+ * `toolResult`), keyed by the caller-supplied `observationId`.
+ *
+ * Wire path exercised end-to-end:
+ *   PerspectiveProxy.runInterpretationWithHarness(..., observationId,
+ *     emitDebugEvents=true)
+ *     → WS-RPC handler builds `InterpretationEmitContext`
+ *     → `run_interpretation_with_harness_and_model` threads it into
+ *       `run_with_tools`
+ *     → per dispatched tool_call, `emit_tool_event(ToolCall)` +
+ *       `emit_tool_event(ToolResult)` publish on the pubsub topic
+ *     → GraphQL subscription forwards to the TS client
+ *     → `addAutoProcessorEventListener` fires our callback
+ *     → assertions verify each event's shape.
+ *
+ * Gated on the same Marvin LLM availability probe as the sibling
+ * tests. Uses the simple `ExtBelief` + task-tracker transcript from
+ * scenario B so the harness reliably calls at least one tool
+ * (`ExtBelief_create` or `ExtBelief_query`).
+ */
+describe("perspective.runInterpretationWithHarness — tool-call events", function () {
+  this.timeout(1_200_000);
+
+  let ad4m: Ad4mClient;
+  let stop: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async function () {
+    try {
+      const probe = await fetch(BASE_URL.replace(/\/v1\/?$/, "") + "/v1/models", {
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!probe.ok) throw new Error(`probe ${probe.status}`);
+      const body = (await probe.json()) as { data?: Array<{ id?: string }> };
+      const ids = (body.data ?? []).map((m) => m.id).filter((id): id is string => !!id);
+      if (!ids.includes(MODEL)) {
+        throw new Error(
+          `model ${MODEL} not present in /v1/models (have: ${ids.join(", ") || "none"})`,
+        );
+      }
+    } catch (e) {
+      console.log(
+        `Skipping tool-call events e2e — LLM endpoint ${BASE_URL} unreachable: ${(e as Error).message}`,
+      );
+      this.skip();
+    }
+
+    const agent = await startAgent("run-interpretation-harness-events");
+    ad4m = agent.client;
+    stop = agent.stop;
+
+    const modelId = await ad4m.ai.addModel({
+      name: "harness-llm",
+      api: { baseUrl: BASE_URL, apiKey: "ollama", model: MODEL, apiType: "OPEN_AI" },
+      modelType: "LLM",
+    } as any);
+    await ad4m.ai.setDefaultModel("LLM", modelId);
+
+    p = await ad4m.perspective.add("run-interpretation-harness-events-test");
+    await ExtBelief.register(p);
+    await ExtIntention.register(p);
+  });
+
+  after(async () => {
+    if (stop) await stop();
+  });
+
+  it("emits ToolCall + ToolResult events keyed by observationId", async () => {
+    // Subscribe FIRST so we don't miss the events that fire during the pass.
+    // Filter by observationId (mapped to `processorId` on the wire) so
+    // events from parallel test perspectives can't cross-contaminate — this
+    // test's observationId is unique to it.
+    const observationId = `tool-events-test-${Date.now()}`;
+    const collected: AutoProcessorEvent[] = [];
+    await p.addAutoProcessorEventListener((event) => {
+      if (event.processorId === observationId) {
+        collected.push(event);
+      }
+    });
+
+    // Simple transcript that reliably triggers at least one propose_create.
+    // Scenario-B shape: three assignment-style utterances, three Task nodes.
+    const transcript = [
+      { speaker: "Nico", text: "James, can you finish the WebRTC call module in WE by Monday?" },
+      { speaker: "James", text: "On it. And Ari, could you review the AD4M harness PR before then?" },
+      { speaker: "Ari", text: "Yes. I'll also spike the SoA tree scaffolding this week." },
+    ];
+
+    let lastError: any = null;
+    for (let attempt = 1; attempt <= HARNESS_E2E_MAX_ATTEMPTS; attempt++) {
+      if (attempt > 1) {
+        // Fresh state per attempt — same purge helper as the sibling tests.
+        await purgeGenerated(p, new Set());
+        collected.length = 0;
+      }
+
+      try {
+        const bases = await p.runInterpretationWithHarness(
+          transcript,
+          BASE_PREFIX,
+          MAX_TOOL_CALLS,
+          ["ExtBelief", "ExtIntention"],
+          undefined, // modelOverride
+          observationId,
+          true, // emitDebugEvents — this is what gates ToolCall/ToolResult
+        );
+
+        expect(bases.length, "harness pass must produce at least one instance").to.be.greaterThan(0);
+
+        // Give the subscription pipeline a beat to catch up — events are
+        // fire-and-forget on the Rust side; the WS delivery + local
+        // callback isn't awaited by the RPC response.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+
+        // Filter to the events we care about; keep the others for the
+        // failure diagnostic if the assertion misses.
+        const toolCallEvents = collected.filter((e) => e.step === "toolCall");
+        const toolResultEvents = collected.filter((e) => e.step === "toolResult");
+
+        expect(
+          toolCallEvents.length,
+          `expected at least one ToolCall event keyed by observationId=${observationId}; observed steps: ${JSON.stringify(collected.map((e) => e.step))}`,
+        ).to.be.greaterThan(0);
+        expect(
+          toolResultEvents.length,
+          `expected at least one ToolResult event keyed by observationId=${observationId}; observed steps: ${JSON.stringify(collected.map((e) => e.step))}`,
+        ).to.be.greaterThan(0);
+
+        // Payload shape: ToolCall must carry a tool name AND JSON-encoded args.
+        for (const call of toolCallEvents) {
+          expect(call.toolName, `ToolCall event missing toolName: ${JSON.stringify(call)}`).to.be.a("string");
+          expect(call.toolName!.length).to.be.greaterThan(0);
+          expect(call.toolArgsJson, `ToolCall event missing toolArgsJson: ${JSON.stringify(call)}`).to.be.a("string");
+          // toolArgsJson is a JSON string (may be `{}` for a zero-arg tool);
+          // parseable is the invariant, not "has fields".
+          expect(() => JSON.parse(call.toolArgsJson!), `toolArgsJson must parse as JSON: ${call.toolArgsJson}`).to.not.throw();
+        }
+        // Payload shape: ToolResult must carry a tool name AND result text.
+        for (const result of toolResultEvents) {
+          expect(result.toolName, `ToolResult event missing toolName: ${JSON.stringify(result)}`).to.be.a("string");
+          expect(result.toolResult, `ToolResult event missing toolResult: ${JSON.stringify(result)}`).to.be.a("string");
+        }
+
+        // Sanity: batchKey and processorId both == observationId (one-shot
+        // uses the same value for both since there's no persistent processor
+        // or batch — WS-RPC handler wires it that way).
+        for (const evt of [...toolCallEvents, ...toolResultEvents]) {
+          expect(evt.processorId).to.equal(observationId);
+          expect(evt.batchKey).to.equal(observationId);
+        }
+
+        console.log(
+          `[tool-events-e2e] passed on attempt ${attempt}/${HARNESS_E2E_MAX_ATTEMPTS} — ${toolCallEvents.length} ToolCall + ${toolResultEvents.length} ToolResult events`,
+        );
+        return;
+      } catch (e) {
+        lastError = e;
+        console.log(
+          `[tool-events-e2e] attempt ${attempt}/${HARNESS_E2E_MAX_ATTEMPTS} did not satisfy retry guard: ${(e as Error).message}`,
+        );
+      }
+    }
+    throw lastError;
+  });
+
+  it("emits no tool-call events when emitDebugEvents is omitted (fast path)", async () => {
+    // Regression: the headless fast path (no `emitDebugEvents`, no
+    // `observationId`) must NOT publish anything. Subscribe filtered by a
+    // fresh id that no pass could use, run a pass without the switches,
+    // and confirm no ToolCall/ToolResult land under that filter — and
+    // separately confirm no such events land under NO filter either
+    // (which would mean a global event leak).
+    const observationId = `tool-events-fastpath-${Date.now()}`;
+    const collected: AutoProcessorEvent[] = [];
+    let anyGlobalToolEvent = false;
+    await p.addAutoProcessorEventListener((event) => {
+      if (event.processorId === observationId) {
+        collected.push(event);
+      }
+      if (event.step === "toolCall" || event.step === "toolResult") {
+        anyGlobalToolEvent = true;
+      }
+    });
+
+    await p.runInterpretationWithHarness(
+      [{ speaker: "Nico", text: "no-op." }],
+      BASE_PREFIX,
+      MAX_TOOL_CALLS,
+      ["ExtBelief", "ExtIntention"],
+      // omit modelOverride, observationId, emitDebugEvents → fast path
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    expect(collected, "no events should land under the filter observationId").to.deep.equal([]);
+    expect(anyGlobalToolEvent, "no ToolCall/ToolResult events should land at all when emitDebugEvents is off").to.equal(false);
   });
 });
