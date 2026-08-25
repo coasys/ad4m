@@ -22,11 +22,13 @@ export async function expressionCreate(fileData) {
         try { fileData = JSON.parse(fileData); } catch (_) {}
     }
 
+    const dataBase64 = fileData.data_base64 || "";
+    const padding = dataBase64.endsWith("==") ? 2 : dataBase64.endsWith("=") ? 1 : 0;
     const fileMetadata = {
         name: fileData.name,
-        size: fileData.data_base64 ? Math.ceil(fileData.data_base64.length * 3 / 4) : 0,
+        size: dataBase64.length > 0 ? Math.floor(dataBase64.length * 3 / 4) - padding : 0,
         file_type: fileData.file_type,
-        data_base64: fileData.data_base64,
+        data_base64: dataBase64,
     };
 
     const address = hash(JSON.stringify(fileMetadata));

@@ -55,12 +55,12 @@ The integration tests use the `ad4m-executor` CLI binary. Depending on what code
 
 ## bootstrap-languages/*/esbuild.ts: the `@coasys/ad4m-ldk` relative path
 
-Every `bootstrap-languages/*/esbuild.ts` resolves `@coasys/ad4m-ldk` two ways:
-an `AD4M_LDK_ENTRY` env var override, falling back to a hardcoded relative
-path from the language's own directory. Inside this monorepo that fallback
-must be `../../ad4m-ldk/js/lib/index.js` (two levels up: `bootstrap-languages/<lang>/`
-→ `bootstrap-languages/` → repo root → `ad4m-ldk/js/lib/index.js`) — this is
-the convention all bootstrap-languages use, checked with:
+Every `bootstrap-languages/*/esbuild.ts` resolves `@coasys/ad4m-ldk` via a
+hardcoded relative path from the language's own directory. Inside this monorepo
+that path must be `../../ad4m-ldk/js/lib/index.js` (two levels up:
+`bootstrap-languages/<lang>/` → `bootstrap-languages/` → repo root →
+`ad4m-ldk/js/lib/index.js`) — this convention applies to all bootstrap-languages.
+Verify with:
 
 ```bash
 grep -n "ad4m-ldk/js/lib" bootstrap-languages/*/esbuild.ts

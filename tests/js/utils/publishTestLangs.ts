@@ -92,7 +92,9 @@ async function publish() {
 
     createTestingAgent();
 
-    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, apiPort, hcAdminPort, hcAppPort, true);
+    const runHolochain = !localMode;
+    console.log(`Publishing executor: runHolochain=${runHolochain}${localMode ? ' (LOCAL_MODE)' : ''}`);
+    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, apiPort, hcAdminPort, hcAppPort, true, undefined, undefined, undefined, undefined, false, undefined, runHolochain);
 
     try {
         const ad4mClient = new Ad4mClient(baseUrl(apiPort));
