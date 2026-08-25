@@ -308,4 +308,129 @@ describe('SHACLFlow', () => {
       expect('interpretationHint' in json.states[0]).toBe(false);
     });
   });
+
+  describe('requires + semanticCheck on FlowState (v1 flow guards)', () => {
+    it('round-trips a state with `requires` and `semanticCheck` via toLinks/fromLinks', () => {
+      const flow = new SHACLFlow('Deliberation', 'ns://deliberation/');
+      flow.addState({
+        name: 'Tension',
+        value: 1,
+        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/tension' },
+        interpretationHint:
+          'Participants have expressed opposing views or objections.',
+        // Design §4.1: model-level guard replacing raw-link stateCheck.
+        // AND-combined; every entry must match on committed graph state.
+        requires: [
+          {
+            className: 'ns://Objection',
+            where: { about: '$flow.base' },
+            count: { min: 1 },
+            linkedTo: 'base',
+          },
+          {
+            className: 'ns://Perspective',
+            where: { about: '$flow.base', stance: { in: ['for', 'against'] } },
+            count: { min: 2 },
+          },
+        ],
+        // Design §5: LLM confirmation after `requires` structurally matches.
+        semanticCheck:
+          'Confirm the objection is a genuine disagreement, not a clarifying question.',
+      });
+
+      const links = flow.toLinks();
+      const roundTripped = SHACLFlow.fromLinks(links, flow.flowUri);
+
+      const tension = roundTripped.states.find(s => s.name === 'Tension');
+      expect(tension).toBeDefined();
+      // requires: array preserved, condition shorthands + object forms both survive.
+      expect(tension?.requires).toHaveLength(2);
+      expect(tension?.requires?.[0].className).toBe('ns://Objection');
+      expect(tension?.requires?.[0].where).toEqual({ about: '$flow.base' });
+      expect(tension?.requires?.[0].count).toEqual({ min: 1 });
+      expect(tension?.requires?.[0].linkedTo).toBe('base');
+      expect(tension?.requires?.[1].where).toEqual({
+        about: '$flow.base',
+        stance: { in: ['for', 'against'] },
+      });
+      expect(tension?.requires?.[1].count).toEqual({ min: 2 });
+      // semanticCheck string round-trips through Literal serialization.
+      expect(tension?.semanticCheck).toBe(
+        'Confirm the objection is a genuine disagreement, not a clarifying question.'
+      );
+    });
+
+    it('round-trips requires + semanticCheck via toJSON/fromJSON', () => {
+      const flow = new SHACLFlow('Delivery', 'ns://delivery/');
+      flow.addState({
+        name: 'Done',
+        value: 1,
+        stateCheck: { predicate: 'ns://delivery/state', target: 'ns://delivery/done' },
+        requires: [
+          {
+            className: 'ns://CompletionEvidence',
+            where: { forTask: '$flow.base' },
+            count: { min: 1 },
+          },
+        ],
+        semanticCheck: 'Confirm the artifact matches what was asked for.',
+      });
+
+      const json = flow.toJSON() as any;
+      const done = json.states[0];
+      expect(done.requires).toHaveLength(1);
+      expect(done.requires[0].className).toBe('ns://CompletionEvidence');
+      expect(done.semanticCheck).toBe('Confirm the artifact matches what was asked for.');
+
+      const roundTripped = SHACLFlow.fromJSON(json);
+      const rtDone = roundTripped.states.find(s => s.name === 'Done');
+      expect(rtDone?.requires?.[0].className).toBe('ns://CompletionEvidence');
+      expect(rtDone?.requires?.[0].where).toEqual({ forTask: '$flow.base' });
+      expect(rtDone?.semanticCheck).toBe('Confirm the artifact matches what was asked for.');
+    });
+
+    it('omits requires and semanticCheck from toLinks when unset (backwards-compatible)', () => {
+      // Legacy state — only stateCheck. No new predicates land on the state URI.
+      const flow = new SHACLFlow('TODO', 'todo://');
+      flow.addState({
+        name: 'ready',
+        value: 0,
+        stateCheck: { predicate: 'todo://state', target: 'todo://ready' },
+      });
+
+      const links = flow.toLinks();
+      const stateUri = flow.stateUri('ready');
+      const requiresLinks = links.filter(
+        l => l.source === stateUri && l.predicate === 'ad4m://requires'
+      );
+      const semanticCheckLinks = links.filter(
+        l => l.source === stateUri && l.predicate === 'ad4m://semanticCheck'
+      );
+      expect(requiresLinks).toHaveLength(0);
+      expect(semanticCheckLinks).toHaveLength(0);
+
+      // Round-trip: the state's fields stay undefined, not empty objects.
+      const roundTripped = SHACLFlow.fromLinks(links, flow.flowUri);
+      const ready = roundTripped.states.find(s => s.name === 'ready');
+      expect(ready?.requires).toBeUndefined();
+      expect(ready?.semanticCheck).toBeUndefined();
+    });
+
+    it('an empty `requires` array is treated as no guard (no link emitted)', () => {
+      const flow = new SHACLFlow('Empty', 'ns://empty/');
+      flow.addState({
+        name: 'x',
+        value: 0,
+        stateCheck: { predicate: 'ns://empty/state', target: 'ns://empty/x' },
+        requires: [],
+      });
+
+      const links = flow.toLinks();
+      const stateUri = flow.stateUri('x');
+      const requiresLinks = links.filter(
+        l => l.source === stateUri && l.predicate === 'ad4m://requires'
+      );
+      expect(requiresLinks).toHaveLength(0);
+    });
+  });
 });

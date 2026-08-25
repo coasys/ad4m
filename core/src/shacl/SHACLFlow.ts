@@ -19,6 +19,57 @@ export interface LinkPattern {
 }
 
 /**
+ * Per-property condition for a `ModelQuery`. String / number / boolean
+ * shorthands compile to an equality match; the object forms are the full
+ * shape a `ModelQuery` engine consumer will evaluate against a class
+ * instance's decoded property value.
+ *
+ * Only the shorthand + `equals` / `in` / `exists` / `matches` operators are
+ * declared in v1 (see design doc §4.1). More operators can land as
+ * additional variants without a schema break.
+ */
+export type PropertyCondition =
+  | string
+  | number
+  | boolean
+  | { equals: unknown }
+  | { in: unknown[] }
+  | { exists: true }
+  | { matches: string };
+
+/**
+ * A model-level query — the shape a flow's `requires` guard evaluates
+ * against the perspective's current class-instance graph. Deliberately
+ * higher-level than raw links so guards talk about subject classes, not
+ * the underlying triples.
+ *
+ * See design doc §3 principle 2 ("Guards talk about models, not raw graph")
+ * and §4.1 for the full field spec. Template variables allowed inside
+ * `where` string values: `$flow.base`, `$flow.uri`, `$did` — the engine
+ * substitutes at evaluation time.
+ */
+export interface ModelQuery {
+  /** Subject-class URI to search for. */
+  className: string;
+  /**
+   * Per-property conditions (all must match — AND semantics inside one
+   * ModelQuery, same as AND semantics across an array of ModelQueries).
+   */
+  where?: { [prop: string]: PropertyCondition | string };
+  /**
+   * Cardinality constraint on matching instances. Default `{ min: 1 }` —
+   * at least one match required to satisfy the guard.
+   */
+  count?: { min?: number; max?: number };
+  /**
+   * How the matched instance connects back to the flow — `"flow"` /
+   * `"base"` for the two canonical anchors; the object form names a
+   * predicate `via` and one of the two anchors as `to`.
+   */
+  linkedTo?: "flow" | "base" | { via: string; to: "flow" | "base" };
+}
+
+/**
  * Flow State definition
  * Represents a single state in the flow state machine
  */
@@ -27,7 +78,14 @@ export interface FlowState {
   name: string;
   /** Numeric state value for ordering (e.g., 0, 0.5, 1) */
   value: number;
-  /** Link pattern that indicates this state */
+  /**
+   * Link pattern that indicates this state.
+   *
+   * Legacy field kept for existing consumers; v1+ flows should express
+   * "am I in this state?" via `requires` (design §4.1), which talks
+   * about subject-class instances rather than raw links. `stateCheck`
+   * will be retired once no production perspective still writes it.
+   */
   stateCheck: LinkPattern;
   /**
    * Natural-language description of what puts a flow instance IN this state.
@@ -40,6 +98,31 @@ export interface FlowState {
    *   clear disagreement or unresolved conflict on the table."
    */
   interpretationHint?: string;
+  /**
+   * Model-level guard: the state is satisfied when every ModelQuery in
+   * the array returns at least one match on committed graph state
+   * (overlays do NOT count as evidence — design §3 principle 5).
+   *
+   * Array semantics: AND — every entry must match. Empty / unset =
+   * no model-level guard (falls back to `stateCheck`).
+   *
+   * Design doc §4.1: "replaces stateCheck+guardQuery; array of queries,
+   * ALL must match; each query's matches become evidence."
+   */
+  requires?: ModelQuery[];
+  /**
+   * Optional English hint for a targeted LLM confirmation before the
+   * engine declares the state entered. Distinct from
+   * `interpretationHint`, which frames the state semantically for the
+   * up-front extraction pass — `semanticCheck` is the "am I still
+   * confident?" pass the engine runs after `requires` matches, for
+   * states where structural presence isn't enough (e.g. tension
+   * resolution).
+   *
+   * Design doc §5 covers the LLM confirmation pass shape. Unset = no
+   * confirmation, `requires` matches directly imply state entered.
+   */
+  semanticCheck?: string;
 }
 
 /**
@@ -310,6 +393,28 @@ export class SHACLFlow {
           target: Literal.from(state.interpretationHint).toUrl()
         });
       }
+
+      // Per-state `requires` guard — array of ModelQueries, AND-combined.
+      // Serialized as one JSON string on `ad4m://requires`. Consumers
+      // (state-transition engine, `flow.availableActions`) parse back.
+      if (state.requires && state.requires.length > 0) {
+        links.push({
+          source: stateUri,
+          predicate: "ad4m://requires",
+          target: `literal:string:${encodeURIComponent(JSON.stringify(state.requires))}`
+        });
+      }
+
+      // Per-state `semanticCheck` hint — optional English confirmation
+      // that runs after `requires` matches, for states where structural
+      // presence isn't sufficient evidence.
+      if (state.semanticCheck !== undefined) {
+        links.push({
+          source: stateUri,
+          predicate: "ad4m://semanticCheck",
+          target: Literal.from(state.semanticCheck).toUrl()
+        });
+      }
     }
 
     // Transitions
@@ -485,7 +590,48 @@ export class SHACLFlow {
         }
       }
 
-      flow.addState({ name: stateName, value: stateValue, stateCheck, ...(interpretationHint !== undefined ? { interpretationHint } : {}) });
+      // Get per-state `requires` guard (optional) — one link carrying a
+      // JSON-encoded ModelQuery[].
+      const requiresLink = links.find(l =>
+        l.source === stateUri && l.predicate === "ad4m://requires"
+      );
+      let requires: ModelQuery[] | undefined;
+      if (requiresLink) {
+        try {
+          const jsonStr = requiresLink.target.replace(
+            /^literal:\/\/string:|^literal:string:/,
+            ""
+          );
+          const parsed = JSON.parse(decodeURIComponent(jsonStr));
+          if (Array.isArray(parsed)) {
+            requires = parsed;
+          }
+        } catch {
+          // Ignore parse errors — leave requires unset rather than crash
+        }
+      }
+
+      // Get per-state `semanticCheck` hint (optional)
+      const semanticCheckLink = links.find(l =>
+        l.source === stateUri && l.predicate === "ad4m://semanticCheck"
+      );
+      let semanticCheck: string | undefined;
+      if (semanticCheckLink) {
+        try {
+          semanticCheck = Literal.fromUrl(semanticCheckLink.target).get() as string;
+        } catch {
+          // Ignore parse errors
+        }
+      }
+
+      flow.addState({
+        name: stateName,
+        value: stateValue,
+        stateCheck,
+        ...(interpretationHint !== undefined ? { interpretationHint } : {}),
+        ...(requires !== undefined ? { requires } : {}),
+        ...(semanticCheck !== undefined ? { semanticCheck } : {}),
+      });
     }
 
     // Find transitions
