@@ -1421,6 +1421,7 @@ async fn run_interpretation_with_harness_handler(
             body.max_tool_calls,
             auth_token,
             emit_ctx.as_ref(),
+            false,
         ),
     )
     .await

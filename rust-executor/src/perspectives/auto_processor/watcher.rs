@@ -763,6 +763,10 @@ pub async fn run_one_pass(
                 // classic path uses; `None` when disabled means the
                 // per-tool-call events also stay silent.
                 emit_ctx.as_ref(),
+                // Dedup on drain: the auto-processor runs indefinitely, so
+                // re-proposed instances must collapse to updates (not
+                // unbounded duplicate creates). James Weir PR #911 review.
+                true,
             )
             .await?;
             (bases, None)

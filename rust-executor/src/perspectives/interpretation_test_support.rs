@@ -480,6 +480,7 @@ pub(crate) async fn run_interpretation_harness_e2e(
         // asserted on here; scenario E's own tests would attach one if we
         // add event-shape assertions in a follow-up).
         None,
+        false,
     )
     .await
     .expect("run_interpretation_with_harness against real LLM to succeed");

@@ -1,9 +1,10 @@
 use super::{
     apply_with_overlay, build_interpretation_input, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
-    identity_property, parse_interpretation_response, plan_interpretation_ops_resolved,
-    resolve_already_present_with_strategy, DedupStrategy, InterpretationOp,
-    InterpretationRunCursor, ProposedInstance, TranscriptTurn,
+    identity_property, normalize_identity, parse_interpretation_response,
+    plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
+    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationRunCursor, ProposedInstance,
+    TranscriptTurn,
 };
 use crate::agent::AgentContext;
 use crate::ai_service::harness::propose::{
@@ -146,6 +147,155 @@ pub async fn strip_noop_updates(
         }
     }
     Ok(kept)
+}
+
+/// Collapse duplicate ops from a harness buffer drain against the perspective's
+/// existing state — the same identity-property matching the classic path runs
+/// via [`resolve_already_present_with_strategy`], but operating on raw
+/// [`InterpretationOp`]s rather than [`ProposedInstance`]s.
+///
+/// - `Create` whose identity-property value (under [`normalize_identity`])
+///   matches an existing instance of the same class is rewritten to an `Update`
+///   on that existing base, preventing unbounded duplicate accretion when the
+///   auto-processor re-proposes the same instance across passes.
+/// - Intra-batch `Create` dedup: if two `Create`s in the same drain match on
+///   (class, normalized identity), only the first survives.
+/// - `AddLinks` whose `(source, predicate, target)` triples all exist in
+///   `existing_links` are dropped entirely; partially-new link sets are
+///   filtered down to the novel triples.
+/// - `Update` ops pass through unchanged (their base already exists by
+///   definition).
+pub(crate) fn dedup_ops_against_existing(
+    ops: Vec<InterpretationOp>,
+    existing: &ExistingInstances,
+    shapes: &[ModelShape],
+    existing_links: &ExistingLinks,
+) -> Vec<InterpretationOp> {
+    let identity_props: HashMap<String, String> = shapes
+        .iter()
+        .filter_map(|s| {
+            identity_property(s).map(|idp| (class_label(&s.target_class, shapes), idp.name.clone()))
+        })
+        .collect();
+
+    // Pre-existing graph identities → (normalized value → existing base), per class.
+    let mut existing_norm_to_base: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for entries in existing.values() {
+        for inst in entries {
+            let Some(idp_name) = identity_props.get(&inst.class) else {
+                continue;
+            };
+            // InstanceContext stores the identity value in `title`.
+            let _ = idp_name; // identity prop name used for Create.values lookup below
+            existing_norm_to_base
+                .entry(inst.class.clone())
+                .or_default()
+                .entry(normalize_identity(&inst.title))
+                .or_insert_with(|| inst.id.clone());
+        }
+    }
+
+    // Intra-batch: (class, normalized identity) → index of the first Create
+    // we kept, so a later same-key Create is dropped.
+    let mut seen_in_batch: HashMap<String, HashMap<String, usize>> = HashMap::new();
+
+    let mut out = Vec::with_capacity(ops.len());
+    for (idx, op) in ops.into_iter().enumerate() {
+        match op {
+            InterpretationOp::Create {
+                base,
+                class,
+                values,
+            } => {
+                let Some(idp_name) = identity_props.get(&class) else {
+                    // No identity property for this class — no dedup possible.
+                    out.push(InterpretationOp::Create {
+                        base,
+                        class,
+                        values,
+                    });
+                    continue;
+                };
+                let id_value = values.get(idp_name).and_then(|v| v.as_str()).unwrap_or("");
+                if id_value.is_empty() {
+                    out.push(InterpretationOp::Create {
+                        base,
+                        class,
+                        values,
+                    });
+                    continue;
+                }
+                let normalized = normalize_identity(id_value);
+
+                // Check against existing graph instances.
+                if let Some(existing_base) = existing_norm_to_base
+                    .get(&class)
+                    .and_then(|m| m.get(&normalized))
+                    .cloned()
+                {
+                    log::debug!(
+                        "harness dedup: Create({class}, {:?}) → Update on existing {existing_base}",
+                        id_value,
+                    );
+                    out.push(InterpretationOp::Update {
+                        base: existing_base,
+                        class,
+                        values,
+                    });
+                    continue;
+                }
+
+                // Intra-batch dedup: drop if we already kept a Create with the
+                // same (class, normalized identity) earlier in this drain.
+                if seen_in_batch
+                    .get(&class)
+                    .and_then(|m| m.get(&normalized))
+                    .is_some()
+                {
+                    log::debug!(
+                        "harness dedup: dropping intra-batch duplicate Create({class}, {:?})",
+                        id_value,
+                    );
+                    continue;
+                }
+                seen_in_batch
+                    .entry(class.clone())
+                    .or_default()
+                    .insert(normalized, idx);
+                out.push(InterpretationOp::Create {
+                    base,
+                    class,
+                    values,
+                });
+            }
+            InterpretationOp::AddLinks { source, links } => {
+                let novel: Vec<_> = links
+                    .into_iter()
+                    .filter(|link| {
+                        let predicate = link.predicate.clone().unwrap_or_default();
+                        !existing_links.contains(&(
+                            link.source.clone(),
+                            predicate,
+                            link.target.clone(),
+                        ))
+                    })
+                    .collect();
+                if novel.is_empty() {
+                    log::debug!(
+                        "harness dedup: dropping AddLinks on {source} — all triples already exist"
+                    );
+                    continue;
+                }
+                out.push(InterpretationOp::AddLinks {
+                    source,
+                    links: novel,
+                });
+            }
+            // Update ops pass through — their base already exists.
+            op @ InterpretationOp::Update { .. } => out.push(op),
+        }
+    }
+    out
 }
 
 /// Persist a planned set of [`InterpretationOp`]s into the perspective, inside a
@@ -623,13 +773,14 @@ pub async fn run_interpretation_with_strategy_and_model(
 /// straight into [`apply_with_overlay`] with the same run-id + task threading
 /// the single-shot path uses.
 ///
-/// The single-shot path's dedup/planning safety net does NOT run here — the
-/// harness expects the LLM to have used its query tools to check for
-/// existing state before proposing writes. This is deliberate (design v3):
-/// the tool surface is powerful enough that the LLM should be trusted to
-/// query-first. If this proves wrong in practice we can add a lightweight
-/// collapse-identical-Create pass on the drained buffer before handoff, but
-/// for MVP the buffer flows straight through.
+/// When `dedup_on_drain` is `false` (the WS-RPC one-shot default), the
+/// buffer flows straight into the overlay gate — the harness trusts the
+/// LLM to query-first. When `true` (the auto-processor's recurrent path),
+/// the drained ops pass through [`dedup_ops_against_existing`] before
+/// `apply_with_overlay`: `Create`s whose identity matches an existing
+/// instance collapse to `Update`s, intra-batch duplicate `Create`s are
+/// dropped, and `AddLinks` whose triples already exist are filtered out.
+/// This bounds duplicate accretion on the indefinitely-running processor.
 ///
 /// The final answer text from the harness is discarded — the LLM already
 /// wrote via tools, and any narrative it emits is not consumed by the
@@ -652,6 +803,7 @@ pub async fn run_interpretation_with_harness_and_model(
     max_tool_calls: u32,
     auth_token: Option<String>,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    dedup_on_drain: bool,
 ) -> anyhow::Result<Vec<String>> {
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
@@ -663,11 +815,9 @@ pub async fn run_interpretation_with_harness_and_model(
     // prompt so the LLM has context (and can name existing `id`s in
     // propose_link_child) even before its first query tool call.
     let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
-    // Existing relation links: not consumed by the harness path directly
-    // (there's no planner to compare against), but pulling them here matches
-    // the single-shot path's data-gathering shape — a later dedup pass on the
-    // drained buffer would need them. Kept for symmetry + future-use.
-    let _existing_links = existing_relation_links(perspective, shapes).await?;
+    // Existing relation links: consumed by the dedup-on-drain pass to filter
+    // AddLinks ops whose triples already exist in the graph.
+    let existing_links = existing_relation_links(perspective, shapes).await?;
 
     let prompt = build_interpretation_input(shapes, transcript, &existing_ctx);
 
@@ -786,10 +936,15 @@ pub async fn run_interpretation_with_harness_and_model(
     )
     .await?;
 
-    // Drain the buffered ops into apply_with_overlay — same overlay gate,
-    // same run-id/ran-at threading, same task-row provenance as the
-    // single-shot path uses. No dedup / planner pass in between.
+    // Drain the buffered ops. When `dedup_on_drain` is active (auto-processor
+    // path), collapse duplicate Creates and filter stale AddLinks before
+    // handing off to the overlay gate.
     let ops = buffer.drain();
+    let ops = if dedup_on_drain {
+        dedup_ops_against_existing(ops, &existing_ctx, shapes, &existing_links)
+    } else {
+        ops
+    };
     // CI-visible diagnostic: pairs with the per-round log in `run_with_tools`.
     // When the harness silently returns zero bases it's almost always because
     // the LLM chose to answer instead of tool-calling, so the buffer is empty
@@ -832,7 +987,7 @@ mod tests {
     use crate::db::Ad4mDb;
     use crate::perspectives::interpretation::*;
     use crate::perspectives::interpretation_test_support::*;
-    use crate::types::AITask;
+    use crate::types::{AITask, Link};
 
     #[tokio::test]
     async fn strip_noop_updates_drops_same_value_upsert_keeps_real_change() {
@@ -1183,5 +1338,232 @@ mod tests {
                 rows.len()
             );
         }
+    }
+
+    // ---- dedup_ops_against_existing -----------------------------------------
+
+    #[tokio::test]
+    async fn dedup_ops_collapses_matching_creates_to_updates_keeps_new() {
+        let (_perspective, shapes, _ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+
+        let existing = existing_map(vec![InstanceContext {
+            id: "soa://existing/intention/1".to_string(),
+            title: "Ship the MVP".to_string(),
+            class: "Intention".to_string(),
+            properties: std::collections::BTreeMap::new(),
+        }]);
+
+        let ops = vec![
+            // Matches existing by identity (title).
+            InterpretationOp::Create {
+                base: "soa://new/1".to_string(),
+                class: "Intention".to_string(),
+                values: serde_json::Map::from_iter([(
+                    "title".to_string(),
+                    serde_json::json!("Ship the MVP"),
+                )]),
+            },
+            // Same identity, different whitespace — also matches.
+            InterpretationOp::Create {
+                base: "soa://new/2".to_string(),
+                class: "Intention".to_string(),
+                values: serde_json::Map::from_iter([(
+                    "title".to_string(),
+                    serde_json::json!("  ship   the   mvp  "),
+                )]),
+            },
+            // Genuinely new — no match.
+            InterpretationOp::Create {
+                base: "soa://new/3".to_string(),
+                class: "Intention".to_string(),
+                values: serde_json::Map::from_iter([(
+                    "title".to_string(),
+                    serde_json::json!("Write the docs"),
+                )]),
+            },
+        ];
+
+        let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
+        assert_eq!(deduped.len(), 3, "all three ops survive (two as Updates)");
+
+        // First two should be Updates on the existing base.
+        match &deduped[0] {
+            InterpretationOp::Update { base, class, .. } => {
+                assert_eq!(base, "soa://existing/intention/1");
+                assert_eq!(class, "Intention");
+            }
+            other => panic!("expected Update, got {other:?}"),
+        }
+        match &deduped[1] {
+            InterpretationOp::Update { base, class, .. } => {
+                assert_eq!(base, "soa://existing/intention/1");
+                assert_eq!(class, "Intention");
+            }
+            other => panic!("expected Update, got {other:?}"),
+        }
+        // Third should remain a Create.
+        match &deduped[2] {
+            InterpretationOp::Create { class, values, .. } => {
+                assert_eq!(class, "Intention");
+                assert_eq!(
+                    values.get("title").and_then(|v| v.as_str()),
+                    Some("Write the docs")
+                );
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dedup_ops_intra_batch_drops_duplicate_creates() {
+        let (_perspective, shapes, _ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let existing = ExistingInstances::new(); // empty graph
+
+        let ops = vec![
+            InterpretationOp::Create {
+                base: "soa://new/1".to_string(),
+                class: "Intention".to_string(),
+                values: serde_json::Map::from_iter([(
+                    "title".to_string(),
+                    serde_json::json!("Ship the MVP"),
+                )]),
+            },
+            // Duplicate of the above (normalized-equal).
+            InterpretationOp::Create {
+                base: "soa://new/2".to_string(),
+                class: "Intention".to_string(),
+                values: serde_json::Map::from_iter([(
+                    "title".to_string(),
+                    serde_json::json!("  SHIP  the  mvp  "),
+                )]),
+            },
+            InterpretationOp::Create {
+                base: "soa://new/3".to_string(),
+                class: "Intention".to_string(),
+                values: serde_json::Map::from_iter([(
+                    "title".to_string(),
+                    serde_json::json!("Write the docs"),
+                )]),
+            },
+        ];
+
+        let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
+        assert_eq!(
+            deduped.len(),
+            2,
+            "intra-batch duplicate must be dropped; got {deduped:#?}"
+        );
+        match &deduped[0] {
+            InterpretationOp::Create { values, .. } => {
+                assert_eq!(
+                    values.get("title").and_then(|v| v.as_str()),
+                    Some("Ship the MVP"),
+                    "first occurrence wins"
+                );
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+        match &deduped[1] {
+            InterpretationOp::Create { values, .. } => {
+                assert_eq!(
+                    values.get("title").and_then(|v| v.as_str()),
+                    Some("Write the docs")
+                );
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dedup_ops_filters_existing_add_links_keeps_novel() {
+        let (_perspective, shapes, _ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let existing = ExistingInstances::new();
+
+        let mut existing_links = ExistingLinks::new();
+        existing_links.insert((
+            "soa://src/1".to_string(),
+            "ns://basedOn".to_string(),
+            "soa://tgt/old".to_string(),
+        ));
+
+        let ops = vec![InterpretationOp::AddLinks {
+            source: "soa://src/1".to_string(),
+            links: vec![
+                // Already exists — should be filtered.
+                Link {
+                    source: "soa://src/1".to_string(),
+                    predicate: Some("ns://basedOn".to_string()),
+                    target: "soa://tgt/old".to_string(),
+                },
+                // Novel — should survive.
+                Link {
+                    source: "soa://src/1".to_string(),
+                    predicate: Some("ns://basedOn".to_string()),
+                    target: "soa://tgt/new".to_string(),
+                },
+            ],
+        }];
+
+        let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &existing_links);
+        assert_eq!(deduped.len(), 1, "one AddLinks op with novel link survives");
+        match &deduped[0] {
+            InterpretationOp::AddLinks { links, .. } => {
+                assert_eq!(links.len(), 1, "only the novel link survives");
+                assert_eq!(links[0].target, "soa://tgt/new");
+            }
+            other => panic!("expected AddLinks, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dedup_ops_drops_all_duplicate_add_links() {
+        let (_perspective, shapes, _ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let existing = ExistingInstances::new();
+
+        let mut existing_links = ExistingLinks::new();
+        existing_links.insert((
+            "soa://src/1".to_string(),
+            "ns://basedOn".to_string(),
+            "soa://tgt/1".to_string(),
+        ));
+
+        let ops = vec![InterpretationOp::AddLinks {
+            source: "soa://src/1".to_string(),
+            links: vec![Link {
+                source: "soa://src/1".to_string(),
+                predicate: Some("ns://basedOn".to_string()),
+                target: "soa://tgt/1".to_string(),
+            }],
+        }];
+
+        let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &existing_links);
+        assert!(
+            deduped.is_empty(),
+            "all-duplicate AddLinks should be dropped entirely; got {deduped:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_ops_passes_updates_through_unchanged() {
+        let (_perspective, shapes, _ctx) =
+            setup_perspective_no_llm(&[("Intention", INTENTION_SDNA)]).await;
+        let existing = ExistingInstances::new();
+
+        let ops = vec![InterpretationOp::Update {
+            base: "soa://existing/1".to_string(),
+            class: "Intention".to_string(),
+            values: serde_json::Map::from_iter([(
+                "title".to_string(),
+                serde_json::json!("Updated title"),
+            )]),
+        }];
+
+        let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
+        assert_eq!(deduped.len(), 1);
+        assert!(matches!(&deduped[0], InterpretationOp::Update { .. }));
     }
 }
