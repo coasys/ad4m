@@ -433,4 +433,151 @@ describe('SHACLFlow', () => {
       expect(requiresLinks).toHaveLength(0);
     });
   });
+
+  describe('CodeRabbit hardening: empty-string / malformed-value tolerance', () => {
+    it('empty-string interpretationHint / semanticCheck emit zero predicates', () => {
+      // Empty strings must be treated as "unset" so we don't materialise an
+      // empty-hint predicate that a consumer would read back as a meaningful
+      // value (CodeRabbit PR #929 comment on lines 316-323 / 388-395 / 408-416).
+      const flow = new SHACLFlow('Empty', 'ns://empty/');
+      flow.interpretationHint = '';
+      flow.addState({
+        name: 'x',
+        value: 0,
+        stateCheck: { predicate: 'ns://empty/state', target: 'ns://empty/x' },
+        interpretationHint: '',
+        semanticCheck: '',
+      });
+
+      const links = flow.toLinks();
+      const hintLinks = links.filter(l => l.predicate === 'ad4m://interpretationHint');
+      const semanticCheckLinks = links.filter(l => l.predicate === 'ad4m://semanticCheck');
+      expect(hintLinks).toHaveLength(0);
+      expect(semanticCheckLinks).toHaveLength(0);
+
+      const json = flow.toJSON() as any;
+      expect('interpretationHint' in json).toBe(false);
+    });
+
+    it('malformed decoded literals leave the field unset (fromLinks)', () => {
+      // Simulate a broken graph: the ad4m://interpretationHint link points at
+      // a target that decodes to a non-string via Literal.get(). The reader
+      // must not blindly `as string`-cast it into flow metadata.
+      const flow = new SHACLFlow('Deliberation', 'ns://deliberation/');
+      flow.addState({
+        name: 'Proposal',
+        value: 0,
+        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/proposal' },
+      });
+
+      const links = flow.toLinks();
+      const flowUri = flow.flowUri;
+      const stateUri = flow.stateUri('Proposal');
+
+      // Non-string literals: literal:number decodes to a real number,
+      // literal:json to a real object. `Literal.get()` returns the decoded
+      // typed value, so a naive `as string` cast would leak them into flow
+      // metadata unless the reader validates.
+      const nonStringNumber = `literal:number:${encodeURIComponent('42')}`;
+      const nonStringObject = `literal:json:${encodeURIComponent(JSON.stringify({ evil: true }))}`;
+
+      links.push({
+        source: flowUri,
+        predicate: 'ad4m://interpretationHint',
+        target: nonStringNumber,
+      });
+      links.push({
+        source: stateUri,
+        predicate: 'ad4m://interpretationHint',
+        target: nonStringObject,
+      });
+      links.push({
+        source: stateUri,
+        predicate: 'ad4m://semanticCheck',
+        target: nonStringNumber,
+      });
+
+      const roundTripped = SHACLFlow.fromLinks(links, flowUri);
+      const proposal = roundTripped.states.find(s => s.name === 'Proposal');
+      expect(roundTripped.interpretationHint).toBeUndefined();
+      expect(proposal?.interpretationHint).toBeUndefined();
+      expect(proposal?.semanticCheck).toBeUndefined();
+    });
+
+    it('malformed `requires` array entries leave the guard unset (fromLinks)', () => {
+      // Array.isArray alone accepts `[null]` / `[{}]` / `[42]` — a broken
+      // graph should not materialise those as ModelQuery entries.
+      const flow = new SHACLFlow('Deliberation', 'ns://deliberation/');
+      flow.addState({
+        name: 'Tension',
+        value: 1,
+        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/tension' },
+      });
+
+      const links = flow.toLinks();
+      const stateUri = flow.stateUri('Tension');
+
+      // Case 1: array with null entry.
+      const bogus1 = `literal:string:${encodeURIComponent(JSON.stringify([null]))}`;
+      // Case 2: array with empty object (no className).
+      const bogus2 = `literal:string:${encodeURIComponent(JSON.stringify([{}]))}`;
+      // Case 3: array with entry whose className is not a string.
+      const bogus3 = `literal:string:${encodeURIComponent(JSON.stringify([{ className: 42 }]))}`;
+      // Case 4: array with entry whose className is empty string.
+      const bogus4 = `literal:string:${encodeURIComponent(JSON.stringify([{ className: '' }]))}`;
+
+      for (const bogus of [bogus1, bogus2, bogus3, bogus4]) {
+        const brokenLinks = [
+          ...links,
+          { source: stateUri, predicate: 'ad4m://requires', target: bogus },
+        ];
+        const rt = SHACLFlow.fromLinks(brokenLinks, flow.flowUri);
+        expect(rt.states.find(s => s.name === 'Tension')?.requires).toBeUndefined();
+      }
+
+      // Sanity: a well-shaped entry mixed in a valid array still round-trips.
+      const good = `literal:string:${encodeURIComponent(
+        JSON.stringify([{ className: 'ns://Objection', where: { about: '$flow.base' } }])
+      )}`;
+      const goodLinks = [
+        ...links,
+        { source: stateUri, predicate: 'ad4m://requires', target: good },
+      ];
+      const rtGood = SHACLFlow.fromLinks(goodLinks, flow.flowUri);
+      expect(rtGood.states.find(s => s.name === 'Tension')?.requires).toHaveLength(1);
+      expect(rtGood.states.find(s => s.name === 'Tension')?.requires?.[0].className).toBe(
+        'ns://Objection'
+      );
+    });
+
+    it('malformed JSON payload sanitisation (fromJSON)', () => {
+      // A downstream caller reconstructing from an untrusted JSON blob must
+      // get the same non-empty-string / ModelQuery-shape guard as fromLinks.
+      const dodgyJson = {
+        name: 'Bad',
+        namespace: 'ns://bad/',
+        flowable: 'any',
+        startAction: [],
+        interpretationHint: '',
+        states: [
+          {
+            name: 's',
+            value: 0,
+            stateCheck: { predicate: 'ns://bad/state', target: 'ns://bad/s' },
+            interpretationHint: '',
+            requires: [null, {}, { className: 42 }],
+            semanticCheck: '',
+          },
+        ],
+        transitions: [],
+      };
+
+      const flow = SHACLFlow.fromJSON(dodgyJson);
+      expect(flow.interpretationHint).toBeUndefined();
+      const s = flow.states.find(x => x.name === 's');
+      expect(s?.interpretationHint).toBeUndefined();
+      expect(s?.requires).toBeUndefined();
+      expect(s?.semanticCheck).toBeUndefined();
+    });
+  });
 });

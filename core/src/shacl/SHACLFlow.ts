@@ -126,6 +126,23 @@ export interface FlowState {
 }
 
 /**
+ * Runtime shape check for a decoded `ModelQuery`. Deserialization paths use
+ * this to guard against malformed guard arrays leaking into flow metadata
+ * (an untyped `Array.isArray` would happily accept `[null]` or `[{}]`).
+ * Only the mandatory `className: string` field is enforced — richer
+ * validation stays with the runtime engine that will actually execute the
+ * query.
+ */
+function isModelQueryShape(v: unknown): v is ModelQuery {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof (v as { className?: unknown }).className === "string" &&
+    (v as { className: string }).className.length > 0
+  );
+}
+
+/**
  * Flow Transition definition
  * Represents a transition between two states
  */
@@ -313,8 +330,11 @@ export class SHACLFlow {
       target: Literal.from(this.name).toUrl()
     });
 
-    // Top-level interpretation hint (optional, drives AI state suggestion)
-    if (this.interpretationHint !== undefined) {
+    // Top-level interpretation hint (optional, drives AI state suggestion).
+    // Empty strings are treated as "unset" so a round-trip through the graph
+    // doesn't materialise an empty-hint predicate that consumers would then
+    // read back as a meaningful value.
+    if (this.interpretationHint) {
       links.push({
         source: flowUri,
         predicate: "ad4m://interpretationHint",
@@ -385,8 +405,9 @@ export class SHACLFlow {
         target: `literal:string:${encodeURIComponent(JSON.stringify(state.stateCheck))}`
       });
 
-      // Per-state interpretation hint (optional, drives AI state suggestion)
-      if (state.interpretationHint !== undefined) {
+      // Per-state interpretation hint (optional, drives AI state suggestion).
+      // Empty strings treated as unset — same rationale as the flow-level hint.
+      if (state.interpretationHint) {
         links.push({
           source: stateUri,
           predicate: "ad4m://interpretationHint",
@@ -407,8 +428,8 @@ export class SHACLFlow {
 
       // Per-state `semanticCheck` hint — optional English confirmation
       // that runs after `requires` matches, for states where structural
-      // presence isn't sufficient evidence.
-      if (state.semanticCheck !== undefined) {
+      // presence isn't sufficient evidence. Empty string = unset.
+      if (state.semanticCheck) {
         links.push({
           source: stateUri,
           predicate: "ad4m://semanticCheck",
@@ -495,15 +516,21 @@ export class SHACLFlow {
     
     const flow = new SHACLFlow(name, namespace);
 
-    // Find top-level interpretation hint
+    // Find top-level interpretation hint. Only accept a decoded value that
+    // is a non-empty string — malformed literals (Literal.get() can return
+    // an object, number, etc.) leave the field unset rather than becoming
+    // corrupt flow metadata.
     const flowHintLink = links.find(l =>
       l.source === flowUri && l.predicate === "ad4m://interpretationHint"
     );
     if (flowHintLink) {
       try {
-        flow.interpretationHint = Literal.fromUrl(flowHintLink.target).get() as string;
+        const decoded = Literal.fromUrl(flowHintLink.target).get();
+        if (typeof decoded === "string" && decoded.length > 0) {
+          flow.interpretationHint = decoded;
+        }
       } catch {
-        // Ignore parse errors
+        // Ignore parse errors — leave unset.
       }
     }
 
@@ -577,21 +604,26 @@ export class SHACLFlow {
         }
       }
       
-      // Get per-state interpretation hint (optional)
+      // Get per-state interpretation hint (optional). Same non-empty-string
+      // guard as the flow-level hint.
       const hintLink = links.find(l =>
         l.source === stateUri && l.predicate === "ad4m://interpretationHint"
       );
       let interpretationHint: string | undefined;
       if (hintLink) {
         try {
-          interpretationHint = Literal.fromUrl(hintLink.target).get() as string;
+          const decoded = Literal.fromUrl(hintLink.target).get();
+          if (typeof decoded === "string" && decoded.length > 0) {
+            interpretationHint = decoded;
+          }
         } catch {
-          // Ignore parse errors
+          // Ignore parse errors — leave unset.
         }
       }
 
       // Get per-state `requires` guard (optional) — one link carrying a
-      // JSON-encoded ModelQuery[].
+      // JSON-encoded ModelQuery[]. Reject arrays whose entries are not
+      // ModelQuery-shaped (missing/non-string `className`, `null`, primitives).
       const requiresLink = links.find(l =>
         l.source === stateUri && l.predicate === "ad4m://requires"
       );
@@ -603,24 +635,27 @@ export class SHACLFlow {
             ""
           );
           const parsed = JSON.parse(decodeURIComponent(jsonStr));
-          if (Array.isArray(parsed)) {
-            requires = parsed;
+          if (Array.isArray(parsed) && parsed.every(isModelQueryShape)) {
+            requires = parsed as ModelQuery[];
           }
         } catch {
           // Ignore parse errors — leave requires unset rather than crash
         }
       }
 
-      // Get per-state `semanticCheck` hint (optional)
+      // Get per-state `semanticCheck` hint (optional). Non-empty-string guard.
       const semanticCheckLink = links.find(l =>
         l.source === stateUri && l.predicate === "ad4m://semanticCheck"
       );
       let semanticCheck: string | undefined;
       if (semanticCheckLink) {
         try {
-          semanticCheck = Literal.fromUrl(semanticCheckLink.target).get() as string;
+          const decoded = Literal.fromUrl(semanticCheckLink.target).get();
+          if (typeof decoded === "string" && decoded.length > 0) {
+            semanticCheck = decoded;
+          }
         } catch {
-          // Ignore parse errors
+          // Ignore parse errors — leave unset.
         }
       }
 
@@ -693,7 +728,8 @@ export class SHACLFlow {
       startAction: this.startAction,
       states: this._states,
       transitions: this._transitions,
-      ...(this.interpretationHint !== undefined ? { interpretationHint: this.interpretationHint } : {})
+      // Empty strings treated as unset — same semantics as the toLinks path.
+      ...(this.interpretationHint ? { interpretationHint: this.interpretationHint } : {})
     };
   }
 
@@ -704,11 +740,28 @@ export class SHACLFlow {
     const flow = new SHACLFlow(json.name, json.namespace);
     flow.flowable = json.flowable || "any";
     flow.startAction = json.startAction || [];
-    if (typeof json.interpretationHint === "string") {
+    // Non-empty-string guard — mirrors the toLinks-side reader.
+    if (typeof json.interpretationHint === "string" && json.interpretationHint.length > 0) {
       flow.interpretationHint = json.interpretationHint;
     }
     for (const state of json.states || []) {
-      flow.addState(state);
+      // Same validation as the toLinks path: reject malformed optional fields
+      // rather than let them poison downstream consumers.
+      const sanitized: FlowState = {
+        name: state.name,
+        value: state.value,
+        stateCheck: state.stateCheck,
+      };
+      if (typeof state.interpretationHint === "string" && state.interpretationHint.length > 0) {
+        sanitized.interpretationHint = state.interpretationHint;
+      }
+      if (Array.isArray(state.requires) && state.requires.every(isModelQueryShape)) {
+        sanitized.requires = state.requires as ModelQuery[];
+      }
+      if (typeof state.semanticCheck === "string" && state.semanticCheck.length > 0) {
+        sanitized.semanticCheck = state.semanticCheck;
+      }
+      flow.addState(sanitized);
     }
     for (const transition of json.transitions || []) {
       flow.addTransition(transition);
