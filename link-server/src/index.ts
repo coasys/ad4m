@@ -7,7 +7,6 @@ interface CliArgs {
   dataDir: string;
   selfUrl?: string;
   autoAdmit: boolean;
-  skipLinkVerification: boolean;
 }
 
 const USAGE = `link-server — self-hostable link language server for AD4M
@@ -36,7 +35,6 @@ function parseArgs(argv: string[]): CliArgs {
   let dataDir = process.env.DATA_DIR ?? "./data";
   let selfUrl: string | undefined = process.env.SELF_URL;
   let autoAdmit = envBool("AUTO_ADMIT");
-  let skipLinkVerification = envBool("SKIP_LINK_VERIFICATION");
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -63,9 +61,6 @@ function parseArgs(argv: string[]): CliArgs {
       case "--auto-admit":
         autoAdmit = true;
         break;
-      case "--skip-link-verification":
-        skipLinkVerification = true;
-        break;
       case "-h":
       case "--help":
         console.log(USAGE);
@@ -78,7 +73,7 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
 
-  return { port, host, dataDir, selfUrl, autoAdmit, skipLinkVerification };
+  return { port, host, dataDir, selfUrl, autoAdmit };
 }
 
 async function main(): Promise<void> {
@@ -89,7 +84,6 @@ async function main(): Promise<void> {
     host: args.host,
     selfUrl: args.selfUrl,
     autoAdmit: args.autoAdmit,
-    skipLinkVerification: args.skipLinkVerification,
     logger: true,
   });
 

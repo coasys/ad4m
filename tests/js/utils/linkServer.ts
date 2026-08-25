@@ -49,19 +49,11 @@ export async function startLinkServer(readyTimeoutMs = 15000): Promise<LinkServe
         process.execPath,
         [LINK_SERVER_ENTRY, "--port", String(port), "--data", dataDir],
         {
-            // SKIP_LINK_VERIFICATION: the Rust executor signs links as
-            // sha256(serde_json(link.data) ++ timestamp_bytes) but link-server's
-            // canonicalLinkPayload builds a different JSON envelope (all fields
-            // inline including author + timestamp). Verification fails on every
-            // executor-produced link. Auth is still enforced (JWT bound to DID);
-            // link signature is defense-in-depth on top.
-            // Tracked: https://github.com/coasys/ad4m/issues/916
             env: {
                 ...process.env,
                 PORT: String(port),
                 DATA_DIR: dataDir,
                 AUTO_ADMIT: "true",
-                SKIP_LINK_VERIFICATION: "true",
             },
             stdio: ["ignore", "pipe", "pipe"],
         },

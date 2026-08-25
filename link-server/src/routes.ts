@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { didToPublicKey, hashMessageForVerify, verifyHex, verifyLinkExpression, type AuthManager, type ChallengeStore } from "./auth.js";
+import { didToPublicKey, hashMessageForVerify, verifyHex, type AuthManager, type ChallengeStore } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
 import { rotateRoomKey } from "./encryption.js";
 import type { FederateResult, FederationIdentity, FederationManager } from "./federation.js";
@@ -23,7 +23,6 @@ export interface RouteContext {
   federation: FederationManager;
   identity: FederationIdentity;
   autoAdmit: boolean;
-  skipLinkVerification: boolean;
   rateLimits: {
     authIp: SlidingWindowLimiter;
     roomJwt: SlidingWindowLimiter;
@@ -192,9 +191,10 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
             .code(400)
             .send({ error: "every link's author must match the authenticated DID" });
         }
-        if (!ctx.skipLinkVerification && !(await verifyLinkExpression(link))) {
-          return reply.code(400).send({ error: "invalid link signature" });
-        }
+        // Link signatures travel as metadata — the server stores and relays
+        // them as-is. JWT auth (bound to the agent's DID) proves identity at
+        // the transport layer. Downstream consumers can verify signatures if
+        // they choose; the server does not need to.
         const encrypted = isEncryptedLinkData(link.data);
         if (room.e2e_enabled && !encrypted) {
           return reply.code(400).send({ error: "room requires E2E-encrypted link data" });

@@ -170,18 +170,13 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
 //   - Common bulk-add case (1500 unique addLinks) → 1 segment → 1 POST.
 //   - Per-segment bounded retries with exponential backoff (replaces the
 //     old `commitWithRetry`). If a segment still fails after
-//     `MAX_COMMIT_ATTEMPTS`, the WHOLE tail of subsequent segments is
-//     aborted — segments were split precisely because they conflict on
-//     link identity, so letting a later segment land after an earlier one
-//     failed would leave the server in a state that neither matches the
-//     caller's intent nor the local store (e.g. remove(X) fails + add(X)
-//     succeeds → server has X, local re-added it, but the intended remove
-//     never happened). We emit `LinkLanguageInstalledButNotSynced` so the
-//     executor knows to treat the language as behind. The local store
-//     already reflects every write (index.ts applies before enqueueing);
-//     there is no automatic re-push path — a hard-failed batch requires
-//     external recovery (teardown + rejoin, or a future re-push flow).
-//     Tracked: https://github.com/coasys/ad4m/issues/917
+//     `MAX_COMMIT_ATTEMPTS`, the failed segment and all remaining
+//     downstream segments get re-enqueued into `_pendingQueue` so the
+//     next flush cycle picks them up automatically. The existing
+//     coalescing handles dedup if diffs overlap, and the microtask
+//     scheduling triggers the retry naturally. We emit
+//     `LinkLanguageInstalledButNotSynced` so the executor knows the
+//     language lags until the re-queued segments land.
 // ---------------------------------------------------------------------------
 
 const MAX_COMMIT_ATTEMPTS = 3;
@@ -229,22 +224,30 @@ async function flushBatch(): Promise<void> {
         if (segment.additions.length === 0 && segment.removals.length === 0) continue;
         const ok = await commitSegmentWithRetries(segment);
         if (!ok) {
-            const remaining = segments.length - i - 1;
-            const droppedSummary = remaining > 0
-                ? segments.slice(i + 1).map((s, idx) =>
-                    `  segment ${i + 2 + idx}: ${s.additions.length} adds, ${s.removals.length} removes`)
-                    .join("\n")
-                : "";
-            console.error(
-                `[server-link-language] batched flush aborted: segment ${i + 1}/${segments.length} ` +
-                `failed after ${MAX_COMMIT_ATTEMPTS} attempts (${segment.additions.length} adds, ` +
-                `${segment.removals.length} removes)` +
-                (remaining > 0
-                    ? `; skipping ${remaining} downstream segment(s) to avoid divergent partial-apply:\n${droppedSummary}`
-                    : ".") +
-                `\nLocal store already reflects all writes; server is behind. ` +
-                `The language has no automatic re-push path — a subsequent sync() only PULLS.`,
+            // Re-enqueue the failed segment + all remaining downstream
+            // segments. They land at the front of the pending queue so
+            // the next flush cycle retries them in original order.
+            const requeue = segments.slice(i);
+            const requeueSummary = requeue.map((s, idx) =>
+                `  segment ${i + 1 + idx}: ${s.additions.length} adds, ${s.removals.length} removes`)
+                .join("\n");
+            console.warn(
+                `[server-link-language] segment ${i + 1}/${segments.length} failed after ` +
+                `${MAX_COMMIT_ATTEMPTS} attempts; re-enqueueing ${requeue.length} segment(s) ` +
+                `for next flush cycle:\n${requeueSummary}`,
             );
+            _pendingQueue.unshift(...requeue);
+            if (!_flushScheduled) {
+                _flushScheduled = true;
+                _inflight = _inflight
+                    .then(() => flushBatch())
+                    .catch((err) => {
+                        console.error(
+                            "[server-link-language] re-enqueued batch flush crashed:",
+                            err,
+                        );
+                    });
+            }
             emitSyncStateSafe("LinkLanguageInstalledButNotSynced");
             return;
         }

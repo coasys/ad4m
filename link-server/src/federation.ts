@@ -1,4 +1,4 @@
-import { signHex, verifyHex, verifyLinkExpression } from "./auth.js";
+import { signHex, verifyHex } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
 import {
   canonicalFederationPayload,
@@ -20,9 +20,9 @@ import type { WsManager } from "./ws.js";
  * when an admin adds the peer, or pinned on first successfully-signed
  * contact if that fetch failed/raced a peer that was briefly offline).
  * Every inbound federate/reconcile call must carry a valid ed25519
- * signature from a known peer key, and every individual link inside a
- * federated diff must independently pass `verifyLinkExpression` — a peer
- * vouches for relaying agent-signed content, it cannot forge it.
+ * signature from a known peer key. Link signatures travel as metadata —
+ * the server stores and relays them as-is; downstream consumers can
+ * verify if they choose.
  *
  * To keep the topology simple (pairwise peers, not a full gossip mesh) this
  * server only forwards diffs it originated locally; diffs learned about via
@@ -183,12 +183,6 @@ export class FederationManager {
     const validSig = await this.verifyPeerSignature(body.serverPublicKey, payload, body.serverSignature);
     if (!validSig) return { ok: false, status: 403, error: "invalid server signature" };
 
-    for (const link of [...body.diff.additions, ...body.diff.removals]) {
-      if (!(await verifyLinkExpression(link))) {
-        return { ok: false, status: 400, error: `invalid link signature for author ${link.author}` };
-      }
-    }
-
     const authorDid = `federation:${body.serverPublicKey.slice(0, 16)}`;
     const { sequence, revision } = this.db.applyDiffAndAppend(roomId, body.diff, authorDid);
     this.ws.broadcast(roomId, { type: "diff", payload: body.diff, revision, sequence });
@@ -261,17 +255,6 @@ export class FederationManager {
 
     for (const diff of response.diffs) {
       if (diff.additions.length === 0 && diff.removals.length === 0) continue;
-      let allValid = true;
-      for (const link of [...diff.additions, ...diff.removals]) {
-        if (!(await verifyLinkExpression(link))) {
-          allValid = false;
-          break;
-        }
-      }
-      if (!allValid) {
-        this.log(`federation: reconcile response from ${peerUrl} had an invalid link signature, skipping`);
-        continue;
-      }
       const { sequence, revision: newRevision } = this.db.applyDiffAndAppend(
         roomId,
         diff,

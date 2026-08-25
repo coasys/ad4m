@@ -649,17 +649,22 @@ describe("sync: enqueueCommitBatched", () => {
         assert.deepEqual(posts[3].additions[0].data, Y.data);
     });
 
-    it("aborts the queue tail when a segment fails all retries", async () => {
-        // Segments are split precisely because they conflict on link
-        // identity — letting a downstream segment land after an upstream
-        // hard-failed would leave server + local store divergent.
+    it("re-enqueues failed segments for the next flush cycle", async () => {
+        // When a segment fails all retries, it and all remaining
+        // downstream segments get re-enqueued into the pending queue
+        // so the next flush picks them up automatically.
         const transport = new MockTransport();
         const posts: any[] = [];
+        let failCount = 0;
         transport.route(
             (url, method) => method === "POST" && url.endsWith("/commit"),
             (_url, _method, body) => {
                 posts.push(JSON.parse(body));
-                return { status: 500, headers: {}, body: "hard failure" };
+                failCount++;
+                // Fail the first 3 attempts (one full retry cycle),
+                // then succeed so the drain can settle.
+                if (failCount <= 3) return { status: 500, headers: {}, body: "hard failure" };
+                return { status: 200, headers: {}, body: "{}" };
             },
         );
         setup(transport);
@@ -674,9 +679,11 @@ describe("sync: enqueueCommitBatched", () => {
         syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
         syncModule.enqueueCommitBatched({ additions: [], removals: [X] });
         await syncModule.drainCommitBatch();
-        // First segment: 3 attempts (MAX_COMMIT_ATTEMPTS) — all fail.
-        // Then the tail is aborted, so segments 2 and 3 are NOT attempted.
-        assert.equal(posts.length, 3, "only the first segment's 3 retry attempts should hit the wire");
-        assert.ok(syncStates.includes("LinkLanguageInstalledButNotSynced"));
+        // First flush: segment 1 fails 3 times → re-enqueued with segments 2+3.
+        // Second flush: segment 1 succeeds (attempt 4), then segments 2+3.
+        assert.ok(posts.length > 3,
+            `re-enqueued segments should produce more POSTs than the initial 3 retries (got ${posts.length})`);
+        assert.ok(syncStates.includes("LinkLanguageInstalledButNotSynced"),
+            "must report LinkLanguageInstalledButNotSynced on first failure");
     });
 });

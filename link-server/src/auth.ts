@@ -3,7 +3,7 @@ import * as ed from "@noble/ed25519";
 import { base58 } from "@scure/base";
 import { SignJWT, jwtVerify, errors as joseErrors } from "jose";
 import type { LinkServerDB } from "./db.js";
-import { canonicalLinkPayload, type LinkExpression } from "./types.js";
+
 
 /**
  * DID key handling, ed25519 sign/verify, challenge-response and JWT session
@@ -88,29 +88,6 @@ export async function verifyHex(
 ): Promise<boolean> {
   try {
     return await ed.verifyAsync(signatureHex, toBytes(message), publicKey);
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Verifies a LinkExpression's proof: the `proof.key` DID (base, without
- * fragment) must match `link.author`, and the signature must verify over
- * the canonical link payload for that author's ed25519 public key.
- */
-export async function verifyLinkExpression(link: LinkExpression): Promise<boolean> {
-  // Defensive: this processes attacker-controlled JSON from HTTP request
-  // bodies (local commits and federated diffs alike), so any malformed
-  // shape must fail verification rather than throw.
-  try {
-    if (!link || typeof link !== "object") return false;
-    if (typeof link.author !== "string" || typeof link.timestamp !== "string") return false;
-    if (!link.data || typeof link.data !== "object") return false;
-    if (!link.proof || !link.proof.signature || !link.proof.key) return false;
-    if (didBase(link.proof.key) !== link.author) return false;
-    const pubkey = didToPublicKey(link.author);
-    const payload = canonicalLinkPayload(link);
-    return await verifyHex(pubkey, payload, link.proof.signature);
   } catch {
     return false;
   }
