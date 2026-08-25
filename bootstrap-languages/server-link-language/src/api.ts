@@ -1,0 +1,171 @@
+/**
+ * Server HTTP client — thin, typed wrappers around every
+ * link-server REST endpoint. Pure module: takes the Transport
+ * singleton from adapters.ts (swappable for a mock in tests) and never
+ * imports ad4m:host directly.
+ */
+
+import { getTransport } from "./adapters.js";
+import type { RoomConfig } from "./adapters.js";
+import type {
+    AclResponse,
+    AuthChallengeResponse,
+    AuthTokenResponse,
+    KeysResponse,
+    PeersResponse,
+    RenderResponse,
+    RevisionResponse,
+    SyncResponse,
+    WirePerspectiveDiff,
+} from "./types.js";
+
+export class ApiError extends Error {
+    status: number;
+    constructor(status: number, message: string) {
+        super(message);
+        this.name = "ApiError";
+        this.status = status;
+    }
+}
+
+function roomUrl(config: RoomConfig, path: string): string {
+    return `${config.serverUrl}/rooms/${encodeURIComponent(config.roomId)}${path}`;
+}
+
+function jsonHeaders(token?: string): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return headers;
+}
+
+async function request<T>(
+    url: string,
+    method: string,
+    headers: Record<string, string>,
+    body?: string,
+): Promise<T> {
+    const res = await getTransport().fetch(url, method, headers, body ?? "");
+    if (res.status < 200 || res.status >= 300) {
+        throw new ApiError(res.status, res.body || `HTTP ${res.status} from ${method} ${url}`);
+    }
+    if (!res.body || res.body.length === 0) {
+        return undefined as unknown as T;
+    }
+    try {
+        return JSON.parse(res.body) as T;
+    } catch (err) {
+        throw new ApiError(
+            res.status,
+            `Invalid JSON response from ${method} ${url}: ${(err as Error).message}`,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+/** Step 1: POST {did} -> {challenge} */
+export async function requestChallenge(config: RoomConfig, did: string): Promise<string> {
+    const res = await request<AuthChallengeResponse>(
+        roomUrl(config, "/auth"),
+        "POST",
+        jsonHeaders(),
+        JSON.stringify({ did }),
+    );
+    return res.challenge;
+}
+
+/**
+ * Step 2: POST {did, challenge, signature} -> {token}
+ *
+ * `x25519PublicKeyHex` is an additive field (not in the base spec) this
+ * language sends so the server can capture the agent's E2E public key at
+ * the one point it already verifies DID ownership. A server that doesn't
+ * care about E2E simply ignores it. See src/encryption.ts module doc.
+ */
+export async function verifyChallenge(
+    config: RoomConfig,
+    did: string,
+    challenge: string,
+    signature: string,
+    x25519PublicKeyHex?: string,
+): Promise<string> {
+    const payload: Record<string, unknown> = { did, challenge, signature };
+    if (x25519PublicKeyHex) payload.x25519PublicKey = x25519PublicKeyHex;
+
+    const res = await request<AuthTokenResponse>(
+        roomUrl(config, "/auth"),
+        "POST",
+        jsonHeaders(),
+        JSON.stringify(payload),
+    );
+    return res.token;
+}
+
+// ---------------------------------------------------------------------------
+// Perspective sync / commit
+// ---------------------------------------------------------------------------
+
+export async function commitDiff(config: RoomConfig, token: string, diff: WirePerspectiveDiff): Promise<void> {
+    await request<unknown>(roomUrl(config, "/commit"), "POST", jsonHeaders(token), JSON.stringify(diff));
+}
+
+export async function fetchSync(config: RoomConfig, token: string, since: number): Promise<SyncResponse> {
+    const url = roomUrl(config, `/sync?since=${encodeURIComponent(String(since))}`);
+    const res = await request<Partial<SyncResponse>>(url, "GET", jsonHeaders(token));
+    return {
+        diffs: res.diffs ?? [],
+        revision: res.revision ?? "",
+        sequence: typeof res.sequence === "number" ? res.sequence : since,
+    };
+}
+
+export async function fetchRender(config: RoomConfig, token: string): Promise<RenderResponse> {
+    const res = await request<Partial<RenderResponse>>(roomUrl(config, "/render"), "GET", jsonHeaders(token));
+    return { links: res.links ?? [], revision: res.revision ?? "" };
+}
+
+// ---------------------------------------------------------------------------
+// Peers / revision / ACL / keys
+// ---------------------------------------------------------------------------
+
+export async function fetchPeers(config: RoomConfig, token: string): Promise<string[]> {
+    const res = await request<Partial<PeersResponse>>(roomUrl(config, "/peers"), "GET", jsonHeaders(token));
+    return res.peers ?? [];
+}
+
+export async function fetchRevision(config: RoomConfig, token: string): Promise<RevisionResponse> {
+    const res = await request<Partial<RevisionResponse>>(roomUrl(config, "/revision"), "GET", jsonHeaders(token));
+    return { revision: res.revision ?? "", sequence: typeof res.sequence === "number" ? res.sequence : 0 };
+}
+
+export async function fetchAcl(config: RoomConfig, token: string): Promise<AclResponse> {
+    const res = await request<Partial<AclResponse>>(roomUrl(config, "/acl"), "GET", jsonHeaders(token));
+    return { admin: res.admin ?? "", members: res.members ?? [] };
+}
+
+/** Returns null when the room has no E2E key configured (server responds
+ * 404/204, or omits/empties `encryptedKey`). */
+export async function fetchRoomKey(config: RoomConfig, token: string): Promise<KeysResponse | null> {
+    try {
+        const res = await request<Partial<KeysResponse>>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
+        if (!res || !res.encryptedKey) return null;
+        return { encryptedKey: res.encryptedKey, version: res.version ?? 0 };
+    } catch (err) {
+        if (err instanceof ApiError && (err.status === 404 || err.status === 204)) {
+            return null;
+        }
+        throw err;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket URL
+// ---------------------------------------------------------------------------
+
+export function wsUrl(config: RoomConfig, token: string): string {
+    const httpUrl = roomUrl(config, "/ws");
+    const wsBase = httpUrl.replace(/^http/, "ws"); // http(s):// -> ws(s)://
+    return `${wsBase}?token=${encodeURIComponent(token)}`;
+}

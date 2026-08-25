@@ -1,0 +1,16 @@
+services:
+  link-server:
+    build: .
+    ports:
+      - "${PORT:-3456}:${PORT:-3456}"
+    volumes:
+      - link-server-data:/data
+    environment:
+      PORT: "${PORT:-3456}"
+      DATA_DIR: /data
+      AUTO_ADMIT: "${AUTO_ADMIT:-false}"
+      SELF_URL: "${SELF_URL:-}"
+    restart: unless-stopped
+
+volumes:
+  link-server-data:
