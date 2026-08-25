@@ -6,6 +6,15 @@ members = [
     "rust-executor",
     "ui/src-tauri"
 ]
+# scripts/install-hc-toolchain.sh clones coasys/holochain at the rev pinned in
+# our Cargo.lock into .hc-toolchain/src/ and builds `hc` from THERE, but that
+# tree's own dep graph has an unresolvable libsqlite3-sys links="sqlite3"
+# conflict that our workspace-level [patch.crates-io] entries below resolve.
+# The clone lives outside `members` so it is only compiled when the toolchain
+# script explicitly asks for it (never as part of the normal workspace build).
+exclude = [
+    ".hc-toolchain",
+]
 
 [patch.crates-io]
 # coasys/lair 0.7.1-coasys-rusqlite-0.40 fork: upstream lair 0.7.1 with

@@ -75,6 +75,17 @@ commands:
           command: |
             rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
       - run:
+          # Isolate `hc` per CI run so the host's global `hc` (shared across
+          # branches / other PRs on this self-hosted runner) doesn't set the
+          # `holochain_cli_bundle` schema for us. The workspace's Cargo.lock
+          # is the source of truth; this script installs a matching `hc`
+          # into $REPO/.hc-toolchain/bin/ and prepareTestDirectory.sh +
+          # the bootstrap-language build.sh files prefer it over $(which hc).
+          # Fixes: `Failed to unpack hApp: unknown field 'signal_url'`.
+          name: Install pinned Holochain CLI (matches Cargo.lock)
+          command: bash scripts/install-hc-toolchain.sh
+          no_output_timeout: 30m
+      - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
 
@@ -90,6 +101,16 @@ jobs:
           name: Clean up stale local artifact stashes (older than 1 day)
           command: |
             find /home/marvin/ci-artifacts -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+      - run:
+          # Install a per-workspace `hc` binary matching Cargo.lock. Needed
+          # here (in build-and-test) because pnpm build-libs -> the
+          # bootstrap-languages build.sh files pack DNAs with `hc`, and if
+          # that `hc` is out of sync with the linked `holochain_cli_bundle`
+          # the packed bundles trip `unknown field 'signal_url'` at install
+          # time in downstream integration tests.
+          name: Install pinned Holochain CLI (matches Cargo.lock)
+          command: bash scripts/install-hc-toolchain.sh
+          no_output_timeout: 30m
       - run:
           name: cargo fmt --check
           command: cargo fmt --check

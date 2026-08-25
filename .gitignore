@@ -1,5 +1,8 @@
 /src/**/*.js
 *.js.map
+# Per-workspace Holochain CLI toolchain built by scripts/install-hc-toolchain.sh
+# Isolated per repo so it doesn't clobber ~/.cargo/bin/hc on shared CI runners.
+.hc-toolchain/
 *.js
 !executor/scripts/*.js
 !skills/ad4m/waker/*.js
