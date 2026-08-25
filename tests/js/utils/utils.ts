@@ -34,7 +34,21 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
 }
 
 export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, relayUrl: string | null, process: ChildProcess}> {
-    let servicesProcess = exec(`kitsune2-bootstrap-srv`);
+    // Prefer the workspace-local, version-pinned kitsune2-bootstrap-srv
+    // installed by scripts/install-hc-toolchain.sh into $REPO/.hc-toolchain/bin/.
+    // This MUST match the kitsune2 version the executor is linked against
+    // (crates.io kitsune2 0.5.0 as of HC 0.7.0), otherwise the standalone
+    // bootstrap-srv and the executor speak different wire protocols and
+    // signals silently fail to route between agents on different nodes.
+    // Falls back to $PATH for dev convenience.
+    // tests/js/utils/utils.ts -> repo root is three parents up.
+    // (fs/path are already imported at the top of this module.)
+    const fs = await import("node:fs");
+    const repoRoot = path.resolve(__dirname, "..", "..", "..");
+    const localBin = path.join(repoRoot, ".hc-toolchain", "bin", "kitsune2-bootstrap-srv");
+    const bootstrapBin = fs.existsSync(localBin) ? localBin : "kitsune2-bootstrap-srv";
+    console.log(`runHcLocalServices: using ${bootstrapBin}`);
+    let servicesProcess = exec(bootstrapBin);
 
     let proxyUrl: string | null = null;
     let bootstrapUrl: string | null = null;

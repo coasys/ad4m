@@ -51,32 +51,38 @@ sqlx-mysql = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libs
 sqlx-postgres = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
 sqlx-sqlite = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
 
-# DEBUG: Using forked kitsune2 with debugging instrumentation and fixed default behavior
-# These patches ensure ad4m uses the fixed kitsune2 that doesn't default to blocking
-#kitsune2_api = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
-#kitsune2_core = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
-#kitsune2_api = { path = "../../kitsune2/crates/api" }
-#kitsune2_core = { path = "../../kitsune2/crates/core" }
-#kitsune2 = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_dht = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_gossip = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_bootstrap_srv = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_bootstrap_client = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_transport_iroh = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
-#kitsune2_transport_iroh = { path = "../../kitsune2/crates/transport_iroh" }
-#kitsune2_bootstrap_client = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
-#kitsune2_bootstrap_client = { path = "../../kitsune2/crates/bootstrap_client" }
+# kitsune2 patches deliberately removed 2026-08-25 (Nico approved plan A).
+#
+# Historical context: these patches used to pin kitsune2 to a lucksus fork
+# (fix/unexpected-blocked-messages, debug-logs) and later to a specific
+# holochain/kitsune2 rev (320a4d9e...) at version 0.4.0-dev.5. That was the
+# other half of a two-repo fork pair with coasys/holochain: our fork carried
+# the space-override changes, kitsune2 carried the blocked-message fix and
+# the debug instrumentation. The kitsune2 changes have since been merged
+# upstream; only the space-override half still lives on coasys/holochain.
+#
+# Meanwhile coasys/holochain 0.7.0 stable now depends on kitsune2 = "0.5.0"
+# from crates.io. Our stale patches pointed at 0.4.0-dev.5 (an incompatible
+# version) AND were declared in rust-executor/Cargo.toml, not this workspace
+# root, which cargo silently ignored anyway:
+#
+#   warning: patch for the non root package will be ignored
+#   warning: patch `kitsune2 v0.4.0-dev.5` was not used in the crate graph
+#
+# The net effect: the executor was already linking crates.io kitsune2 0.5.0
+# regardless of these lines, while my host was running an out-of-date
+# kitsune2-bootstrap-srv 0.4.0-dev.3 CLI, causing wire-protocol drift between
+# the standalone bootstrap-srv started by integration tests and the transport
+# crate the executor is linked to. Symptoms: multi-user signal-routing tests
+# time out; send_signal returns "no AgentPubKey found for DID" not because
+# the DID lookup fails but because the transport can't deliver.
+#
+# Fix: drop the patches (they were dead weight and version-mismatched); the
+# workspace now transparently uses crates.io kitsune2 0.5.0 everywhere, and
+# scripts/install-hc-toolchain.sh installs a matching kitsune2-bootstrap-srv
+# 0.5.0 from crates.io into .hc-toolchain/bin/ so the CLI matches the linked
+# library. Nothing to see here.
 
-kitsune2 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_bootstrap_client = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_bootstrap_srv = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_core = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_dht = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_gossip = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-#kitsune2_test_utils = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_transport_iroh = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_transport_tx5 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
 # Optimization for test builds to keep binary under ARM64 ±128MB branch limit.
 # Without this, the test binary is too large for the linker on Apple Silicon.
 [profile.test]
