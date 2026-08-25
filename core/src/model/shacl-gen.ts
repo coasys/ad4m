@@ -461,6 +461,26 @@ export function buildSHACL(
         shape.addProperty(relShape);
     }
 
+    // ── Ordering links ─────────────────────────────────────────────────
+    // Ordering entries are stored on the *parent*, under one shared predicate,
+    // so that reconstruction needs no extra query: they arrive with the
+    // instance's own links. That only works if the instance query asks for them,
+    // and it builds its predicate filter from the shape's declared paths — so a
+    // class owning any ordered collection has to declare the predicate, or the
+    // very links the ordering depends on are filtered out of the read that needs
+    // them.
+    //
+    // One entry covers every ordered relation on the class; each entry names the
+    // relation it belongs to.
+    const hasOrderedRelation = Object.values(allRelationsMeta).some((m) => m.ordering);
+    if (hasOrderedRelation) {
+        shape.addProperty({
+            name: '_collectionOrder',
+            path: 'ad4m://collection_order',
+            nodeKind: 'IRI',
+        });
+    }
+
     // Always set constructor and destructor actions on the shape, even
     // when empty.  An empty array serialises to `literal:string:[]`
     // which the Rust executor parses as a valid (no-op) command list,

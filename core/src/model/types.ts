@@ -447,6 +447,13 @@ export interface RelationMetadata {
   local?: boolean;
   /** Link direction: 'forward' for HasMany/HasOne, 'reverse' for BelongsToMany/BelongsToOne */
   direction?: 'forward' | 'reverse';
+  /**
+   * CRDT ordering config, when this collection has a user-controlled order.
+   *
+   * Its presence is what makes a reorder count as a change: for an ordered
+   * relation the sequence *is* the state, where an unordered one is a set.
+   */
+  ordering?: { strategy: 'linkedList' };
   /** Target model class thunk for hydration and type filtering */
   target?: () => any;
   /**

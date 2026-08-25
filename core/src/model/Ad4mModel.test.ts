@@ -2636,3 +2636,80 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     });
   });
 });
+
+describe("Ordered relations", () => {
+  @Model({ name: "OrderedColumn" })
+  class OrderedColumn extends Ad4mModel {
+    @HasMany({ through: "kanban://has_task", ordering: { strategy: "linkedList" } })
+    tasks: string[] = [];
+
+    @HasMany({ through: "kanban://archived" })
+    archived: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("declares its ordering in SHACL", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const tasks = shape.properties.find((p: any) => p.name === "tasks");
+    expect(tasks.ordering).toBe("linkedList");
+  });
+
+  it("declares the predicate the ordering entries are stored under", () => {
+    // Entries live on the parent under one shared predicate. The instance query
+    // builds its predicate filter from the shape's declared paths, so without
+    // this the read that needs the ordering links filters them out.
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const orderProp = shape.properties.find(
+      (p: any) => p.path === "ad4m://collection_order"
+    );
+    expect(orderProp).toBeDefined();
+  });
+
+  it("omits that predicate when nothing on the class is ordered", () => {
+    @Model({ name: "UnorderedOnly" })
+    class UnorderedOnly extends Ad4mModel {
+      @HasMany({ through: "kanban://archived" })
+      archived: string[] = [];
+    }
+    const { shape } = (UnorderedOnly as any).generateSHACL();
+    expect(
+      shape.properties.find((p: any) => p.path === "ad4m://collection_order")
+    ).toBeUndefined();
+  });
+
+  it("treats a reorder as a change", () => {
+    // The whole point: for an ordered relation the sequence *is* the state, so
+    // sorting before comparing would make save() a no-op for the one edit this
+    // feature exists to support.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.tasks = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.tasks = ["c", "a", "b"];
+    expect(column.changedFields()).toContain("tasks");
+  });
+
+  it("still treats a reorder of an unordered relation as no change", () => {
+    // An unordered relation is a set — the executor returns it by link
+    // timestamp, so assigning the same members in another order changed nothing.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.archived = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.archived = ["c", "a", "b"];
+    expect(column.changedFields()).not.toContain("archived");
+  });
+
+  it("round-trips ordering through SHACL links", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const links = shape.toLinks().map((l: any) => ({
+      source: l.source,
+      predicate: l.predicate,
+      target: l.target,
+    }));
+    const reconstructed = SHACLShape.fromLinks(links as any, shape.nodeShapeUri);
+    const tasks = reconstructed.properties.find((p: any) => p.name === "tasks");
+    expect(tasks!.ordering).toBe("linkedList");
+  });
+});

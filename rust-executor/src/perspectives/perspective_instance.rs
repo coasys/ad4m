@@ -3357,6 +3357,120 @@ impl PerspectiveInstance {
         super::subject_class_of::subject_class_of(&self.sparql_store, &resolver, uris)
     }
 
+    /// The ordering strategy declared for `(source, predicate)`, if any.
+    ///
+    /// Resolved by asking which class this source is an instance of and reading
+    /// that class's shape. Answering `None` — because the source is not a
+    /// subject instance, or its class declares nothing — is the ordinary case
+    /// and costs one classification.
+    async fn ordering_strategy_for(&self, source: &str, predicate: &str) -> Option<String> {
+        let classes = self.subject_class_of(&[source.to_string()]).ok()?;
+        let class_name = classes.get(source)?;
+        let shape = self.get_shape(class_name).ok()?;
+        shape
+            .properties
+            .iter()
+            .find(|p| p.predicate == predicate && p.ordering.is_some())
+            .and_then(|p| p.ordering.clone())
+    }
+
+    /// Write the ordering entries that turn the collection's current order into
+    /// the desired one.
+    ///
+    /// Additive only: entries are never removed, and a removal writes nothing at
+    /// all — dropping the data link is the whole deletion, because the ordering
+    /// entries are position hints over a membership set the data links define.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_collection_ordering(
+        &mut self,
+        source: &str,
+        predicate: &str,
+        current_members: &[(String, String)],
+        desired: &[String],
+        status: LinkStatus,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let strategy_name = match self.ordering_strategy_for(source, predicate).await {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let strategy = match crate::perspectives::ordering::create_strategy(&strategy_name) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("ordering: {e}");
+                return Ok(());
+            }
+        };
+
+        let existing_order_links = self
+            .get_links(&LinkQuery {
+                source: Some(source.to_string()),
+                predicate: Some(
+                    crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                ),
+                target: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            })
+            .await?;
+        let targets: Vec<String> = existing_order_links
+            .iter()
+            .map(|l| l.data.target.clone())
+            .collect();
+        let current_entries =
+            crate::perspectives::ordering::parse_ordering_entries(&targets, predicate);
+
+        let agent_did = crate::agent::did();
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+
+        let entries = if current_entries.is_empty() {
+            // No prior ordering: the first save on an ordered collection, or one
+            // that was unordered until its SHACL said otherwise.
+            strategy.generate_full(desired, predicate, &agent_did, now_ms)
+        } else {
+            strategy
+                .diff(
+                    &current_entries,
+                    current_members,
+                    desired,
+                    predicate,
+                    &agent_did,
+                    now_ms,
+                )
+                .add
+        };
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let links: Vec<Link> = entries
+            .iter()
+            .filter_map(
+                |entry| match crate::perspectives::ordering::encode_ordering_entry(entry) {
+                    Ok(target) => Some(Link {
+                        source: source.to_string(),
+                        predicate: Some(
+                            crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                        ),
+                        target,
+                    }),
+                    Err(e) => {
+                        log::warn!("ordering: could not encode entry: {e}");
+                        None
+                    }
+                },
+            )
+            .collect();
+
+        if !links.is_empty() {
+            self.add_links(links, status, batch_id, context).await?;
+        }
+        Ok(())
+    }
+
     pub async fn model_query(
         &self,
         class_name: &str,
@@ -4376,8 +4490,16 @@ impl PerspectiveInstance {
                     .await?;
                 }
                 Action::CollectionSetter => {
-                    // Remove matching persisted links
-                    let link_expressions = self
+                    // Diff, rather than delete-everything-then-re-add.
+                    //
+                    // The old pattern made a one-item change to a 100-item
+                    // collection cost 100 removals and 101 additions, every one
+                    // of them signed and synced. It also restamped every link,
+                    // which is what today's ordering silently depends on — so
+                    // the diff and the ordering below have to arrive together or
+                    // every existing ordered collection scrambles on its next
+                    // save.
+                    let existing = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
                             predicate: predicate.clone(),
@@ -4387,34 +4509,73 @@ impl PerspectiveInstance {
                             limit: None,
                         })
                         .await?;
-                    for link_expression in link_expressions {
-                        self.remove_link(link_expression.into(), batch_id.clone())
-                            .await?;
+
+                    let desired: Vec<String> = parameters
+                        .iter()
+                        .map(|p| jsvalue_to_string(&p.value))
+                        .collect();
+                    let desired_set: std::collections::HashSet<&str> =
+                        desired.iter().map(|s| s.as_str()).collect();
+
+                    // What the collection holds now, with each member's earliest
+                    // link timestamp — the ordering module's membership input.
+                    let mut current_members: Vec<(String, String)> = Vec::new();
+                    let mut existing_targets: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for link in &existing {
+                        if existing_targets.insert(link.data.target.clone()) {
+                            current_members
+                                .push((link.data.target.clone(), link.timestamp.clone()));
+                        }
                     }
-                    // Also prune matching links from pending batch additions
+
+                    for link in &existing {
+                        if !desired_set.contains(link.data.target.as_str()) {
+                            self.remove_link(link.clone().into(), batch_id.clone())
+                                .await?;
+                        }
+                    }
+
+                    // Prune pending batch additions for targets that are going
+                    // away, so a save+update in one transaction cannot leave a
+                    // duplicate behind.
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
                         if let Some(batch) = batches.get_mut(bid) {
                             batch.diff.additions.retain(|link_expr| {
                                 !(link_expr.data.source == source
-                                    && link_expr.data.predicate == predicate)
+                                    && link_expr.data.predicate == predicate
+                                    && !desired_set.contains(link_expr.data.target.as_str()))
                             });
                         }
                     }
-                    self.add_links(
-                        parameters
-                            .iter()
-                            .map(|p| Link {
-                                source: source.clone(),
-                                predicate: predicate.clone(),
-                                target: jsvalue_to_string(&p.value),
-                            })
-                            .collect(),
-                        status,
-                        batch_id.clone(),
-                        context,
-                    )
-                    .await?;
+
+                    let new_links: Vec<Link> = desired
+                        .iter()
+                        .filter(|t| !existing_targets.contains(*t))
+                        .map(|t| Link {
+                            source: source.clone(),
+                            predicate: predicate.clone(),
+                            target: t.clone(),
+                        })
+                        .collect();
+                    if !new_links.is_empty() {
+                        self.add_links(new_links, status.clone(), batch_id.clone(), context)
+                            .await?;
+                    }
+
+                    if let Some(ref pred) = predicate {
+                        self.apply_collection_ordering(
+                            &source,
+                            pred,
+                            &current_members,
+                            &desired,
+                            status,
+                            batch_id.clone(),
+                            context,
+                        )
+                        .await?;
+                    }
                 }
             }
 
