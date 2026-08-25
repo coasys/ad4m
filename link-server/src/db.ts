@@ -159,26 +159,19 @@ export class LinkServerDB {
 
   createRoom(roomId: string, adminDid: string): RoomRow {
     const createdAt = new Date().toISOString();
+    const revision = computeRevision([]);
     this.raw
       .prepare(
-        "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled) VALUES (?, ?, ?, 0)"
+        "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled, revision) VALUES (?, ?, ?, 0, ?)"
       )
-      .run(roomId, adminDid, createdAt);
-    return { id: roomId, admin_did: adminDid, created_at: createdAt, e2e_enabled: 0, revision: null };
+      .run(roomId, adminDid, createdAt, revision);
+    return { id: roomId, admin_did: adminDid, created_at: createdAt, e2e_enabled: 0, revision };
   }
 
-  /** Returns the cached revision for a room, or recomputes it if not yet cached. */
+  /** Returns the revision for a room. Always present — set at creation and updated on every commit. */
   getRoomRevision(roomId: string): string {
     const room = this.getRoom(roomId);
-    if (room?.revision) return room.revision;
-    // First call or legacy room without a cached revision — compute and cache it.
-    const revision = computeRevision(this.getActiveHashes(roomId));
-    if (room) {
-      this.raw
-        .prepare("UPDATE rooms SET revision = ? WHERE id = ?")
-        .run(revision, roomId);
-    }
-    return revision;
+    return room?.revision ?? computeRevision([]);
   }
 
   setE2eEnabled(roomId: string, enabled: boolean): void {

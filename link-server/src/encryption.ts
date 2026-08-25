@@ -87,7 +87,7 @@ export function encryptRoomKeyForRecipient(
   const ephemeralPub = x25519.getPublicKey(ephemeralPriv);
   const shared = x25519.getSharedSecret(ephemeralPriv, recipientX25519Pub);
   const symKey = deriveSealKey(shared, ephemeralPub, recipientX25519Pub);
-  const nonce = nodeRandomBytes(12);
+  const nonce = new Uint8Array(nodeRandomBytes(12));
   const ciphertext = gcm(symKey, nonce).encrypt(roomKey);
   return {
     ephemeralPublicKey: bytesToHex(ephemeralPub),
