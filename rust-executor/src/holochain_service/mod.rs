@@ -598,6 +598,30 @@ impl HolochainService {
             );
         }
 
+        // NET-DIAG: log the resolved network config in a compact form so we
+        // can compare across nodes in CI without wading through the debug
+        // pretty-print of the whole ConductorConfig.
+        info!(
+            "NET-DIAG conductor network config: bootstrap_url={:?} relay_url={:?} space_overrides={} \
+             (use_bootstrap={}, use_proxy={}, use_local_proxy={}, use_mdns={}, proxy_url={:?})",
+            config.network.bootstrap_url.as_str(),
+            config.network.relay_url.as_str(),
+            config.network.space_overrides.len(),
+            local_config.use_bootstrap,
+            local_config.use_proxy,
+            local_config.use_local_proxy,
+            local_config.use_mdns,
+            local_config.proxy_url,
+        );
+        for (space_hash, override_cfg) in &config.network.space_overrides {
+            info!(
+                "NET-DIAG space_override[{}]: bootstrap_url={:?} relay_url={:?} auth={}",
+                space_hash,
+                override_cfg.bootstrap_url.as_ref().map(|u| u.as_str()),
+                override_cfg.relay_url.as_ref().map(|u| u.as_str()),
+                if override_cfg.base64_auth_material.is_some() { "yes" } else { "no" },
+            );
+        }
         info!("Starting holochain conductor with config: {:#?}", config);
         let passphrase_locked_array =
             sodoken::LockedArray::from(local_config.passphrase.as_bytes().to_vec());
@@ -946,7 +970,15 @@ impl HolochainService {
             }
         }
 
-        for agent_info in agent_infos {
+        // NET-DIAG: track which spaces we successfully added infos into vs
+        // which stayed "unavailable" — lets us cross-reference the running
+        // cell list at the end of the batch.
+        let mut succeeded_by_space: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut skipped_by_space: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        for (idx, agent_info) in agent_infos.iter().enumerate() {
             let mut attempt = 0usize;
             loop {
                 match self
@@ -956,6 +988,8 @@ impl HolochainService {
                 {
                     Ok(()) => {
                         success_count += 1;
+                        // We don't have the space id here — use a placeholder.
+                        *succeeded_by_space.entry("<ok>".to_string()).or_insert(0) += 1;
                         break;
                     }
                     Err(e) => {
@@ -967,28 +1001,27 @@ impl HolochainService {
                         if is_space_not_found {
                             let fp = space_fingerprint(&error_str);
                             if exhausted_spaces.contains(&fp) {
-                                // Same space we already gave up on — skip
-                                // immediately, no sleep. This keeps the whole
-                                // batch within the 30s dispatcher budget even
-                                // if hundreds of agent infos target the same
-                                // never-going-to-arrive space.
                                 skipped_count += 1;
+                                *skipped_by_space.entry(fp).or_insert(0) += 1;
                                 break;
                             }
                             if attempt < K2_SPACE_RETRIES {
-                                // First-in-space — try backoff. Space may
-                                // still be initialising.
                                 let delay_ms = K2_SPACE_RETRY_BASE_MS * (1u64 << attempt as u32);
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
                                     .await;
                                 attempt += 1;
                                 continue;
                             }
-                            // Retries exhausted for THIS space — cache the
-                            // fingerprint so subsequent items with the same
-                            // failure short-circuit.
-                            exhausted_spaces.insert(fp);
+                            // NET-DIAG: log the actual K2SpaceNotFound error the
+                            // FIRST time we hit a new fingerprint. Currently we
+                            // just count-and-move-on — which is what hid the
+                            // multi-user cross-node failure signature for weeks.
+                            error!(
+                                "add_agent_infos: exhausted retries for space (item #{idx}): {error_str}"
+                            );
+                            exhausted_spaces.insert(fp.clone());
                             skipped_count += 1;
+                            *skipped_by_space.entry(fp).or_insert(0) += 1;
                             break;
                         }
 
@@ -999,6 +1032,27 @@ impl HolochainService {
                     }
                 }
             }
+        }
+
+        // NET-DIAG: end-of-batch snapshot. Lists every running cell's DNA
+        // hash (which becomes the K2 space id), and the per-space skip
+        // counts so we can see whether the "unavailable" spaces correspond
+        // to DNAs the conductor thinks it has running — that would prove
+        // the space-init race is a false alarm and the real problem is
+        // network handshake.
+        {
+            let running_cell_ids = self.conductor.running_cell_ids();
+            let running_dnas: std::collections::HashSet<_> = running_cell_ids
+                .iter()
+                .map(|c| c.dna_hash().to_string())
+                .collect();
+            info!(
+                "NET-DIAG add_agent_infos: running_dnas={} skipped_spaces={} skips_by_space={:?} running={:?}",
+                running_dnas.len(),
+                exhausted_spaces.len(),
+                skipped_by_space,
+                running_dnas,
+            );
         }
 
         if skipped_count > 0 || failure_count > 0 {
