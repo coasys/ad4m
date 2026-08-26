@@ -27,7 +27,7 @@ import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
+import { Ad4mClient, Link, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
 import { FlowInstance, FlowTransitionProposal } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
 import { startAgent } from "../../helpers/index.js";
@@ -300,5 +300,122 @@ describe("FlowInstance — @Model", function () {
       .to.equal(parsed.target_class);
     expect(actual, "TS shape must match Rust SDNA path→name pairs")
       .to.deep.equal(expected);
+  });
+});
+
+// ── PerspectiveProxy.startFlowInstance — v5 API (design doc §4.3) ────────────
+// Mints an on-graph `FlowInstance` node tied to a base expression, seeded at
+// the flow's first declared state. Registration of the hardwired runtime
+// classes is idempotent inside the API — callers do NOT pre-register.
+
+describe("PerspectiveProxy.startFlowInstance — v5 API", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-start-instance");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-start-instance-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    // v5 flow states express membership via `requires`; the legacy
+    // `value` / `stateCheck` fields are still on the interface until the
+    // retirement pass and are populated here with harmless placeholders
+    // so the type checks — they are not exercised by startFlowInstance.
+    const identified: FlowState = {
+      name: "Identified",
+      value: 0,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
+    };
+    const inProgress: FlowState = {
+      name: "InProgress",
+      value: 1,
+      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
+    };
+    flow.addState(identified);
+    flow.addState(inProgress);
+    return flow;
+  }
+
+  it("mints a FlowInstance seeded at the first state and returns the hydrated model", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+
+    const before = new Date().toISOString();
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/1");
+    const after = new Date().toISOString();
+
+    expect(instance).to.be.instanceOf(FlowInstance);
+    expect(instance.flow).to.equal("Delivery");
+    expect(instance.baseExpression).to.equal("ad4m://task/1");
+    expect(instance.currentState).to.equal("Identified");
+    expect(instance.createdAt >= before && instance.createdAt <= after,
+      `createdAt ${instance.createdAt} must fall in [${before}, ${after}]`).to.equal(true);
+
+    // Findable via the discriminator predicate — same lookup UIs will use.
+    const all = await FlowInstance.findAll(p);
+    expect(all.length).to.equal(1);
+    expect(all[0].flow).to.equal("Delivery");
+    expect(all[0].baseExpression).to.equal("ad4m://task/1");
+    expect(all[0].currentState).to.equal("Identified");
+  });
+
+  it("supports multiple concurrent instances on distinct bases", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    await p.startFlowInstance("Delivery", "ad4m://task/a");
+    await p.startFlowInstance("Delivery", "ad4m://task/b");
+
+    const all = await FlowInstance.findAll(p);
+    expect(all.length).to.equal(2);
+    const bases = all.map((i) => i.baseExpression).sort();
+    expect(bases).to.deep.equal(["ad4m://task/a", "ad4m://task/b"]);
+  });
+
+  it("throws when the named flow is not registered on the perspective", async () => {
+    let caught: unknown = null;
+    try {
+      await p.startFlowInstance("Nope", "ad4m://task/1");
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).to.match(/Flow "Nope" not found/);
+  });
+
+  it("throws when the flow has zero declared states", async () => {
+    const zeroState = new SHACLFlow("Like", "flow://");
+    // no addState calls — zero-state action flow (§6.3), handled by
+    // runFlowAction / fireAction, not startFlowInstance.
+    await p.addFlow("Like", zeroState);
+
+    let caught: unknown = null;
+    try {
+      await p.startFlowInstance("Like", "ad4m://post/1");
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).to.match(/has no states/);
   });
 });

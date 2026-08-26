@@ -16,6 +16,8 @@ import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
+import { FlowInstance, FlowTransitionProposal } from "./FlowModels";
+import { Ad4mModel } from "../model/Ad4mModel";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
@@ -1135,6 +1137,44 @@ export class PerspectiveProxy {
         if (!flow) throw `Flow "${flowName}" not found`;
         if (flow.startAction.length === 0) throw `Flow "${flowName}" has no start action`;
         await this.executeAction(flow.startAction, exprAddr, undefined)
+    }
+
+    /**
+     * v5-shaped flow instantiation (design doc §4.3). Mints a `FlowInstance`
+     * node on the graph tied to `baseExpression`, seeded at the flow's first
+     * declared state. Idempotently registers the hardwired `FlowInstance` and
+     * `FlowTransitionProposal` @Model classes on first call — the on-graph
+     * shape matches the Rust-side hardwired SDNA (parity-locked in
+     * `flow-instance.test.ts` / `flow-transition-proposal.test.ts`).
+     *
+     * The engine that fires transitions post-consensus (§7 / PR-sequence item
+     * 3) reads the returned instance's `currentState`; UIs subscribe via the
+     * `FlowInstance` wrapper class (§4.3, wrapper-side lands in the following
+     * slice).
+     *
+     * @param flowName - Name of a `SHACLFlow` already registered on the perspective
+     * @param baseExpression - URI of the subject expression the flow runs on
+     * @throws When the flow is unknown or has zero declared states (use the
+     *   zero-state action-flow path — coming with §6.3 fireAction — for that shape).
+     * @returns The freshly-minted `FlowInstance` (hydrated).
+     */
+    async startFlowInstance(flowName: string, baseExpression: string): Promise<FlowInstance> {
+        const flow = await this.getFlow(flowName);
+        if (!flow) throw `Flow "${flowName}" not found`;
+        if (flow.states.length === 0) {
+            throw `Flow "${flowName}" has no states — startFlowInstance is for stateful flows only; zero-state flows fire via runFlowAction (§6.3)`;
+        }
+        // Register the hardwired runtime classes if this is the first flow
+        // instance on the perspective. registerAll is a single batched RPC and
+        // no-ops when both classes are already present.
+        await Ad4mModel.registerAll(this, [FlowInstance, FlowTransitionProposal]);
+        const instance = await FlowInstance.create(this, {
+            flow: flowName,
+            baseExpression,
+            currentState: flow.states[0].name,
+            createdAt: new Date().toISOString(),
+        });
+        return instance;
     }
 
     /** Returns all expressions in the given state of given Social DNA flow */
