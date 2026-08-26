@@ -1168,11 +1168,15 @@ export class PerspectiveProxy {
         // instance on the perspective. registerAll is a single batched RPC and
         // no-ops when both classes are already present.
         await Ad4mModel.registerAll(this, [FlowInstance, FlowTransitionProposal]);
+        // Property keys must be the FlowInstance @Model field names — `subject`
+        // / `startedAt` (not `baseExpression` / `createdAt`, which collide with
+        // Ad4mModel synthetic hydration fields and would be silently shadowed
+        // on read).
         const instance = await FlowInstance.create(this, {
             flow: flowName,
-            baseExpression,
+            subject: baseExpression,
             currentState: flow.states[0].name,
-            createdAt: new Date().toISOString(),
+            startedAt: new Date().toISOString(),
         });
         return instance;
     }

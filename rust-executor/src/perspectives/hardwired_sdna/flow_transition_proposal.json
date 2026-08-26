@@ -13,6 +13,6 @@
     {"path": "ad4m://flow/evidence_hashes",  "name": "evidenceHashes",                     "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/evidence_hashes", "target": "value"}]},
     {"path": "ad4m://flow/run_uri",          "name": "runUri",                             "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/run_uri", "target": "value"}]},
     {"path": "ad4m://flow/rationale",        "name": "rationale",                          "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/rationale", "target": "value"}]},
-    {"path": "ad4m://flow/created_at",       "name": "createdAt",                          "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/created_at", "target": "value"}]}
+    {"path": "ad4m://flow/created_at",       "name": "proposedAt",                         "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/created_at", "target": "value"}]}
   ]
 }

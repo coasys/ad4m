@@ -108,7 +108,7 @@ describe("FlowTransitionProposal — @Model", function () {
     expect(proposals[0].toState).to.equal("tensionIdentified");
     expect(proposals[0].proposer).to.equal("did:example:alice");
     expect(proposals[0].evidenceHashes).to.equal("{}");
-    expect(proposals[0].createdAt).to.equal("2026-08-26T09:00:00Z");
+    expect(proposals[0].proposedAt).to.equal("2026-08-26T09:00:00Z");
   });
 
   it("FlowTransitionProposal round-trip: evidence + optional runUri/rationale hydrate", async () => {
@@ -274,9 +274,9 @@ describe("FlowInstance — @Model", function () {
     const all = await FlowInstance.findAll(p);
     expect(all.length).to.equal(1);
     expect(all[0].flow).to.equal("Delivery");
-    expect(all[0].baseExpression).to.equal("ad4m://some-subject");
+    expect(all[0].subject).to.equal("ad4m://some-subject");
     expect(all[0].currentState).to.equal("Scoped");
-    expect(all[0].createdAt).to.equal("2026-08-26T09:45:00Z");
+    expect(all[0].startedAt).to.equal("2026-08-26T09:45:00Z");
   });
 
   it("FlowInstance @Model shape matches Rust flow_instance.json", () => {
@@ -370,16 +370,16 @@ describe("PerspectiveProxy.startFlowInstance — v5 API", function () {
 
     expect(instance).to.be.instanceOf(FlowInstance);
     expect(instance.flow).to.equal("Delivery");
-    expect(instance.baseExpression).to.equal("ad4m://task/1");
+    expect(instance.subject).to.equal("ad4m://task/1");
     expect(instance.currentState).to.equal("Identified");
-    expect(instance.createdAt >= before && instance.createdAt <= after,
-      `createdAt ${instance.createdAt} must fall in [${before}, ${after}]`).to.equal(true);
+    expect(instance.startedAt >= before && instance.startedAt <= after,
+      `startedAt ${instance.startedAt} must fall in [${before}, ${after}]`).to.equal(true);
 
     // Findable via the discriminator predicate — same lookup UIs will use.
     const all = await FlowInstance.findAll(p);
     expect(all.length).to.equal(1);
     expect(all[0].flow).to.equal("Delivery");
-    expect(all[0].baseExpression).to.equal("ad4m://task/1");
+    expect(all[0].subject).to.equal("ad4m://task/1");
     expect(all[0].currentState).to.equal("Identified");
   });
 
@@ -390,7 +390,7 @@ describe("PerspectiveProxy.startFlowInstance — v5 API", function () {
 
     const all = await FlowInstance.findAll(p);
     expect(all.length).to.equal(2);
-    const bases = all.map((i) => i.baseExpression).sort();
+    const bases = all.map((i) => i.subject).sort();
     expect(bases).to.deep.equal(["ad4m://task/a", "ad4m://task/b"]);
   });
 
@@ -525,18 +525,18 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
     const deliveries = await p.getFlowInstances("Delivery");
     expect(deliveries.length).to.equal(2);
     expect(deliveries.every((i) => i.flow === "Delivery")).to.equal(true);
-    const bases = deliveries.map((i) => i.baseExpression).sort();
+    const bases = deliveries.map((i) => i.subject).sort();
     expect(bases).to.deep.equal(["ad4m://task/a", "ad4m://task/b"]);
 
     const deliberations = await p.getFlowInstances("Deliberation");
     expect(deliberations.length).to.equal(1);
-    expect(deliberations[0].baseExpression).to.equal("ad4m://proposal/x");
+    expect(deliberations[0].subject).to.equal("ad4m://proposal/x");
 
     const misses = await p.getFlowInstances("Nope");
     expect(misses).to.deep.equal([]);
   });
 
-  it("returns fully hydrated instances (flow, baseExpression, currentState, createdAt)", async () => {
+  it("returns fully hydrated instances (flow, subject, currentState, startedAt)", async () => {
     await p.addFlow("Delivery", makeDeliveryFlow());
     const before = new Date().toISOString();
     await p.startFlowInstance("Delivery", "ad4m://task/hydrate");
@@ -544,9 +544,9 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
 
     const [hydrated] = await p.getFlowInstances("Delivery");
     expect(hydrated.flow).to.equal("Delivery");
-    expect(hydrated.baseExpression).to.equal("ad4m://task/hydrate");
+    expect(hydrated.subject).to.equal("ad4m://task/hydrate");
     expect(hydrated.currentState).to.equal("Identified");
-    expect(hydrated.createdAt >= before && hydrated.createdAt <= after,
-      `createdAt ${hydrated.createdAt} must fall in [${before}, ${after}]`).to.equal(true);
+    expect(hydrated.startedAt >= before && hydrated.startedAt <= after,
+      `startedAt ${hydrated.startedAt} must fall in [${before}, ${after}]`).to.equal(true);
   });
 });

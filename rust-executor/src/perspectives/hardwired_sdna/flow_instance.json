@@ -5,9 +5,9 @@
     {"action": "addLink", "source": "this", "predicate": "ad4m://flow/flow_name", "target": "placeholder"}
   ],
   "properties": [
-    {"path": "ad4m://flow/flow_name",     "name": "flow",            "identity": true, "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/flow_name", "target": "value"}]},
-    {"path": "ad4m://flow/base",          "name": "baseExpression",                    "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/base", "target": "value"}]},
-    {"path": "ad4m://flow/current_state", "name": "currentState",                      "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/current_state", "target": "value"}]},
-    {"path": "ad4m://flow/created_at",    "name": "createdAt",                         "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/created_at", "target": "value"}]}
+    {"path": "ad4m://flow/flow_name",     "name": "flow",       "identity": true, "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/flow_name", "target": "value"}]},
+    {"path": "ad4m://flow/base",          "name": "subject",                      "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/base", "target": "value"}]},
+    {"path": "ad4m://flow/current_state", "name": "currentState",                 "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/current_state", "target": "value"}]},
+    {"path": "ad4m://flow/created_at",    "name": "startedAt",                    "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/created_at", "target": "value"}]}
   ]
 }

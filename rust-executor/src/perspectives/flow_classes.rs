@@ -98,11 +98,15 @@ pub(crate) async fn mint_flow_instance(
     ensure_flow_model_classes(perspective, context).await?;
 
     let uri = flow_instance_uri(instance_id);
+    // Property names must match the SDNA `name` fields exactly, not the
+    // wire predicate paths. `subject` / `startedAt` (not `baseExpression`
+    // / `createdAt`) — the latter two collide with `Ad4mModel` synthetic
+    // hydration fields on the TS reader side.
     let values = serde_json::json!({
         "flow": flow_name,
-        "baseExpression": base_expression,
+        "subject": base_expression,
         "currentState": initial_state,
-        "createdAt": created_at,
+        "startedAt": created_at,
     });
     perspective
         .create_subject(
@@ -141,7 +145,7 @@ mod tests {
             .expect("properties must be an array");
         assert!(!props.is_empty(), "FlowInstance must declare properties");
         let names: Vec<&str> = props.iter().filter_map(|p| p["name"].as_str()).collect();
-        for expected in ["flow", "baseExpression", "currentState", "createdAt"] {
+        for expected in ["flow", "subject", "currentState", "startedAt"] {
             assert!(
                 names.contains(&expected),
                 "FlowInstance SDNA missing '{expected}' property (found {names:?})",
@@ -171,7 +175,7 @@ mod tests {
             "proposer",
             "evidence",
             "evidenceHashes",
-            "createdAt",
+            "proposedAt",
         ] {
             assert!(
                 names.contains(&expected),
@@ -210,7 +214,7 @@ mod tests {
             .iter()
             .filter_map(|p| p["name"].as_str())
             .collect();
-        for key in ["flow", "baseExpression", "currentState", "createdAt"] {
+        for key in ["flow", "subject", "currentState", "startedAt"] {
             assert!(
                 props.contains(&key),
                 "mint_flow_instance writes `{key}` but SDNA does not declare it (found {props:?})",

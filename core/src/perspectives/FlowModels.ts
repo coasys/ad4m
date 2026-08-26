@@ -90,9 +90,16 @@ export class FlowTransitionProposal extends Ad4mModel {
   @Optional({ through: "ad4m://flow/rationale" })
   rationale?: string;
 
-  /** RFC3339 timestamp when the proposal was written. */
+  /**
+   * RFC3339 timestamp when the proposal was written.
+   * Named `proposedAt` (not `createdAt`) because `Ad4mModel` reserves
+   * `createdAt` / `updatedAt` / `baseExpression` as synthetic hydration
+   * fields — a subclass property with those names is silently overwritten
+   * by the earliest / latest link timestamp on hydration, and the TS-side
+   * `jsonToModelInstance` converts any `createdAt` value to epoch millis.
+   */
   @Property({ through: "ad4m://flow/created_at", required: true })
-  createdAt: string = "";
+  proposedAt: string = "";
 }
 
 // ── FlowInstance ────────────────────────────────────────────────────────────
@@ -113,15 +120,28 @@ export class FlowInstance extends Ad4mModel {
   @Property({ through: "ad4m://flow/flow_name", required: true, identity: true })
   flow: string = "";
 
-  /** URI of the subject expression this flow runs on. */
+  /**
+   * URI of the subject expression this flow runs on.
+   * Named `subject` (not `baseExpression`) because `Ad4mModel` reserves
+   * `baseExpression` as a synthetic hydration field always set to the
+   * instance's own URI — a subclass property with that name is shadowed
+   * on read.
+   */
   @Property({ through: "ad4m://flow/base", required: true })
-  baseExpression: string = "";
+  subject: string = "";
 
   /** Name of the state the flow is currently in. */
   @Property({ through: "ad4m://flow/current_state", required: true })
   currentState: string = "";
 
-  /** RFC3339 timestamp when the flow was started on this base. */
+  /**
+   * RFC3339 timestamp when the flow was started on this base.
+   * Named `startedAt` (not `createdAt`) because `Ad4mModel` reserves
+   * `createdAt` / `updatedAt` as synthetic hydration fields — a subclass
+   * property with those names is silently overwritten by the earliest /
+   * latest link timestamp, and the TS-side `jsonToModelInstance` converts
+   * any `createdAt` value to epoch millis.
+   */
   @Property({ through: "ad4m://flow/created_at", required: true })
-  createdAt: string = "";
+  startedAt: string = "";
 }
