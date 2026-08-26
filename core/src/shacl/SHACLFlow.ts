@@ -889,12 +889,24 @@ export class SHACLFlow {
    * Convert to JSON representation
    */
   toJSON(): object {
+    // Per-state metadata is optional; strip empty strings / empty arrays so
+    // json.states[i] agrees with what toLinks() would materialise (a state
+    // constructed with `interpretationHint: ""` produces no predicate, so
+    // JSON must not carry the empty field either).
+    const sanitizedStates = this._states.map(s => ({
+      name: s.name,
+      value: s.value,
+      stateCheck: s.stateCheck,
+      ...(s.interpretationHint ? { interpretationHint: s.interpretationHint } : {}),
+      ...(s.requires && s.requires.length > 0 ? { requires: s.requires } : {}),
+      ...(s.semanticCheck ? { semanticCheck: s.semanticCheck } : {})
+    }));
     return {
       name: this.name,
       namespace: this.namespace,
       flowable: this.flowable,
       startAction: this.startAction,
-      states: this._states,
+      states: sanitizedStates,
       transitions: this._transitions,
       // Empty strings / empty arrays treated as unset — same semantics
       // as the toLinks path, so JSON <-> links round-trips agree.

@@ -441,6 +441,8 @@ describe('SHACLFlow', () => {
       // Empty strings must be treated as "unset" so we don't materialise an
       // empty-hint predicate that a consumer would read back as a meaningful
       // value (CodeRabbit PR #929 comment on lines 316-323 / 388-395 / 408-416).
+      // Same rule must apply to json.states[i] so JSON and toLinks agree on
+      // "unset" (CodeRabbit PR #929 follow-up on lines 891-907).
       const flow = new SHACLFlow('Empty', 'ns://empty/');
       flow.interpretationHint = '';
       flow.addState({
@@ -449,16 +451,30 @@ describe('SHACLFlow', () => {
         stateCheck: { predicate: 'ns://empty/state', target: 'ns://empty/x' },
         interpretationHint: '',
         semanticCheck: '',
+        requires: [],
       });
 
       const links = flow.toLinks();
       const hintLinks = links.filter(l => l.predicate === 'ad4m://interpretationHint');
       const semanticCheckLinks = links.filter(l => l.predicate === 'ad4m://semanticCheck');
+      const requiresLinks = links.filter(l => l.predicate === 'ad4m://requires');
       expect(hintLinks).toHaveLength(0);
       expect(semanticCheckLinks).toHaveLength(0);
+      expect(requiresLinks).toHaveLength(0);
 
       const json = flow.toJSON() as any;
       expect('interpretationHint' in json).toBe(false);
+      // json.states[0] must strip the same optional fields as toLinks does.
+      expect('interpretationHint' in json.states[0]).toBe(false);
+      expect('semanticCheck' in json.states[0]).toBe(false);
+      expect('requires' in json.states[0]).toBe(false);
+      // Required fields still present.
+      expect(json.states[0].name).toBe('x');
+      expect(json.states[0].value).toBe(0);
+      expect(json.states[0].stateCheck).toEqual({
+        predicate: 'ns://empty/state',
+        target: 'ns://empty/x',
+      });
     });
 
     it('malformed decoded literals leave the field unset (fromLinks)', () => {
