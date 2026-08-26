@@ -642,6 +642,25 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Stop an auto-processor by deleting its config.
+     *
+     * The registration is data — the watch loop reads the processor set back out of the
+     * perspective's graph on every tick — so deleting the config is what stops it, and there is
+     * nothing else to unregister. The config is `Shared`, so this stops the processor for the
+     * neighbourhood rather than only for this peer.
+     *
+     * Resolves `true` when there was a processor to remove and `false` when there was not; a
+     * processor another peer has already removed is not an error.
+     *
+     * The processor's `InterpretationRun` nodes stay: they are the record of what it did and the
+     * processed-turn cursor, so a processor later registered under the same id resumes where this
+     * one left off rather than re-reading every turn.
+     */
+    async removeAutoProcessor(processorId: string): Promise<boolean> {
+        return await this.#client.removeAutoProcessor(this.#handle.uuid, processorId)
+    }
+
+    /**
      * Pending interpretation overlays on this perspective — LLM suggestions the
      * §4 divergence gate staged rather than applied, awaiting human accept/reject.
      */
