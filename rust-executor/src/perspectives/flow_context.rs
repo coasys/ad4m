@@ -44,6 +44,7 @@
 #![allow(dead_code)]
 
 use crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS;
+use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     parse_flow_from_links, ConsensusRule, FlowState, ModelQuery, PropertyCondition, SHACLFlow,
@@ -422,6 +423,61 @@ pub fn build_flow_contexts(
             ))
         })
         .collect()
+}
+
+/// Given the extraction pass's `Scope`, return the base-expression URI
+/// that FlowInstances should be filtered on.
+///
+/// Both `Scope::Model { id, .. }` and `Scope::Raw { id, .. }` carry the
+/// scope's anchor URI in `id`; a FlowInstance whose `subject == id` is
+/// running on THIS anchor. Callers that want every active flow on the
+/// perspective (e.g. tests) pass `None` at the [`load_flow_instances`]
+/// layer directly and skip this helper.
+pub fn scope_subject(scope: &Scope) -> &str {
+    match scope {
+        Scope::Model { id, .. } => id.as_str(),
+        Scope::Raw { id, .. } => id.as_str(),
+    }
+}
+
+/// Slice 10.3c — compose the two loaders + [`build_flow_contexts`] into
+/// one call that the extraction pass (`run.rs`) can use directly.
+///
+/// Returns the (possibly empty) list of [`FlowContext`]s. Any I/O
+/// failure is logged and downgraded to an empty result — the extraction
+/// pass MUST NOT break because one perspective couldn't enumerate flows;
+/// the fallback is "extract without flow-aware prompting", which is
+/// exactly the pre-slice-10.2 behaviour.
+///
+/// `scope`, when `Some`, narrows [`load_flow_instances`] to flow
+/// instances whose base expression matches the scope's anchor URI (see
+/// [`scope_subject`]). Pass `None` to load every active flow on the
+/// perspective (e.g. from a perspective-scoped pass).
+pub async fn gather_active_flow_contexts(
+    perspective: &PerspectiveInstance,
+    scope: Option<&Scope>,
+) -> Vec<FlowContext> {
+    let flows_by_name = match load_shacl_flows(perspective).await {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("gather_active_flow_contexts: load_shacl_flows failed, using empty: {e:#}");
+            return Vec::new();
+        }
+    };
+    if flows_by_name.is_empty() {
+        return Vec::new();
+    }
+    let subject = scope.map(scope_subject);
+    let records = match load_flow_instances(perspective, subject).await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!(
+                "gather_active_flow_contexts: load_flow_instances failed, using empty: {e:#}"
+            );
+            return Vec::new();
+        }
+    };
+    build_flow_contexts(&records, &flows_by_name)
 }
 
 /// Discover every `SHACLFlow` definition present in a flat bag of links
@@ -1330,5 +1386,27 @@ mod tests {
             .map(|s| s.name.as_str())
             .collect();
         assert_eq!(names, vec!["review", "identified"]);
+    }
+
+    // ------------- scope_subject (slice 10.3c) -------------
+
+    #[test]
+    fn scope_subject_extracts_id_from_both_variants() {
+        // Both Scope variants carry the pass anchor URI in `id`. The
+        // extraction pass filters FlowInstances by subject == this URI,
+        // so a mismatch here would silently drop every scope-scoped
+        // active flow.
+        let m = Scope::Model {
+            model: "Task".to_string(),
+            id: "ad4m://task/some-task".to_string(),
+            field: None,
+        };
+        assert_eq!(scope_subject(&m), "ad4m://task/some-task");
+
+        let r = Scope::Raw {
+            id: "literal://string:channel-x".to_string(),
+            predicate: "ad4m://hasChild".to_string(),
+        };
+        assert_eq!(scope_subject(&r), "literal://string:channel-x");
     }
 }
