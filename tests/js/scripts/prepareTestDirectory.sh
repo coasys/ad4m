@@ -1,4 +1,8 @@
 #!/bin/bash
+# Resolve REPO_ROOT while $0 is still valid — it is usually a relative path
+# (./scripts/prepareTestDirectory.sh), so it must be resolved BEFORE any cd.
+REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+
 [ -d "tst-tmp" ] && rm -rf tst-tmp
 mkdir tst-tmp
 cd tst-tmp
@@ -11,7 +15,6 @@ mkdir note
 # pinned in Cargo.lock must match the `holochain_cli_bundle` the executor
 # links against, otherwise `install_app_bundle` rejects the packed happ with
 # schema-mismatch errors (e.g. `unknown field 'signal_url'`).
-REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 LOCAL_HC="$REPO_ROOT/.hc-toolchain/bin/hc"
 if [ -x "$LOCAL_HC" ]; then
     HC_BIN="$LOCAL_HC"
