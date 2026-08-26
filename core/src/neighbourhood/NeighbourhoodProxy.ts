@@ -7,6 +7,7 @@ import type {
     SfuConfig,
     SfuQualityPreference,
     SfuRoomInfo,
+    TrackMapEntry,
 } from "./SfuTypes";
 
 export class NeighbourhoodProxy {
@@ -142,8 +143,47 @@ export class NeighbourhoodProxy {
             neighbourhoodUrl: string
             roomName: string
             sdpOffer: string
+            trackMapping?: TrackMapEntry[]
         }) => void,
     ): () => void {
         return this.#client.subscribeSfuCallRenegotiationOffer(targetDid, callback)
+    }
+
+    /**
+     * Subscribe to cascade rebalance migration events for `targetDid`.
+     * Returns an unsubscribe function.
+     */
+    subscribeMigrateEvent(
+        targetDid: string,
+        callback: (event: {
+            targetDid: string
+            neighbourhoodUrl: string
+            roomName: string
+            migrateToDid: string
+        }) => void,
+    ): () => void {
+        return this.#client.subscribeSfuMigrateEvent(targetDid, callback)
+    }
+
+    // ── SFU diagnostic / test-harness ──────────────────────────────────
+
+    async sfuCascadeStatus(): Promise<{
+        establishedCount: number
+        pipes: { roomId: string; remoteDid: string }[]
+    }> {
+        return await this.#client.sfuCascadeStatus()
+    }
+
+    async sfuQualityPreferences(): Promise<
+        { participantId: string; preference: string }[]
+    > {
+        return await this.#client.sfuQualityPreferences()
+    }
+
+    async sfuEnsureMembership(
+        neighbourhoodUrl: string,
+        did: string,
+    ): Promise<boolean> {
+        return await this.#client.sfuEnsureMembership(neighbourhoodUrl, did)
     }
 }

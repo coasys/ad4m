@@ -11,6 +11,7 @@ import type {
     SfuConfig,
     SfuQualityPreference,
     SfuRoomInfo,
+    TrackMapEntry,
 } from "./SfuTypes"
 
 export class NeighbourhoodClient {
@@ -230,6 +231,7 @@ export class NeighbourhoodClient {
             neighbourhoodUrl: string
             roomName: string
             sdpOffer: string
+            trackMapping?: TrackMapEntry[]
         }) => void,
     ): () => void {
         return this.#apiClient.subscribe((data: any) => {
@@ -240,6 +242,7 @@ export class NeighbourhoodClient {
                 neighbourhoodUrl: string
                 roomName: string
                 sdpOffer: string
+                trackMapping?: TrackMapEntry[]
             }
             if (payload.targetDid !== targetDid) return
             callback({
@@ -247,7 +250,82 @@ export class NeighbourhoodClient {
                 neighbourhoodUrl: payload.neighbourhoodUrl,
                 roomName: payload.roomName,
                 sdpOffer: payload.sdpOffer,
+                trackMapping: payload.trackMapping,
             })
+        })
+    }
+
+    /**
+     * Subscribe to cascade rebalance migration events for `targetDid`.
+     * The server publishes `sfu-migrate` events on the events_ws when
+     * the cascade rebalancer decides a participant should move to a
+     * less-loaded node.  Returns an unsubscribe function.
+     */
+    subscribeSfuMigrateEvent(
+        targetDid: string,
+        callback: (payload: {
+            targetDid: string
+            neighbourhoodUrl: string
+            roomName: string
+            migrateToDid: string
+        }) => void,
+    ): () => void {
+        return this.#apiClient.subscribe((data: any) => {
+            if (data?.type !== "sfu-migrate") return
+            const payload = data as {
+                type: string
+                targetDid: string
+                neighbourhoodUrl: string
+                roomName: string
+                migrateToDid: string
+            }
+            if (payload.targetDid !== targetDid) return
+            callback({
+                targetDid: payload.targetDid,
+                neighbourhoodUrl: payload.neighbourhoodUrl,
+                roomName: payload.roomName,
+                migrateToDid: payload.migrateToDid,
+            })
+        })
+    }
+
+    // ── SFU diagnostic / test-harness endpoints ────────────────────────
+
+    /**
+     * Read-only: how many SFU↔SFU pipe transports are fully established,
+     * plus the list of pipes.  Useful for diagnostics and wind-tunnel
+     * assertions.
+     */
+    async sfuCascadeStatus(): Promise<{
+        establishedCount: number
+        pipes: { roomId: string; remoteDid: string }[]
+    }> {
+        return this.#apiClient.call("sfu.cascadeStatus", {})
+    }
+
+    /**
+     * Read-only: per-participant quality preferences the SFU event loop
+     * currently holds.  Returns `[{participantId, preference}, ...]`.
+     */
+    async sfuQualityPreferences(): Promise<
+        { participantId: string; preference: string }[]
+    > {
+        return this.#apiClient.call("sfu.qualityPreferences", {})
+    }
+
+    /**
+     * Register a DID as a neighbourhood member on this executor.
+     * In production the neighbourhood join flow handles this
+     * automatically; this RPC exists for test harnesses and bridge
+     * deployments.
+     */
+    async sfuEnsureMembership(
+        neighbourhoodUrl: string,
+        did: string,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.ensureMembership", {
+            neighbourhoodUrl,
+            did,
         })
     }
 }

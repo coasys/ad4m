@@ -38,7 +38,7 @@ export interface SfuNeighbourhoodApi {
     callSetQualityPreference(
         neighbourhoodUrl: string,
         roomName: string,
-        preference: string,
+        preference: SfuQualityPreference,
     ): Promise<boolean>
     callAnswerServerOffer(
         neighbourhoodUrl: string,
