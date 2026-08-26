@@ -359,6 +359,13 @@ export class PerspectiveClient {
         )
     }
 
+    /** Delete an auto-processor's config. `false` when there was none to delete. */
+    async removeAutoProcessor(uuid: string, processorId: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.removeAutoProcessor', { uuid, processorId },
+        )
+    }
+
     /** Pending interpretation overlays (LLM suggestions awaiting human accept/reject). */
     async interpretationOverlays(uuid: string): Promise<InterpretationOverlayInfo[]> {
         return this.#apiClient.call<InterpretationOverlayInfo[]>(
