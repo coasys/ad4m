@@ -14,7 +14,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, killByPorts } from "../utils/utils";
+import { startExecutor, killByPorts, pollUntil } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import { mcpHttpRequest, callMcpTool, initializeMcp } from './mcp-utils';
 
@@ -69,20 +69,25 @@ describe("MCP Neighbourhood Integration Tests", function () {
             MCP_PORT,
         );
 
-        await sleep(3000);
-
+        // Poll until agent generation succeeds (server ready)
         const adminClient = new Ad4mClient(`http://127.0.0.1:${API_PORT}`, ADMIN_CREDENTIAL, false);
-        await adminClient.agent.generate("test-passphrase");
+        await pollUntil(async () => {
+            await adminClient.agent.generate("test-passphrase");
+            return true;
+        }, { timeoutMs: 15000, label: "executor ready and agent generated" });
         console.log("Agent generated");
     });
 
     after(async () => {
         if (executorProcess) {
             executorProcess.kill('SIGTERM');
-            await sleep(1000);
+            await pollUntil(() => executorProcess!.killed, { timeoutMs: 5000, label: "executor exits after SIGTERM" }).catch(() => {});
             if (!executorProcess.killed) executorProcess.kill('SIGKILL');
         }
-        killByPorts([API_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT]);
+        // Exit before killByPorts: lsof includes the test process's own
+        // client connections, so killByPorts would SIGTERM mocha itself
+        // (exit 143). cleanup.js between test files handles residual ports.
+        process.exit(0);
     });
 
     // ========================================================================

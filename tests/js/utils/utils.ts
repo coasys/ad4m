@@ -289,6 +289,59 @@ export function sleep(ms: number) {
 }
 
 /**
+ * Poll a predicate until it returns true, or throw after `timeoutMs`.
+ *
+ * Replaces the `await sleep(N); expect(x)` pattern: the test completes as
+ * soon as the condition holds (fast path) and only fails after a bounded
+ * timeout (no flake from "sleep wasn't long enough").
+ *
+ * The predicate may be sync or async. Exceptions from it are treated as
+ * "not yet true" so an API call that throws while the executor is still
+ * starting doesn't have to be wrapped by the caller.
+ */
+export async function pollUntil(
+    predicate: () => boolean | Promise<boolean>,
+    opts: { timeoutMs?: number; intervalMs?: number; label?: string } = {},
+): Promise<void> {
+    const { timeoutMs = 15000, intervalMs = 200, label = "condition" } = opts;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        try {
+            if (await predicate()) return;
+        } catch { /* treat as "not yet" */ }
+        await sleep(intervalMs);
+    }
+    throw new Error(`pollUntil timed out after ${timeoutMs}ms waiting for: ${label}`);
+}
+
+/**
+ * Actively polls a predicate and fails immediately if it ever becomes true.
+ * Returns successfully when the wait period expires without the predicate
+ * firing — use this for negative assertions ("X should NOT happen").
+ *
+ * This replaces `await sleep(N); expect(x).to.be.false` with an approach
+ * that catches transient true states and can use a shorter wait window.
+ */
+export async function assertStaysFalse(
+    predicate: () => boolean | Promise<boolean>,
+    opts: { waitMs?: number; intervalMs?: number; label?: string } = {},
+): Promise<void> {
+    const { waitMs = 1000, intervalMs = 100, label = "condition" } = opts;
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+        try {
+            if (await predicate()) {
+                throw new Error(`assertStaysFalse failed: ${label} became true`);
+            }
+        } catch (e: any) {
+            if (e.message?.startsWith("assertStaysFalse failed:")) throw e;
+            /* treat other exceptions as "not yet evaluable" */
+        }
+        await sleep(intervalMs);
+    }
+}
+
+/**
  * Clears all links in a perspective in a single removeLinks() batch call.
  * Import from here or from helpers/assertions to get a clean slate before each test.
  */

@@ -1,7 +1,7 @@
 import { Link, LinkQuery, SHACLFlow } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { expect } from "chai";
-import { sleep } from "../utils/utils";
+import { pollUntil } from "../utils/utils";
 
 export default function socialDNATests(testContext: TestContext) {
     return () => {
@@ -112,8 +112,11 @@ export default function socialDNATests(testContext: TestContext) {
 
                 // Test runFlowAction() transitions state: ready -> doing
                 await perspective.runFlowAction('TODO', 'test-lang://1234', 'Start');
-                await sleep(100);
 
+                await pollUntil(async () => {
+                    const state = await perspective.flowState('TODO', 'test-lang://1234');
+                    return state === 0.5;
+                }, { timeoutMs: 5000, label: "flow state transitions to doing (0.5)" });
                 todoState = await perspective.flowState('TODO', 'test-lang://1234');
                 expect(todoState).to.be.equal(0.5);
 
@@ -134,8 +137,11 @@ export default function socialDNATests(testContext: TestContext) {
                 expect(flowActions[0]).to.be.equal('Finish');
 
                 await perspective.runFlowAction('TODO', 'test-lang://1234', 'Finish');
-                await sleep(100);
 
+                await pollUntil(async () => {
+                    const state = await perspective.flowState('TODO', 'test-lang://1234');
+                    return state === 1;
+                }, { timeoutMs: 5000, label: "flow state transitions to done (1)" });
                 todoState = await perspective.flowState('TODO', 'test-lang://1234');
                 expect(todoState).to.be.equal(1);
 

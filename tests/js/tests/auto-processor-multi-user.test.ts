@@ -31,7 +31,7 @@ import { fileURLToPath } from "url";
 import { expect } from "chai";
 import {
   baseUrl,
-  sleep,
+  pollUntil,
   startExecutor,
   runHcLocalServices,
   gracefulShutdown,
@@ -166,8 +166,11 @@ describe("AutoProcessor runs for managed users on a hosted node", function () {
       claimTtlMs: 60_000,
     } as any);
 
-    // Give the supervisor its first tick (5s) to spawn per-user loops.
-    await sleep(6_000);
+    // Wait for the supervisor to spawn per-user loops (first tick at ~5s)
+    await pollUntil(async () => {
+        const bobPRaw = await bob!.perspective.byUUID(handle.uuid);
+        return bobPRaw !== null;
+    }, { timeoutMs: 15000, intervalMs: 1000, label: "supervisor spawns per-user loops" });
 
     // `perspective.add` assigns the caller as the owner, so a strict
     // ownership regime would make Bob's `byUUID` return `null`

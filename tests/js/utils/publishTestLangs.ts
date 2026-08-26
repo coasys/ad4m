@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
-import { baseUrl, sleep, startExecutor } from "./utils";
+import { baseUrl, pollUntil, startExecutor } from "./utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -159,7 +159,9 @@ async function publish() {
         console.log(`Killing executor on ports ${setupPorts.join('/')}...`);
         killExecutorPorts(setupPorts);
         deregisterPorts(setupPorts);
-        await sleep(1000);
+        await pollUntil(() => {
+            try { execSync(`lsof -ti TCP:${apiPort} -s TCP:LISTEN`, { stdio: 'ignore' }); return false; } catch { return true; }
+        }, { timeoutMs: 5000, intervalMs: 200, label: "executor ports freed after shutdown" });
     }
 
     exit();

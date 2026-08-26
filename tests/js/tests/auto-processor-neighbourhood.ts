@@ -17,7 +17,7 @@
 import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
-import { sleep } from "../utils/utils";
+import { pollUntil, sleep } from "../utils/utils";
 import { waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
@@ -93,7 +93,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
 
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
         await testContext.makeAllNodesKnown();
-        await sleep(2000);
+        await sleep(2000); // K2 space initialization after join + agent info exchange
 
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
@@ -134,9 +134,19 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           claimTtlMs: 60_000,
           ...config,
         } as any);
-        // Give the AutoProcessorConfig time to sync to Bob so his watcher can
-        // load it — otherwise Bob has no scope query and never gathers turns.
-        await sleep(3000);
+        // Wait for AutoProcessorConfig to sync to Bob so his watcher can load it.
+        // The config lives as a subject-class instance at node
+        // `ad4m://autoprocessor/{processorId}` — poll for its links on Bob's side.
+        await pollUntil(async () => {
+            try {
+                const bobLinks = await bobP.get(new LinkQuery({ source: `ad4m://autoprocessor/${processorId}` }));
+                // The config has 6+ required properties (processor_id, source_scope_query,
+                // interpretation_class, debounce_ms, batch_max, claim_ttl_ms). Poll until
+                // all required links sync — passing on the first link lets the watcher
+                // load a partial config and race the claim mechanism.
+                return bobLinks.length >= 6;
+            } catch { return false; }
+        }, { timeoutMs: 180000, intervalMs: 500, label: "AutoProcessorConfig fully syncs to Bob" });
 
         return { aliceP, bobP, events };
       }

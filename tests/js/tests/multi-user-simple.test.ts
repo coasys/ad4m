@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, sleep, startExecutor, runHcLocalServices, gracefulShutdown } from "../utils/utils";
+import { baseUrl, pollUntil, startExecutor, runHcLocalServices, gracefulShutdown, sleep } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { LinkQuery } from "@coasys/ad4m";
@@ -157,8 +157,12 @@ describe("Multi-User Simple integration tests", () => {
             // User 1 creates a perspective
             await client1.perspective.add("User 1 Perspective");
 
-            // Wait a moment for last_seen to be updated
-            await sleep(1000);
+            // Poll until user stats reflect the new perspective
+            await pollUntil(async () => {
+                const u = await adminAd4mClient!.runtime.listUsers();
+                const user = u.find((x: any) => x.email === "stats1@example.com");
+                return user && user.perspectiveCount === 1;
+            }, { timeoutMs: 5000, intervalMs: 200, label: "user perspectiveCount updated" });
 
             // List users
             const users = await adminAd4mClient!.runtime.listUsers();
@@ -221,8 +225,12 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("========================HERE 2================================");
 
-            // Wait for middleware to process (async task needs time)
-            await sleep(2000);
+            // Wait for last_seen to be updated by middleware
+            await pollUntil(async () => {
+                const u = await adminAd4mClient!.runtime.listUsers();
+                const found = u.find((x: any) => x.email === "lastseen@example.com");
+                return found && found.lastSeen !== undefined;
+            }, { timeoutMs: 5000, intervalMs: 200, label: "last_seen timestamp updated" });
 
             // List users again
             users = await adminAd4mClient!.runtime.listUsers();
@@ -816,16 +824,19 @@ describe("Multi-User Simple integration tests", () => {
             console.log("User 1 DID:", user1Agent.did);
             console.log("User 2 DID:", user2Agent.did);
 
-            // Wait a moment for the agents to be fully published
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Poll until agents are published and retrievable by DID
+            await pollUntil(async () => {
+                const r1 = await adminAd4mClient!.agent.byDID(user1Agent.did);
+                const r2 = await adminAd4mClient!.agent.byDID(user2Agent.did);
+                return r1 !== null && r2 !== null;
+            }, { timeoutMs: 10000, label: "agents published and retrievable by DID" });
 
-            // Try to retrieve the users from the agent language by their DIDs
-            // This should work if they were properly published to the agent language
+            // Retrieve the users from the agent language by their DIDs
             try {
                 console.log("Attempting to retrieve user 1 with DID:", user1Agent.did);
                 const retrievedUser1 = await adminAd4mClient!.agent.byDID(user1Agent.did);
                 console.log("Retrieved user 1:", retrievedUser1);
-                
+
                 console.log("Attempting to retrieve user 2 with DID:", user2Agent.did);
                 const retrievedUser2 = await adminAd4mClient!.agent.byDID(user2Agent.did);
                 console.log("Retrieved user 2:", retrievedUser2);
@@ -911,8 +922,18 @@ describe("Multi-User Simple integration tests", () => {
             link2.proof = new ExpressionProof("sig2", "key2")
             await client2.agent.updatePublicPerspective(new Perspective([link2]));
 
-            // Wait for the updates to be published
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Poll until the updated perspectives are visible via agent language
+            await pollUntil(async () => {
+                const r1 = await adminAd4mClient!.agent.byDID(user1Agent.did);
+                const r2 = await adminAd4mClient!.agent.byDID(user2Agent.did);
+                const has1 = r1?.perspective?.links?.some((link: any) =>
+                    link.data.source === "user1" && link.data.target === "profile1"
+                );
+                const has2 = r2?.perspective?.links?.some((link: any) =>
+                    link.data.source === "user2" && link.data.target === "profile2"
+                );
+                return !!has1 && !!has2;
+            }, { timeoutMs: 10000, label: "public perspectives updated in agent language" });
 
             // Retrieve the updated agents from the agent language
             try {
@@ -926,7 +947,7 @@ describe("Multi-User Simple integration tests", () => {
                 // Check that the public perspectives were updated
                 if (retrievedUser1?.perspective) {
                     expect(retrievedUser1.perspective.links).to.have.length.greaterThan(0);
-                    const hasUser1Link = retrievedUser1.perspective.links.some(link => 
+                    const hasUser1Link = retrievedUser1.perspective.links.some(link =>
                         link.data.source === "user1" && link.data.target === "profile1"
                     );
                     expect(hasUser1Link).to.be.true;
@@ -1078,23 +1099,23 @@ describe("Multi-User Simple integration tests", () => {
             );
             console.log("User 1 published neighbourhood:", neighbourhoodUrl);
 
-            // Wait for neighbourhood to be fully set up
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
             // User 2 joins the same neighbourhood
             const joinResult = await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
             console.log("User 2 joined neighbourhood:", joinResult);
-            //console.log("User 2 joined neighbourhood uuid:", joinResult.uuid);
 
-            // Wait for neighbourhood sync
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Poll until both users see the shared perspective
+            let user1SharedPerspective: any;
+            let user2SharedPerspective: any;
+            await pollUntil(async () => {
+                const u1p = await client1.perspective.all();
+                const u2p = await client2.perspective.all();
+                user1SharedPerspective = u1p.find(p => p.sharedUrl === neighbourhoodUrl);
+                user2SharedPerspective = u2p.find(p => p.sharedUrl === neighbourhoodUrl);
+                return !!user1SharedPerspective && !!user2SharedPerspective;
+            }, { timeoutMs: 15000, label: "both users see shared perspective" });
 
-            // Verify both users can see the shared perspective
             const user1Perspectives = await client1.perspective.all();
             const user2Perspectives = await client2.perspective.all();
-
-            const user1SharedPerspective = user1Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
-            const user2SharedPerspective = user2Perspectives.find(p => p.sharedUrl === neighbourhoodUrl);
 
             console.log("User 1 perspectives:", user1Perspectives);
             console.log("User 2 perspectives:", user2Perspectives);
@@ -1108,21 +1129,28 @@ describe("Multi-User Simple integration tests", () => {
             const link2 = new Link({source: "test://user2", target: "test://data2", predicate: "test://added"});
             await client2.perspective.addLink(user2SharedPerspective!.uuid, link2);
 
-            // Wait for sync
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Poll until both users see each other's links
+            await pollUntil(async () => {
+                const u1Links = await client1.perspective.queryLinks(user1SharedPerspective!.uuid, new LinkQuery({}));
+                const u2Links = await client2.perspective.queryLinks(user2SharedPerspective!.uuid, new LinkQuery({}));
+                const u1SeesU2 = u1Links.some(l =>
+                    l.data.source === "test://user2" && l.data.target === "test://data2"
+                );
+                const u2SeesU1 = u2Links.some(l =>
+                    l.data.source === "test://user1" && l.data.target === "test://data1"
+                );
+                return u1SeesU2 && u2SeesU1;
+            }, { timeoutMs: 15000, label: "both users see each other's links" });
 
-            // User 1 should see User 2's link
             const user1Links = await client1.perspective.queryLinks(user1SharedPerspective!.uuid, new LinkQuery({}));
             const user2Links = await client2.perspective.queryLinks(user2SharedPerspective!.uuid, new LinkQuery({}));
 
             console.log("User 1 sees links:", user1Links.length);
             console.log("User 2 sees links:", user2Links.length);
 
-            // Both users should see both links
             expect(user1Links.length).to.be.greaterThan(1);
             expect(user2Links.length).to.be.greaterThan(1);
 
-            // Verify specific links exist
             const user1SeesUser2Link = user1Links.some(l =>
                 l.data.source === "test://user2" && l.data.target === "test://data2"
             );
@@ -1170,8 +1198,11 @@ describe("Multi-User Simple integration tests", () => {
             await perspective1.ensureSDNASubjectClass(User1Model);
             console.log("User 1 model ensured");
 
-            // Wait for SDNA to be processed
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Poll until SDNA subject class is available
+            await pollUntil(async () => {
+                const classes = await perspective1.subjectClasses();
+                return classes.some((c: any) => c === "User1Model" || c.name === "User1Model");
+            }, { timeoutMs: 10000, label: "User1Model SDNA class available" });
 
             let user1Model = new User1Model(perspective1);
             user1Model.user1Property = "User1 created this";
@@ -1214,8 +1245,11 @@ describe("Multi-User Simple integration tests", () => {
             console.log("User 2 model ensured");
 
 
-            // Wait for SDNA to be processed
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Poll until User2Model SDNA class is available
+            await pollUntil(async () => {
+                const classes = await user2SharedPerspective!.subjectClasses();
+                return classes.some((c: any) => c === "User2Model" || c.name === "User2Model");
+            }, { timeoutMs: 10000, label: "User2Model SDNA class available" });
 
             let user2Model = new User2Model(user2SharedPerspective!);
             user2Model.user2Property = "User2 created this";
@@ -1225,11 +1259,14 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("Testing prolog pool isolation...");
 
-            
+            // Poll until both users see both SDNA classes (shared neighbourhood sync)
+            await pollUntil(async () => {
+                const c1 = await perspective1.subjectClasses();
+                return c1.length >= 2;
+            }, { timeoutMs: 15000, label: "User 1 sees both SDNA classes" });
+
             let classesSeenByUser1 = await perspective1.subjectClasses()
             console.log("User 1 sees classes:", classesSeenByUser1);
-            // In a shared neighbourhood, SDNA links propagate, so both users
-            // eventually see both classes once sync completes.
             expect(classesSeenByUser1.length).to.equal(2);
 
             let classesSeenByUser2 = await user2SharedPerspective!.subjectClasses()
@@ -1281,16 +1318,22 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("User 2 joined neighbourhood");
 
-            // Wait a bit for neighbourhood to be fully set up
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Poll until both perspectives have their link language installed
+            await pollUntil(async () => {
+                const u1p = await client1.perspective.all();
+                const u2p = await client2.perspective.all();
+                const u1state = u1p.find(p => p.uuid === perspective1.uuid)?.state;
+                const u2state = u2p.find(p => p.sharedUrl === neighbourhoodUrl)?.state;
+                const ready = ["LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED", "SYNCED"];
+                return ready.includes(u1state as string) && ready.includes(u2state as string);
+            }, { timeoutMs: 30000, label: "neighbourhood link language installed for both users" });
 
-            // Get neighbourhood proxy for User 2
             const user2Neighbourhood = await user2SharedPerspective!.getNeighbourhoodProxy();
             expect(user2Neighbourhood).to.not.be.null;
 
             // Set up signal listener for User 2
             const user2ReceivedSignals: any[] = [];
-            const user2SignalSubscription = user2Neighbourhood!.addSignalHandler((signal) => {
+            const user2SignalSubscription = user2Neighbourhood!.addSignalHandler((signal: any) => {
                 //console.log("User 2 received signal:", signal);
                 user2ReceivedSignals.push(signal);
             });
@@ -1310,9 +1353,6 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("User 1 signal listener set up");
 
-            // Wait a bit to ensure subscriptions are active
-            await new Promise(resolve => setTimeout(resolve, 500));
-
             // User 1 sends a signal to User 2
             const testSignalPayload = new PerspectiveUnsignedInput([
                 {
@@ -1330,12 +1370,10 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("Signal sent, waiting for delivery...");
 
-            // Wait for signal to be received (with timeout)
-            const maxWaitTime = 5000; // 5 seconds
-            let startTime = Date.now();
-            while (user2ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
+            // Poll until User 2 receives the signal
+            await pollUntil(() => user2ReceivedSignals.length > 0, {
+                timeoutMs: 5000, label: "User 2 receives signal from User 1"
+            });
 
             // Verify User 2 received the signal
             expect(user2ReceivedSignals.length).to.be.greaterThan(0, "User 2 should have received at least one signal");
@@ -1369,13 +1407,11 @@ describe("Multi-User Simple integration tests", () => {
                 reverseSignalPayload
             );
 
-            // Wait for signal to be received
-            startTime = Date.now();
-            while (user1ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
-                await new Promise(resolve => setTimeout(resolve, 100));
-            }
+            // Poll until User 1 receives the reverse signal
+            await pollUntil(() => user1ReceivedSignals.length > 0, {
+                timeoutMs: 5000, label: "User 1 receives signal from User 2"
+            });
 
-            // Verify User 1 received the signal
             expect(user1ReceivedSignals.length).to.be.greaterThan(0, "User 1 should have received at least one signal");
 
             const user1ReceivedSignal = user1ReceivedSignals[0];
@@ -1444,10 +1480,7 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("User 1 published neighbourhood:", neighbourhoodUrl);
 
-            // Wait for neighbourhood to be published
-            await new Promise(resolve => setTimeout(resolve, 2000));
-
-            // SECOND managed user joins the neighbourhood
+            // User 2 joins the neighbourhood
             console.log("\nUser 2 (second managed user) joining neighbourhood...");
             const joinResult = await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
             console.log("User 2 join result:", joinResult.uuid);
@@ -1458,13 +1491,20 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("User 2 joined neighbourhood");
 
-            // Wait for neighbourhood to sync
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            // Poll until both perspectives have their link language installed
+            await pollUntil(async () => {
+                const u1p = await client1.perspective.all();
+                const u2p = await client2.perspective.all();
+                const u1state = u1p.find(p => p.uuid === perspective1.uuid)?.state;
+                const u2state = u2p.find(p => p.sharedUrl === neighbourhoodUrl)?.state;
+                const ready = ["LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED", "SYNCED"];
+                return ready.includes(u1state as string) && ready.includes(u2state as string);
+            }, { timeoutMs: 30000, label: "neighbourhood link language installed for both users" });
 
             // Get neighbourhood proxies
             const user1Neighbourhood = await perspective1.getNeighbourhoodProxy();
             const user2Neighbourhood = await user2SharedPerspective!.getNeighbourhoodProxy();
-            
+
             expect(user1Neighbourhood).to.not.be.null;
             expect(user2Neighbourhood).to.not.be.null;
 
@@ -1485,9 +1525,6 @@ describe("Multi-User Simple integration tests", () => {
             });
 
             console.log("Signal handlers set up for both users");
-
-            // Wait for subscriptions to be active
-            await new Promise(resolve => setTimeout(resolve, 1000));
 
             // Check if users can see each other in otherAgents
             console.log("\n=== Checking otherAgents() ===");
@@ -1510,8 +1547,10 @@ describe("Multi-User Simple integration tests", () => {
             await user1Neighbourhood!.sendSignalU(user2Did, signal1to2);
             console.log("Signal sent from User 1 to User 2");
 
-            // Wait for signal delivery
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Poll until User 2 receives the signal
+            await pollUntil(() => user2ReceivedSignals.length > 0, {
+                timeoutMs: 5000, label: "User 2 receives signal from User 1 (Flux scenario)"
+            });
 
             // User 2 sends a signal to User 1
             console.log("\n=== User 2 sending signal to User 1 ===");
@@ -1526,8 +1565,10 @@ describe("Multi-User Simple integration tests", () => {
             await user2Neighbourhood!.sendSignalU(user1Did, signal2to1);
             console.log("Signal sent from User 2 to User 1");
 
-            // Wait for signal delivery
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Poll until User 1 receives the signal
+            await pollUntil(() => user1ReceivedSignals.length > 0, {
+                timeoutMs: 5000, label: "User 1 receives signal from User 2 (Flux scenario)"
+            });
 
             // Verify signals were received
             console.log("\n=== Verification ===");
@@ -1587,7 +1628,6 @@ describe("Multi-User Simple integration tests", () => {
                 new Perspective([])
             );
             console.log("Main agent created neighbourhood:", neighbourhoodUrl);
-            await new Promise(resolve => setTimeout(resolve, 2000));
 
             // Managed user joins the neighbourhood
             await userClient.neighbourhood.joinFromUrl(neighbourhoodUrl);
@@ -1595,9 +1635,17 @@ describe("Multi-User Simple integration tests", () => {
             const userSharedPerspective = userPerspectives.find(p => p.sharedUrl === neighbourhoodUrl);
             expect(userSharedPerspective).to.not.be.null;
             console.log("Managed user joined neighbourhood");
-            await new Promise(resolve => setTimeout(resolve, 2000));
 
-            // Get neighbourhood proxies for both sides
+            // Poll until both perspectives have their link language installed
+            await pollUntil(async () => {
+                const mainPersp = await adminAd4mClient!.perspective.all();
+                const userPersp = await userClient.perspective.all();
+                const mainState = mainPersp.find(p => p.uuid === mainPerspective.uuid)?.state;
+                const userState = userPersp.find(p => p.sharedUrl === neighbourhoodUrl)?.state;
+                const ready = ["LINK_LANGUAGE_INSTALLED_BUT_NOT_SYNCED", "SYNCED"];
+                return ready.includes(mainState as string) && ready.includes(userState as string);
+            }, { timeoutMs: 30000, label: "neighbourhood link language installed (main agent + managed user)" });
+
             const mainAgentNH = await mainPerspective.getNeighbourhoodProxy();
             const userNH = await userSharedPerspective!.getNeighbourhoodProxy();
             expect(mainAgentNH).to.not.be.null;
@@ -1607,16 +1655,14 @@ describe("Multi-User Simple integration tests", () => {
             const mainAgentReceivedSignals: any[] = [];
             const userReceivedSignals: any[] = [];
 
-            mainAgentNH!.addSignalHandler((signal) => {
+            mainAgentNH!.addSignalHandler((signal: any) => {
                 console.log("✉️ Main agent received signal:", JSON.stringify(signal));
                 mainAgentReceivedSignals.push(signal);
             });
-            userNH!.addSignalHandler((signal) => {
+            userNH!.addSignalHandler((signal: any) => {
                 console.log("✉️ Managed user received signal:", JSON.stringify(signal));
                 userReceivedSignals.push(signal);
             });
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
 
             // --- Test 1: main agent sends signal to managed user ---
             console.log("\n--- Main agent sending signal to managed user ---");
@@ -1624,11 +1670,9 @@ describe("Multi-User Simple integration tests", () => {
                 new Link({ source: "test://signal", predicate: "test://main_to_user", target: mainAgentDid })
             ]));
 
-            const maxWait = 5000;
-            let start = Date.now();
-            while (userReceivedSignals.length === 0 && Date.now() - start < maxWait) {
-                await new Promise(r => setTimeout(r, 100));
-            }
+            await pollUntil(() => userReceivedSignals.length > 0, {
+                timeoutMs: 5000, label: "managed user receives signal from main agent"
+            });
             expect(userReceivedSignals.length).to.be.greaterThan(0, "Managed user should receive signal from main agent");
             expect(userReceivedSignals[0].data.links[0].data.predicate).to.equal("test://main_to_user");
             console.log("✅ Managed user received signal from main agent");
@@ -1639,10 +1683,9 @@ describe("Multi-User Simple integration tests", () => {
                 new Link({ source: "test://signal", predicate: "test://user_to_main", target: userDid })
             ]));
 
-            start = Date.now();
-            while (mainAgentReceivedSignals.length === 0 && Date.now() - start < maxWait) {
-                await new Promise(r => setTimeout(r, 100));
-            }
+            await pollUntil(() => mainAgentReceivedSignals.length > 0, {
+                timeoutMs: 5000, label: "main agent receives signal from managed user"
+            });
             expect(mainAgentReceivedSignals.length).to.be.greaterThan(0, "Main agent should receive signal from managed user");
             expect(mainAgentReceivedSignals[0].data.links[0].data.predicate).to.equal("test://user_to_main");
             console.log("✅ Main agent received signal from managed user");
@@ -1654,10 +1697,9 @@ describe("Multi-User Simple integration tests", () => {
                 new Link({ source: "test://broadcast", predicate: "test://user_broadcast", target: userDid })
             ]));
 
-            start = Date.now();
-            while (mainAgentReceivedSignals.length === mainAgentCountBefore && Date.now() - start < maxWait) {
-                await new Promise(r => setTimeout(r, 100));
-            }
+            await pollUntil(() => mainAgentReceivedSignals.length > mainAgentCountBefore, {
+                timeoutMs: 5000, label: "main agent receives broadcast from managed user"
+            });
             expect(mainAgentReceivedSignals.length).to.be.greaterThan(mainAgentCountBefore, "Main agent should receive broadcast from managed user");
             const broadcastSignal = mainAgentReceivedSignals[mainAgentReceivedSignals.length - 1];
             expect(broadcastSignal.data.links[0].data.predicate).to.equal("test://user_broadcast");
@@ -1803,20 +1845,23 @@ describe("Multi-User Simple integration tests", () => {
             // All other users join the neighbourhood
             console.log("Node 1 User 2 joining...");
             await node1User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(2000); // Wait for join to complete
+            await sleep(2000); // K2 space initialization after DNA install
 
             console.log("Node 2 User 1 joining...");
             await node2User1Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(2000); // Wait for join to complete
+            await sleep(2000); // K2 space initialization after DNA install
 
             console.log("Node 2 User 2 joining...");
             await node2User2Client!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(2000); // Wait for join to complete
+            await sleep(2000); // K2 space initialization after DNA install
 
-            // Re-exchange agent infos with retry to handle K2 space initialization delays (Holochain 0.7.0)
-            // After users join and link language is installed, new DNA/K2 spaces are created
-            // We need to retry agent info exchange to allow K2 spaces to become ready
-            console.log("Re-exchanging agent infos with retry for K2 space readiness...");
+            // Re-exchange agent infos with retry to handle K2 space initialization
+            // delays (Holochain 0.7.0). After users join and link language installs,
+            // new DNA/K2 spaces get created. Repeated exchanges (not breaking on
+            // first success) push additional K2 agent info that the DHT needs to
+            // gossip peer keys across nodes. The inter-attempt sleep also serves as
+            // propagation time — there is no observable "K2 ready" state to poll for.
+            console.log("Re-exchanging agent infos for K2 space readiness...");
             for (let attempt = 1; attempt <= 5; attempt++) {
                 try {
                     console.log(`Agent info exchange attempt ${attempt}/5`);
@@ -1826,14 +1871,17 @@ describe("Multi-User Simple integration tests", () => {
                     await node2AdminClient!.runtime.hcAddAgentInfos(node1AgentInfos);
                     console.log(`✅ Agent info exchange attempt ${attempt} successful`);
                 } catch (error) {
-                    console.log(`⚠️  Agent info exchange attempt ${attempt} failed:`, error);
+                    console.log(`⚠️ Agent info exchange attempt ${attempt} failed:`, error);
                 }
                 if (attempt < 5) {
-                    await sleep(3000); // Wait before retry
+                    await sleep(3000);
                 }
             }
 
-            // Wait for neighbourhood to sync and owners lists to be updated
+            // DHT gossip propagation: the K2 network needs time to distribute
+            // agent keys and owners lists across nodes after the exchanges above.
+            // No observable state exists to poll — otherAgents() IS that poll,
+            // and it needs this preceding propagation window.
             console.log("Waiting for neighbourhood sync and owners list updates...");
             await sleep(15000);
 
@@ -1863,34 +1911,16 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\nChecking 'others()' for each user:");
 
             // Helper function to poll until all expected DIDs are seen
-            const pollUntilAllSeen = async (proxy: any, expectedDids: string[], userLabel: string, maxAttempts = 50) => {
-                console.log(`Polling ${userLabel} for others...`);
-                console.log(`Expected DIDs:`, expectedDids);
-                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                    const others = await proxy.otherAgents();
-                    console.log(`${userLabel} sees others (attempt ${attempt}):`, others);
-
-                    const allFound = expectedDids.every(did => {
-                        console.log(`Checking if ${did} is in ${others}`);
-                        let result = others.includes(did);
-                        console.log(`Result: ${result}`);
-                        return result;
-                    });
-                    if (allFound) {
-                        console.log(`✅ ${userLabel} sees all expected users!`);
-                        return others;
-                    }
-
-                    if (attempt < maxAttempts) {
-                        console.log(`${userLabel} waiting for DHT gossip... (${attempt}/${maxAttempts})`);
-                        await sleep(2000);
-                    }
-                }
-
-                // Return the last result even if not complete
-                const finalOthers = await proxy.otherAgents();
-                console.log(`${userLabel} final result after ${maxAttempts} attempts:`, finalOthers);
-                return finalOthers;
+            const pollUntilAllSeen = async (proxy: any, expectedDids: string[], userLabel: string) => {
+                let others: string[] = [];
+                await pollUntil(async () => {
+                    others = await proxy.otherAgents();
+                    const allFound = expectedDids.every((did: string) => others.includes(did));
+                    if (!allFound) console.log(`${userLabel} waiting for DHT gossip... sees ${others.length}/${expectedDids.length} DIDs`);
+                    else console.log(`✅ ${userLabel} sees all expected users!`);
+                    return allFound;
+                }, { timeoutMs: 150000, intervalMs: 2000, label: `${userLabel} sees all expected DIDs` });
+                return others;
             };
 
             const node1User1Others = await pollUntilAllSeen(
@@ -1973,8 +2003,9 @@ describe("Multi-User Simple integration tests", () => {
                 node2User2ReceivedSignals.push(signal);
             });
 
-            await sleep(3000); // Let handlers initialize and subscriptions become active
-
+            // Subscription-init delay: signal handlers register asynchronously
+            // and the DHT needs time to propagate AgentPubKeys across peers.
+            await sleep(3000);
 
             // Node 2 User 1 sends a signal to Node 2 User 2 (both on same node - local routing)
             console.log(`\nNode 2 User 1 (${node2User1Did.substring(0, 20)}...) sending signal to Node 2 User 2 (${node2User2Did.substring(0, 20)}...)`);
@@ -1988,12 +2019,7 @@ describe("Multi-User Simple integration tests", () => {
 
             // Wait for signal delivery
             console.log("Waiting for signal delivery...");
-            const maxWaitTime = 20000;
-            let startTime = Date.now();
-            while (node2User2ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
-                await sleep(100);
-                console.log(".");
-            }
+            await pollUntil(() => node2User2ReceivedSignals.length > 0, { timeoutMs: 20000, intervalMs: 100, label: "node2 user2 receives signal" });
 
             console.log("Signal delivery complete");
 
@@ -2016,12 +2042,8 @@ describe("Multi-User Simple integration tests", () => {
             ]));
 
             // Wait for signal delivery
-            startTime = Date.now();
             console.log("Waiting for signal delivery...");
-            while (node2User1ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
-                await sleep(100);
-                console.log(".");
-            }
+            await pollUntil(() => node2User1ReceivedSignals.length > 0, { timeoutMs: 20000, intervalMs: 100, label: "node2 user1 receives signal" });
             console.log("Signal delivery complete");
 
             // Verify Node 2 User 1 received the signal
@@ -2041,8 +2063,6 @@ describe("Multi-User Simple integration tests", () => {
                 node1User1ReceivedSignals.push(signal);
             });
 
-            await sleep(1500);
-
             console.log(`\nNode 2 User 1 (${node2User1Did.substring(0, 20)}...) sending signal to Node 1 User 1 (${node1User1Did.substring(0, 20)}...)`);
             await node2User1Proxy!.sendSignalU(node1User1Did, new PerspectiveUnsignedInput([
                 {
@@ -2052,10 +2072,7 @@ describe("Multi-User Simple integration tests", () => {
                 }
             ]));
 
-            startTime = Date.now();
-            while (node1User1ReceivedSignals.length === 0 && (Date.now() - startTime) < maxWaitTime) {
-                await sleep(100);
-            }
+            await pollUntil(() => node1User1ReceivedSignals.length > 0, { timeoutMs: 20000, intervalMs: 100, label: "node1 user1 receives cross-node signal" });
 
             expect(node1User1ReceivedSignals.length).to.be.greaterThan(0, "Node 1 User 1 should have received signal");
             expect(node1User1ReceivedSignals[0].author).to.equal(node2User1Did);
@@ -2119,29 +2136,23 @@ describe("Multi-User Simple integration tests", () => {
             });
             console.log("Node 2 User 2 added link");
 
-            // Wait for background Holochain commits to complete before polling
-            await sleep(5000);
-
-            // Re-exchange agent infos before sync polling — K2 spaces created
-            // during link-language install may need fresh peer info
+            // Exchange agent infos before sync polling
             console.log("Re-exchanging agent infos before link sync polling...");
-            for (let attempt = 1; attempt <= 3; attempt++) {
+            await pollUntil(async () => {
                 try {
                     const n1Infos = await adminAd4mClient!.runtime.hcAgentInfos();
                     const n2Infos = await node2AdminClient!.runtime.hcAgentInfos();
                     await adminAd4mClient!.runtime.hcAddAgentInfos(n2Infos);
                     await node2AdminClient!.runtime.hcAddAgentInfos(n1Infos);
+                    return true;
                 } catch (e) {
-                    console.log(`  Agent info exchange attempt ${attempt} failed:`, e);
+                    console.log("  Agent info exchange failed:", e);
+                    return false;
                 }
-                if (attempt < 3) await sleep(2000);
-            }
+            }, { timeoutMs: 10000, intervalMs: 2000, label: "pre-sync agent info exchange" });
 
             // Wait for cross-node Holochain gossip synchronization with retry
             console.log("\nWaiting for cross-node sync (polling until all users see >= 5 links)...");
-            const syncTimeout = 240000; // 4 minutes max — WS transport adds slight overhead to gossip timing
-            const syncStart = Date.now();
-            let synced = false;
             let pollCount = 0;
 
             let node1User1Links: any[] = [];
@@ -2149,8 +2160,7 @@ describe("Multi-User Simple integration tests", () => {
             let node2User1Links: any[] = [];
             let node2User2Links: any[] = [];
 
-            while (!synced && Date.now() - syncStart < syncTimeout) {
-                await sleep(5000);
+            await pollUntil(async () => {
                 pollCount++;
 
                 // Re-exchange agent infos every 15s to help K2 peer discovery
@@ -2180,8 +2190,8 @@ describe("Multi-User Simple integration tests", () => {
                 const counts = [node1User1Links.length, node1User2Links.length, node2User1Links.length, node2User2Links.length];
                 console.log(`  Sync check: link counts = [${counts.join(', ')}] (need >= 5 each)`);
 
-                synced = counts.every(c => c >= 5);
-            }
+                return counts.every(c => c >= 5);
+            }, { timeoutMs: 240000, intervalMs: 5000, label: "cross-node link sync (all users >= 5 links)" });
 
             console.log(`\nQuerying links from each user's perspective...`);
             console.log(`Node 1 User 1 sees ${node1User1Links.length} links`);
@@ -2282,25 +2292,19 @@ describe("Multi-User Simple integration tests", () => {
             });
             client2.perspective.subscribePerspectiveAdded();
 
-            // Wait for subscriptions to be active
-            await sleep(1000);
-            console.log("✅ Subscriptions active");
-
             // User 1 creates a perspective
             console.log("\nUser 1 creating perspective...");
             const user1Perspective = await client1.perspective.add("User 1 Only Perspective");
             console.log(`User 1 created perspective: ${user1Perspective.uuid}`);
 
-            // Wait for events to propagate
-            await sleep(2000);
+            await pollUntil(() => user1Events.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user1 perspectiveAdded event" });
 
             // User 2 creates a perspective
             console.log("\nUser 2 creating perspective...");
             const user2Perspective = await client2.perspective.add("User 2 Only Perspective");
             console.log(`User 2 created perspective: ${user2Perspective.uuid}`);
 
-            // Wait for events to propagate
-            await sleep(2000);
+            await pollUntil(() => user2Events.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user2 perspectiveAdded event" });
 
             console.log(`\nUser 1 received ${user1Events.length} events`);
             console.log(`User 2 received ${user2Events.length} events`);
@@ -2350,20 +2354,17 @@ describe("Multi-User Simple integration tests", () => {
             });
             client2.perspective.subscribePerspectiveUpdated();
 
-            await sleep(1000);
-            console.log("✅ Subscriptions active");
-
             // User 1 updates their perspective metadata (name)
             console.log("\nUser 1 updating their perspective name...");
             await client1.perspective.update(user1Perspective.uuid, "User 1 Updated Name");
 
-            await sleep(2000);
+            await pollUntil(() => user1UpdateEvents.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user1 perspectiveUpdated event" });
 
             // User 2 updates their perspective metadata (name)
             console.log("\nUser 2 updating their perspective name...");
             await client2.perspective.update(user2Perspective.uuid, "User 2 Updated Name");
 
-            await sleep(2000);
+            await pollUntil(() => user2UpdateEvents.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user2 perspectiveUpdated event" });
 
             console.log(`\nUser 1 received ${user1UpdateEvents.length} update events`);
             console.log(`User 2 received ${user2UpdateEvents.length} update events`);
@@ -2414,9 +2415,6 @@ describe("Multi-User Simple integration tests", () => {
                 user2LinkEvents.push(link);
             }]);
 
-            await sleep(1000);
-            console.log("✅ Subscriptions active");
-
             // User 1 adds a link to their perspective
             console.log("\nUser 1 adding link to their perspective...");
             await client1.perspective.addLink(user1Perspective.uuid, {
@@ -2425,7 +2423,7 @@ describe("Multi-User Simple integration tests", () => {
                 predicate: "test://has"
             });
 
-            await sleep(2000);
+            await pollUntil(() => user1LinkEvents.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user1 linkAdded event" });
 
             // User 2 adds a link to their perspective
             console.log("\nUser 2 adding link to their perspective...");
@@ -2435,7 +2433,7 @@ describe("Multi-User Simple integration tests", () => {
                 predicate: "test://has"
             });
 
-            await sleep(2000);
+            await pollUntil(() => user2LinkEvents.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user2 linkAdded event" });
 
             console.log(`\nUser 1 received ${user1LinkEvents.length} link events`);
             console.log(`User 2 received ${user2LinkEvents.length} link events`);
@@ -2503,20 +2501,17 @@ describe("Multi-User Simple integration tests", () => {
             });
             client2.perspective.subscribePerspectiveRemoved();
 
-            await sleep(1000);
-            console.log("✅ Subscriptions active");
-
             // User 1 removes their perspective
             console.log("\nUser 1 removing their perspective...");
             await client1.perspective.remove(user1Perspective.uuid);
 
-            await sleep(2000);
+            await pollUntil(() => user1RemoveEvents.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user1 perspectiveRemoved event" });
 
             // User 2 removes their perspective
             console.log("\nUser 2 removing their perspective...");
             await client2.perspective.remove(user2Perspective.uuid);
 
-            await sleep(2000);
+            await pollUntil(() => user2RemoveEvents.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user2 perspectiveRemoved event" });
 
             console.log(`\nUser 1 received ${user1RemoveEvents.length} removal events`);
             console.log(`User 2 received ${user2RemoveEvents.length} removal events`);
@@ -2578,7 +2573,10 @@ describe("Multi-User Simple integration tests", () => {
             const notif1Id = await client1.runtime.requestInstallNotification(user1Notification);
             const notif2Id = await client2.runtime.requestInstallNotification(user2Notification);
 
-            await sleep(500);
+            await pollUntil(async () => {
+                const notifs = await client1.runtime.notifications();
+                return notifs.some(n => n.id === notif1Id);
+            }, { timeoutMs: 5000, intervalMs: 100, label: "user1 notification installed" });
 
             // User 1 retrieves notifications - should only see their own and it should be auto-granted
             const user1Notifications = await client1.runtime.notifications();
@@ -2656,7 +2654,11 @@ describe("Multi-User Simple integration tests", () => {
             const notif1Id = await client1.runtime.requestInstallNotification(user1Notification);
             const notif2Id = await client2.runtime.requestInstallNotification(user2Notification);
 
-            await sleep(500);
+            await pollUntil(async () => {
+                const n1 = await client1.runtime.notifications();
+                const n2 = await client2.runtime.notifications();
+                return n1.some(n => n.id === notif1Id) && n2.some(n => n.id === notif2Id);
+            }, { timeoutMs: 5000, intervalMs: 100, label: "both user notifications installed" });
 
             // Verify that both notifications contain the $agentDid variable in their triggers
             // and are auto-granted for managed users
@@ -2709,7 +2711,10 @@ describe("Multi-User Simple integration tests", () => {
 
             // Install notification - managed users get auto-granted
             const notificationId = await client1.runtime.requestInstallNotification(notification);
-            await sleep(500);
+            await pollUntil(async () => {
+                const notifs = await client1.runtime.notifications();
+                return notifs.some(n => n.id === notificationId);
+            }, { timeoutMs: 5000, intervalMs: 100, label: "notification installed for user1" });
 
             // User 1 can see their notification and it should be auto-granted
             const user1Notifs = await client1.runtime.notifications();
@@ -2748,7 +2753,10 @@ describe("Multi-User Simple integration tests", () => {
             };
 
             const notificationId = await managedClient.runtime.requestInstallNotification(notification);
-            await sleep(500);
+            await pollUntil(async () => {
+                const notifs = await managedClient.runtime.notifications();
+                return notifs.some(n => n.id === notificationId);
+            }, { timeoutMs: 5000, intervalMs: 100, label: "managed user notification installed" });
 
             // Verify the notification is auto-granted
             const notifs = await managedClient.runtime.notifications();
@@ -2879,26 +2887,6 @@ describe("Multi-User Simple integration tests", () => {
             // The remote agent is already in before the managed user even exists.
             console.log("Remote main agent joining neighbourhood...");
             await node3MainClient!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(3000);
-
-            // Exchange agent infos so the two nodes can find each other
-            console.log("Exchanging agent infos after remote join...");
-            for (let attempt = 1; attempt <= 5; attempt++) {
-                try {
-                    const localInfos = await adminAd4mClient!.runtime.hcAgentInfos();
-                    const remoteInfos = await node3MainClient!.runtime.hcAgentInfos();
-                    await adminAd4mClient!.runtime.hcAddAgentInfos(remoteInfos);
-                    await node3MainClient!.runtime.hcAddAgentInfos(localInfos);
-                    console.log(`Agent info exchange attempt ${attempt}/5 successful`);
-                } catch (error) {
-                    console.log(`Agent info exchange attempt ${attempt} failed:`, error);
-                }
-                if (attempt < 5) await sleep(3000);
-            }
-
-            // Wait for the two main agents to fully sync
-            console.log("Waiting for main agents to sync...");
-            await sleep(15000);
 
             // Verify the two main agents see each other before proceeding
             const localMainPerspectives = await adminAd4mClient!.perspective.all();
@@ -2911,24 +2899,31 @@ describe("Multi-User Simple integration tests", () => {
             expect(remoteNH).to.not.be.undefined;
             const remoteProxy = await remoteNH!.getNeighbourhoodProxy();
 
-            console.log("Verifying main agents see each other...");
-            const pollUntilSeen = async (proxy: any, expectedDids: string[], label: string, maxAttempts = 50) => {
-                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                    const others = await proxy.otherAgents();
-                    const allFound = expectedDids.every((did: string) => others.includes(did));
-                    if (allFound) {
-                        console.log(`${label} sees all expected agents`);
-                        return others;
-                    }
-                    if (attempt < maxAttempts) await sleep(2000);
-                }
-                const finalOthers = await proxy.otherAgents();
-                console.log(`${label} final others after polling:`, finalOthers);
-                return finalOthers;
+            // Exchange agent infos and poll until the two main agents discover each other
+            console.log("Exchanging agent infos and waiting for main agents to sync...");
+            const pollUntilSeen = async (proxy: any, expectedDids: string[], label: string, timeoutMs = 100000) => {
+                let others: string[] = [];
+                await pollUntil(async () => {
+                    others = await proxy.otherAgents();
+                    return expectedDids.every((did: string) => others.includes(did));
+                }, { timeoutMs, intervalMs: 2000, label: `${label} sees expected agents` });
+                console.log(`${label} sees all expected agents`);
+                return others;
             };
 
-            await pollUntilSeen(localMainProxy!, [remoteMainAgentDid], "Local Main Agent");
-            await pollUntilSeen(remoteProxy!, [localMainAgentDid], "Remote Main Agent");
+            await pollUntil(async () => {
+                try {
+                    const localInfos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const remoteInfos = await node3MainClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(remoteInfos);
+                    await node3MainClient!.runtime.hcAddAgentInfos(localInfos);
+                } catch (error) {
+                    console.log("Agent info exchange failed:", error);
+                }
+                const localOthers = await localMainProxy!.otherAgents();
+                const remoteOthers = await remoteProxy!.otherAgents();
+                return localOthers.includes(remoteMainAgentDid) && remoteOthers.includes(localMainAgentDid);
+            }, { timeoutMs: 120000, intervalMs: 3000, label: "main agents see each other after info exchange" });
             console.log("Main agents synced and see each other.");
 
             // Step 3: NOW create the managed user (simulating late signup in Flux)
@@ -2947,27 +2942,6 @@ describe("Multi-User Simple integration tests", () => {
             // Step 4: Managed user joins the neighbourhood
             console.log("Managed user joining neighbourhood (late joiner)...");
             await localManagedUserClient!.neighbourhood.joinFromUrl(neighbourhoodUrl);
-            await sleep(5000);
-
-            // Re-exchange agent infos so the remote node can discover
-            // the managed user's DID-to-AgentPubKey mapping
-            console.log("Re-exchanging agent infos after managed user join...");
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                try {
-                    const localInfos = await adminAd4mClient!.runtime.hcAgentInfos();
-                    const remoteInfos = await node3MainClient!.runtime.hcAgentInfos();
-                    await adminAd4mClient!.runtime.hcAddAgentInfos(remoteInfos);
-                    await node3MainClient!.runtime.hcAddAgentInfos(localInfos);
-                    console.log(`Post-managed-join agent info exchange ${attempt}/3 successful`);
-                } catch (error) {
-                    console.log(`Post-managed-join agent info exchange ${attempt} failed:`, error);
-                }
-                if (attempt < 3) await sleep(3000);
-            }
-
-            // Wait for the managed user's DID link to gossip
-            console.log("Waiting for managed user DID gossip...");
-            await sleep(10000);
 
             // Get managed user's neighbourhood proxy
             const localManagedPerspectives = await localManagedUserClient!.perspective.all();
@@ -2975,25 +2949,30 @@ describe("Multi-User Simple integration tests", () => {
             expect(localManagedNH).to.not.be.undefined;
             const localManagedProxy = await localManagedNH!.getNeighbourhoodProxy();
 
-            // Wait for the managed user to be discovered by remote
-            console.log("Waiting for managed user DHT gossip / peer discovery...");
+            // Re-exchange agent infos and poll until managed user is discovered
+            console.log("Re-exchanging agent infos and waiting for managed user DID gossip...");
+            await pollUntil(async () => {
+                try {
+                    const localInfos = await adminAd4mClient!.runtime.hcAgentInfos();
+                    const remoteInfos = await node3MainClient!.runtime.hcAgentInfos();
+                    await adminAd4mClient!.runtime.hcAddAgentInfos(remoteInfos);
+                    await node3MainClient!.runtime.hcAddAgentInfos(localInfos);
+                } catch (error) {
+                    console.log("Post-managed-join agent info exchange failed:", error);
+                }
+                const remoteOthers = await remoteProxy!.otherAgents();
+                const managedOthers = await localManagedProxy!.otherAgents();
+                return remoteOthers.includes(localManagedUserDid) && managedOthers.includes(remoteMainAgentDid);
+            }, { timeoutMs: 120000, intervalMs: 3000, label: "managed user and remote agent discover each other" });
 
             // Remote main agent should see the managed user
-            const remoteOthers = await pollUntilSeen(
-                remoteProxy!,
-                [localManagedUserDid],
-                "Remote Main Agent"
-            );
+            const remoteOthers = await remoteProxy!.otherAgents();
             expect(remoteOthers).to.include(localManagedUserDid,
                 "Remote main agent should see local managed user in others()");
             console.log("✅ Remote main agent sees managed user in others()");
 
             // Managed user should see the remote main agent
-            const managedOthers = await pollUntilSeen(
-                localManagedProxy!,
-                [remoteMainAgentDid],
-                "Local Managed User"
-            );
+            const managedOthers = await localManagedProxy!.otherAgents();
             expect(managedOthers).to.include(remoteMainAgentDid,
                 "Local managed user should see remote main agent in others()");
             console.log("✅ Managed user sees remote main agent in others()");
@@ -3015,18 +2994,14 @@ describe("Multi-User Simple integration tests", () => {
                 console.log("  [RECV] Local main agent got signal from:", signal.author);
                 localMainReceivedSignals.push(signal);
             });
-            await sleep(3000); // Let subscriptions stabilize
-
-            const maxWaitTime = 30000;
             const waitForSignal = async (signals: any[], label: string) => {
-                const start = Date.now();
-                while (signals.length === 0 && (Date.now() - start) < maxWaitTime) {
-                    await sleep(100);
-                }
+                await pollUntil(() => signals.length > 0, {
+                    timeoutMs: 30000, intervalMs: 100, label: `${label} receives signal`
+                });
                 if (signals.length > 0) {
                     console.log(`  ✅ ${label}: received signal from ${signals[0].author}`);
                 } else {
-                    console.log(`  ❌ ${label}: NO signal received after ${maxWaitTime}ms`);
+                    console.log(`  ❌ ${label}: NO signal received after 30000ms`);
                 }
             };
 

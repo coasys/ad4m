@@ -227,9 +227,11 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 executorProcess.kill('SIGKILL');
             }
         }
-        // Port-based kill as safety net
-        killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        // Exit before killByPorts: lsof includes the test process's own
+        // client connections, so killByPorts would SIGTERM mocha itself
+        // (exit 143). cleanup.js between test files handles residual ports.
         deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        process.exit(0);
     });
 
     // ========================================================================

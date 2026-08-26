@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, runHcLocalServices, quitExecutor } from "../utils/utils";
+import { startExecutor, runHcLocalServices, quitExecutor, pollUntil } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 
@@ -321,9 +321,13 @@ describe("Email Verification with Mock Service", () => {
 
             // Request new code
             await adminAd4mClient!.agent.requestLoginVerification(email);
-            await sleep(100); // Small delay to ensure new code generation
 
-            const code2 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+            // Poll until a new code appears (different from the consumed one)
+            let code2: string | undefined;
+            await pollUntil(async () => {
+                code2 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                return code2 !== undefined && code2 !== code1;
+            }, { timeoutMs: 5000, label: "new verification code generated" });
 
             // Codes should be different
             expect(code1).to.not.equal(code2);
