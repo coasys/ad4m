@@ -15,7 +15,7 @@ import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
-import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
+import { SHACLFlow } from "../shacl/SHACLFlow";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
@@ -1106,27 +1106,24 @@ export class PerspectiveProxy {
         });
     }
 
-    /** Returns all Social DNA flows that can be started from the given expression */
+    /**
+     * Returns all Social DNA flows that can be started from the given expression.
+     *
+     * Post-`flowable` retirement: a flow is a candidate iff its `inputTypes`
+     * declaration is compatible with the expression. A flow with no declared
+     * `inputTypes` (or one containing the `"any"` wildcard) matches every
+     * expression — same behaviour as the legacy `flowable === "any"` case.
+     * Concrete class-URI matching against the expression's runtime class is
+     * a follow-up (design doc §5 spawn engine).
+     */
     async availableFlows(exprAddr: string): Promise<string[]> {
         const allFlowNames = await this.sdnaFlows();
         const available: string[] = [];
         for (const name of allFlowNames) {
             const flow = await this.getFlow(name);
             if (!flow) continue;
-            if (flow.flowable === "any") {
+            if (flow.inputTypes.length === 0 || flow.inputTypes.includes("any")) {
                 available.push(name);
-            } else {
-                // Check if the expression matches the flowable link pattern
-                const pattern = flow.flowable as LinkPattern;
-                const source = pattern.source || exprAddr;
-                const links = await this.get(new LinkQuery({
-                    source,
-                    predicate: pattern.predicate,
-                    target: pattern.target
-                }));
-                if (links.length > 0) {
-                    available.push(name);
-                }
             }
         }
         return available;
@@ -1542,7 +1539,7 @@ export class PerspectiveProxy {
      * import { SHACLFlow } from '@coasys/ad4m';
      * 
      * const todoFlow = new SHACLFlow('TODO', 'todo://');
-     * todoFlow.flowable = 'any';
+     * todoFlow.inputTypes = ['any'];
      * 
      * // Define states
      * todoFlow.addState({ name: 'ready', value: 0, stateCheck: { predicate: 'todo://state', target: 'todo://ready' }});
@@ -1614,7 +1611,7 @@ export class PerspectiveProxy {
 
         const flowUri = flowUriLinks[0].data.target;
 
-        // Fetch flow-level links (hasState, hasTransition, flowable, startAction)
+        // Fetch flow-level links (hasState, hasTransition, startAction, inputTypes/outputTypes/…)
         const flowLevelLinks = await this.get(new LinkQuery({ source: flowUri }));
 
         // Collect state and transition URIs, then fetch their child links

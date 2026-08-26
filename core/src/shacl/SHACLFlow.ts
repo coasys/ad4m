@@ -158,26 +158,19 @@ export interface FlowTransition {
 }
 
 /**
- * Flowable condition - determines which expressions can enter this flow
- * "any" means all expressions can start this flow
- * Otherwise, a link pattern to check
- */
-export type FlowableCondition = "any" | LinkPattern;
-
-/**
  * SHACL Flow - represents a state machine for AD4M expressions
- * 
+ *
  * Flows define:
- * - Which expressions can enter the flow (flowable condition)
+ * - Which expressions can enter the flow (via `inputTypes`)
  * - What states exist and how to detect them (via link patterns)
  * - How to transition between states (via actions)
- * 
+ *
  * @example
  * ```typescript
  * const todoFlow = new SHACLFlow('todo://TODO', 'todo://');
- * 
+ *
  * // Any expression can become a TODO
- * todoFlow.flowable = 'any';
+ * todoFlow.inputTypes = ['any'];
  * 
  * // Define states
  * todoFlow.addState({
@@ -226,9 +219,6 @@ export class SHACLFlow {
   /** Namespace for generated URIs */
   public namespace: string;
 
-  /** Condition for which expressions can start this flow */
-  public flowable: FlowableCondition = "any";
-
   /** Actions to execute when starting the flow */
   public startAction: AD4MAction[] = [];
 
@@ -248,11 +238,11 @@ export class SHACLFlow {
    *
    * Design doc §4.1 (v4 addition): a flow's *typed input*. When an
    * expression whose class matches any URI in this array enters scope,
-   * the flow-spawn engine considers it a candidate base. Superseder of
-   * the old `flowable: LinkPattern` primitive — model-level instead of
-   * link-level. Empty array = flow declares no typed input (currently
-   * treated the same as unset; a future engine pass may use this as
-   * "any class allowed" once `flowable` is retired).
+   * the flow-spawn engine considers it a candidate base. Superseded
+   * the older link-level `flowable: LinkPattern` primitive — model-level
+   * matching by subject class instead of link matching. Empty array =
+   * flow declares no typed input. The `"any"` sentinel is accepted as
+   * a wildcard for tests and legacy flows.
    */
   public inputTypes: string[] = [];
 
@@ -430,21 +420,6 @@ export class SHACLFlow {
         source: flowUri,
         predicate: "ad4m://context",
         target: `literal:string:${encodeURIComponent(JSON.stringify(this.context))}`
-      });
-    }
-
-    // Flowable condition
-    if (this.flowable === "any") {
-      links.push({
-        source: flowUri,
-        predicate: "ad4m://flowable",
-        target: "ad4m://any"
-      });
-    } else {
-      links.push({
-        source: flowUri,
-        predicate: "ad4m://flowable",
-        target: `literal:string:${encodeURIComponent(JSON.stringify(this.flowable))}`
       });
     }
 
@@ -702,23 +677,6 @@ export class SHACLFlow {
       }
     }
 
-    // Find flowable condition
-    const flowableLink = links.find(l =>
-      l.source === flowUri && l.predicate === "ad4m://flowable"
-    );
-    if (flowableLink) {
-      if (flowableLink.target === "ad4m://any") {
-        flow.flowable = "any";
-      } else {
-        try {
-          const jsonStr = flowableLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          flow.flowable = JSON.parse(decodeURIComponent(jsonStr));
-        } catch {
-          flow.flowable = "any";
-        }
-      }
-    }
-
     // Find start action
     const startActionLink = links.find(l =>
       l.source === flowUri && l.predicate === "ad4m://startAction"
@@ -904,7 +862,6 @@ export class SHACLFlow {
     return {
       name: this.name,
       namespace: this.namespace,
-      flowable: this.flowable,
       startAction: this.startAction,
       states: sanitizedStates,
       transitions: this._transitions,
@@ -923,7 +880,6 @@ export class SHACLFlow {
    */
   static fromJSON(json: any): SHACLFlow {
     const flow = new SHACLFlow(json.name, json.namespace);
-    flow.flowable = json.flowable || "any";
     flow.startAction = json.startAction || [];
     // Non-empty-string guard — mirrors the toLinks-side reader.
     if (typeof json.interpretationHint === "string" && json.interpretationHint.length > 0) {

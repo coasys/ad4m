@@ -68,7 +68,6 @@ describe('SHACLFlow', () => {
   describe('toLinks()', () => {
     it('serializes flow to links', () => {
       const flow = new SHACLFlow('TODO', 'todo://');
-      flow.flowable = 'any';
       flow.startAction = [
         { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
       ];
@@ -93,11 +92,12 @@ describe('SHACLFlow', () => {
       expect(typeLink).toBeDefined();
       expect(typeLink!.source).toBe('todo://TODOFlow');
       
-      // Check flowable link
+      // `flowable` retired (design §4.1) — the flow serializer must not emit
+      // any `ad4m://flowable` link. `inputTypes` is the successor field and
+      // gets exercised separately.
       const flowableLink = links.find(l => l.predicate === 'ad4m://flowable');
-      expect(flowableLink).toBeDefined();
-      expect(flowableLink!.target).toBe('ad4m://any');
-      
+      expect(flowableLink).toBeUndefined();
+
       // Check start action link
       const startActionLink = links.find(l => l.predicate === 'ad4m://startAction');
       expect(startActionLink).toBeDefined();
@@ -117,7 +117,6 @@ describe('SHACLFlow', () => {
   describe('fromLinks()', () => {
     it('reconstructs flow from links', () => {
       const original = new SHACLFlow('TODO', 'todo://');
-      original.flowable = 'any';
       original.startAction = [
         { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
       ];
@@ -143,7 +142,6 @@ describe('SHACLFlow', () => {
       
       expect(reconstructed.name).toBe('TODO');
       expect(reconstructed.namespace).toBe('todo://');
-      expect(reconstructed.flowable).toBe('any');
       expect(reconstructed.startAction.length).toBe(1);
       expect(reconstructed.states.length).toBe(2);
       expect(reconstructed.transitions.length).toBe(1);
@@ -178,8 +176,7 @@ describe('SHACLFlow', () => {
   describe('full TODO example', () => {
     it('creates complete TODO flow matching Prolog example', () => {
       const flow = new SHACLFlow('TODO', 'todo://');
-      flow.flowable = 'any';
-      
+
       // Start action - renders expression as TODO in 'ready' state
       flow.startAction = [
         { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
@@ -240,7 +237,6 @@ describe('SHACLFlow', () => {
   describe('interpretationHint (AI-driven state suggestion)', () => {
     it('round-trips top-level and per-state interpretation hints via toLinks/fromLinks', () => {
       const flow = new SHACLFlow('Deliberation', 'ns://deliberation/');
-      flow.flowable = 'any';
       flow.interpretationHint =
         'Tracks a group deliberation from initial proposal to shared understanding.';
 
@@ -574,7 +570,6 @@ describe('SHACLFlow', () => {
       const dodgyJson = {
         name: 'Bad',
         namespace: 'ns://bad/',
-        flowable: 'any',
         startAction: [],
         interpretationHint: '',
         states: [
@@ -727,7 +722,6 @@ describe('SHACLFlow', () => {
       const dodgyJson = {
         name: 'BadFlow',
         namespace: 'ns://',
-        flowable: 'any',
         startAction: [],
         inputTypes: ['coasys://Task', null, 42],
         outputTypes: 'not-an-array',

@@ -170,9 +170,6 @@ pub struct SHACLFlow {
     pub name: String,
     /// Namespace for URIs (e.g., "todo://")
     pub namespace: String,
-    /// Flowable condition - "any" or a LinkPattern
-    #[serde(default = "default_flowable")]
-    pub flowable: serde_json::Value,
     /// Actions to execute when starting the flow
     #[serde(default)]
     pub start_action: Vec<AD4MAction>,
@@ -182,10 +179,6 @@ pub struct SHACLFlow {
     /// Transitions between states
     #[serde(default)]
     pub transitions: Vec<FlowTransition>,
-}
-
-fn default_flowable() -> serde_json::Value {
-    serde_json::Value::String("any".to_string())
 }
 
 /// Parse Flow JSON to RDF links
@@ -209,21 +202,6 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
         source: flow_uri.clone(),
         predicate: Some("ad4m://flowName".to_string()),
         target: format!("literal:string:{}", urlencoding::encode(flow_name)),
-    });
-
-    // Flowable condition
-    let flowable_target = if flow.flowable == serde_json::Value::String("any".to_string()) {
-        "ad4m://any".to_string()
-    } else {
-        format!(
-            "literal:string:{}",
-            urlencoding::encode(&flow.flowable.to_string())
-        )
-    };
-    links.push(Link {
-        source: flow_uri.clone(),
-        predicate: Some("ad4m://flowable".to_string()),
-        target: flowable_target,
     });
 
     // Start action
@@ -963,7 +941,6 @@ mod tests {
         let flow_json = r#"{
             "name": "TODO",
             "namespace": "todo://",
-            "flowable": "any",
             "start_action": [
                 {"action": "addLink", "source": "this", "predicate": "todo://state", "target": "todo://ready"}
             ],
@@ -1000,14 +977,6 @@ mod tests {
                 && l.predicate == Some("rdf://type".to_string())
                 && l.target == "ad4m://Flow"),
             "Missing flow type link"
-        );
-
-        // Check for flowable link
-        assert!(
-            links.iter().any(|l| l.source == "todo://TODOFlow"
-                && l.predicate == Some("ad4m://flowable".to_string())
-                && l.target == "ad4m://any"),
-            "Missing flowable link"
         );
 
         // Check for start action link
@@ -1050,36 +1019,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_flow_with_link_pattern_flowable() {
-        let flow_json = r#"{
-            "name": "Approval",
-            "namespace": "approval://",
-            "flowable": {"predicate": "rdf://type", "target": "approval://Document"},
-            "states": [],
-            "transitions": []
-        }"#;
-
-        let links = parse_flow_to_links(flow_json, "Approval").unwrap();
-
-        // Check for flowable link with pattern (not "any")
-        let flowable_link = links
-            .iter()
-            .find(|l| {
-                l.source == "approval://ApprovalFlow"
-                    && l.predicate == Some("ad4m://flowable".to_string())
-            })
-            .expect("Missing flowable link");
-
-        // Should be a literal with JSON, not "ad4m://any"
-        assert!(
-            flowable_link.target.starts_with("literal://string:")
-                || flowable_link.target.starts_with("literal:string:"),
-            "Flowable should be encoded as literal JSON"
-        );
-        assert!(
-            flowable_link.target.contains("predicate"),
-            "Flowable literal should contain predicate"
-        );
-    }
 }

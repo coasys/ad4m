@@ -26,7 +26,7 @@ export default function socialDNATests(testContext: TestContext) {
 
                 // Create a SHACLFlow for TODO workflow
                 const todoFlow = new SHACLFlow('TODO', 'todo://');
-                todoFlow.flowable = 'any';
+                todoFlow.inputTypes = ['any'];
 
                 // Define states
                 todoFlow.addState({
