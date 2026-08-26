@@ -509,10 +509,7 @@ impl SfuServer {
                         match Candidate::from_sdp_string(&candidate_sdp) {
                             Ok(candidate) => {
                                 peer.rtc.add_remote_candidate(candidate);
-                                debug!(
-                                    "SFU: trickle ICE candidate added for {}",
-                                    participant_id
-                                );
+                                debug!("SFU: trickle ICE candidate added for {}", participant_id);
                             }
                             Err(e) => {
                                 warn!(
@@ -531,10 +528,7 @@ impl SfuServer {
                         let origin_room = match peers.get(&participant_id) {
                             Some(p) => p.room_id.clone(),
                             None => {
-                                debug!(
-                                    "SFU: RelayData for unknown participant {}",
-                                    participant_id
-                                );
+                                debug!("SFU: RelayData for unknown participant {}", participant_id);
                                 continue;
                             }
                         };
@@ -750,10 +744,7 @@ impl SfuServer {
                             }
                             Event::ChannelClose(cid) => {
                                 if let Some(label) = peer.channels.remove(&cid) {
-                                    info!(
-                                        "SFU: peer {} closed data channel '{}'",
-                                        pid, label
-                                    );
+                                    info!("SFU: peer {} closed data channel '{}'", pid, label);
                                 }
                             }
                             _ => {}
