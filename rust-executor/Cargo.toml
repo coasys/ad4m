@@ -52,14 +52,18 @@ generate_snapshot = []  # Feature flag for snapshot generation mode
 # upstream's alias) with `features = ["v8"]` explicit. deno_core also gets
 # the same treatment. Being explicit at both levels because feature
 # propagation through git-tagged deps in Cargo.lock generate is unreliable.
-# Deno workspace-locally aliases deno_v8 as `v8` with default-features=false
-# and features=["simdutf"]. Because feature *unification* per-crate uses the
-# alias name, we must declare our extra feature under the SAME alias here.
-#
-# Setting default-features = false explicitly to override the deno-workspace
-# `simdutf` feature — our coasys-release CI didn't build the simdutf variant
-# of the V8 prebuilt binaries, only the plain `release` variant, so requesting
-# simdutf triggers a 404 for src_binding_simdutf_release_*.rs at build time.
+# NOTE on `simdutf`: deno_core enables deno_v8's `simdutf` feature itself,
+# and cargo feature unification keeps it enabled no matter what we declare
+# here — `default-features = false` on our side CANNOT strip it (CodeRabbit
+# PR #907 simdutf thread). Instead, the coasys/rusty_v8 release workflow
+# publishes the simdutf variant of the prebuilt V8 artifacts
+# (librusty_v8_simdutf_release_* + src_binding_simdutf_release_*), which
+# RUSTY_V8_MIRROR (.cargo/config.toml) points the build at. As of tag
+# v150.4.0-coasys only the x86_64-unknown-linux-gnu simdutf variant is
+# published — before cutting a release build for macOS / Windows /
+# aarch64-linux, the simdutf artifacts for those targets must be added to
+# the coasys/rusty_v8 release, or those builds fall back to a 2-3h V8
+# source build (or 404, depending on rusty_v8's build.rs fallback).
 # Direct dep on deno_v8 (real crate name, not aliased) with v8 feature
 # explicitly enabled. Aliasing as `v8` locally competed with deno's own
 # workspace-alias and broke feature chaining through deno_core::v8 = ["v8/v8"].

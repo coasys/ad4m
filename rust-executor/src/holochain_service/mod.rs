@@ -21,7 +21,7 @@ use holochain::test_utils::itertools::Either;
 use holochain_types::dna::ValidatedDnaManifest;
 use holochain_types::websocket::AllowedOrigins;
 use kitsune_p2p_types::dependencies::url2::Url2;
-use log::{error, info, warn};
+use log::{error, info};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::select;
@@ -486,70 +486,39 @@ impl HolochainService {
     }
 
     pub async fn new(local_config: LocalConductorConfig) -> Result<HolochainService, AnyError> {
-        let conductor_yaml_path =
-            std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
-
-        // Resolve the relay_url once so both the new-config branch (below)
-        // and the legacy-migration branch (above) share the same value.
-        // Precedence: use_proxy → explicit relay_url → default.
-        // CodeRabbit review PR #907 finding #4 (proxy/relay precedence).
+        // Resolve the relay_url once. Precedence: use_proxy → explicit
+        // relay_url → default. CodeRabbit review PR #907 finding #4.
         let resolved_relay_url = resolve_relay_url(&local_config);
 
-        let mut config = if conductor_yaml_path.exists() {
-            // CodeRabbit review PR #907 finding #3: Holochain 0.7 tightened
-            // conductor-config deserialization and now:
-            //   - rejects obsolete network.signal_url and
-            //     network.webrtc_config fields
-            //   - REQUIRES network.relay_url
-            // Users upgrading from HC 0.6 in place have both problems (their
-            // file has obsolete fields AND lacks relay_url), so load_yaml
-            // fails either way. Migrate the file in place before load_yaml()
-            // sees it. Idempotent: fields already-clean / already-present are
-            // left untouched (no rewrite, no mtime change).
-            //
-            // CodeRabbit round-2 finding @508: also inject resolved relay_url
-            // when absent, otherwise load_yaml fails on the required-field
-            // check for a migrated file.
-            if let Err(e) =
-                migrate_legacy_conductor_config(&conductor_yaml_path, Some(&resolved_relay_url))
-                    .await
-            {
-                warn!(
-                    "Could not migrate legacy conductor_config.yaml at {:?}: {} \
-                     — load_yaml may still succeed if the file is already 0.7-clean.",
-                    conductor_yaml_path, e
-                );
-            }
-            ConductorConfig::load_yaml(&conductor_yaml_path)?
+        // The conductor config is always constructed in code from
+        // LocalConductorConfig. Nothing in AD4M has ever written a
+        // conductor_config.yaml into conductor_path, so the old
+        // "load_yaml if the file exists" branch (added 2023) only ever
+        // served hand-authored files — and silently overrode the launcher/
+        // CLI flags when one was present. Dropped on PR #907 (per Nico's
+        // review question) together with the HC 0.6→0.7 yaml migration
+        // shim that existed only to keep that branch loadable.
+        let mut config = ConductorConfig::default();
+        let data_root_path: DataRootPath =
+            PathBuf::from(local_config.conductor_path.clone()).into();
+        config.data_root_path = Some(data_root_path);
+        config.admin_interfaces = None;
+
+        let mut network_config = NetworkConfig::default();
+
+        if local_config.use_bootstrap {
+            network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
         } else {
-            let mut config = ConductorConfig::default();
-            let data_root_path: DataRootPath =
-                PathBuf::from(local_config.conductor_path.clone()).into();
-            config.data_root_path = Some(data_root_path);
-            config.admin_interfaces = None;
+            network_config.bootstrap_url = Url2::parse("http://bootstrap.ad4m.dev:4433");
+        }
 
-            let mut network_config = NetworkConfig::default();
+        // HC 0.7.0 dropped NetworkConfig.signal_url — the signal-server
+        // concept was folded into bootstrap+relay. Old AD4M code set
+        // signal_url to a WS URL for direct peer signaling; under 0.7
+        // this responsibility moved to the iroh relay (relay_url).
+        network_config.relay_url = Url2::parse(resolved_relay_url.as_str());
 
-            if local_config.use_bootstrap {
-                network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
-            } else {
-                network_config.bootstrap_url = Url2::parse("http://bootstrap.ad4m.dev:4433");
-            }
-
-            // HC 0.7.0 dropped NetworkConfig.signal_url — the signal-server
-            // concept was folded into bootstrap+relay. Old AD4M code set
-            // signal_url to a WS URL for direct peer signaling; under 0.7
-            // this responsibility moved to the iroh relay (relay_url).
-            //
-            // Precedence resolution is factored into resolve_relay_url() at
-            // the top of this function so the legacy-migration path can share
-            // the same value. CodeRabbit review PR #907 finding #4.
-            network_config.relay_url = Url2::parse(resolved_relay_url.as_str());
-
-            config.network = network_config;
-
-            config
-        };
+        config.network = network_config;
 
         // Apply unyt space override: the unyt DNA gets its own bootstrap,
         // relay, and auth material. All other DNAs use the AD4M defaults above.
@@ -1298,121 +1267,66 @@ pub async fn run_local_hc_services() -> Result<(), AnyError> {
 ///   2. explicit `relay_url` (from launcher config)          → use it
 ///   3. hard-coded default (public AD4M bootstrap relay)     → fallback
 ///
-/// Factored out of `HolochainService::new` so the same resolution can be
-/// applied both to fresh configs and to migrated legacy configs (see
-/// `migrate_legacy_conductor_config`).
-///
 /// CodeRabbit review PR #907 finding #4.
 fn resolve_relay_url(local_config: &LocalConductorConfig) -> String {
-    if local_config.use_proxy && !local_config.proxy_url.is_empty() {
+    let url = if local_config.use_proxy && !local_config.proxy_url.is_empty() {
         local_config.proxy_url.clone()
     } else if let Some(ref relay_url) = local_config.relay_url {
         relay_url.clone()
     } else {
         "http://bootstrap.ad4m.dev:4433/relay".to_string()
-    }
+    };
+    normalize_relay_scheme(&url)
 }
 
-/// Migrate a Holochain 0.6-era `conductor_config.yaml` in place so that
-/// Holochain 0.7's stricter deserializer accepts it.
+/// Normalize a relay URL to the scheme iroh expects.
 ///
-/// Two changes are needed:
-///   1. **Strip obsolete keys** (HC 0.7 rejects unknown fields):
-///      `network.signal_url` (folded into the iroh relay) and
-///      `network.webrtc_config` (WebRTC transport is gone).
-///   2. **Inject `network.relay_url`** if absent — HC 0.7 makes this field
-///      REQUIRED. A file migrated by (1) alone still fails `load_yaml` on
-///      the missing-field check. The caller passes in the resolved URL
-///      (from `resolve_relay_url`) so precedence stays centralised.
-///
-/// The helper reads the file, parses it as a generic YAML mapping, applies
-/// the changes, and writes it back. Idempotent: if the file is already
-/// 0.7-clean (no obsolete keys, `relay_url` already present), it is left
-/// untouched (no rewrite, no mtime change).
-///
-/// CodeRabbit review PR #907 finding #3 (strip obsolete keys) + round-2
-/// finding @508 (inject relay_url).
-async fn migrate_legacy_conductor_config(
-    path: &std::path::Path,
-    resolved_relay_url: Option<&str>,
-) -> Result<(), AnyError> {
-    let raw = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| anyhow!("read conductor_config.yaml: {}", e))?;
-
-    let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw)
-        .map_err(|e| anyhow!("parse conductor_config.yaml as YAML: {}", e))?;
-
-    let mut removed: Vec<&'static str> = Vec::new();
-    let mut injected_relay = false;
-
-    // Ensure a `network:` mapping exists so we can operate on it uniformly.
-    // If the file has no network section at all, create an empty one.
-    let doc_map = doc
-        .as_mapping_mut()
-        .ok_or_else(|| anyhow!("conductor_config.yaml root is not a mapping"))?;
-    let network_key = serde_yaml::Value::String("network".to_string());
-    if !doc_map.contains_key(&network_key) {
-        doc_map.insert(
-            network_key.clone(),
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-        );
+/// HC 0.7's `relay_url` is the iroh relay's BASE URL: `https://` for TLS
+/// relays, `http://` for plain-text ones (the iroh client performs the
+/// websocket upgrade itself). Pre-0.7 AD4M configs carry websocket-scheme
+/// proxy URLs (`wss://` / `ws://`), and `resolve_relay_url` reuses
+/// `proxy_url` as the relay — so those legacy schemes still reach us here.
+/// iroh happens to dial TLS for `wss` too, but kitsune2's plain-text guard
+/// only recognises `http`, so a plain-text `ws://` URL would slip past it
+/// and then fail the TLS handshake. Map ws→http and wss→https so both the
+/// guard and the dialer see the canonical scheme.
+/// CodeRabbit review PR #907, relay_url-scheme thread.
+fn normalize_relay_scheme(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("wss://") {
+        format!("https://{}", rest)
+    } else if let Some(rest) = url.strip_prefix("ws://") {
+        format!("http://{}", rest)
+    } else {
+        url.to_string()
     }
-    let network = doc_map
-        .get_mut(&network_key)
-        .and_then(|n| n.as_mapping_mut())
-        .ok_or_else(|| anyhow!("conductor_config.yaml `network` is not a mapping"))?;
-
-    for legacy_key in ["signal_url", "webrtc_config"] {
-        if network
-            .remove(serde_yaml::Value::String(legacy_key.to_string()))
-            .is_some()
-        {
-            removed.push(legacy_key);
-        }
-    }
-
-    // Round-2 finding @508: inject the resolved relay_url when absent.
-    // We only inject when the caller gave us one AND the file doesn't
-    // already have one. If the file HAS a relay_url we honour it (users
-    // may have hand-tuned it).
-    let relay_key = serde_yaml::Value::String("relay_url".to_string());
-    if !network.contains_key(&relay_key) {
-        if let Some(url) = resolved_relay_url {
-            network.insert(relay_key, serde_yaml::Value::String(url.to_string()));
-            injected_relay = true;
-        }
-    }
-
-    if removed.is_empty() && !injected_relay {
-        // Nothing to migrate; leave the file untouched to preserve mtime.
-        return Ok(());
-    }
-
-    let out = serde_yaml::to_string(&doc)
-        .map_err(|e| anyhow!("re-serialize migrated conductor_config.yaml: {}", e))?;
-    tokio::fs::write(path, out)
-        .await
-        .map_err(|e| anyhow!("write migrated conductor_config.yaml: {}", e))?;
-
-    let mut summary = format!("Migrated conductor_config.yaml at {:?}:", path);
-    if !removed.is_empty() {
-        summary.push_str(&format!(" stripped obsolete network.* keys: {:?}", removed));
-    }
-    if injected_relay {
-        summary.push_str(&format!(
-            "{} injected required network.relay_url = {}",
-            if removed.is_empty() { "" } else { ";" },
-            resolved_relay_url.unwrap_or("")
-        ));
-    }
-    info!("{}", summary);
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use tokio::time::{Duration, Instant};
+
+    #[test]
+    fn test_normalize_relay_scheme() {
+        // Legacy websocket schemes from pre-0.7 proxy_url configs map to
+        // the base-URL schemes iroh expects.
+        assert_eq!(
+            super::normalize_relay_scheme("wss://proxy.ad4m.dev:443/relay"),
+            "https://proxy.ad4m.dev:443/relay"
+        );
+        assert_eq!(
+            super::normalize_relay_scheme("ws://127.0.0.1:4433"),
+            "http://127.0.0.1:4433"
+        );
+        // Canonical schemes pass through untouched.
+        assert_eq!(
+            super::normalize_relay_scheme("https://relay.example/"),
+            "https://relay.example/"
+        );
+        assert_eq!(
+            super::normalize_relay_scheme("http://bootstrap.ad4m.dev:4433/relay"),
+            "http://bootstrap.ad4m.dev:4433/relay"
+        );
+    }
 
     /// Integration test: start a real Holochain conductor and generate signing keypairs.
     #[tokio::test(flavor = "multi_thread")]
