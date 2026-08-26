@@ -67,6 +67,62 @@ export interface ModelQuery {
    * predicate `via` and one of the two anchors as `to`.
    */
   linkedTo?: "flow" | "base" | { via: string; to: "flow" | "base" };
+  /**
+   * When this query is used as a `ConsensusRule.fromRole`, names the
+   * property on the matched instance that carries a DID. Design doc §7.2
+   * Shape 1 (instance-carries-DID): engine runs the query, then extracts
+   * `didProperty` from each result to build the eligible-DID set.
+   *
+   * Shape 2 (instance-is-per-DID, using `$did` templating in `where`)
+   * omits `didProperty` — the engine iterates candidate DIDs and treats
+   * a non-empty result set as "this DID matches."
+   *
+   * Ignored when the query is used as a state guard (`requires`) or
+   * background `context`.
+   */
+  didProperty?: string;
+  /**
+   * OR-compose a role expression across multiple ModelQueries. Semantics:
+   * a DID counts if it appears in the result of ANY branch (design §7.3
+   * multi-role hybrid example — "either reviewer OR admin"). Each branch
+   * is a full ModelQuery, so branches can each carry their own
+   * `didProperty` / `where` / `linkedTo`.
+   *
+   * A ModelQuery with a non-empty `or` array acts as a composition node;
+   * its own `className` / `where` etc. still count as an additional
+   * branch (union with the array). Empty or unset = no composition.
+   *
+   * Intentionally scoped to `or` for v1 — `and` / `not` fall out of the
+   * same mechanism and can land later without a schema break (design
+   * §7.4). Ignored when the query is used as a state guard or context.
+   */
+  or?: ModelQuery[];
+}
+
+/**
+ * Consensus rule for a flow-state transition (or a top-level zero-state
+ * flow's completion). Distinct DID counting with optional role
+ * restriction.
+ *
+ * Design doc §7:
+ * - `{ n: 1 }` — any agent's proposal advances (default).
+ * - `{ n: 2 }` — two distinct agents must agree.
+ * - `{ n, fromRole }` — only agents matching the role query count.
+ *
+ * `fromRole` reuses `ModelQuery` (design §7.2) so role definitions live
+ * entirely in the ontology — communities can invent roles like
+ * "Reviewer" / "Guardian" without any code change.
+ */
+export interface ConsensusRule {
+  /** Required count of distinct qualifying DIDs. */
+  n: number;
+  /**
+   * Optional role restriction. When set, only DIDs returned by the role
+   * query are counted. Two evaluation shapes (design §7.2):
+   *   Shape 1 — `didProperty` present: run once, extract DIDs from matches.
+   *   Shape 2 — `$did` templated in `where`: run per candidate.
+   */
+  fromRole?: ModelQuery;
 }
 
 /**
@@ -123,6 +179,18 @@ export interface FlowState {
    * confirmation, `requires` matches directly imply state entered.
    */
   semanticCheck?: string;
+  /**
+   * Per-state consensus rule override. When present, transitions INTO
+   * this state require the specified number of distinct qualifying DIDs
+   * (see `ConsensusRule`). Overrides the flow-level `consensusRule` if
+   * both are set; when neither is set, the runtime engine's default of
+   * `{ n: 1 }` applies (any single agent's action fires the transition).
+   *
+   * Design doc §4.1 (v3) — per-state override enables mixed-consensus
+   * flows where e.g. "Perspective" states need only one voice but the
+   * "Resolution" state requires a quorum.
+   */
+  consensusRule?: ConsensusRule;
 }
 
 /**
@@ -140,6 +208,25 @@ function isModelQueryShape(v: unknown): v is ModelQuery {
     typeof (v as { className?: unknown }).className === "string" &&
     (v as { className: string }).className.length > 0
   );
+}
+
+/**
+ * Runtime shape check for a decoded `ConsensusRule`. Enforces the one
+ * mandatory field (`n: number` with a sane range) and, when `fromRole`
+ * is present, that it's a valid ModelQuery. A malformed literal (e.g.
+ * `{ n: "many" }` or `{ n: 1, fromRole: null }`) leaves the field unset
+ * rather than becoming corrupt flow metadata that downstream engines
+ * would trip over.
+ */
+function isConsensusRuleShape(v: unknown): v is ConsensusRule {
+  if (typeof v !== "object" || v === null) return false;
+  const n = (v as { n?: unknown }).n;
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 1 || !Number.isInteger(n)) {
+    return false;
+  }
+  const fromRole = (v as { fromRole?: unknown }).fromRole;
+  if (fromRole !== undefined && !isModelQueryShape(fromRole)) return false;
+  return true;
 }
 
 /**
@@ -284,7 +371,22 @@ export class SHACLFlow {
    * Empty / unset = no context queries.
    */
   public context?: ModelQuery[];
-  
+
+  /**
+   * Flow-level consensus rule. Two roles:
+   *  - **Default for state transitions** — when a `FlowState` doesn't
+   *    declare its own `consensusRule`, transitions into it fall back
+   *    to this rule.
+   *  - **Zero-state flow completion** — for actions-as-flows (a flow
+   *    with no `FlowState`s), this is the rule the engine checks the
+   *    moment `outputTypes` are satisfied. E.g. a Like flow declares
+   *    `{ n: 1 }` and completes on the first author.
+   *
+   * Design doc §4.1 (v4): terminal condition for stateless flows.
+   * Unset = engine default of `{ n: 1 }` applies at both layers.
+   */
+  public consensusRule?: ConsensusRule;
+
   /** States in this flow */
   private _states: FlowState[] = [];
   
@@ -423,6 +525,19 @@ export class SHACLFlow {
       });
     }
 
+    // Flow-level `consensusRule` — default for state transitions when a
+    // FlowState omits its own rule; also the terminal-firing rule for
+    // zero-state flows. Serialized as one JSON literal (the shape is
+    // fixed and cheap to parse; consistent with `context` / `requires`
+    // so consumers only need one parser).
+    if (this.consensusRule) {
+      links.push({
+        source: flowUri,
+        predicate: "ad4m://consensusRule",
+        target: `literal:string:${encodeURIComponent(JSON.stringify(this.consensusRule))}`
+      });
+    }
+
     // Start action
     if (this.startAction.length > 0) {
       links.push({
@@ -500,6 +615,17 @@ export class SHACLFlow {
           source: stateUri,
           predicate: "ad4m://semanticCheck",
           target: Literal.from(state.semanticCheck).toUrl()
+        });
+      }
+
+      // Per-state `consensusRule` override — one JSON literal on the
+      // state, same predicate name as the flow-level rule but scoped by
+      // source URI so the reader can tell them apart.
+      if (state.consensusRule) {
+        links.push({
+          source: stateUri,
+          predicate: "ad4m://consensusRule",
+          target: `literal:string:${encodeURIComponent(JSON.stringify(state.consensusRule))}`
         });
       }
     }
@@ -677,6 +803,27 @@ export class SHACLFlow {
       }
     }
 
+    // Find flow-level `consensusRule`. Reject malformed literals
+    // (missing `n`, non-integer `n`, invalid `fromRole`) so the runtime
+    // engine never has to defensively re-validate a stored rule.
+    const consensusRuleLink = links.find(l =>
+      l.source === flowUri && l.predicate === "ad4m://consensusRule"
+    );
+    if (consensusRuleLink) {
+      try {
+        const jsonStr = consensusRuleLink.target.replace(
+          /^literal:\/\/string:|^literal:string:/,
+          ""
+        );
+        const parsed = JSON.parse(decodeURIComponent(jsonStr));
+        if (isConsensusRuleShape(parsed)) {
+          flow.consensusRule = parsed;
+        }
+      } catch {
+        // Ignore parse errors — leave unset.
+      }
+    }
+
     // Find start action
     const startActionLink = links.find(l =>
       l.source === flowUri && l.predicate === "ad4m://startAction"
@@ -785,6 +932,28 @@ export class SHACLFlow {
         }
       }
 
+      // Get per-state `consensusRule` override (optional). Same shape
+      // guard as the flow-level rule; a malformed literal (missing `n`,
+      // non-integer, invalid `fromRole`) leaves the field unset.
+      const stateConsensusLink = links.find(l =>
+        l.source === stateUri && l.predicate === "ad4m://consensusRule"
+      );
+      let consensusRule: ConsensusRule | undefined;
+      if (stateConsensusLink) {
+        try {
+          const jsonStr = stateConsensusLink.target.replace(
+            /^literal:\/\/string:|^literal:string:/,
+            ""
+          );
+          const parsed = JSON.parse(decodeURIComponent(jsonStr));
+          if (isConsensusRuleShape(parsed)) {
+            consensusRule = parsed;
+          }
+        } catch {
+          // Ignore parse errors — leave unset.
+        }
+      }
+
       flow.addState({
         name: stateName,
         value: stateValue,
@@ -792,6 +961,7 @@ export class SHACLFlow {
         ...(interpretationHint !== undefined ? { interpretationHint } : {}),
         ...(requires !== undefined ? { requires } : {}),
         ...(semanticCheck !== undefined ? { semanticCheck } : {}),
+        ...(consensusRule !== undefined ? { consensusRule } : {}),
       });
     }
 
@@ -857,7 +1027,8 @@ export class SHACLFlow {
       stateCheck: s.stateCheck,
       ...(s.interpretationHint ? { interpretationHint: s.interpretationHint } : {}),
       ...(s.requires && s.requires.length > 0 ? { requires: s.requires } : {}),
-      ...(s.semanticCheck ? { semanticCheck: s.semanticCheck } : {})
+      ...(s.semanticCheck ? { semanticCheck: s.semanticCheck } : {}),
+      ...(s.consensusRule ? { consensusRule: s.consensusRule } : {})
     }));
     return {
       name: this.name,
@@ -871,7 +1042,8 @@ export class SHACLFlow {
       ...(this.inputTypes.length > 0 ? { inputTypes: this.inputTypes } : {}),
       ...(this.outputTypes.length > 0 ? { outputTypes: this.outputTypes } : {}),
       ...(this.creationHint ? { creationHint: this.creationHint } : {}),
-      ...(this.context && this.context.length > 0 ? { context: this.context } : {})
+      ...(this.context && this.context.length > 0 ? { context: this.context } : {}),
+      ...(this.consensusRule ? { consensusRule: this.consensusRule } : {})
     };
   }
 
@@ -905,6 +1077,9 @@ export class SHACLFlow {
     if (Array.isArray(json.context) && json.context.every(isModelQueryShape)) {
       flow.context = json.context as ModelQuery[];
     }
+    if (isConsensusRuleShape(json.consensusRule)) {
+      flow.consensusRule = json.consensusRule as ConsensusRule;
+    }
     for (const state of json.states || []) {
       // Same validation as the toLinks path: reject malformed optional fields
       // rather than let them poison downstream consumers.
@@ -921,6 +1096,9 @@ export class SHACLFlow {
       }
       if (typeof state.semanticCheck === "string" && state.semanticCheck.length > 0) {
         sanitized.semanticCheck = state.semanticCheck;
+      }
+      if (isConsensusRuleShape(state.consensusRule)) {
+        sanitized.consensusRule = state.consensusRule as ConsensusRule;
       }
       flow.addState(sanitized);
     }

@@ -1,4 +1,4 @@
-import { SHACLFlow, FlowState, FlowTransition, AD4MAction } from './SHACLFlow';
+import { SHACLFlow, FlowState, FlowTransition, AD4MAction, ConsensusRule } from './SHACLFlow';
 import { Link } from '../links/Links';
 import { Literal } from '../Literal';
 
@@ -736,6 +736,185 @@ describe('SHACLFlow', () => {
       expect(flow.outputTypes).toEqual([]);
       expect(flow.creationHint).toBeUndefined();
       expect(flow.context).toBeUndefined();
+    });
+  });
+
+  describe('consensusRule (design §7)', () => {
+    it('round-trips a flow-level consensusRule via toLinks/fromLinks', () => {
+      const like = new SHACLFlow('Like', 'we://');
+      like.inputTypes = ['we://Post'];
+      like.outputTypes = ['we://Like'];
+      like.consensusRule = { n: 1 };
+
+      const links = like.toLinks();
+      const consensusLink = links.find(
+        l => l.source === like.flowUri && l.predicate === 'ad4m://consensusRule'
+      );
+      expect(consensusLink).toBeDefined();
+
+      const roundTripped = SHACLFlow.fromLinks(links, like.flowUri);
+      expect(roundTripped.consensusRule).toEqual({ n: 1 });
+    });
+
+    it('round-trips a per-state consensusRule override via toLinks/fromLinks', () => {
+      const delib = new SHACLFlow('Delib', 'coasys://');
+      delib.addState({
+        name: 'perspective',
+        value: 0.25,
+        stateCheck: { predicate: 'coasys://state', target: 'coasys://perspective' },
+        consensusRule: { n: 1 },
+      });
+      delib.addState({
+        name: 'resolution',
+        value: 1,
+        stateCheck: { predicate: 'coasys://state', target: 'coasys://resolution' },
+        consensusRule: {
+          n: 2,
+          fromRole: {
+            className: 'coasys://Reviewer',
+            where: { forTask: '$flow.base' },
+            didProperty: 'agent',
+          },
+        },
+      });
+
+      const links = delib.toLinks();
+      const roundTripped = SHACLFlow.fromLinks(links, delib.flowUri);
+      expect(roundTripped.states[0].consensusRule).toEqual({ n: 1 });
+      expect(roundTripped.states[1].consensusRule).toEqual({
+        n: 2,
+        fromRole: {
+          className: 'coasys://Reviewer',
+          where: { forTask: '$flow.base' },
+          didProperty: 'agent',
+        },
+      });
+    });
+
+    it('round-trips flow-level + per-state consensusRule via toJSON/fromJSON', () => {
+      const flow = new SHACLFlow('Delib', 'coasys://');
+      flow.consensusRule = { n: 3 };
+      flow.addState({
+        name: 'overlap',
+        value: 0.75,
+        stateCheck: { predicate: 'coasys://state', target: 'coasys://overlap' },
+        consensusRule: {
+          n: 1,
+          fromRole: {
+            or: [
+              { className: 'coasys://Reviewer', didProperty: 'agent' },
+              { className: 'coasys://Admin', didProperty: 'agent' },
+            ],
+            className: 'coasys://Facilitator',
+            didProperty: 'agent',
+          },
+        },
+      });
+
+      const json = JSON.parse(JSON.stringify(flow.toJSON()));
+      const roundTripped = SHACLFlow.fromJSON(json);
+      expect(roundTripped.consensusRule).toEqual({ n: 3 });
+      expect(roundTripped.states[0].consensusRule?.n).toBe(1);
+      expect(roundTripped.states[0].consensusRule?.fromRole?.or?.length).toBe(2);
+      expect(roundTripped.states[0].consensusRule?.fromRole?.didProperty).toBe('agent');
+    });
+
+    it('omits consensusRule from toLinks / toJSON when unset (backwards-compatible)', () => {
+      const flow = new SHACLFlow('Bare', 'ns://');
+      flow.addState({
+        name: 'ready',
+        value: 0,
+        stateCheck: { predicate: 'ns://state', target: 'ns://ready' },
+      });
+
+      const links = flow.toLinks();
+      expect(
+        links.find(l => l.predicate === 'ad4m://consensusRule')
+      ).toBeUndefined();
+
+      const json = flow.toJSON() as Record<string, unknown>;
+      expect(json.consensusRule).toBeUndefined();
+      const states = json.states as Array<Record<string, unknown>>;
+      expect(states[0].consensusRule).toBeUndefined();
+    });
+
+    it('rejects malformed consensusRule (missing n, non-integer, bad fromRole) — fromLinks', () => {
+      const flowUri = 'ns://BadFlow';
+      const stateUri = 'ns://BadFlow.bad';
+      const badLinks: Link[] = [
+        { source: flowUri, predicate: 'rdf://type', target: 'ad4m://Flow' },
+        { source: flowUri, predicate: 'ad4m://flowName', target: Literal.from('BadFlow').toUrl() },
+        // Flow-level: missing `n`
+        {
+          source: flowUri,
+          predicate: 'ad4m://consensusRule',
+          target: `literal:string:${encodeURIComponent(JSON.stringify({ fromRole: { className: 'ns://R' } }))}`,
+        },
+        { source: flowUri, predicate: 'ad4m://hasState', target: stateUri },
+        { source: stateUri, predicate: 'rdf://type', target: 'ad4m://FlowState' },
+        { source: stateUri, predicate: 'ad4m://stateName', target: Literal.from('bad').toUrl() },
+        { source: stateUri, predicate: 'ad4m://stateValue', target: Literal.from(0).toUrl() },
+        {
+          source: stateUri,
+          predicate: 'ad4m://stateCheck',
+          target: `literal:string:${encodeURIComponent(JSON.stringify({ predicate: 'p', target: 't' }))}`,
+        },
+        // State-level: non-integer n + junk fromRole
+        {
+          source: stateUri,
+          predicate: 'ad4m://consensusRule',
+          target: `literal:string:${encodeURIComponent(JSON.stringify({ n: 'many', fromRole: null }))}`,
+        },
+      ];
+
+      const flow = SHACLFlow.fromLinks(badLinks, flowUri);
+      expect(flow.consensusRule).toBeUndefined();
+      expect(flow.states[0].consensusRule).toBeUndefined();
+    });
+
+    it('rejects malformed consensusRule via fromJSON (n as string, fractional n, fromRole missing className)', () => {
+      const dodgyJson = {
+        name: 'BadFlow',
+        namespace: 'ns://',
+        startAction: [],
+        consensusRule: { n: 'many' },
+        states: [
+          {
+            name: 'a',
+            value: 0,
+            stateCheck: { predicate: 'p', target: 't' },
+            consensusRule: { n: 1.5 },
+          },
+          {
+            name: 'b',
+            value: 1,
+            stateCheck: { predicate: 'p', target: 't' },
+            consensusRule: { n: 1, fromRole: { where: { x: 1 } } },
+          },
+        ],
+        transitions: [],
+      };
+
+      const flow = SHACLFlow.fromJSON(dodgyJson as any);
+      expect(flow.consensusRule).toBeUndefined();
+      expect(flow.states[0].consensusRule).toBeUndefined();
+      expect(flow.states[1].consensusRule).toBeUndefined();
+    });
+
+    it('accepts a role query in `$did`-templated Shape 2 form (no didProperty)', () => {
+      const flow = new SHACLFlow('Gated', 'ns://');
+      const rule: ConsensusRule = {
+        n: 1,
+        fromRole: {
+          className: 'ns://Reputation',
+          where: { agent: '$did', score: { equals: 100 } as any },
+        },
+      };
+      flow.consensusRule = rule;
+
+      const roundTripped = SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
+      expect(roundTripped.consensusRule?.fromRole?.didProperty).toBeUndefined();
+      expect(roundTripped.consensusRule?.fromRole?.where?.agent).toBe('$did');
     });
   });
 });
