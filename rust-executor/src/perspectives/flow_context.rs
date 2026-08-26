@@ -46,9 +46,10 @@
 use crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
-    ConsensusRule, FlowState, ModelQuery, PropertyCondition, SHACLFlow,
+    parse_flow_from_links, ConsensusRule, FlowState, ModelQuery, PropertyCondition, SHACLFlow,
 };
-use std::collections::HashMap;
+use crate::types::{Link, LinkQuery};
+use std::collections::{HashMap, HashSet};
 
 /// One live `FlowInstance` summarized for the LLM prompt-builder.
 ///
@@ -423,11 +424,176 @@ pub fn build_flow_contexts(
         .collect()
 }
 
+/// Discover every `SHACLFlow` definition present in a flat bag of links
+/// and return them keyed by [`SHACLFlow::name`].
+///
+/// Flow discovery is anchored on `?flow_uri rdf://type ad4m://Flow`. For
+/// each such source, the loader gathers:
+///
+/// - all links whose `source == flow_uri` (the flow-level metadata), and
+/// - all links whose `source` matches a `hasState` or `hasTransition`
+///   child target of that flow (the per-state / per-transition rows).
+///
+/// The gathered slice is then handed to
+/// [`parse_flow_from_links`]. Flows whose parse fails are skipped with a
+/// warning rather than failing the whole load — a single malformed flow
+/// definition on the perspective shouldn't blind the extraction pass to
+/// every other flow.
+///
+/// This is the pure, in-memory half; [`load_shacl_flows`] is the
+/// [`PerspectiveInstance`] wrapper that fetches the link set with
+/// targeted queries and delegates here.
+pub fn parse_flows_from_bag(links: &[Link]) -> HashMap<String, SHACLFlow> {
+    let mut flows = HashMap::new();
+
+    let flow_uris: Vec<String> = links
+        .iter()
+        .filter(|l| l.predicate.as_deref() == Some("rdf://type") && l.target == "ad4m://Flow")
+        .map(|l| l.source.clone())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for flow_uri in flow_uris {
+        let child_uris: HashSet<String> = links
+            .iter()
+            .filter(|l| {
+                l.source == flow_uri
+                    && matches!(
+                        l.predicate.as_deref(),
+                        Some("ad4m://hasState") | Some("ad4m://hasTransition")
+                    )
+            })
+            .map(|l| l.target.clone())
+            .collect();
+
+        let related: Vec<Link> = links
+            .iter()
+            .filter(|l| l.source == flow_uri || child_uris.contains(&l.source))
+            .cloned()
+            .collect();
+
+        match parse_flow_from_links(&related, &flow_uri) {
+            Ok(flow) => {
+                flows.insert(flow.name.clone(), flow);
+            }
+            Err(e) => {
+                log::warn!("parse_flows_from_bag: skipping flow {flow_uri} (parse failed): {e:#}");
+            }
+        }
+    }
+
+    flows
+}
+
+/// Load every `SHACLFlow` definition off a live perspective and return
+/// them keyed by name — the flow-side companion to
+/// [`load_flow_instances`].
+///
+/// Uses targeted [`PerspectiveInstance::get_links`] calls (rather than a
+/// full-perspective scan) to keep the hot-path cost proportional to
+/// `F * (S+T)`, where `F` is the flow count and `S+T` is the average
+/// state + transition count per flow. On a perspective with millions of
+/// links this is what keeps the auto-processor's per-batch flow load
+/// bounded.
+///
+/// Query plan:
+///
+/// 1. `(predicate = rdf://type, target = ad4m://Flow)` — enumerate every
+///    live `flow_uri` on the perspective.
+/// 2. Per `flow_uri`: `(source = flow_uri)` — pull the flow-level
+///    metadata + `hasState`/`hasTransition` edges.
+/// 3. Per state/transition child URI: `(source = child_uri)` — pull the
+///    per-state / per-transition rows.
+///
+/// Then delegates to [`parse_flows_from_bag`] for the actual
+/// [`SHACLFlow`] reconstruction, so the parse-side behaviour is
+/// exercised by the module's fixture-driven tests without needing a
+/// live perspective.
+///
+/// Errors from the outer type-index query propagate; per-flow child
+/// query failures are logged and skipped so one broken flow can't blind
+/// the extraction pass to every other flow on the perspective.
+pub async fn load_shacl_flows(
+    perspective: &PerspectiveInstance,
+) -> anyhow::Result<HashMap<String, SHACLFlow>> {
+    let type_query = LinkQuery {
+        source: None,
+        predicate: Some("rdf://type".to_string()),
+        target: Some("ad4m://Flow".to_string()),
+        from_date: None,
+        until_date: None,
+        limit: None,
+    };
+    let type_links = perspective
+        .get_links(&type_query)
+        .await
+        .map_err(|e| anyhow::anyhow!("load_shacl_flows: get_links(type) failed: {e:#}"))?;
+
+    let mut bag: Vec<Link> = Vec::with_capacity(type_links.len());
+    for tl in &type_links {
+        bag.push(tl.data.clone());
+    }
+
+    for tl in type_links {
+        let flow_uri = tl.data.source;
+        if flow_uri.is_empty() {
+            continue;
+        }
+        let flow_query = LinkQuery {
+            source: Some(flow_uri.clone()),
+            predicate: None,
+            target: None,
+            from_date: None,
+            until_date: None,
+            limit: None,
+        };
+        let flow_links = match perspective.get_links(&flow_query).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::warn!(
+                    "load_shacl_flows: get_links(source={flow_uri}) failed, skipping: {e:#}"
+                );
+                continue;
+            }
+        };
+        let child_uris: Vec<String> = flow_links
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.data.predicate.as_deref(),
+                    Some("ad4m://hasState") | Some("ad4m://hasTransition")
+                )
+            })
+            .map(|d| d.data.target.clone())
+            .collect();
+        bag.extend(flow_links.into_iter().map(|d| d.data));
+
+        for child in child_uris {
+            let child_query = LinkQuery {
+                source: Some(child),
+                predicate: None,
+                target: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            };
+            match perspective.get_links(&child_query).await {
+                Ok(child_links) => bag.extend(child_links.into_iter().map(|d| d.data)),
+                Err(e) => log::warn!(
+                    "load_shacl_flows: get_links(child of {flow_uri}) failed, skipping child: {e:#}"
+                ),
+            }
+        }
+    }
+
+    Ok(parse_flows_from_bag(&bag))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::perspectives::shacl_parser::{
-        AD4MAction, FlowTransition, LinkPattern, ModelQueryCount,
+        parse_flow_to_links, AD4MAction, FlowTransition, LinkPattern, ModelQueryCount,
     };
     use std::collections::BTreeMap;
 
@@ -981,6 +1147,159 @@ mod tests {
                 "ad4m://flow/instance/c",
             ]
         );
+    }
+
+    // ------------- parse_flows_from_bag -------------
+
+    fn mk_link(source: &str, predicate: &str, target: &str) -> Link {
+        Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        }
+    }
+
+    fn ready_done_flow_links(name: &str, namespace: &str) -> Vec<Link> {
+        let flow_json = format!(
+            r#"{{
+                "name": "{name}",
+                "namespace": "{namespace}",
+                "start_action": [],
+                "states": [
+                    {{"name": "ready", "value": 0.0, "state_check": {{"predicate": "{namespace}state", "target": "{namespace}ready"}}}},
+                    {{"name": "done",  "value": 1.0, "state_check": {{"predicate": "{namespace}state", "target": "{namespace}done"}}}}
+                ],
+                "transitions": [
+                    {{"action_name": "Complete", "from_state": "ready", "to_state": "done", "actions": []}}
+                ]
+            }}"#
+        );
+        parse_flow_to_links(&flow_json, name).expect("writer builds v4 flow links")
+    }
+
+    #[test]
+    fn parse_flows_from_bag_empty_returns_empty() {
+        let flows = parse_flows_from_bag(&[]);
+        assert!(flows.is_empty());
+    }
+
+    #[test]
+    fn parse_flows_from_bag_no_flow_type_links_returns_empty() {
+        // Bag with random unrelated links but no `rdf://type → ad4m://Flow`.
+        let bag = vec![
+            mk_link("ad4m://task/foo", "rdf://type", "ad4m://Task"),
+            mk_link(
+                "ad4m://task/foo",
+                "ad4m://title",
+                "literal:string:Ship%20it",
+            ),
+        ];
+        let flows = parse_flows_from_bag(&bag);
+        assert!(flows.is_empty());
+    }
+
+    #[test]
+    fn parse_flows_from_bag_discovers_single_flow_via_writer_output() {
+        let bag = ready_done_flow_links("TODO", "todo://");
+        let flows = parse_flows_from_bag(&bag);
+        assert_eq!(flows.len(), 1, "expected exactly one flow");
+        let flow = flows.get("TODO").expect("flow keyed by name");
+        assert_eq!(flow.namespace, "todo://");
+        assert_eq!(flow.states.len(), 2);
+        assert_eq!(flow.transitions.len(), 1);
+        assert_eq!(flow.transitions[0].action_name, "Complete");
+        assert_eq!(flow.transitions[0].from_state, "ready");
+        assert_eq!(flow.transitions[0].to_state, "done");
+    }
+
+    #[test]
+    fn parse_flows_from_bag_discovers_multiple_flows_side_by_side() {
+        let mut bag = ready_done_flow_links("TODO", "todo://");
+        bag.extend(ready_done_flow_links("Approval", "gov://"));
+        let flows = parse_flows_from_bag(&bag);
+        assert_eq!(flows.len(), 2);
+        assert!(flows.contains_key("TODO"));
+        assert!(flows.contains_key("Approval"));
+        // Namespaces stay isolated — cross-contamination would mean the
+        // reader crossed hasState/hasTransition child gathering between
+        // sibling flows.
+        assert_eq!(flows["TODO"].namespace, "todo://");
+        assert_eq!(flows["Approval"].namespace, "gov://");
+        assert_eq!(flows["TODO"].states.len(), 2);
+        assert_eq!(flows["Approval"].states.len(), 2);
+    }
+
+    #[test]
+    fn parse_flows_from_bag_ignores_unrelated_noise_links() {
+        // Real flow + unrelated task/proposal noise. The noise MUST NOT
+        // widen the flow's link set, and MUST NOT stop the flow from
+        // being discovered.
+        let mut bag = ready_done_flow_links("TODO", "todo://");
+        bag.extend(vec![
+            mk_link("ad4m://task/foo", "rdf://type", "ad4m://Task"),
+            mk_link(
+                "ad4m://task/foo",
+                "ad4m://title",
+                "literal:string:Something",
+            ),
+            mk_link("ad4m://proposal/bar", "rdf://type", "ad4m://Proposal"),
+        ]);
+        let flows = parse_flows_from_bag(&bag);
+        assert_eq!(flows.len(), 1);
+        assert!(flows.contains_key("TODO"));
+    }
+
+    #[test]
+    fn parse_flows_from_bag_skips_flow_uri_without_flow_suffix() {
+        // Manufactured type-index row whose source doesn't end in
+        // "Flow" — parse_flow_from_links returns Err, loader must skip
+        // it rather than propagate.
+        let mut bag = ready_done_flow_links("TODO", "todo://");
+        bag.push(mk_link("malformed://Broken", "rdf://type", "ad4m://Flow"));
+        let flows = parse_flows_from_bag(&bag);
+        assert_eq!(flows.len(), 1, "well-formed flow still discovered");
+        assert!(flows.contains_key("TODO"));
+    }
+
+    #[test]
+    fn parse_flows_from_bag_ignores_type_link_with_empty_source() {
+        // A `rdf://type → ad4m://Flow` link with an empty source has no
+        // flow URI to hang gathering off — must not be enumerated.
+        let mut bag = ready_done_flow_links("TODO", "todo://");
+        bag.push(mk_link("", "rdf://type", "ad4m://Flow"));
+        let flows = parse_flows_from_bag(&bag);
+        assert_eq!(flows.len(), 1);
+        assert!(flows.contains_key("TODO"));
+    }
+
+    #[test]
+    fn parse_flows_from_bag_child_uri_collision_across_flows_stays_isolated() {
+        // Two flows that both happen to reference a state named
+        // "shared" — but the state URIs are namespaced by flow name, so
+        // gathering must not cross the boundary.
+        let mut bag = ready_done_flow_links("Alpha", "ex://");
+        bag.extend(ready_done_flow_links("Beta", "ex://"));
+        let flows = parse_flows_from_bag(&bag);
+        assert_eq!(flows.len(), 2);
+        // Each flow's state count must remain 2 — a leak would push
+        // one flow's states into the other.
+        for name in ["Alpha", "Beta"] {
+            let f = flows.get(name).expect("flow present");
+            assert_eq!(f.states.len(), 2, "flow {name} states leaked from sibling");
+        }
+    }
+
+    #[test]
+    fn parse_flows_from_bag_key_is_shaclflow_name_not_uri() {
+        // The HashMap MUST key on `SHACLFlow.name` (matches
+        // FlowInstance.flow discriminator + build_flow_contexts lookup).
+        let bag = ready_done_flow_links("TODO", "todo://");
+        let flows = parse_flows_from_bag(&bag);
+        assert!(
+            !flows.contains_key("todo://TODOFlow"),
+            "keyed on URI, not name"
+        );
+        assert!(flows.contains_key("TODO"), "must key on flow.name");
     }
 
     // ------------- summarize_flow_instance -------------
