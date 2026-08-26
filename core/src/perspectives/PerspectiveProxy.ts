@@ -1177,6 +1177,40 @@ export class PerspectiveProxy {
         return instance;
     }
 
+    /**
+     * Returns all live `FlowInstance` records on this perspective (v5, design
+     * doc §4.3). Idempotently registers the hardwired `FlowInstance` +
+     * `FlowTransitionProposal` @Model classes on first call — so callers can
+     * ask for instances before any {@link startFlowInstance} has ever run
+     * without hitting a "class not registered" hydration error.
+     *
+     * Optional `flowName` narrows by flow-name discriminator (single SHACL
+     * `where`-filter round-trip; no client-side filtering). Omitting the arg
+     * returns instances across all flows in the perspective.
+     *
+     * Feeds §5 Model C: the channel-scoped extraction pass calls this to
+     * gather active flow context (currentState per instance) for the LLM
+     * prompt, and UIs use it to render active-flow indicators.
+     *
+     * @param flowName - Optional flow-name filter
+     * @returns Hydrated `FlowInstance[]`, empty when none exist
+     *
+     * @example
+     * ```typescript
+     * const deliveries = await p.getFlowInstances("Delivery");
+     * for (const inst of deliveries) {
+     *   console.log(`${inst.baseExpression} is in state ${inst.currentState}`);
+     * }
+     * ```
+     */
+    async getFlowInstances(flowName?: string): Promise<FlowInstance[]> {
+        await Ad4mModel.registerAll(this, [FlowInstance, FlowTransitionProposal]);
+        if (flowName !== undefined) {
+            return FlowInstance.findAll(this, { where: { flow: flowName } });
+        }
+        return FlowInstance.findAll(this);
+    }
+
     /** Returns all expressions in the given state of given Social DNA flow */
     async expressionsInFlowState(flowName: string, flowState: number): Promise<string[]> {
         const flow = await this.getFlow(flowName);

@@ -419,3 +419,134 @@ describe("PerspectiveProxy.startFlowInstance — v5 API", function () {
     expect(String(caught)).to.match(/has no states/);
   });
 });
+
+// ── PerspectiveProxy.getFlowInstances — v5 read side (design doc §4.3 / §5) ──
+// Enumerates live FlowInstance records; optionally narrowed by flow-name
+// discriminator. Feeds §5 Model C prompt gathering and UI indicators. Class
+// registration is idempotent so callers may query BEFORE the first
+// startFlowInstance ever fires without hitting hydration errors.
+
+describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-get-instances");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-get-instances-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    flow.addState({
+      name: "Identified",
+      value: 0,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
+    });
+    flow.addState({
+      name: "InProgress",
+      value: 1,
+      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
+    });
+    return flow;
+  }
+
+  function makeDeliberationFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Deliberation", "flow://");
+    flow.inputTypes = ["ad4m://Proposal"];
+    flow.addState({
+      name: "Proposal",
+      value: 0,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Proposal" },
+    });
+    return flow;
+  }
+
+  it("returns an empty array when no flow instances exist on the perspective", async () => {
+    const all = await p.getFlowInstances();
+    expect(all).to.deep.equal([]);
+  });
+
+  it("does not throw when called before any startFlowInstance — idempotent registration", async () => {
+    // No addFlow / startFlowInstance beforehand; class must self-register.
+    const all = await p.getFlowInstances();
+    expect(all).to.deep.equal([]);
+
+    // And a filtered call must be equally safe.
+    const filtered = await p.getFlowInstances("Delivery");
+    expect(filtered).to.deep.equal([]);
+  });
+
+  it("returns all live instances across flows when called with no filter", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    await p.addFlow("Deliberation", makeDeliberationFlow());
+
+    await p.startFlowInstance("Delivery", "ad4m://task/1");
+    await p.startFlowInstance("Delivery", "ad4m://task/2");
+    await p.startFlowInstance("Deliberation", "ad4m://proposal/1");
+
+    const all = await p.getFlowInstances();
+    expect(all.length).to.equal(3);
+    expect(all.every((i) => i instanceof FlowInstance)).to.equal(true);
+    const flows = all.map((i) => i.flow).sort();
+    expect(flows).to.deep.equal(["Deliberation", "Delivery", "Delivery"]);
+  });
+
+  it("narrows by flow-name discriminator when the filter is supplied", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    await p.addFlow("Deliberation", makeDeliberationFlow());
+
+    await p.startFlowInstance("Delivery", "ad4m://task/a");
+    await p.startFlowInstance("Delivery", "ad4m://task/b");
+    await p.startFlowInstance("Deliberation", "ad4m://proposal/x");
+
+    const deliveries = await p.getFlowInstances("Delivery");
+    expect(deliveries.length).to.equal(2);
+    expect(deliveries.every((i) => i.flow === "Delivery")).to.equal(true);
+    const bases = deliveries.map((i) => i.baseExpression).sort();
+    expect(bases).to.deep.equal(["ad4m://task/a", "ad4m://task/b"]);
+
+    const deliberations = await p.getFlowInstances("Deliberation");
+    expect(deliberations.length).to.equal(1);
+    expect(deliberations[0].baseExpression).to.equal("ad4m://proposal/x");
+
+    const misses = await p.getFlowInstances("Nope");
+    expect(misses).to.deep.equal([]);
+  });
+
+  it("returns fully hydrated instances (flow, baseExpression, currentState, createdAt)", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const before = new Date().toISOString();
+    await p.startFlowInstance("Delivery", "ad4m://task/hydrate");
+    const after = new Date().toISOString();
+
+    const [hydrated] = await p.getFlowInstances("Delivery");
+    expect(hydrated.flow).to.equal("Delivery");
+    expect(hydrated.baseExpression).to.equal("ad4m://task/hydrate");
+    expect(hydrated.currentState).to.equal("Identified");
+    expect(hydrated.createdAt >= before && hydrated.createdAt <= after,
+      `createdAt ${hydrated.createdAt} must fall in [${before}, ${after}]`).to.equal(true);
+  });
+});
