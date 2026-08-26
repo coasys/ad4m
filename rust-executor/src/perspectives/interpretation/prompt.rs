@@ -2,6 +2,7 @@ use super::{
     class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
 };
 use crate::db::Ad4mDb;
+use crate::perspectives::flow_context::{render_consensus_rule, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
 use std::collections::HashMap;
@@ -38,10 +39,21 @@ use std::collections::HashMap;
 /// is the SDNA `interpretationHint` declared on the property whose predicate
 /// matches the relation (matched via the `properties`/`include_relations`
 /// overlap that `load_shape` guarantees); `None` when no hint was declared.
+///
+/// `active_flows` is the slice 10.2 payoff: any FlowInstance currently running
+/// on the extraction scope is summarized (via [`FlowContext`]) so the LLM can
+/// see the current state, every reachable next-state, and the English rendering
+/// of each next-state's `requires` guard + optional `semanticCheck` hint. When
+/// non-empty, an `active_flows` key is added to the prompt JSON; when empty,
+/// the key is OMITTED entirely so passes with no live flows spend zero prompt
+/// tokens on flow scaffolding (and the LLM never sees an empty section that
+/// might confuse it into inventing flows). Callers with no active flows can
+/// safely pass `&[]`.
 pub fn build_interpretation_input(
     shapes: &[ModelShape],
     transcript: &[TranscriptTurn],
     existing: &ExistingInstances,
+    active_flows: &[FlowContext],
 ) -> String {
     // Group the id-keyed source by class once for the per-class `existing`
     // blocks below (deterministically ordered — see `instances_by_class`).
@@ -165,7 +177,93 @@ pub fn build_interpretation_input(
             obj
         })
         .collect();
-    serde_json::json!({ "classes": classes, "transcript": turns }).to_string()
+    let mut out = serde_json::json!({ "classes": classes, "transcript": turns });
+    if !active_flows.is_empty() {
+        out["active_flows"] = serde_json::Value::Array(
+            active_flows
+                .iter()
+                .map(render_active_flow_for_prompt)
+                .collect(),
+        );
+    }
+    out.to_string()
+}
+
+/// Render one live [`FlowContext`] as the JSON object the LLM sees under
+/// `active_flows[]`. Pure. Shape:
+/// ```json
+/// {
+///   "instance": "ad4m://flow/instance/…",   // instance URI (stable handle)
+///   "subject":  "ad4m://…",                 // the base expression the flow rides on
+///   "flow":     "Delivery",                  // flow name (matches SHACLFlow.name)
+///   "currentState": "doing",
+///   "hint":     "…",                         // flow-level interpretationHint (omitted if unset)
+///   "consensus":"1 signer",                  // flow-level default consensus (omitted if unset)
+///   "nextStates": [
+///     {
+///       "name":         "review",
+///       "hint":         "…",                 // per-state interpretationHint (omitted if unset)
+///       "requires":     "at least 1 match of Review where owner = \"…\"",  // "" if none
+///       "semanticCheck":"…",                 // per-state semanticCheck hint (omitted if unset)
+///       "consensus":    "2 signers"          // per-state override (omitted if unset)
+///     }, …
+///   ]
+/// }
+/// ```
+/// Optional fields are omitted when unset so the prompt scales linearly with
+/// active-flow count and each state's cost stays proportional to what the flow
+/// actually declares. `requires` is included even when empty as `""` — a
+/// zero-length string is the explicit "no evidence guard, LLM decides on hint
+/// alone" signal (distinct from the field being absent, which shouldn't happen
+/// for a well-formed FlowContext).
+fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("instance".into(), serde_json::json!(fc.instance_uri));
+    obj.insert("subject".into(), serde_json::json!(fc.subject));
+    obj.insert("flow".into(), serde_json::json!(fc.flow_name));
+    obj.insert("currentState".into(), serde_json::json!(fc.current_state));
+    if let Some(hint) = fc.flow_interpretation_hint.as_ref() {
+        if !hint.is_empty() {
+            obj.insert("hint".into(), serde_json::json!(hint));
+        }
+    }
+    if let Some(rule) = fc.consensus_rule.as_ref() {
+        obj.insert(
+            "consensus".into(),
+            serde_json::json!(render_consensus_rule(rule)),
+        );
+    }
+    let next: Vec<serde_json::Value> = fc
+        .reachable_next_states
+        .iter()
+        .map(|ns| {
+            let mut o = serde_json::Map::new();
+            o.insert("name".into(), serde_json::json!(ns.name));
+            if let Some(h) = ns.interpretation_hint.as_ref() {
+                if !h.is_empty() {
+                    o.insert("hint".into(), serde_json::json!(h));
+                }
+            }
+            o.insert(
+                "requires".into(),
+                serde_json::json!(ns.requires_human_readable),
+            );
+            if let Some(sc) = ns.semantic_check.as_ref() {
+                if !sc.is_empty() {
+                    o.insert("semanticCheck".into(), serde_json::json!(sc));
+                }
+            }
+            if let Some(rule) = ns.consensus_rule.as_ref() {
+                o.insert(
+                    "consensus".into(),
+                    serde_json::json!(render_consensus_rule(rule)),
+                );
+            }
+            serde_json::Value::Object(o)
+        })
+        .collect();
+    obj.insert("nextStates".into(), serde_json::Value::Array(next));
+    serde_json::Value::Object(obj)
 }
 
 /// name under which the generic interpretation task is registered with
@@ -194,6 +292,20 @@ You receive a JSON object with these fields:
     whether new turns continue that instance or belong to a fresh one.
   - `transcript`: an array of turns `{speaker, text}` and, when known,
     `timestamp` (the source link's RFC3339 time).
+  - `active_flows` (OPTIONAL — present only when flows are running on this
+    scope): an array of live `FlowInstance` summaries. Each entry has an
+    `instance` URI, the `subject` base expression it rides on, the `flow`
+    name, the `currentState`, an optional flow-level `hint`, an optional
+    default `consensus` rule, and a `nextStates` array. Every `nextStates`
+    entry carries a `name`, an optional `hint` (when to advance to this
+    state), a `requires` field (English rendering of the evidence guard —
+    the empty string means \"no structural guard, decide on hint alone\"),
+    an optional `semanticCheck` (extra 2nd-pass hint), and an optional
+    per-state `consensus` override. Read this section BEFORE deciding
+    what to extract: when the transcript matches a `nextStates` entry's
+    `hint`, prefer extracting instances that will satisfy its `requires`
+    guard so the flow can advance. When `active_flows` is absent, extract
+    freely on the class hints alone.
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...relations}`,
 where fields carry strings drawn from what participants actually said or
@@ -555,6 +667,7 @@ mod tests {
                 "I'll extract the LLM processing into ADAM",
             )],
             &no_existing(),
+            &[],
         );
 
         // class-level hints reach the prompt
@@ -597,13 +710,14 @@ mod tests {
         let shapes = vec![shape_from_sdna("Intention", INTENTION_SDNA)];
         let mut turn = TranscriptTurn::from_speaker_text("Nico", "I'll ship it");
         turn.timestamp = "2026-08-13T12:00:00.000Z".into();
-        let input = build_interpretation_input(&shapes, &[turn], &no_existing());
+        let input = build_interpretation_input(&shapes, &[turn], &no_existing(), &[]);
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         assert_eq!(v["transcript"][0]["timestamp"], "2026-08-13T12:00:00.000Z");
         let without = build_interpretation_input(
             &shapes,
             &[TranscriptTurn::from_speaker_text("Nico", "I'll ship it")],
             &no_existing(),
+            &[],
         );
         let v2: serde_json::Value = serde_json::from_str(&without).unwrap();
         assert!(
@@ -633,6 +747,7 @@ mod tests {
                 "About that design doc…",
             )],
             &existing,
+            &[],
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         let task_class = v["classes"]
@@ -695,6 +810,7 @@ mod tests {
                 "Switching topics — Q3 retro planning.",
             )],
             &existing,
+            &[],
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         let sg_class = v["classes"]
@@ -763,6 +879,213 @@ mod tests {
         assert!(
             p.contains("never emit a") || p.contains("Never emit a"),
             "system prompt must forbid unresolved `new:` refs"
+        );
+    }
+
+    // ========================================================================
+    // Slice 10.2 — active_flows section of the interpretation prompt
+    // ========================================================================
+    //
+    // The prompt-side payoff: an extraction pass over a scope with running
+    // FlowInstances now sees them (current state + reachable next-states +
+    // requires-in-English + optional semanticCheck + consensus rendering) so
+    // the LLM can preferentially extract instances that advance the flow.
+    // Passes with no active flows must be byte-identical to the pre-slice-10.2
+    // prompt (guarded below).
+
+    use crate::perspectives::flow_context::{FlowContext, NextStateSummary};
+    use crate::perspectives::shacl_parser::ConsensusRule;
+
+    fn sample_delivery_context() -> FlowContext {
+        FlowContext {
+            flow_name: "Delivery".to_string(),
+            instance_uri: "ad4m://flow/instance/abc".to_string(),
+            subject: "ad4m://tasks/onboard-users".to_string(),
+            current_state: "doing".to_string(),
+            flow_interpretation_hint: Some("How this task moves from ready to done".to_string()),
+            reachable_next_states: vec![NextStateSummary {
+                name: "review".to_string(),
+                interpretation_hint: Some("Someone volunteers to review the work".to_string()),
+                requires_human_readable:
+                    "at least 1 match of Review where target = \"the current task\"".to_string(),
+                semantic_check: Some(
+                    "The reviewer explicitly claims the work is testable".to_string(),
+                ),
+                consensus_rule: Some(ConsensusRule {
+                    n: 2,
+                    from_role: None,
+                }),
+            }],
+            consensus_rule: Some(ConsensusRule {
+                n: 1,
+                from_role: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn active_flows_absent_when_empty_and_prompt_shape_matches_pre_slice_10_2() {
+        // Passes with no live flows spend zero tokens on flow scaffolding AND
+        // never show the LLM an `active_flows` key at all. Guards two failure
+        // modes: (a) prompt bloat on the common path, (b) an empty `[]` value
+        // that could confuse small models into inventing flow scaffolding.
+        let shapes = vec![shape_from_sdna("Belief", BELIEF_SDNA)];
+        let input = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text(
+                "Ana",
+                "The metric is down",
+            )],
+            &no_existing(),
+            &[],
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert!(
+            v.get("active_flows").is_none(),
+            "empty active_flows must be omitted from the prompt entirely, got: {input}"
+        );
+        // Also proves nothing else in the JSON shape moved — same keys, same order-agnostic set.
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        assert!(
+            keys.len() == 2 && keys.contains(&"classes") && keys.contains(&"transcript"),
+            "pre-slice-10.2 keys must be preserved when active_flows is empty; got {keys:?}"
+        );
+    }
+
+    #[test]
+    fn active_flows_renders_full_shape_when_non_empty() {
+        // One live FlowInstance → one `active_flows[0]` entry carrying: instance
+        // URI, subject, flow name, current state, flow-level hint, flow-level
+        // consensus rule (English), and one `nextStates` entry with every
+        // optional field populated (hint, requires-in-English, semanticCheck,
+        // per-state consensus override).
+        let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
+        let flows = [sample_delivery_context()];
+        let input = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text(
+                "Ana",
+                "I'll review the onboarding task now",
+            )],
+            &no_existing(),
+            &flows,
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let arr = v["active_flows"]
+            .as_array()
+            .expect("active_flows must render as an array when non-empty");
+        assert_eq!(arr.len(), 1);
+        let fc = &arr[0];
+        assert_eq!(fc["instance"], "ad4m://flow/instance/abc");
+        assert_eq!(fc["subject"], "ad4m://tasks/onboard-users");
+        assert_eq!(fc["flow"], "Delivery");
+        assert_eq!(fc["currentState"], "doing");
+        assert_eq!(fc["hint"], "How this task moves from ready to done");
+        assert_eq!(fc["consensus"], "1 signer");
+
+        let ns = fc["nextStates"]
+            .as_array()
+            .expect("nextStates must render as an array");
+        assert_eq!(ns.len(), 1);
+        let review = &ns[0];
+        assert_eq!(review["name"], "review");
+        assert_eq!(review["hint"], "Someone volunteers to review the work");
+        assert_eq!(
+            review["requires"],
+            "at least 1 match of Review where target = \"the current task\""
+        );
+        assert_eq!(
+            review["semanticCheck"],
+            "The reviewer explicitly claims the work is testable"
+        );
+        assert_eq!(review["consensus"], "2 signers");
+    }
+
+    #[test]
+    fn active_flows_omits_optional_fields_when_unset() {
+        // A minimal FlowContext (no flow-level hint, no consensus, one bare
+        // next-state with no hint/semanticCheck/consensus override) must NOT
+        // render empty keys — every optional field is omitted when unset so
+        // the prompt scales linearly with declared content. `requires` is the
+        // ONE exception: the empty string is explicitly rendered as a signal
+        // that the state has no structural guard (LLM decides on hint alone).
+        let shapes = vec![shape_from_sdna("Belief", BELIEF_SDNA)];
+        let bare = FlowContext {
+            flow_name: "Like".to_string(),
+            instance_uri: "ad4m://flow/instance/xyz".to_string(),
+            subject: "ad4m://post/1".to_string(),
+            current_state: "initial".to_string(),
+            flow_interpretation_hint: None,
+            reachable_next_states: vec![NextStateSummary {
+                name: "liked".to_string(),
+                interpretation_hint: None,
+                requires_human_readable: String::new(),
+                semantic_check: None,
+                consensus_rule: None,
+            }],
+            consensus_rule: None,
+        };
+        let input = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text("Ana", "I like this")],
+            &no_existing(),
+            &[bare],
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let fc = &v["active_flows"][0];
+        assert!(
+            fc.get("hint").is_none(),
+            "flow-level hint must be omitted when unset; got {fc:?}"
+        );
+        assert!(
+            fc.get("consensus").is_none(),
+            "flow-level consensus must be omitted when unset; got {fc:?}"
+        );
+        let ns = &fc["nextStates"][0];
+        assert!(
+            ns.get("hint").is_none(),
+            "per-state hint must be omitted when unset; got {ns:?}"
+        );
+        assert!(
+            ns.get("semanticCheck").is_none(),
+            "per-state semanticCheck must be omitted when unset; got {ns:?}"
+        );
+        assert!(
+            ns.get("consensus").is_none(),
+            "per-state consensus must be omitted when unset; got {ns:?}"
+        );
+        // `requires` is the deliberate exception — rendered as "" so an empty
+        // guard is legible to the LLM as "no structural guard" (distinct from
+        // the field being absent, which would break the prompt contract).
+        assert_eq!(
+            ns["requires"], "",
+            "empty requires must render as the empty string, not be omitted"
+        );
+    }
+
+    #[test]
+    fn system_prompt_documents_active_flows_section() {
+        // Regression guard: the system prompt must tell the LLM (a) that the
+        // section is optional, (b) how to read `nextStates`, (c) that
+        // `requires` is English, and (d) that seeing this section should
+        // *bias* extraction toward advancing the flow — otherwise the whole
+        // slice 10.2 payload is on the LLM's blindside.
+        let p = INTERPRETATION_SYSTEM_PROMPT;
+        assert!(
+            p.contains("active_flows"),
+            "system prompt must introduce the active_flows section"
+        );
+        assert!(
+            p.contains("OPTIONAL"),
+            "system prompt must state that active_flows is optional (absent when no flows run)"
+        );
+        assert!(
+            p.contains("nextStates") && p.contains("requires"),
+            "system prompt must describe the nextStates + requires shape"
+        );
+        assert!(
+            p.contains("advance"),
+            "system prompt must instruct the LLM to bias toward extractions that advance the flow"
         );
     }
 

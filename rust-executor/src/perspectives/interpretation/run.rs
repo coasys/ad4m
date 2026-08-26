@@ -616,7 +616,11 @@ pub async fn run_interpretation_with_strategy_and_model(
             identity_property(s).map(|idp| (class_label(&s.target_class, shapes), idp.name.clone()))
         })
         .collect();
-    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx);
+    // Slice 10.2 wired the FlowContext parameter through the extraction
+    // pass; slice 10.3 will actually load active flows for `scope` and
+    // pass them here. Until then `&[]` preserves the pre-slice-10.2
+    // prompt shape byte-for-byte.
+    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &[]);
 
     let service = crate::ai_service::AIService::global_instance()
         .await
@@ -820,7 +824,11 @@ pub async fn run_interpretation_with_harness_and_model(
     // AddLinks ops whose triples already exist in the graph.
     let existing_links = existing_relation_links(perspective, shapes).await?;
 
-    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx);
+    // Slice 10.2 wired the FlowContext parameter through the extraction
+    // pass; slice 10.3 will actually load active flows for `scope` and
+    // pass them here. Until then `&[]` preserves the pre-slice-10.2
+    // prompt shape byte-for-byte.
+    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &[]);
 
     // Build per-class propose shapes from the perspective's SHACL classes,
     // filtered to the class-name set the caller passed as `shapes`. Any
