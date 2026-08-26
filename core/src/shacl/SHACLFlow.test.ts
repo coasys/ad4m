@@ -1,4 +1,6 @@
 import { SHACLFlow, FlowState, FlowTransition, AD4MAction } from './SHACLFlow';
+import { Link } from '../links/Links';
+import { Literal } from '../Literal';
 
 describe('SHACLFlow', () => {
   describe('basic construction', () => {
@@ -578,6 +580,152 @@ describe('SHACLFlow', () => {
       expect(s?.interpretationHint).toBeUndefined();
       expect(s?.requires).toBeUndefined();
       expect(s?.semanticCheck).toBeUndefined();
+    });
+  });
+
+  describe('flow-level typed I/O + creationHint + context (design §4.1)', () => {
+    it('round-trips inputTypes / outputTypes / creationHint / context via toLinks/fromLinks', () => {
+      const flow = new SHACLFlow('Delivery', 'coasys://');
+      flow.inputTypes = ['coasys://Task'];
+      flow.outputTypes = ['coasys://Delivery'];
+      flow.creationHint =
+        'Spawn when someone commits to a concrete, actionable task.';
+      flow.context = [
+        {
+          className: 'coasys://Actor',
+          where: { did: '$did' },
+          count: { min: 1 },
+        },
+      ];
+
+      const links = flow.toLinks();
+      const roundTripped = SHACLFlow.fromLinks(links, flow.flowUri);
+      expect(roundTripped.inputTypes).toEqual(['coasys://Task']);
+      expect(roundTripped.outputTypes).toEqual(['coasys://Delivery']);
+      expect(roundTripped.creationHint).toBe(
+        'Spawn when someone commits to a concrete, actionable task.'
+      );
+      expect(roundTripped.context).toEqual([
+        {
+          className: 'coasys://Actor',
+          where: { did: '$did' },
+          count: { min: 1 },
+        },
+      ]);
+    });
+
+    it('round-trips a zero-state action flow (Like example, §6.3)', () => {
+      const like = new SHACLFlow('Like', 'we://');
+      like.inputTypes = ['we://Post'];
+      like.outputTypes = ['we://Like'];
+      like.creationHint = 'Spawn when a user endorses or approves a post.';
+
+      const links = like.toLinks();
+      const roundTripped = SHACLFlow.fromLinks(links, like.flowUri);
+      expect(roundTripped.states).toEqual([]);
+      expect(roundTripped.transitions).toEqual([]);
+      expect(roundTripped.inputTypes).toEqual(['we://Post']);
+      expect(roundTripped.outputTypes).toEqual(['we://Like']);
+      expect(roundTripped.creationHint).toBe(
+        'Spawn when a user endorses or approves a post.'
+      );
+    });
+
+    it('round-trips inputTypes / outputTypes / creationHint / context via toJSON/fromJSON', () => {
+      const flow = new SHACLFlow('Delib', 'coasys://');
+      flow.inputTypes = ['coasys://Proposal'];
+      flow.outputTypes = ['coasys://Resolution'];
+      flow.creationHint = 'Spawn when a proposal is put forward for discussion.';
+      flow.context = [
+        { className: 'coasys://Group', linkedTo: 'base' },
+      ];
+
+      const json = JSON.parse(JSON.stringify(flow.toJSON()));
+      const roundTripped = SHACLFlow.fromJSON(json);
+      expect(roundTripped.inputTypes).toEqual(['coasys://Proposal']);
+      expect(roundTripped.outputTypes).toEqual(['coasys://Resolution']);
+      expect(roundTripped.creationHint).toBe(
+        'Spawn when a proposal is put forward for discussion.'
+      );
+      expect(roundTripped.context).toEqual([
+        { className: 'coasys://Group', linkedTo: 'base' },
+      ]);
+    });
+
+    it('omits the new fields from toLinks / toJSON when unset (backwards-compatible)', () => {
+      const flow = new SHACLFlow('Bare', 'ns://');
+      const links = flow.toLinks();
+      expect(
+        links.find(l => l.predicate === 'ad4m://inputTypes')
+      ).toBeUndefined();
+      expect(
+        links.find(l => l.predicate === 'ad4m://outputTypes')
+      ).toBeUndefined();
+      expect(
+        links.find(l => l.predicate === 'ad4m://creationHint')
+      ).toBeUndefined();
+      expect(
+        links.find(l => l.predicate === 'ad4m://context')
+      ).toBeUndefined();
+
+      const json = flow.toJSON() as Record<string, unknown>;
+      expect(json.inputTypes).toBeUndefined();
+      expect(json.outputTypes).toBeUndefined();
+      expect(json.creationHint).toBeUndefined();
+      expect(json.context).toBeUndefined();
+    });
+
+    it('malformed inputTypes / outputTypes / context leave defaults untouched (fromLinks)', () => {
+      const flowUri = 'ns://BadFlow';
+      const badLinks: Link[] = [
+        { source: flowUri, predicate: 'rdf://type', target: 'ad4m://Flow' },
+        {
+          source: flowUri,
+          predicate: 'ad4m://flowName',
+          target: Literal.from('BadFlow').toUrl(),
+        },
+        {
+          source: flowUri,
+          predicate: 'ad4m://inputTypes',
+          target: `literal:string:${encodeURIComponent(JSON.stringify([null, 42, {}]))}`,
+        },
+        {
+          source: flowUri,
+          predicate: 'ad4m://outputTypes',
+          target: `literal:string:${encodeURIComponent(JSON.stringify(['', 'coasys://Delivery']))}`,
+        },
+        {
+          source: flowUri,
+          predicate: 'ad4m://context',
+          target: `literal:string:${encodeURIComponent(JSON.stringify([{ notAClassName: 'x' }]))}`,
+        },
+      ];
+
+      const flow = SHACLFlow.fromLinks(badLinks, flowUri);
+      expect(flow.inputTypes).toEqual([]);
+      expect(flow.outputTypes).toEqual([]);
+      expect(flow.context).toBeUndefined();
+    });
+
+    it('malformed inputTypes / outputTypes / creationHint / context sanitised (fromJSON)', () => {
+      const dodgyJson = {
+        name: 'BadFlow',
+        namespace: 'ns://',
+        flowable: 'any',
+        startAction: [],
+        inputTypes: ['coasys://Task', null, 42],
+        outputTypes: 'not-an-array',
+        creationHint: '',
+        context: [{ className: 42 }, null],
+        states: [],
+        transitions: [],
+      };
+
+      const flow = SHACLFlow.fromJSON(dodgyJson);
+      expect(flow.inputTypes).toEqual([]);
+      expect(flow.outputTypes).toEqual([]);
+      expect(flow.creationHint).toBeUndefined();
+      expect(flow.context).toBeUndefined();
     });
   });
 });

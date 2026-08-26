@@ -242,6 +242,58 @@ export class SHACLFlow {
    *   finding overlap."
    */
   public interpretationHint?: string;
+
+  /**
+   * Subject-class URIs the flow accepts as its base expression.
+   *
+   * Design doc §4.1 (v4 addition): a flow's *typed input*. When an
+   * expression whose class matches any URI in this array enters scope,
+   * the flow-spawn engine considers it a candidate base. Superseder of
+   * the old `flowable: LinkPattern` primitive — model-level instead of
+   * link-level. Empty array = flow declares no typed input (currently
+   * treated the same as unset; a future engine pass may use this as
+   * "any class allowed" once `flowable` is retired).
+   */
+  public inputTypes: string[] = [];
+
+  /**
+   * Subject-class URIs the flow must produce (linked to the base) for a
+   * run to count as complete.
+   *
+   * Design doc §4.1 (v4 addition): a flow's *typed output*. Two jobs:
+   * (a) documentation for stateful flows — records what a completed run
+   * leaves in the graph; (b) **terminal condition** for zero-state flows —
+   * a flow with no `FlowState`s completes when at least one instance of
+   * each `outputTypes` entry exists in scope and is linked to the base,
+   * and `consensusRule` fires. This is what makes "Like" a first-class
+   * flow with no state machine.
+   */
+  public outputTypes: string[] = [];
+
+  /**
+   * Optional English hint for AI-driven flow-spawn: when should the
+   * interpretation engine mint a new instance of this flow (as opposed
+   * to advancing an existing one)?
+   *
+   * Design doc §4.1: analogous to `interpretationHint` on subject
+   * classes — steers the LLM's up-front extraction pass. Distinct from
+   * `interpretationHint` on the flow, which describes what the flow *is*.
+   * Example (Delivery Flow): "Spawn when someone commits to a concrete,
+   * actionable task."
+   */
+  public creationHint?: string;
+
+  /**
+   * Optional background queries pulled into the LLM prompt as CONTEXT
+   * (not evidence).
+   *
+   * Design doc §4.1: engine evaluates each `ModelQuery` and threads
+   * matches into the prompt so the LLM can reason with them, but
+   * matches do NOT count toward `requires` guards on states. Same
+   * `ModelQuery[]` shape and template-variable rules as `FlowState.requires`.
+   * Empty / unset = no context queries.
+   */
+  public context?: ModelQuery[];
   
   /** States in this flow */
   private _states: FlowState[] = [];
@@ -339,6 +391,45 @@ export class SHACLFlow {
         source: flowUri,
         predicate: "ad4m://interpretationHint",
         target: Literal.from(this.interpretationHint).toUrl()
+      });
+    }
+
+    // Typed I/O (flow-level, design §4.1). Both arrays are only
+    // serialized when non-empty — an empty list is indistinguishable
+    // from "unset" for a round-trip, and emitting one would give
+    // downstream consumers a meaningless predicate to interpret.
+    if (this.inputTypes.length > 0) {
+      links.push({
+        source: flowUri,
+        predicate: "ad4m://inputTypes",
+        target: `literal:string:${encodeURIComponent(JSON.stringify(this.inputTypes))}`
+      });
+    }
+    if (this.outputTypes.length > 0) {
+      links.push({
+        source: flowUri,
+        predicate: "ad4m://outputTypes",
+        target: `literal:string:${encodeURIComponent(JSON.stringify(this.outputTypes))}`
+      });
+    }
+
+    // Flow-level `creationHint` — same empty-string-is-unset guard as
+    // `interpretationHint`, same reason (round-trip fidelity).
+    if (this.creationHint) {
+      links.push({
+        source: flowUri,
+        predicate: "ad4m://creationHint",
+        target: Literal.from(this.creationHint).toUrl()
+      });
+    }
+
+    // Flow-level `context` — background queries the LLM sees but not
+    // guard evidence. Single JSON literal, consumers parse back.
+    if (this.context && this.context.length > 0) {
+      links.push({
+        source: flowUri,
+        predicate: "ad4m://context",
+        target: `literal:string:${encodeURIComponent(JSON.stringify(this.context))}`
       });
     }
 
@@ -534,8 +625,85 @@ export class SHACLFlow {
       }
     }
 
+    // Find typed I/O (flow-level, design §4.1). Both arrays validated
+    // element-wise — only accept string[] payloads. A malformed literal
+    // (`[null]`, `[42]`, non-array) leaves the field as its default
+    // empty array rather than corrupting flow metadata.
+    const inputTypesLink = links.find(l =>
+      l.source === flowUri && l.predicate === "ad4m://inputTypes"
+    );
+    if (inputTypesLink) {
+      try {
+        const jsonStr = inputTypesLink.target.replace(
+          /^literal:\/\/string:|^literal:string:/,
+          ""
+        );
+        const parsed = JSON.parse(decodeURIComponent(jsonStr));
+        if (Array.isArray(parsed) && parsed.every(v => typeof v === "string" && v.length > 0)) {
+          flow.inputTypes = parsed as string[];
+        }
+      } catch {
+        // Ignore parse errors — leave as default empty array.
+      }
+    }
+
+    const outputTypesLink = links.find(l =>
+      l.source === flowUri && l.predicate === "ad4m://outputTypes"
+    );
+    if (outputTypesLink) {
+      try {
+        const jsonStr = outputTypesLink.target.replace(
+          /^literal:\/\/string:|^literal:string:/,
+          ""
+        );
+        const parsed = JSON.parse(decodeURIComponent(jsonStr));
+        if (Array.isArray(parsed) && parsed.every(v => typeof v === "string" && v.length > 0)) {
+          flow.outputTypes = parsed as string[];
+        }
+      } catch {
+        // Ignore parse errors — leave as default empty array.
+      }
+    }
+
+    // Find flow-level `creationHint`. Non-empty-string guard — same
+    // rationale as `interpretationHint`.
+    const creationHintLink = links.find(l =>
+      l.source === flowUri && l.predicate === "ad4m://creationHint"
+    );
+    if (creationHintLink) {
+      try {
+        const decoded = Literal.fromUrl(creationHintLink.target).get();
+        if (typeof decoded === "string" && decoded.length > 0) {
+          flow.creationHint = decoded;
+        }
+      } catch {
+        // Ignore parse errors — leave unset.
+      }
+    }
+
+    // Find flow-level `context` — same ModelQuery-shape guard as
+    // FlowState.requires (rejects `[null]`, `[{}]`, non-string
+    // `className`).
+    const contextLink = links.find(l =>
+      l.source === flowUri && l.predicate === "ad4m://context"
+    );
+    if (contextLink) {
+      try {
+        const jsonStr = contextLink.target.replace(
+          /^literal:\/\/string:|^literal:string:/,
+          ""
+        );
+        const parsed = JSON.parse(decodeURIComponent(jsonStr));
+        if (Array.isArray(parsed) && parsed.every(isModelQueryShape)) {
+          flow.context = parsed as ModelQuery[];
+        }
+      } catch {
+        // Ignore parse errors — leave unset.
+      }
+    }
+
     // Find flowable condition
-    const flowableLink = links.find(l => 
+    const flowableLink = links.find(l =>
       l.source === flowUri && l.predicate === "ad4m://flowable"
     );
     if (flowableLink) {
@@ -728,8 +896,13 @@ export class SHACLFlow {
       startAction: this.startAction,
       states: this._states,
       transitions: this._transitions,
-      // Empty strings treated as unset — same semantics as the toLinks path.
-      ...(this.interpretationHint ? { interpretationHint: this.interpretationHint } : {})
+      // Empty strings / empty arrays treated as unset — same semantics
+      // as the toLinks path, so JSON <-> links round-trips agree.
+      ...(this.interpretationHint ? { interpretationHint: this.interpretationHint } : {}),
+      ...(this.inputTypes.length > 0 ? { inputTypes: this.inputTypes } : {}),
+      ...(this.outputTypes.length > 0 ? { outputTypes: this.outputTypes } : {}),
+      ...(this.creationHint ? { creationHint: this.creationHint } : {}),
+      ...(this.context && this.context.length > 0 ? { context: this.context } : {})
     };
   }
 
@@ -743,6 +916,26 @@ export class SHACLFlow {
     // Non-empty-string guard — mirrors the toLinks-side reader.
     if (typeof json.interpretationHint === "string" && json.interpretationHint.length > 0) {
       flow.interpretationHint = json.interpretationHint;
+    }
+    // Typed I/O (design §4.1). Same string[]/ModelQuery[] shape guards
+    // as the fromLinks path — malformed payloads leave defaults untouched.
+    if (
+      Array.isArray(json.inputTypes) &&
+      json.inputTypes.every((v: unknown) => typeof v === "string" && v.length > 0)
+    ) {
+      flow.inputTypes = json.inputTypes as string[];
+    }
+    if (
+      Array.isArray(json.outputTypes) &&
+      json.outputTypes.every((v: unknown) => typeof v === "string" && v.length > 0)
+    ) {
+      flow.outputTypes = json.outputTypes as string[];
+    }
+    if (typeof json.creationHint === "string" && json.creationHint.length > 0) {
+      flow.creationHint = json.creationHint;
+    }
+    if (Array.isArray(json.context) && json.context.every(isModelQueryShape)) {
+      flow.context = json.context as ModelQuery[];
     }
     for (const state of json.states || []) {
       // Same validation as the toLinks path: reject malformed optional fields
