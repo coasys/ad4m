@@ -139,6 +139,93 @@ pub struct LinkPattern {
     pub target: String,
 }
 
+/// A per-property condition for a `ModelQuery` — the shape the v5 flow
+/// engine evaluates against a class instance's decoded value. Mirrors
+/// `PropertyCondition` in `core/src/shacl/SHACLFlow.ts`.
+///
+/// String / number / boolean shorthands compile to an equality match;
+/// the object forms are the full spec. `#[serde(untagged)]` — the JSON
+/// on the wire is either a scalar (`"foo"` / `42` / `true`) or one of
+/// the object variants; readers dispatch on shape.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum PropertyCondition {
+    Str(String),
+    Num(f64),
+    Bool(bool),
+    Equals {
+        equals: serde_json::Value,
+    },
+    In {
+        #[serde(rename = "in")]
+        one_of: Vec<serde_json::Value>,
+    },
+    Exists {
+        exists: bool,
+    },
+    Matches {
+        matches: String,
+    },
+}
+
+/// Model-level query — a flow's `requires` guard evaluates an array of
+/// these against the perspective's current class-instance graph. Mirrors
+/// `ModelQuery` in `core/src/shacl/SHACLFlow.ts`. All fields optional
+/// except `className` to match the TS shape.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ModelQuery {
+    /// Subject-class URI to search for.
+    #[serde(rename = "className")]
+    pub class_name: String,
+    /// Per-property conditions (AND semantics inside one query;
+    /// AND semantics across an array of queries too).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#where: Option<std::collections::BTreeMap<String, PropertyCondition>>,
+    /// Cardinality constraint on matching instances.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<ModelQueryCount>,
+    /// How the matched instance connects back to the flow.
+    #[serde(rename = "linkedTo", default, skip_serializing_if = "Option::is_none")]
+    pub linked_to: Option<serde_json::Value>,
+    /// DID-property gate — restricts matches to instances whose named
+    /// property equals a specific DID. Threaded through by role checks
+    /// (§7.2). Value is a template variable (`"$did"`) resolved at
+    /// evaluation time.
+    #[serde(
+        rename = "didProperty",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub did_property: Option<String>,
+    /// Composed OR — matches if ANY of the sub-queries do. Mirrors the
+    /// TS `or?: ModelQuery[]` field (§7.3 multi-role composition).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub or: Option<Vec<ModelQuery>>,
+}
+
+/// `count` shape on a `ModelQuery`. Default `{ min: 1 }` — at least one
+/// match required to satisfy the guard.
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ModelQueryCount {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<u32>,
+}
+
+/// Consensus firing rule — how many distinct DIDs must sign a proposal
+/// before the engine advances the flow to the state. Mirrors
+/// `ConsensusRule` in `core/src/shacl/SHACLFlow.ts` §7.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConsensusRule {
+    /// Distinct-DID threshold. `1` = solo-actor / like-button semantics.
+    pub n: u32,
+    /// Optional role gate: a signer must satisfy this ModelQuery
+    /// (with `$did` substituted) to count toward the threshold.
+    #[serde(rename = "fromRole", default, skip_serializing_if = "Option::is_none")]
+    pub from_role: Option<ModelQuery>,
+}
+
 /// Flow State definition
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlowState {
@@ -146,8 +233,41 @@ pub struct FlowState {
     pub name: String,
     /// Numeric state value for ordering (e.g., 0, 0.5, 1)
     pub value: f64,
-    /// Link pattern that indicates this state
+    /// Link pattern that indicates this state (legacy v4 field, still
+    /// carried for backwards compat while v1 flows in production migrate
+    /// to `requires`).
     pub state_check: LinkPattern,
+    /// English description of what puts a flow instance IN this state.
+    /// Read by the extraction pass to steer the LLM's state-transition
+    /// suggestions. Mirrors `FlowState.interpretationHint` on the TS side.
+    #[serde(
+        rename = "interpretationHint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub interpretation_hint: Option<String>,
+    /// Model-level guard: state is satisfied when every ModelQuery in
+    /// the array returns at least one match on committed graph state.
+    /// AND semantics across the array. Empty / unset = no model-level
+    /// guard (falls back to `state_check`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires: Option<Vec<ModelQuery>>,
+    /// English hint for a targeted LLM confirmation after `requires`
+    /// matches. Unset = `requires` matches directly imply state entered.
+    #[serde(
+        rename = "semanticCheck",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub semantic_check: Option<String>,
+    /// Per-state consensus override. Unset = falls back to the flow's
+    /// top-level `consensus_rule`.
+    #[serde(
+        rename = "consensusRule",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub consensus_rule: Option<ConsensusRule>,
 }
 
 /// Flow Transition definition
@@ -179,6 +299,47 @@ pub struct SHACLFlow {
     /// Transitions between states
     #[serde(default)]
     pub transitions: Vec<FlowTransition>,
+    /// Top-level frame — English description of what the flow is about.
+    /// Read by the extraction pass. Mirrors
+    /// `SHACLFlow.interpretationHint` on the TS side.
+    #[serde(
+        rename = "interpretationHint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub interpretation_hint: Option<String>,
+    /// Subject-class URIs the flow accepts as its base (replaces the
+    /// legacy `flowable` field on TS). Mirrors `SHACLFlow.inputTypes`.
+    #[serde(rename = "inputTypes", default)]
+    pub input_types: Vec<String>,
+    /// Subject-class URIs the flow must produce at least one instance
+    /// of before it can complete. Mirrors `SHACLFlow.outputTypes`.
+    #[serde(rename = "outputTypes", default)]
+    pub output_types: Vec<String>,
+    /// English hint for how to recognize when a new instance of this
+    /// flow should be spawned on a candidate base. Read by the LLM
+    /// during the extraction pass — a match ⇒ propose a `startFlow`.
+    /// Mirrors `SHACLFlow.creationHint`.
+    #[serde(
+        rename = "creationHint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub creation_hint: Option<String>,
+    /// Extra ModelQueries pulled into the LLM prompt as BACKGROUND
+    /// context (NOT evidence for `requires`). Mirrors `SHACLFlow.context`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Vec<ModelQuery>>,
+    /// Flow-level default consensus rule. States without their own
+    /// `consensus_rule` inherit this. For zero-state flows (§4.1.1 —
+    /// like-button-shape actions), this IS the single consensus rule.
+    /// Mirrors `SHACLFlow.consensusRule`.
+    #[serde(
+        rename = "consensusRule",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub consensus_rule: Option<ConsensusRule>,
 }
 
 /// Parse Flow JSON to RDF links
@@ -1017,5 +1178,173 @@ mod tests {
                 && l.predicate == Some("ad4m://actionName".to_string())),
             "Missing action name link"
         );
+    }
+
+    /// Load-bearing sanity check for slice-10.0: the v5 fields the TS
+    /// side ships (`interpretationHint`, `requires`, `semanticCheck`,
+    /// `consensusRule`, `inputTypes`, `outputTypes`, `creationHint`,
+    /// `context`) deserialise cleanly from the same JSON shape
+    /// `toJSON()` on `core/src/shacl/SHACLFlow.ts` emits. This is the
+    /// wire-format contract between the TS designer surface and the
+    /// Rust flow engine — a drift here breaks slice 10.1's context
+    /// gathering silently.
+    #[test]
+    fn test_parse_flow_with_v5_fields() {
+        let flow_json = r#"{
+            "name": "Deliberation",
+            "namespace": "ns://deliberation/",
+            "interpretationHint": "Tracks a group deliberation from proposal to shared understanding.",
+            "inputTypes": ["ns://Proposal"],
+            "outputTypes": ["ns://Resolution"],
+            "creationHint": "Someone raised a proposal that needs group deliberation before a decision.",
+            "consensusRule": { "n": 2 },
+            "context": [
+                { "className": "ns://Perspective", "where": { "about": "$flow.base" } }
+            ],
+            "start_action": [],
+            "states": [
+                {
+                    "name": "Tension",
+                    "value": 1.0,
+                    "state_check": { "predicate": "ns://state", "target": "ns://tension" },
+                    "interpretationHint": "Participants have voiced opposing views on the proposal.",
+                    "semanticCheck": "Confirm the objection is genuine disagreement, not a clarifying question.",
+                    "consensusRule": { "n": 2, "fromRole": { "className": "ns://Reviewer" } },
+                    "requires": [
+                        {
+                            "className": "ns://Objection",
+                            "where": { "about": "$flow.base" },
+                            "count": { "min": 1 },
+                            "linkedTo": "base"
+                        },
+                        {
+                            "className": "ns://Perspective",
+                            "where": {
+                                "about": "$flow.base",
+                                "stance": { "in": ["for", "against"] }
+                            },
+                            "count": { "min": 2 }
+                        }
+                    ]
+                }
+            ],
+            "transitions": []
+        }"#;
+
+        let flow: SHACLFlow =
+            serde_json::from_str(flow_json).expect("v5 fields deserialise cleanly");
+
+        assert_eq!(
+            flow.interpretation_hint.as_deref(),
+            Some("Tracks a group deliberation from proposal to shared understanding.")
+        );
+        assert_eq!(flow.input_types, vec!["ns://Proposal".to_string()]);
+        assert_eq!(flow.output_types, vec!["ns://Resolution".to_string()]);
+        assert!(flow.creation_hint.is_some());
+        assert_eq!(flow.consensus_rule.as_ref().map(|c| c.n), Some(2));
+        assert!(flow.context.is_some());
+
+        let tension = &flow.states[0];
+        assert!(tension.interpretation_hint.is_some());
+        assert!(tension.semantic_check.is_some());
+        assert_eq!(tension.consensus_rule.as_ref().map(|c| c.n), Some(2));
+        assert!(tension.consensus_rule.as_ref().unwrap().from_role.is_some());
+
+        let requires = tension.requires.as_ref().expect("requires present");
+        assert_eq!(requires.len(), 2);
+        assert_eq!(requires[0].class_name, "ns://Objection");
+        assert_eq!(requires[0].count.as_ref().and_then(|c| c.min), Some(1));
+        assert_eq!(requires[1].class_name, "ns://Perspective");
+        let where_ = requires[1].r#where.as_ref().expect("where clause present");
+        assert!(where_.contains_key("about"));
+        assert!(where_.contains_key("stance"));
+        // The `stance` condition is the `In` object variant — untagged
+        // enum dispatch on shape.
+        match where_.get("stance").unwrap() {
+            PropertyCondition::In { one_of } => {
+                assert_eq!(one_of.len(), 2);
+            }
+            other => panic!("expected In variant, got {other:?}"),
+        }
+    }
+
+    /// The v4 shape (no v5 fields) still parses — `#[serde(default)]`
+    /// on every new field keeps back-compat. If this test breaks, an
+    /// upgrade path forgot to preserve the pre-v5 wire format.
+    #[test]
+    fn test_parse_flow_v4_shape_still_works() {
+        let flow_json = r#"{
+            "name": "TODO",
+            "namespace": "todo://",
+            "start_action": [],
+            "states": [
+                {
+                    "name": "ready",
+                    "value": 0.0,
+                    "state_check": { "predicate": "todo://state", "target": "todo://ready" }
+                }
+            ],
+            "transitions": []
+        }"#;
+
+        let flow: SHACLFlow = serde_json::from_str(flow_json)
+            .expect("v4 shape parses cleanly with default v5 fields");
+        assert_eq!(flow.name, "TODO");
+        assert!(flow.interpretation_hint.is_none());
+        assert!(flow.input_types.is_empty());
+        assert!(flow.output_types.is_empty());
+        assert!(flow.creation_hint.is_none());
+        assert!(flow.consensus_rule.is_none());
+        assert!(flow.context.is_none());
+        assert!(flow.states[0].interpretation_hint.is_none());
+        assert!(flow.states[0].requires.is_none());
+        assert!(flow.states[0].semantic_check.is_none());
+        assert!(flow.states[0].consensus_rule.is_none());
+    }
+
+    /// `PropertyCondition` scalar shorthand → serde untagged should
+    /// pick the right variant for each JSON leaf shape.
+    #[test]
+    fn test_property_condition_scalar_shorthand_deserialisation() {
+        let str: PropertyCondition = serde_json::from_str(r#""hello""#).unwrap();
+        assert!(matches!(str, PropertyCondition::Str(_)));
+
+        let num: PropertyCondition = serde_json::from_str(r#"42"#).unwrap();
+        assert!(matches!(num, PropertyCondition::Num(_)));
+
+        let boolv: PropertyCondition = serde_json::from_str(r#"true"#).unwrap();
+        assert!(matches!(boolv, PropertyCondition::Bool(_)));
+
+        let equals: PropertyCondition = serde_json::from_str(r#"{"equals":"x"}"#).unwrap();
+        assert!(matches!(equals, PropertyCondition::Equals { .. }));
+
+        let in_: PropertyCondition = serde_json::from_str(r#"{"in":["a","b"]}"#).unwrap();
+        assert!(matches!(in_, PropertyCondition::In { .. }));
+
+        let exists: PropertyCondition = serde_json::from_str(r#"{"exists":true}"#).unwrap();
+        assert!(matches!(exists, PropertyCondition::Exists { .. }));
+
+        let matches_: PropertyCondition = serde_json::from_str(r#"{"matches":"^foo"}"#).unwrap();
+        assert!(matches!(matches_, PropertyCondition::Matches { .. }));
+    }
+
+    /// `ModelQuery.or` composes recursively — the composed guard shape
+    /// used by role expressions in §7.3. Round-trip must preserve the
+    /// nested structure so the engine can walk it during evaluation.
+    #[test]
+    fn test_model_query_or_composition() {
+        let json = r#"{
+            "className": "ns://Role",
+            "or": [
+                { "className": "ns://Editor", "didProperty": "member" },
+                { "className": "ns://Owner",  "didProperty": "owner" }
+            ]
+        }"#;
+        let q: ModelQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.class_name, "ns://Role");
+        let or = q.or.expect("or clause present");
+        assert_eq!(or.len(), 2);
+        assert_eq!(or[0].did_property.as_deref(), Some("member"));
+        assert_eq!(or[1].did_property.as_deref(), Some("owner"));
     }
 }
