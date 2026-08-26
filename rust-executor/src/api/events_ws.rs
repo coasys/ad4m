@@ -582,10 +582,7 @@ pub(crate) async fn build_event_stream(
             ),
         ),
     );
-    let sfu = stream::select(
-        stream::select(s_sfu_reneg, s_sfu_migrate),
-        s_sfu_data,
-    );
+    let sfu = stream::select(stream::select(s_sfu_reneg, s_sfu_migrate), s_sfu_data);
 
     let top = stream::select(
         stream::select(agent, persp),
