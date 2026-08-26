@@ -1595,6 +1595,19 @@ async fn emit_one_shot_abandoned(uuid: &str, observation_id: &str, did: &str, re
 /// `AutoProcessorConfig` into the shared graph; the executor watch loop reads it
 /// back and starts running interpretation automatically over new source items,
 /// emitting step signals on the events WebSocket (`auto-processor-event`).
+///
+/// **Registering is not idempotent in its class list.** Scalars overwrite through their
+/// `setSingleTarget` setters, but `interpretationClasses` is a collection written with the shape's
+/// `addLink` setter, so a second registration under the same `processorId` *unions* its classes
+/// with what is already stored rather than replacing them. Registering `[A]` and then `[B]` leaves
+/// a processor materializing both.
+///
+/// This endpoint is therefore for **creating** a processor. To change what an existing one
+/// extracts, edit its `AutoProcessorConfig` through the model API, where a collection can be set to
+/// exactly the values given; to stop it, use `perspective.removeAutoProcessor`. A client that
+/// re-registers on reconnect should check whether the config already exists first — the config is
+/// shared graph state that outlives any one agent's session, so "ensure it exists" is the shape
+/// that wants, not "register it again".
 async fn add_auto_processor_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -1618,6 +1631,14 @@ async fn add_auto_processor_handler(
     // back at the boundary instead. Ranges mirror
     // `AutoProcessorConfig::config_from_instance` (rust-executor/src/
     // perspectives/auto_processor/config.rs).
+    //
+    // `scalar_string` treats an empty scalar as absent, so `config_from_instance` rejects a config
+    // whose `processorId` is `""` — it writes, reports success, and never loads. It is also the
+    // identity: the node URI, the claim's batch nodes and the processed-turn cursor are all derived
+    // from it, so an empty one is not a processor that runs badly but a processor with no name.
+    if body.processor_id.is_empty() {
+        return Err(WsRpcError::bad_request("`processorId` must be non-empty"));
+    }
     if body.interpretation_classes.is_empty() {
         return Err(WsRpcError::bad_request(
             "`interpretationClasses` must be non-empty",
@@ -1672,6 +1693,46 @@ async fn add_auto_processor_handler(
     .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(body.processor_id)?)
+}
+
+/// `perspective.removeAutoProcessor` — delete a processor's config instance, which is what stops
+/// its watch: the loop reads the processor set back out of the perspective's graph on every tick.
+///
+/// Answers `true` when there was a processor to remove and `false` when there was not, rather than
+/// erroring on the second case — a caller tidying up after a processor a peer has already removed
+/// has done the right thing, and a teardown path is the worst place to raise an avoidable failure.
+///
+/// Deliberately validates less than its `add` counterpart, which rejects an empty `processorId`.
+/// Strictness belongs on the way in: registration decides what may exist, and removal is how
+/// anything already there is recovered from. A config written before that validation existed — or
+/// by any writer that is not this handler — must stay removable, and refusing the id here would
+/// leave junk on the graph with no API able to take it away. The id is used verbatim to derive one
+/// node URI, so an empty one addresses exactly the node an empty-id write produced and nothing else.
+///
+/// Takes the same `update` capability as registering one. Deleting a processor is not a read: it
+/// changes what the neighbourhood extracts, for everyone.
+async fn remove_auto_processor_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    use crate::api::types::RemoveAutoProcessorRequest;
+    use crate::perspectives::auto_processor::config::remove_processor;
+
+    let body: RemoveAutoProcessorRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![body.uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let removed = remove_processor(&mut perspective, &body.processor_id, &agent_context)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(removed))
 }
 
 /// `perspective.acceptInterpretation` — materialize the overlay's staged
@@ -1798,6 +1859,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         run_interpretation_with_harness_handler,
     );
     map.register("perspective.addAutoProcessor", add_auto_processor_handler);
+    map.register(
+        "perspective.removeAutoProcessor",
+        remove_auto_processor_handler,
+    );
     map.register(
         "perspective.acceptInterpretation",
         accept_interpretation_handler,
