@@ -180,7 +180,7 @@ describe("Decorators → SHACL writer round-trip", () => {
   it("emits scalar property predicates", () => {
     @Model({ name: "Profile" })
     class Profile extends Ad4mModel {
-      @Property({ through: "ns://name", resolveLanguage: "literal" })
+      @Property({ through: "ns://name" })
       name: string = "";
     }
 
@@ -190,8 +190,139 @@ describe("Decorators → SHACL writer round-trip", () => {
     expect(findLinkTarget(links, "ns://Profile.name", "sh://path")).toBe(
       "ns://name",
     );
+    // A bare @Property is deterministic-literal by default — no
+    // resolveLanguage link is emitted.
     expect(
       findLinkTarget(links, "ns://Profile.name", "ad4m://resolveLanguage"),
-    ).toBe("literal:string:literal");
+    ).toBeUndefined();
+  });
+
+  it("emits ad4m://interpretation_hint on the class shape and per property", () => {
+    @Model({
+      name: "Belief",
+      interpretationHint:
+        "A claim a participant holds to be true about the world or the group. Not a task or a question.",
+    })
+    class Belief extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        resolveLanguage: "literal",
+        interpretationHint: "One-sentence statement in the claimant's framing.",
+      })
+      title: string = "";
+
+      @Property({ through: "ns://body", resolveLanguage: "literal" })
+      body: string = "";
+    }
+
+    const { shape } = Belief.generateSHACL();
+    const links = flatten(shape);
+
+    expect(findLinkTarget(links, shape.nodeShapeUri, "ad4m://interpretation_hint"))
+      .toBe(
+        "literal:string:A claim a participant holds to be true about the " +
+        "world or the group. Not a task or a question.",
+      );
+    expect(
+      findLinkTarget(links, "ns://Belief.title", "ad4m://interpretation_hint"),
+    ).toBe(
+      "literal:string:One-sentence statement in the claimant's framing.",
+    );
+    expect(
+      findLinkTarget(links, "ns://Belief.body", "ad4m://interpretation_hint"),
+    ).toBeUndefined();
+  });
+
+  it("emits ad4m://interpretation_hint on relation properties", () => {
+    // Relation-level interpretation hints (RelationOptions.interpretationHint)
+    // are read by the Rust harness's `ShaclProperty.interpretation_hint` and
+    // rendered into the `_propose_link_child` predicate-field description so
+    // the LLM knows what each relation MEANS semantically, not just that it
+    // exists. Regression against the follow-up-branch scope creep: pulled
+    // into PR #911 per Nico's 2026-08-24 ask.
+    @Model({ name: "Intention" })
+    class Intention extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        interpretationHint: "Imperative statement of intent.",
+      })
+      title: string = "";
+
+      @HasMany(() => Belief, {
+        through: "ns://basedOn",
+        interpretationHint:
+          "The prior beliefs this intention derives from.",
+      })
+      basedOn: Belief[] = [];
+
+      @HasMany(() => Belief, { through: "ns://contradicts" })
+      contradicts: Belief[] = [];
+    }
+    @Model({ name: "Belief" })
+    class Belief extends Ad4mModel {
+      @Property({ through: "ns://title", required: true }) title: string = "";
+    }
+
+    const { shape } = Intention.generateSHACL();
+    const links = flatten(shape);
+
+    // Named relation with a hint → link present on the relation's property
+    // node with the hint text.
+    expect(
+      findLinkTarget(links, "ns://Intention.basedOn", "ad4m://interpretation_hint"),
+    ).toBe(
+      "literal:string:The prior beliefs this intention derives from.",
+    );
+
+    // Named relation WITHOUT a hint → no interpretation_hint link (the
+    // scalar-property "no hint = no link" path is what relations follow too).
+    expect(
+      findLinkTarget(
+        links,
+        "ns://Intention.contradicts",
+        "ad4m://interpretation_hint",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("round-trips interpretationHint through toJSON/fromJSON", () => {
+    @Model({
+      name: "Task",
+      interpretationHint:
+        "Something a participant commits to doing - actionable outcome.",
+    })
+    class Task extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        resolveLanguage: "literal",
+        interpretationHint: "Imperative summary of the work.",
+      })
+      title: string = "";
+    }
+
+    const { shape } = Task.generateSHACL();
+    const json: any = shape.toJSON();
+
+    expect(json.interpretation_hint).toBe(
+      "Something a participant commits to doing - actionable outcome.",
+    );
+    const titleProp = json.properties.find((p: any) => p.name === "title");
+    expect(titleProp.interpretation_hint).toBe(
+      "Imperative summary of the work.",
+    );
+
+    const rebuilt = (shape.constructor as any).fromJSON(json);
+    expect(rebuilt.interpretationHint).toBe(
+      "Something a participant commits to doing - actionable outcome.",
+    );
+    const rebuiltTitle = rebuilt.properties.find(
+      (p: any) => p.name === "title",
+    );
+    expect(rebuiltTitle.interpretationHint).toBe(
+      "Imperative summary of the work.",
+    );
   });
 });

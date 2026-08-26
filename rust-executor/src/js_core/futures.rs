@@ -2,11 +2,9 @@ use deno_core::error::CoreError;
 use deno_core::{v8, PollEventLoopOptions};
 use deno_runtime::worker::MainWorker;
 use futures::Future;
-// Import the JsRuntime struct.
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::thread::sleep;
 use tokio::sync::Mutex as TokioMutex;
 
 pub struct EventLoopFuture {
@@ -20,22 +18,29 @@ impl EventLoopFuture {
 }
 
 impl Future for EventLoopFuture {
-    type Output = Result<(), CoreError>; // You can customize the output type.
+    type Output = Result<(), CoreError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        sleep(std::time::Duration::from_millis(1));
         let worker = self.worker.try_lock();
         if let Ok(mut worker) = worker {
-            let res = worker.js_runtime.poll_event_loop(
+            match worker.js_runtime.poll_event_loop(
                 cx,
                 PollEventLoopOptions {
                     pump_v8_message_loop: true,
                     wait_for_inspector: false,
                 },
-            );
-            cx.waker().wake_by_ref();
-            res
+            ) {
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                // Event loop drained or has pending work with registered
+                // wakers. Return Pending — deno_core's internal wakers
+                // (I/O, timers) or the channel in the surrounding select!
+                // (new RPC request) will re-poll when needed.
+                Poll::Ready(Ok(())) | Poll::Pending => Poll::Pending,
+            }
         } else {
+            // Lock contention — another task holds the worker mutex.
+            // The channel-side waker in the surrounding select! re-polls
+            // when the lock holder finishes.
             Poll::Pending
         }
     }
@@ -89,11 +94,9 @@ where
             .poll_event_loop(cx, deno_core::PollEventLoopOptions::default());
         if let Poll::Ready(event_loop_result) = event_loop_poll {
             if let Err(err) = event_loop_result {
-                // Propagate the actual event-loop error. This previously returned a
-                // hardcoded CoreError::TLA, which relabelled EVERY event-loop failure
-                // (permission denials, uncaught rejections, module-eval errors) as
-                // "Top-level await is not allowed in synchronous evaluation" — a red
-                // herring that hid the real cause of language-bundle load failures.
+                // Propagate the actual event-loop error so callers see
+                // the real failure (permission denial, uncaught rejection,
+                // module-eval error, etc.).
                 log::error!("Error in event loop: {:?}", err);
                 return Poll::Ready(Err(err));
             }

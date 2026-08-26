@@ -283,7 +283,10 @@ async fn ensure_membership(params: Value, ctx: Arc<RequestContext>) -> Result<Va
 /// participant.  Returns `[{participantId, preference}, ...]`.
 /// Wind tunnel uses this to verify cascade propagation reached the
 /// sender's node.
-async fn quality_preferences(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+async fn quality_preferences(
+    _params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let svc = service()?;

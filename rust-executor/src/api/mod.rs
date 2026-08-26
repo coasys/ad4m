@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod errors;
 pub mod events_ws;
+pub mod openai_compat;
 pub mod types;
 pub mod ws_rpc;
 
@@ -100,6 +101,14 @@ pub fn api_router(state: AppState) -> Router {
                 post(ai_ws::feed_transcription_stream),
             ),
     )
+    // ── OpenAI-compatible /v1 surface ──
+    //
+    // Mounted at both `/v1` (the canonical OpenAI path) and
+    // `/api/v1/openai/v1` (for proxies that hard-code the `/api/v1`
+    // prefix from the native AD4M surface).  Both share the same
+    // handlers + AppState.
+    .nest("/v1", openai_compat::router())
+    .nest("/api/v1/openai/v1", openai_compat::router())
     // ── State + Middleware ──
     .with_state(state)
     .layer(Extension(handler_map))

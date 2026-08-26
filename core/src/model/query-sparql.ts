@@ -81,18 +81,53 @@ export function hasJsOnlyWhereFilters(
 }
 
 /**
- * Check if a string value looks like a URI (has a scheme).
+ * Check whether a string value is a well-formed absolute IRI that can be
+ * stored verbatim as a link target (raw `NamedNode`) instead of being
+ * wrapped in a `literal:string:*` URI.
+ *
+ * This mirrors the Rust `is_safe_iri_target` /
+ * `looks_like_absolute_iri` predicate in
+ * `rust-executor/src/perspectives/model_query/utils.rs` and is
+ * **load-bearing**: a value that returns `true` here MUST also be safely
+ * queryable on the Rust side (`validate_iri` gate on the SPARQL
+ * `UNION { ?s <pred> <val> }` IRI arm), otherwise scheme-lookalike prose
+ * such as `"Note: buy milk"`, `"Re: standup"`, `"TODO: fix this"` slips
+ * through the write regex, is stored as an invalid `NamedNode`, and
+ * becomes a silent no-match on read.
+ *
+ * Fast-path scheme check (`^[a-zA-Z][a-zA-Z0-9+\-._]*:`) followed by the
+ * same rejection set the Rust `validate_iri` applies: any Unicode
+ * whitespace, C0/C1 control chars, and the SPARQL-breaking characters
+ * `< > { } "`.
  */
-function looksLikeUri(value: string): boolean {
-  return /^[a-zA-Z][a-zA-Z0-9+\-._]*:/.test(value);
+export function looksLikeUri(value: string): boolean {
+  if (!/^[a-zA-Z][a-zA-Z0-9+\-._]*:/.test(value)) return false;
+  // Reject anything the Rust-side `validate_iri` rejects so the two
+  // predicates stay in sync. `\s` covers ASCII whitespace *and*
+  // U+00A0/other Unicode whitespace under the default JS regex semantics.
+  if (/[\s<>{}"\u0000-\u001F\u007F-\u009F]/.test(value)) return false;
+  return true;
 }
 
 /**
  * Convert a JS value to its literal: IRI form, matching how the Rust executor
- * stores property values that don't have a resolveLanguage set.
- * Strings that already look like URIs are returned as-is.
+ * stores property values in the default deterministic-literal path
+ * (`resolveLanguage` unset). Strings that already look like URIs are returned
+ * as-is.
+ *
+ * Exported so write-side helpers (e.g. `Ad4mModel.setProperty`'s literal
+ * resolve path) can keep their on-disk form aligned with what
+ * `queryToSPARQL()` filters against — otherwise the same value can be
+ * stored as `<literal:string:https%3A...>` from one path while WHERE
+ * builders probe `<https://example.com>` from the other.
+ *
+ * The object/array arm mirrors Rust's `Literal::from_json` in
+ * `perspective_instance.rs::resolve_property_value` (which routes
+ * `Value::Object | Value::Array` through JSON encoding). Without it, JS
+ * would fall through to `String(value)` and turn `{a: 1}` into
+ * `"[object Object]"` and `[1, 2, 3]` into `"1,2,3"` before wrapping.
  */
-function valueToLiteralIri(value: any): string {
+export function valueToLiteralIri(value: any): string {
   if (typeof value === 'string') {
     if (looksLikeUri(value)) return value;
     return Literal.from(value).toUrl();
@@ -103,21 +138,55 @@ function valueToLiteralIri(value: any): string {
   if (typeof value === 'boolean') {
     return Literal.from(value).toUrl();
   }
+  // Objects and arrays: route through Literal.from so we emit
+  // `literal:json:*` (mirrors Rust `Literal::from_json`). Without this
+  // arm we fall through to `String(value)` which turns objects into
+  // `"[object Object]"` and arrays into `"1,2"` — silently storing the
+  // wrong shape and breaking equality filters (`findAll({ where:
+  // { config: {...} } })` would match against `"[object Object]"`).
+  // The `value !== null` guard preserves the historical fallthrough for
+  // `null` (→ `literal:string:null`), since `Literal.from(null).toUrl()`
+  // throws on the empty-literal check.
+  if (value !== null && typeof value === 'object') {
+    return Literal.from(value).toUrl();
+  }
   return Literal.from(String(value)).toUrl();
 }
 
+/** How a property's value is stored / resolved. */
+export type LiteralStorageMode =
+  | { kind: "deterministic" }            // deterministic literal: IRI (POS-index friendly, no signature)
+  | { kind: "envelope" }                 // signed expression on the built-in literal language
+  | { kind: "custom"; language: string }; // signed expression on a custom language
+
 /**
- * Determine if a property stores values as literal: IRIs (needs parse_literal for comparisons).
- * Properties with resolveLanguage === "literal" AND properties without resolveLanguage
- * both store values as literal: URIs. Only properties with a non-literal resolveLanguage
- * (e.g. file storage) or flag properties store raw URIs.
+ * Derive the effective storage mode from a property's explicit options.
+ * `resolveLanguage` is the sole selector and is NOT defaulted at the
+ * decorator level:
+ *   - unset               → deterministic typed literal (the perf default
+ *                            for a plain `@Property()`)
+ *   - `"literal"`         → signed envelope on the built-in literal language
+ *                            (per-value provenance, e.g. Flux message bodies)
+ *   - `<custom address>`  → signed expression on that custom language
+ */
+export function effectiveLiteralStorage(meta: {
+  resolveLanguage?: string;
+}): LiteralStorageMode {
+  const lang = meta.resolveLanguage;
+  if (lang === undefined) return { kind: "deterministic" };
+  if (lang === "literal") return { kind: "envelope" };
+  return { kind: "custom", language: lang };
+}
+
+/**
+ * Determine if a property stores values as deterministic literal: IRIs (so WHERE
+ * filters can match typed literals directly). Envelope / custom-language
+ * properties resolve through expressions, and flag properties store raw URIs —
+ * none is a deterministic literal.
  */
 function isLiteralStoredProperty(propMeta: PropertyMetadata): boolean {
   if (propMeta.flag) return false;
-  // If resolveLanguage is set to something other than "literal", it's a language expression URI
-  if (propMeta.resolveLanguage && propMeta.resolveLanguage !== "literal") return false;
-  // Everything else (resolveLanguage === "literal" or undefined) stores as literal: URIs
-  return true;
+  return effectiveLiteralStorage(propMeta).kind === "deterministic";
 }
 
 /**

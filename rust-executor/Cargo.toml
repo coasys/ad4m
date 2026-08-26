@@ -1,6 +1,6 @@
 [package]
 name = "ad4m-executor"
-version = "0.13.0-test-9"
+version = "0.13.0-test-interpretation-2"
 edition = "2021"
 authors = ["Nicolas Luck <nicolas.luck@coasys.org>"]
 description = "Runtime implementation of AD4M as library - https://ad4m.dev"
@@ -48,7 +48,6 @@ tokio = { version = "1.25.0", features = ["full"] }
 # WebRTC SFU — str0m is a pure-Rust sans-I/O WebRTC stack. We drive the
 # event loop ourselves over a UDP socket in `rust-executor/src/sfu`.
 str0m = "0.9"
-async-trait = "0.1"
 url = "2.3.1"
 urlencoding = "2.1"
 percent-encoding = "2"
@@ -71,10 +70,12 @@ hex = "0.4.3"
 argon2 = { version = "0.5.0", features = ["simple"] }
 rand = "0.8.5"
 base64 = "0.21.0"
+# TURN credential generation for SFU ICE server config
 hmac = "0.12"
 sha1 = "0.10"
 rmcp = { version = "0.15.0", features = ["server", "transport-streamable-http-server"] }
-axum = { version = "0.8", features = ["ws"] }
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { version = "0.6", features = ["cors", "set-header", "catch-panic"] }
 schemars = "1.0"
@@ -112,7 +113,7 @@ sodoken = "=0.1.0"
 scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prolog", branch = "ad4m" }
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
-ad4m-client = { path = "../rust-client", version="0.13.0-test-9" }
+ad4m-client = { path = "../rust-client", version="0.13.0-test-interpretation-2" }
 reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 
 # rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }

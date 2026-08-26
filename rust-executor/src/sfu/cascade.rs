@@ -505,11 +505,7 @@ impl CascadeManager {
     ///    A gap of 3 means the post-move gap drops to 1 — stable.)
     ///
     /// Returns `None` when no migration action makes sense.
-    pub fn suggest_rebalance(
-        &mut self,
-        room_id: &str,
-        local_count: u32,
-    ) -> Option<String> {
+    pub fn suggest_rebalance(&mut self, room_id: &str, local_count: u32) -> Option<String> {
         // Cooldown check: skip if we migrated from this room recently
         if let Some(last) = self.rebalance_cooldowns.get(room_id) {
             if last.elapsed() < Duration::from_secs(30) {
@@ -698,27 +694,19 @@ mod tests {
         mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 0, 8);
         let redirect = mgr.pick_redirect_node(
             &room_id.to_string(),
-            1,                             // local well under capacity
-            Some("did:key:remote"),         // but remote is preferred
+            1,                      // local well under capacity
+            Some("did:key:remote"), // but remote is preferred
         );
         assert!(redirect.is_some());
         assert_eq!(redirect.unwrap().did, "did:key:remote");
 
         // When preferred node is at capacity, fall through to normal logic
         mgr.handle_sfu_announce("did:key:remote".into(), room_id.to_string(), 8, 8);
-        let redirect = mgr.pick_redirect_node(
-            &room_id.to_string(),
-            1,
-            Some("did:key:remote"),
-        );
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 1, Some("did:key:remote"));
         assert!(redirect.is_none()); // local has capacity, preferred full
 
         // When preferred DID matches local, no redirect (we ARE the preferred)
-        let redirect = mgr.pick_redirect_node(
-            &room_id.to_string(),
-            1,
-            Some("did:key:local"),
-        );
+        let redirect = mgr.pick_redirect_node(&room_id.to_string(), 1, Some("did:key:local"));
         assert!(redirect.is_none());
     }
 
@@ -812,5 +800,4 @@ mod tests {
         // Room B should still allow rebalancing (independent cooldown)
         assert!(mgr.suggest_rebalance(room_b, 9).is_some());
     }
-
 }

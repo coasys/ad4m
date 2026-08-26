@@ -183,10 +183,15 @@ async fn holochain_signal_receiver() {
                     }
                 }
             } else {
-                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                // stream_receiver.recv() returned None — channel closed.
+                // Back off before re-acquiring the service; this rarely
+                // happens in normal operation.
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         } else {
-            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            // Holochain service not yet available (still booting or
+            // disabled). 500ms between readiness checks.
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
     }
 }
@@ -417,12 +422,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                     info!("SFU media bind address override: {}", addr);
                     sfu_config.bind_addr = sa;
                 }
-                Err(e) => warn!("SFU bind address `{}` parse error: {} — using default", addr, e),
+                Err(e) => warn!(
+                    "SFU bind address `{}` parse error: {} — using default",
+                    addr, e
+                ),
             }
         }
-        match crate::sfu::SfuService::start(sfu_config, gossip)
-            .await
-        {
+        match crate::sfu::SfuService::start(sfu_config, gossip).await {
             Ok(svc) => info!("SFU service ready on UDP {}", svc.local_addr()),
             Err(e) => warn!("SFU service failed to start: {}", e),
         }

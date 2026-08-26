@@ -67,21 +67,21 @@ So,
 Literal.from("thinks").toUrl();
 ```
 
-returns `literal://string:thinks` - which is a valid URI -
+returns `literal:string:thinks` - which is a valid URI -
 and
 
 ```js
 Literal.from("AD4M will be the last social network").toUrl();
 ```
 
-returns `literal://string:AD4M%20will%20be%20the%20last%20social%20network`.
+returns `literal:string:AD4M%20will%20be%20the%20last%20social%20network`.
 This is basically like URL parameters and let's us get around introducing Languages
 before using Perspectives and Links.
 
 We can decode the URL into a JavaScript literal like so:
 
 ```js
-const string = Literal.fromUrl("literal://string:thinks").get();
+const string = Literal.fromUrl("literal:string:thinks").get();
 // string == 'thinks'
 ```
 
@@ -107,8 +107,8 @@ LinkExpressions wrap Links with author, timestamp and signature:
     timestamp: "Sun Oct 23 2022 15:31:52 GMT+0200 (Central European Summer Time)",
     data: {
         source: "did:key:zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",
-        predicate: "literal://string:thinks",
-        target: "literal://string:AD4M%20will%20be%20the%20last%20social%20network",
+        predicate: "literal:string:thinks",
+        target: "literal:string:AD4M%20will%20be%20the%20last%20social%20network",
     },
     proof: {
         key: "#zQ3shNWd4bg67ktTVg9EMnnrsRjhkH6cRNCjRRxfTaTqBniAf",

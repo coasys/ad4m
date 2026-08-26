@@ -302,7 +302,9 @@ impl SfuService {
                         // Cheap: one HashMap scan per Announce.
                         let evicted = mgr.evict_stale_nodes(Duration::from_secs(30));
                         for (evicted_room, evicted_did) in evicted {
-                            if let Some(pid) = mgr.remove_node_from_room(&evicted_room, &evicted_did) {
+                            if let Some(pid) =
+                                mgr.remove_node_from_room(&evicted_room, &evicted_did)
+                            {
                                 pipes_to_drop.push(pid);
                             }
                         }
@@ -506,7 +508,10 @@ impl SfuService {
                     })
                     .await
                 {
-                    warn!("SFU cascade: failed to enqueue pipe quality preference: {}", e);
+                    warn!(
+                        "SFU cascade: failed to enqueue pipe quality preference: {}",
+                        e
+                    );
                 }
             }
 
@@ -769,11 +774,8 @@ impl SfuService {
                 .get(neighbourhood_url)
                 .and_then(|c| c.preferred_sfu_did.as_deref());
 
-            if let Some(node) = mgr.pick_redirect_node(
-                &room_id.to_string(),
-                local_count,
-                preferred,
-            ) {
+            if let Some(node) = mgr.pick_redirect_node(&room_id.to_string(), local_count, preferred)
+            {
                 // Redirect to a remote node (may or may not have
                 // headroom — client-side cycle detection handles the
                 // all-full case).
@@ -803,7 +805,13 @@ impl SfuService {
         let (rtc, sdp_answer) = SfuServer::create_rtc_for_offer(offer, self.server.local_addr)?;
 
         // Create the SFU peer and send it to the event loop
-        let peer = SfuPeer::new(pid.clone(), room_id.clone(), agent_did.to_string(), rtc, false);
+        let peer = SfuPeer::new(
+            pid.clone(),
+            room_id.clone(),
+            agent_did.to_string(),
+            rtc,
+            false,
+        );
 
         self.server
             .command_tx
