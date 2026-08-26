@@ -255,7 +255,7 @@ Connect to `ws://localhost:12000/api/v1/ws` and send JSON-RPC messages:
 ```json
 {"method": "agent.status", "params": {}, "id": "1"}
 
-{"method": "perspectives.add_link", "params": {"uuid": "<perspective-uuid>", "link": {"source": "ad4m://self", "predicate": "has_name", "target": "literal://string:Data"}}, "id": "2"}
+{"method": "perspectives.add_link", "params": {"uuid": "<perspective-uuid>", "link": {"source": "ad4m://self", "predicate": "has_name", "target": "literal:string:Data"}}, "id": "2"}
 ```
 
 **Auth:** Send `{"method": "auth", "params": {"credential": "<admin-credential>"}}` (single-user) or `{"method": "auth", "params": {"jwt": "<token>"}}` (multi-user) as the first message.

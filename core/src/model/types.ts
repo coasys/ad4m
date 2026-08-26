@@ -47,15 +47,25 @@ export type Where = {
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
- * Discriminated union for parent-scoped queries.
+ * A named subgraph scope: a parent node + linking predicate.
  *
- * **Model form** (preferred) — predicate auto-resolved from the parent model's
- * relation metadata. Use `field` to disambiguate when the parent has multiple
- * relations targeting the same child class.
+ * Reusable across contexts that need to identify "the subtree under node X
+ * linked via predicate P": query-time filtering as a `parent` filter on a
+ * `ModelQuery` (the "all Messages belonging to Channel X" case) AND
+ * AutoProcessor's `existingScope` / `mintScope` fields — the former
+ * constrains dedup lookups; the latter turns each new mint into a child
+ * link under the given node.
+ *
+ * **Model form** (preferred for parent-filter queries) — predicate
+ * auto-resolved from the parent model's relation metadata. Use `field` to
+ * disambiguate when the parent has multiple relations targeting the same
+ * child class. AutoProcessor `mintScope` requires the **Raw form** because
+ * only Raw carries an explicit linking predicate; `Model` scopes have no
+ * predicate to write.
  *
  * **Raw form** — explicit predicate string, no metadata lookup.
  */
-export type ParentScope =
+export type Scope =
   | { model: typeof Ad4mModel; id: string; field?: string }
   | { id: string; predicate: string };
 
@@ -129,7 +139,7 @@ export function isIncludeProjection(val: unknown): val is IncludeProjection {
 
 export type Query = {
   /** Filter to instances that are the target of a link from a given parent. */
-  parent?: ParentScope;
+  parent?: Scope;
   properties?: string[];
   include?: IncludeMap;
   /**
@@ -345,7 +355,7 @@ export type IncludeExtras<T extends Ad4mModel, I> =
 // ---- Typed Query -------------------------------------------------------------
 
 type StrictTypedQuery<T extends Ad4mModel> = {
-  parent?: ParentScope;
+  parent?: Scope;
   properties?: PropertyKeysOf<T>[];
   include?: TypedIncludeMap<T>;
   includeAll?: boolean;
@@ -402,7 +412,12 @@ export interface PropertyMetadata {
   readOnly: boolean;
   /** Initial value if specified */
   initial?: string;
-  /** Language for resolution (e.g., "literal") */
+  /** Sole selector of storage mode:
+   *   - unset               → deterministic typed literal (fast POS-index
+   *                            path, the default for a plain `@Property()`)
+   *   - `"literal"`         → signed envelope on the built-in literal language
+   *   - `<custom address>`  → expression on that custom language
+   */
   resolveLanguage?: string;
   /** Custom Prolog getter code */
   prologGetter?: string;

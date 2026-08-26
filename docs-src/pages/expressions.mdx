@@ -80,7 +80,7 @@ const url = await ad4m.expression.create(
     "Hello World!", 
     "literal"
 );
-// Returns: literal://base64encoded-content
+// Returns: literal:base64encoded-content
 
 // Create an Expression using a custom Language
 const socialPost = await ad4m.expression.create(
@@ -148,7 +148,7 @@ While Expressions can contain any type of data, there are several common pattern
 1. **Literal Expressions**
    - Simple data types (strings, numbers, objects)
    - Encoded directly in the address
-   - Example: `literal://base64encoded-content`
+   - Example: `literal:base64encoded-content`
 
 2. **Content Expressions**
    - Larger data objects (posts, documents, media)

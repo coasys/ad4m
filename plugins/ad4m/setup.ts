@@ -54,6 +54,20 @@ export async function runSetup(
     logger.warn("[ad4m-setup] Could not read OpenClaw hooks config");
   }
 
+  // ── Options from plugin config ──
+  const pluginCfg = openclawConfig?.plugins?.entries?.ad4m?.config ?? {};
+  const runHolochain = pluginCfg.runHolochain !== false; // default true
+  // Multi-user external: the assistant provisions its OWN user (distinct DID)
+  // via signup/login rather than a capability against the node's base agent.
+  const multiUser = pluginCfg.multiUser === true;
+  const agentEmail = pluginCfg.email || `openclaw-${generateRandomPassphrase(8)}@agent.local`;
+  // Password resolves env var → config field → interactive stdin (setup only).
+  // Never generated: a randomly-generated password would be persisted nowhere
+  // and the user could never log in again after the first JWT expires.
+  const agentPassword = multiUser
+    ? await resolveMultiUserPassword(logger, pluginCfg.password)
+    : undefined;
+
   // ── Step 2: Find binary ──
   const binaryPath = findExecutorBinary();
   if (binaryPath) {
@@ -71,13 +85,13 @@ export async function runSetup(
 
   if (running) {
     // Branch B: Executor already running
-    await setupExternalMode(logger, endpoint, wakeToken, running, executorUrl);
+    await setupExternalMode(logger, endpoint, wakeToken, running, executorUrl, multiUser, agentEmail, agentPassword);
   } else if (binaryPath) {
     // Branch A: No running executor, binary found
-    await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken);
+    await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken, runHolochain);
   } else {
     // Branch C: No binary, no executor — try to download, then set up managed mode
-    await setupWithDownload(logger, endpoint, executorUrl, wakeToken);
+    await setupWithDownload(logger, endpoint, executorUrl, wakeToken, runHolochain);
   }
 }
 
@@ -91,6 +105,7 @@ async function setupManagedMode(
   endpoint: string,
   executorUrl: string,
   wakeToken?: string,
+  runHolochain: boolean = true,
 ): Promise<void> {
   logger.info("[ad4m-setup] Setting up managed mode...");
 
@@ -127,6 +142,9 @@ async function setupManagedMode(
     endpoint,
     executorUrl,
     binaryPath,
+    undefined,
+    undefined,
+    runHolochain,
   );
 
   if (!startResult) {
@@ -190,6 +208,9 @@ async function setupExternalMode(
   wakeToken?: string,
   detectedVia: "mcp" | "http" = "mcp",
   executorUrl: string = "http://localhost:12000",
+  multiUser: boolean = false,
+  email?: string,
+  password?: string,
 ): Promise<void> {
   if (detectedVia === "http") {
     // Executor found via HTTP (MCP is disabled / not available).
@@ -234,6 +255,58 @@ async function setupExternalMode(
   try {
     // Initialize MCP session (no auth needed)
     const initResp = await mcpInitialize(endpoint);
+
+    // Multi-user node: provision the assistant's OWN user identity (distinct DID)
+    // via signup + login, rather than a capability against the node's base agent.
+    if (multiUser && email && password) {
+      logger.info(`[ad4m-setup] Multi-user node — provisioning own identity (${email})...`);
+      // mcpCallTool returns a JSON-RPC error as result text rather than throwing,
+      // so inspect the result — the catch alone only sees transport failures.
+      try {
+        const signupResult = await mcpCallTool(endpoint, "signup", { email, password }, initResp.sessionId);
+        const signupData = extractMcpResultData(signupResult);
+        if (signupData?.error) {
+          logger.info(`[ad4m-setup] signup: ${signupData.error} (user may already exist — continuing to login)`);
+        }
+      } catch (e: any) {
+        logger.info(`[ad4m-setup] signup failed (transport): ${e.message} (continuing to login)`);
+      }
+      const loginResult = await mcpCallTool(
+        endpoint,
+        "login_email",
+        { email, password },
+        initResp.sessionId,
+      );
+      const loginData = extractMcpResultData(loginResult);
+      const userToken = loginData?.token ?? loginData?.jwt;
+      if (userToken) {
+        logger.info(`[ad4m-setup] Logged in as ${email}; own user identity ready.`);
+        printConfigSnippet(logger, "external", {
+          mcpEndpoint: endpoint,
+          token: userToken,
+          email,
+          multiUser: "true",
+          wakeToken,
+        });
+        return;
+      }
+      // login_email returned no token — the node may enforce SMTP-backed email
+      // verification. Fall back to the code-verification flow: request a code,
+      // read it (interactive prompt / /dev/tty), and exchange it for a JWT.
+      const verifiedToken = await loginViaEmailVerification(logger, endpoint, email, initResp.sessionId);
+      if (verifiedToken) {
+        logger.info(`[ad4m-setup] Verified ${email} via email code; own user identity ready.`);
+        printConfigSnippet(logger, "external", {
+          mcpEndpoint: endpoint,
+          token: verifiedToken,
+          email,
+          multiUser: "true",
+          wakeToken,
+        });
+        return;
+      }
+      logger.warn("[ad4m-setup] Multi-user login returned no token; falling back to the capability flow.");
+    }
 
     // Request capabilities
     const capResult = await mcpCallTool(
@@ -314,6 +387,46 @@ function promptUser(question: string): Promise<string> {
 }
 
 /**
+ * Resolve the multi-user password without persisting it. Checks, in order:
+ *   1. `AD4M_PASSWORD` env var
+ *   2. `pluginCfg.password` (backwards-compat escape hatch; warns)
+ *   3. Interactive stdin prompt (only when a TTY is attached)
+ *
+ * Returns `undefined` when no source is available — callers should skip the
+ * multi-user login path and fall through to the capability flow.
+ */
+async function resolveMultiUserPassword(
+  logger: any,
+  configPassword?: string,
+): Promise<string | undefined> {
+  const envPass = process.env.AD4M_PASSWORD;
+  if (envPass) {
+    logger.info("[ad4m-setup] Using multi-user password from AD4M_PASSWORD env var.");
+    return envPass;
+  }
+  if (configPassword) {
+    logger.warn(
+      "[ad4m-setup] plugin config contains a plaintext `password` — this is discouraged. " +
+        "Prefer the AD4M_PASSWORD env var so the secret is not stored on disk.",
+    );
+    return configPassword;
+  }
+  if (process.stdin.isTTY) {
+    logger.info("[ad4m-setup] No AD4M_PASSWORD env var found; prompting on stdin.");
+    const entered = await promptUser(
+      "[ad4m-setup] Enter password for the multi-user account (blank to skip): ",
+    );
+    return entered || undefined;
+  }
+  logger.warn(
+    "[ad4m-setup] Multi-user mode requested but no password available " +
+      "(AD4M_PASSWORD unset and stdin is not a TTY). " +
+      "Skipping login; falling back to the capability-request flow.",
+  );
+  return undefined;
+}
+
+/**
  * External-mode auth flow using Ad4mClient over HTTP.
  * Used when the executor is detected via HTTP (MCP disabled).
  *
@@ -322,6 +435,42 @@ function promptUser(question: string): Promise<string> {
  * 2. User enters the 6-digit code from the launcher UI
  * 3. generateJwt(requestId, code) → returns JWT
  */
+/**
+ * Email-verification fallback for multi-user login. Used when a node enforces
+ * SMTP-backed email verification, so `login_email` alone returns no token: the
+ * plugin requests a code, reads it, and exchanges it for a JWT via
+ * `verify_email_code`. `readCode` defaults to an interactive prompt; tests
+ * inject a fixed reader. Returns the JWT, or null when no token results.
+ */
+export async function loginViaEmailVerification(
+  logger: any,
+  endpoint: string,
+  email: string,
+  sessionId: string,
+  readCode: () => Promise<string> = () =>
+    promptUser("[ad4m-setup] Enter the 6-digit code from your email (blank to skip): "),
+): Promise<string | null> {
+  try {
+    // Trigger the verification email (best-effort — the user already signed up).
+    await mcpCallTool(endpoint, "request_login_verification", { email }, sessionId);
+  } catch (e: any) {
+    logger.info(`[ad4m-setup] request_login_verification: ${e.message}`);
+  }
+  logger.info("[ad4m-setup] A verification code has been sent to your email (if the node has SMTP configured).");
+  const code = await readCode();
+  if (!code) {
+    logger.info("[ad4m-setup] No code entered — skipping email-verification login.");
+    return null;
+  }
+  const verifyResult = await mcpCallTool(endpoint, "verify_email_code", { email, code, type: "login" }, sessionId);
+  const verifyData = extractMcpResultData(verifyResult);
+  const token = verifyData?.token ?? verifyData?.jwt ?? null;
+  if (!token) {
+    logger.warn(`[ad4m-setup] verify_email_code failed: ${JSON.stringify(verifyData?.error ?? verifyData)}`);
+  }
+  return token;
+}
+
 async function setupExternalModeViaHttp(
   logger: any,
   executorUrl: string,
@@ -440,6 +589,7 @@ async function setupWithDownload(
   endpoint: string,
   executorUrl: string,
   wakeToken?: string,
+  runHolochain: boolean = true,
 ): Promise<void> {
   logger.info(
     "[ad4m-setup] No ad4m-executor binary found and no running executor detected.",
@@ -477,7 +627,7 @@ async function setupWithDownload(
   logger.info(`[ad4m-setup] Downloaded ad4m-executor to: ${binaryPath}`);
 
   // Continue with managed mode setup using the downloaded binary
-  await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken);
+  await setupManagedMode(logger, binaryPath, endpoint, executorUrl, wakeToken, runHolochain);
 }
 
 // ---------------------------------------------------------------------------
@@ -498,6 +648,8 @@ function printConfigSnippet(
     if (values.mcpEndpoint) config.mcpEndpoint = values.mcpEndpoint;
     if (values.executorUrl) config.executorUrl = values.executorUrl;
     if (values.token) config.token = values.token;
+    if (values.multiUser) config.multiUser = true;
+    if (values.email) config.email = values.email;
   }
 
   if (values.wakeToken) config.wakeToken = values.wakeToken;

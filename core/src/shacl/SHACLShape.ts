@@ -151,7 +151,13 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Writable property */
   writable?: boolean;
 
-  /** AD4M-specific: Language to resolve property values through */
+  /** AD4M-specific: sole selector of storage mode:
+   *   - unset               → deterministic typed literal (fast POS-index
+   *                            path, the default for a plain `@Property()`).
+   *   - `"literal"`         → signed envelope on the built-in literal
+   *                            language (per-value provenance, e.g. Flux
+   *                            message bodies).
+   *   - `<custom address>`  → `expression_create` on that custom language. */
   resolveLanguage?: string;
 
   /** AD4M-specific: Setter action for this property */
@@ -206,9 +212,22 @@ export interface SHACLPropertyShape {
   filter?: boolean;
 
   /** AD4M-specific: Transform expression (SHACL-AF Node Expression).
-   *  Applied to resolved property values in the Rust model query engine.
-   *  Only used for properties with resolveLanguage set. */
+   *  Applied to a property's resolved value in the Rust model query engine —
+   *  for values resolved through a `resolveLanguage` (`"literal"` for a signed
+   *  envelope, or a custom language) and for any property that declares a
+   *  transform. */
   transform?: NodeExpression;
+
+  /** AD4M-specific: Natural-language hint that steers the generic LLM
+   *  extractor when producing typed instances from a transcript.  Emitted
+   *  as an `ad4m://interpretation_hint` link on the property shape node and
+   *  surfaced on `ShapeProperty.interpretation_hint` by the Rust model query. */
+  interpretationHint?: string;
+
+  /** AD4M-specific: marks this property as the class's identity (dedup key)
+   *  for the generic LLM interpreter. Emitted as an `ad4m://identity` link
+   *  (`literal:string:true`) and read back on `ShapeProperty.identity`. */
+  identity?: boolean;
 }
 
 /**
@@ -233,6 +252,12 @@ export class SHACLShape {
 
   /** Parent shape URIs for model inheritance (sh:node references) */
   parentShapes: string[];
+
+  /** AD4M-specific: Natural-language hint that steers the generic LLM
+   *  extractor when producing instances of this class.  Emitted as an
+   *  `ad4m://interpretation_hint` link on the shape node itself and surfaced
+   *  on `ModelShape.interpretation_hint` by the Rust model query. */
+  interpretationHint?: string;
 
   /**
    * Create a new SHACL Shape
@@ -355,11 +380,19 @@ export class SHACLShape {
       if (prop.local !== undefined) {
         turtle += `    ad4m:local ${prop.local} ;\n`;
       }
-      
+
       if (prop.writable !== undefined) {
         turtle += `    ad4m:writable ${prop.writable} ;\n`;
       }
-      
+
+      // Interpreter dedup key: `toLinks()` and `toJSON()` preserve
+      // `identity`; a Turtle export must too or the round-trip through
+      // Turtle silently drops the interpretation-dedup marker
+      // (CodeRabbit #881 review).
+      if (prop.identity !== undefined) {
+        turtle += `    ad4m:identity ${prop.identity} ;\n`;
+      }
+
       // Remove trailing semicolon and close bracket
       turtle = turtle.slice(0, -2) + '\n';
       turtle += isLast ? `  ] .\n` : `  ] ;\n`;
@@ -410,7 +443,17 @@ export class SHACLShape {
         target: `literal:string:${JSON.stringify(this.destructor_actions)}`
       });
     }
-    
+
+    // Class-level interpretation hint — read by the Rust model query as
+    // `ModelShape.interpretation_hint` and fed to the generic LLM extractor.
+    if (this.interpretationHint) {
+      links.push({
+        source: this.nodeShapeUri,
+        predicate: "ad4m://interpretation_hint",
+        target: `literal:string:${this.interpretationHint}`
+      });
+    }
+
     // Property shapes (each gets a named URI: {namespace}/{ClassName}.{propertyName})
     for (let i = 0; i < this.properties.length; i++) {
       const prop = this.properties[i];
@@ -636,6 +679,22 @@ export class SHACLShape {
           target: `literal:string:${JSON.stringify(prop.transform)}`
         });
       }
+
+      if (prop.interpretationHint) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://interpretation_hint",
+          target: `literal:string:${prop.interpretationHint}`
+        });
+      }
+
+      if (prop.identity) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://identity",
+          target: `literal:string:true`
+        });
+      }
     }
 
     return links;
@@ -678,8 +737,18 @@ export class SHACLShape {
       }
     }
 
+    // Class-level interpretation hint (mirror of the emit in toLinks())
+    const classHintLink = links.find(l =>
+      l.source === shapeUri && l.predicate === "ad4m://interpretation_hint"
+    );
+    if (classHintLink) {
+      shape.interpretationHint = classHintLink.target.replace(
+        /^literal:\/\/string:|^literal:string:/, ''
+      );
+    }
+
     // Find all property shapes
-    const propShapeLinks = links.filter(l => 
+    const propShapeLinks = links.filter(l =>
       l.source === shapeUri && l.predicate === "sh://property"
     );
     
@@ -796,12 +865,18 @@ export class SHACLShape {
         prop.writable = val === 'true';
       }
 
+      // The general language selector (e.g. "literal" or a custom address).
       const resolveLangLink = links.find(l =>
         l.source === propShapeId && l.predicate === "ad4m://resolveLanguage"
       );
       if (resolveLangLink) {
         prop.resolveLanguage = resolveLangLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
       }
+
+      // Storage mode is derived from `resolveLanguage` alone:
+      //   - unset       → deterministic typed literal (fast path)
+      //   - "literal"   → signed envelope on the built-in literal language
+      //   - <address>   → expression on that custom language
 
       // Parse action arrays
       const setterLink = links.find(l =>
@@ -930,6 +1005,23 @@ export class SHACLShape {
         prop.filter = val === 'true';
       }
 
+      const interpretationHintLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://interpretation_hint"
+      );
+      if (interpretationHintLink) {
+        prop.interpretationHint = interpretationHintLink.target.replace(
+          /^literal:\/\/string:|^literal:string:/, ''
+        );
+      }
+
+      const identityLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://identity"
+      );
+      if (identityLink) {
+        prop.identity =
+          identityLink.target.replace(/^literal:\/\/string:|^literal:string:/, '') === 'true';
+      }
+
       const transformLink = links.find(l =>
         l.source === propShapeId && l.predicate === "ad4m://transform"
       );
@@ -969,6 +1061,7 @@ export class SHACLShape {
       node_shape_uri: this.nodeShapeUri,
       target_class: this.targetClass,
       parent_shapes: this.parentShapes.length > 0 ? this.parentShapes : undefined,
+      interpretation_hint: this.interpretationHint,
       properties: this.properties.map(p => ({
         path: p.path,
         name: p.name,
@@ -996,6 +1089,8 @@ export class SHACLShape {
         where_predicates: p.wherePredicates,
         filter: p.filter,
         transform: p.transform,
+        interpretation_hint: p.interpretationHint,
+        identity: p.identity,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -1032,7 +1127,7 @@ export class SHACLShape {
         hasValue: p.has_value,
         local: p.local,
         writable: p.writable,
-        resolveLanguage: p.resolve_language,
+        resolveLanguage: p.resolve_language ?? (p as any).resolveLanguage,
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,
@@ -1046,9 +1141,11 @@ export class SHACLShape {
         wherePredicates: p.where_predicates,
         filter: p.filter,
         transform: p.transform,
+        interpretationHint: p.interpretation_hint,
+        identity: p.identity,
       });
     }
-    
+
     if (json.constructor_actions) {
       shape.constructor_actions = json.constructor_actions;
     }
@@ -1060,7 +1157,10 @@ export class SHACLShape {
         shape.addParentShape(ps);
       }
     }
-    
+    if (json.interpretation_hint) {
+      shape.interpretationHint = json.interpretation_hint;
+    }
+
     return shape;
   }
 }

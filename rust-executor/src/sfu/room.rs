@@ -220,7 +220,6 @@ impl RoomManager {
     pub fn list_rooms(&self) -> Vec<&SfuRoom> {
         self.rooms.values().collect()
     }
-
 }
 
 #[cfg(test)]

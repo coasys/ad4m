@@ -429,11 +429,11 @@ const results = await mySocialPerspective.query({
 
 In v0.x, the friends list was stored in a local SQLite table managed
 by `RuntimeService` (`rust-executor/src/runtime_service/mod.rs`) and
-surfaced via `addFriends` / `removeFriends` / `friends()` GraphQL
-operations.
+surfaced via `addFriends` / `removeFriends` / `friends()` operations
+(previously GraphQL, now WS-RPC).
 
 v1.0 replaces this with a perspective-backed convention. A runtime
-SHOULD continue to expose the GraphQL shims for backward
+SHOULD continue to expose the legacy operations for backward
 compatibility, but the implementations become thin wrappers:
 
 ```

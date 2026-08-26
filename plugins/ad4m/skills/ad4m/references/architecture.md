@@ -14,8 +14,8 @@ A perspective is a subjective graph of links — a personal knowledge graph. Eve
 
 ```
 Perspective "My Notes"
-├── Link: (ad4m://self) --has_name--> (literal://string:Data)
-├── Link: (ad4m://self) --has_role--> (literal://string:AI Agent)
+├── Link: (ad4m://self) --has_name--> (literal:string:Data)
+├── Link: (ad4m://self) --has_role--> (literal:string:AI Agent)
 └── Link: (did:key:z6Mk...) --authored--> (Qm...expression-hash)
 ```
 
@@ -54,11 +54,19 @@ interface LinkExpression {
 ### URI Conventions
 
 - `ad4m://self` — the perspective itself
-- `literal://string:value` — inline string literal
-- `literal://number:42` — inline number
-- `literal://json:{"key":"value"}` — inline JSON
+- `literal:string:value` — inline string literal
+- `literal:number:42` — inline number
+- `literal:json:{"key":"value"}` — inline JSON
 - `did:key:z6Mk...` — agent identity
 - `Qm...` — content-addressed expression (language-specific)
+
+### Links Alone Don't Give You Uniqueness
+
+`addLink` is a raw graph-edge primitive — `ad4m_add_link(perspective_id, source, predicate, target)` writes exactly the triple you give it and has no opinion about whether `source` or `target` uniquely identifies anything in your domain. Link directly against content (e.g. using a message's text itself as the source or target of a link, instead of a dedicated instance IRI) and two logically distinct entities with identical content collapse onto the same graph node — there's nothing left to tell them apart.
+
+**Reifiers provide provenance, not identity.** Every link is stored with an RDF 1.2 reifier — `<link:HASH> rdf:reifies <<( source predicate target )>>` — carrying author, timestamp, and signature metadata for that specific triple-assertion (`rust-executor/src/perspectives/sparql_store.rs`). This answers "who claimed this link, when, and is it validly signed" for any individual write. It does **not** give the entity the triple describes a stable, addressable identity. Two different messages, each independently reified with their own author and timestamp, are still indistinguishable as entities if both use the same literal as their source/target — the reifier authenticates the assertion, not the thing being asserted about.
+
+**Subject classes are the canonical fix.** Instantiating a subject class always mints a fresh, random, content-independent base expression (`ad4m://obj/<24 random chars>` — see `core/src/model/Ad4mModel.ts`) *before* any property is written, and every property write for that instance uses this IRI as the link's `source` — never the property's own value. Two instances with byte-identical properties therefore stay distinct: identity lives in the instance's IRI, not in whatever its properties happen to hold. Work at the class/model level (`ad4m_add_model`, `{class}_create`, `@Property`) rather than writing raw links directly, unless you're deliberately reconstructing this uniqueness guarantee yourself.
 
 ## Languages
 
@@ -102,6 +110,8 @@ Subject classes impose structure on the link graph using SHACL (Shapes Constrain
 ### How It Works
 
 Classes are registered via the `ad4m_add_model` MCP tool (or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
+
+Each instance's identity is its base expression — a freshly generated, content-independent `ad4m://obj/<id>` IRI (see [Links Alone Don't Give You Uniqueness](#links-alone-dont-give-you-uniqueness) above). This is what makes subject classes the canonical way to model anything where two instances might end up with identical property values.
 
 ### SHACL JSON Format
 
@@ -219,7 +229,7 @@ Once registered, dynamic tools are auto-generated:
 When you set `message.body = "Hello"` via a subject class:
 
 ```
-Link: (<message-instance-uri>) --message://body--> (literal://string:Hello)
+Link: (<message-instance-uri>) --message://body--> (literal:string:Hello)
 ```
 
 When you add to a collection `message.reactions.add(uri)`:
@@ -233,8 +243,8 @@ Link: (<message-instance-uri>) --message://reactions--> (<reaction-uri>)
 SHACL definitions are decomposed into RDF links in the perspective. Key link patterns:
 
 ```
-(ad4m://self) --ad4m://has_shacl--> (literal://string:shacl://Message)
-(literal://string:shacl://Message) --ad4m://shacl_shape_uri--> (message://MessageShape)
+(ad4m://self) --ad4m://has_shacl--> (literal:string:shacl://Message)
+(literal:string:shacl://Message) --ad4m://shacl_shape_uri--> (message://MessageShape)
 (message://Message) --rdf://type--> (ad4m://SubjectClass)
 (message://MessageShape) --sh://property--> (message://Message.body)
 ```

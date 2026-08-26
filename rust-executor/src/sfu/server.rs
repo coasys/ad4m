@@ -233,7 +233,12 @@ impl SfuServer {
         let (command_tx, command_rx) = mpsc::channel(256);
         let (dead_pipe_tx, dead_pipe_rx) = mpsc::channel(64);
 
-        tokio::spawn(Self::event_loop(socket, command_rx, local_addr, dead_pipe_tx));
+        tokio::spawn(Self::event_loop(
+            socket,
+            command_rx,
+            local_addr,
+            dead_pipe_tx,
+        ));
 
         Ok(Self {
             local_addr,
@@ -339,13 +344,10 @@ impl SfuServer {
                             for (origin_pid, origin_mid) in video_origins {
                                 if let Some(origin_peer) = peers.get_mut(&origin_pid) {
                                     if origin_peer.room_id == room_id {
-                                        if let Some(mut writer) =
-                                            origin_peer.rtc.writer(origin_mid)
+                                        if let Some(mut writer) = origin_peer.rtc.writer(origin_mid)
                                         {
-                                            let _ = writer.request_keyframe(
-                                                None,
-                                                KeyframeRequestKind::Pli,
-                                            );
+                                            let _ = writer
+                                                .request_keyframe(None, KeyframeRequestKind::Pli);
                                             debug!(
                                                 "SFU: requested keyframe from {} mid {} for layer switch on {}",
                                                 origin_pid, origin_mid, participant_id
@@ -518,10 +520,7 @@ impl SfuServer {
                 if peer.pending_offer.is_some() {
                     if let Some(sent_at) = peer.pending_offer_sent {
                         if sent_at.elapsed() > stale_threshold {
-                            warn!(
-                                "SFU: peer {} pending offer stale (>10s), clearing",
-                                pid
-                            );
+                            warn!("SFU: peer {} pending offer stale (>10s), clearing", pid);
                             peer.pending_offer = None;
                             peer.pending_offer_sent = None;
                             // Deferred tracks drain in the post-poll
@@ -545,8 +544,8 @@ impl SfuServer {
 
                     match peer.rtc.poll_output() {
                         Ok(Output::Transmit(transmit)) => {
-                            if let Err(e) = socket
-                                .try_send_to(&transmit.contents, transmit.destination)
+                            if let Err(e) =
+                                socket.try_send_to(&transmit.contents, transmit.destination)
                             {
                                 debug!(
                                     "SFU: failed to send UDP to {}: {}",
@@ -621,10 +620,9 @@ impl SfuServer {
                     }
 
                     // Find the outgoing Mid on the target peer that maps to this origin track
-                    if let Some(&out_mid) =
-                        target_peer
-                            .tracks_out_rev
-                            .get(&(origin_pid.clone(), data.mid))
+                    if let Some(&out_mid) = target_peer
+                        .tracks_out_rev
+                        .get(&(origin_pid.clone(), data.mid))
                     {
                         if let Some(writer) = target_peer.rtc.writer(out_mid) {
                             if let Err(e) = writer.write(
@@ -651,15 +649,8 @@ impl SfuServer {
             // only clear pending_offer; the actual drain happens here.
             for (pid, peer) in peers.iter_mut() {
                 if peer.pending_offer.is_none() && !peer.deferred_tracks.is_empty() {
-                    if let Some((sdp_offer_json, track_mapping)) =
-                        apply_deferred_tracks(peer)
-                    {
-                        publish_renegotiation_offer(
-                            peer,
-                            pid,
-                            sdp_offer_json,
-                            track_mapping,
-                        );
+                    if let Some((sdp_offer_json, track_mapping)) = apply_deferred_tracks(peer) {
+                        publish_renegotiation_offer(peer, pid, sdp_offer_json, track_mapping);
                     }
                 }
             }
@@ -963,9 +954,7 @@ fn clean_stale_track_refs(
 /// Drain deferred tracks from a peer and produce a renegotiation
 /// offer.  Returns `(sdp_offer_json, track_mapping)` or `None` when
 /// no actionable tracks remain.
-fn apply_deferred_tracks(
-    peer: &mut SfuPeer,
-) -> Option<(String, Vec<crate::sfu::TrackMapEntry>)> {
+fn apply_deferred_tracks(peer: &mut SfuPeer) -> Option<(String, Vec<crate::sfu::TrackMapEntry>)> {
     if peer.deferred_tracks.is_empty() {
         return None;
     }
@@ -989,8 +978,7 @@ fn apply_deferred_tracks(
     let mut api = peer.rtc.sdp_api();
     let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind, String)> = Vec::new();
     for (origin_pid, origin_mid, kind, agent_did) in to_add {
-        let new_mid =
-            api.add_media(kind, str0m::media::Direction::SendOnly, None, None, None);
+        let new_mid = api.add_media(kind, str0m::media::Direction::SendOnly, None, None, None);
         new_outbound.push((new_mid, origin_pid, origin_mid, kind, agent_did));
     }
 
@@ -998,15 +986,17 @@ fn apply_deferred_tracks(
 
     let track_mapping: Vec<crate::sfu::TrackMapEntry> = new_outbound
         .iter()
-        .map(|(new_mid, _, _, kind, agent_did)| crate::sfu::TrackMapEntry {
-            mid: new_mid.to_string(),
-            agent_did: agent_did.clone(),
-            media_kind: if kind.is_audio() {
-                "audio".to_string()
-            } else {
-                "video".to_string()
+        .map(
+            |(new_mid, _, _, kind, agent_did)| crate::sfu::TrackMapEntry {
+                mid: new_mid.to_string(),
+                agent_did: agent_did.clone(),
+                media_kind: if kind.is_audio() {
+                    "audio".to_string()
+                } else {
+                    "video".to_string()
+                },
             },
-        })
+        )
         .collect();
 
     for (new_mid, origin_pid, origin_mid, _, _) in new_outbound {

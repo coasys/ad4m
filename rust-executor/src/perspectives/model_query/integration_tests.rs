@@ -10,7 +10,7 @@ use super::sparql_builder::build_instance_sparql;
 use super::test_helpers::{
     evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
 };
-use super::types::{ModelShape, ShapeProperty};
+use super::types::{ModelQueryInput, ModelShape, ShapeProperty};
 use super::utils::literal_percent_encode;
 use super::*;
 use crate::perspectives::sparql_store::SparqlStore;
@@ -206,7 +206,9 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
         ))
         .unwrap();
 
-    // Shape has resolveLanguage: "literal" (the @Property default)
+    // Shape omits resolveLanguage → deterministic literal storage (the default).
+    // A deterministic property whose value happens to be a raw URI is matched via
+    // the WHERE builder's typed-literal-VALUES + `<uri>` UNION fallback.
     let shape_json = r#"{
         "className": "Todo",
         "properties": {
@@ -218,8 +220,7 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
             },
             "state": {
                 "predicate": "todo://state",
-                "required": true,
-                "resolveLanguage": "literal"
+                "required": true
             }
         },
         "relations": {}
@@ -241,7 +242,7 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
     assert_eq!(
         result.instances.len(),
         1,
-        "WHERE state='todo://ready' should match raw URI even with resolveLanguage: literal"
+        "WHERE state='todo://ready' should match a raw URI value on a deterministic-literal property"
     );
 }
 
@@ -463,21 +464,23 @@ async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
         .unwrap();
 
     // Child via shared predicate
+    let shared_child_iri = signed_literal("shared_child");
     store
         .add_link(&make_link(
             parent,
             "test://has_child",
-            "literal:string:shared_child",
+            &shared_child_iri,
             "1700000000001",
         ))
         .unwrap();
 
     // Child via unique predicate
+    let special_child_iri = signed_literal("special_child");
     store
         .add_link(&make_link(
             parent,
             "test://has_special",
-            "literal:string:special_child",
+            &special_child_iri,
             "1700000000002",
         ))
         .unwrap();
@@ -525,9 +528,9 @@ async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
     assert_eq!(beta.len(), 1, "beta should have 1 child");
     assert_eq!(special.len(), 1, "special should have 1 child");
 
-    assert_eq!(alpha[0].as_str().unwrap(), "literal:string:shared_child");
-    assert_eq!(beta[0].as_str().unwrap(), "literal:string:shared_child");
-    assert_eq!(special[0].as_str().unwrap(), "literal:string:special_child");
+    assert_eq!(alpha[0].as_str().unwrap(), shared_child_iri);
+    assert_eq!(beta[0].as_str().unwrap(), shared_child_iri);
+    assert_eq!(special[0].as_str().unwrap(), special_child_iri);
 }
 
 // --- IncludeProjection helpers ---
@@ -571,10 +574,13 @@ async fn test_build_projection_where_patterns_id_filter() {
 
 #[tokio::test]
 async fn test_build_projection_where_patterns_with_target_shape() {
+    // A custom resolveLanguage stores signed-envelope URIs, not deterministic
+    // literals, so the WHERE builder must probe via FILTER(STR(?var)=...) rather
+    // than a typed-literal VALUES clause.
     let target_shape_json = r#"{
         "className": "Signal",
         "properties": {
-            "signalTypeId": { "predicate": "signal://type" }
+            "signalTypeId": { "predicate": "signal://type", "resolveLanguage": "test://custom-lang" }
         },
         "relations": {}
     }"#;
@@ -603,7 +609,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
     );
     assert!(
         patterns.contains("FILTER"),
-        "expected FILTER with fn/parse_literal, got: {patterns}"
+        "expected FILTER on STR(?var), got: {patterns}"
     );
 }
 
@@ -662,8 +668,11 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             where_filter: None,
             where_predicates: None,
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
+        interpretation_hint: None,
     }
 }
 
@@ -1122,10 +1131,13 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     let store = SparqlStore::new(None).unwrap();
     let ts = "2024-01-01T00:00:00Z";
 
-    let board = "literal:string:board1";
-    let task1 = "literal:string:task-active-1";
-    let task2 = "literal:string:task-active-2";
-    let task3 = "literal:string:task-done";
+    // Use real IRI shapes for instance IDs — `literal:string:` is a wire
+    // encoding for typed-literal *values*, not for identifiers, so a value
+    // used as a triple subject must be a real IRI.
+    let board = "ad4m://board1";
+    let task1 = "ad4m://task-active-1";
+    let task2 = "ad4m://task-active-2";
+    let task3 = "ad4m://task-done";
 
     // Board -> Task links
     store
@@ -1234,8 +1246,11 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
+        interpretation_hint: None,
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
@@ -1798,8 +1813,11 @@ async fn test_where_filter_signed_expression_string() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
@@ -1872,8 +1890,11 @@ async fn test_where_filter_signed_expression_no_matches() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -1994,8 +2015,11 @@ async fn test_where_filter_multiple_conditions() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
@@ -2061,8 +2085,11 @@ async fn test_where_filter_missing_property_on_target() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2126,8 +2153,11 @@ async fn test_where_filter_plain_literal_string() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
@@ -2214,8 +2244,11 @@ async fn test_where_filter_on_multiple_instances() {
             where_filter: Some(where_filter),
             where_predicates: Some(where_predicates),
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
+        interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
@@ -2603,6 +2636,8 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
@@ -2623,6 +2658,8 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
@@ -2632,6 +2669,7 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
         shape_uri: String::new(),
         properties: props,
         include_relations: vec![],
+        interpretation_hint: None,
     }
 }
 
@@ -3354,8 +3392,13 @@ async fn test_full_model_query_ops_contains_with_pagination() {
     );
 }
 
-/// Helper: create a signed-envelope literal IRI (mimics what expression.create("literal", value)
-/// produces in production). The signed envelope is JSON with {author, timestamp, data, proof}.
+/// Build a `literal:json:<signed_envelope>` IRI — the shape produced by
+/// `expression.create("literal", value)`, i.e. what a `resolveLanguage:"literal"`
+/// property stores today, and what older databases that pre-date plain-literal
+/// writes hold on disk. Used both by tests that seed envelope-form data to
+/// exercise the migration path and by tests that assert envelope properties
+/// still query and sort on the inner value.
+#[allow(dead_code)]
 fn signed_envelope_literal(value: &str) -> String {
     signed_envelope_literal_with_ts(value, "2024-01-01T00:00:00.000Z")
 }
@@ -3383,16 +3426,15 @@ fn signed_envelope_literal_with_ts(value: &str, timestamp: &str) -> String {
     format!("literal:json:{}", literal_percent_encode(&json_str))
 }
 
-/// Regression test for signed-envelope literals with fn/parse_literal WHERE clauses.
-/// Exercises the exact pattern used by paginateSubscribe: model query with WHERE
-/// filtering on a literal property, pagination (limit/offset), and count=true,
-/// where stored values are signed expression envelopes (literal:json:{signed}).
+/// Same workload as `test_legacy_envelope_migrated_then_paginate_count` but
+/// with plain `literal:string:` targets from the start. Confirms model
+/// queries reach the rows through the indexed direct-IRI WHERE form alone,
+/// without any envelope unwrap step.
 #[tokio::test]
-async fn test_signed_envelope_where_paginate_count() {
+async fn test_plain_literal_where_paginate_count() {
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
 
-    // Insert 4 items: 3 active, 1 inactive — all using signed envelope format
     let items = vec![
         ("test://item-1", "active", "Alpha"),
         ("test://item-2", "active", "Beta"),
@@ -3405,20 +3447,10 @@ async fn test_signed_envelope_where_paginate_count() {
             .add_link(&make_link(uri, "ns://type", "ns://task", &ts))
             .unwrap();
         store
-            .add_link(&make_link(
-                uri,
-                "ns://status",
-                &signed_envelope_literal(status),
-                &ts,
-            ))
+            .add_link(&make_link(uri, "ns://status", &signed_literal(status), &ts))
             .unwrap();
         store
-            .add_link(&make_link(
-                uri,
-                "ns://name",
-                &signed_envelope_literal(name),
-                &ts,
-            ))
+            .add_link(&make_link(uri, "ns://name", &signed_literal(name), &ts))
             .unwrap();
     }
 
@@ -3432,7 +3464,6 @@ async fn test_signed_envelope_where_paginate_count() {
         "relations": {}
     }"#;
 
-    // Query: WHERE status = "active", paginated (limit 2, offset 0), ordered by timestamp ASC
     let mut wc = BTreeMap::new();
     wc.insert(
         "status".to_string(),
@@ -3454,28 +3485,12 @@ async fn test_signed_envelope_where_paginate_count() {
     .await
     .unwrap();
 
-    // Should return 2 items in page, total_count = 3 (all active items)
     assert_eq!(result.instances.len(), 2, "Page should have 2 items");
     assert_eq!(result.total_count, 3, "Total active items should be 3");
-    assert_eq!(
-        result.instances[0]["name"].as_str().unwrap(),
-        "Alpha",
-        "First item by timestamp"
-    );
-    assert_eq!(
-        result.instances[1]["name"].as_str().unwrap(),
-        "Beta",
-        "Second item by timestamp"
-    );
+    assert_eq!(result.instances[0]["name"].as_str().unwrap(), "Alpha");
+    assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Beta");
+    assert_eq!(result.instances[0]["status"].as_str().unwrap(), "active");
 
-    // Verify hydration: name should be the unwrapped data, not the full signed envelope
-    assert_eq!(
-        result.instances[0]["status"].as_str().unwrap(),
-        "active",
-        "Status should be unwrapped from signed envelope"
-    );
-
-    // Page 2: offset 2
     let result2 = execute_model_query_from_json(
         &store,
         "Task",
@@ -3492,30 +3507,22 @@ async fn test_signed_envelope_where_paginate_count() {
     .await
     .unwrap();
 
-    assert_eq!(
-        result2.instances.len(),
-        1,
-        "Page 2 should have 1 remaining item"
-    );
-    assert_eq!(result2.total_count, 3, "Total count unchanged");
-    assert_eq!(
-        result2.instances[0]["name"].as_str().unwrap(),
-        "Delta",
-        "Third active item"
-    );
+    assert_eq!(result2.instances.len(), 1);
+    assert_eq!(result2.total_count, 3);
+    assert_eq!(result2.instances[0]["name"].as_str().unwrap(), "Delta");
 }
 
-/// Regression: mixed literal formats (plain + signed envelope) coexist in the same query.
-/// This can happen during migration or when different code paths create links.
+/// Guards that the `contains` filter — which doesn't reduce to a direct
+/// equality lookup — keeps matching plain literal targets correctly.  Now
+/// runs as `CONTAINS(LCASE(STR(?val)), …)` over the typed literal directly.
 #[tokio::test]
-async fn test_mixed_plain_and_signed_envelope_where() {
+async fn test_plain_literal_contains_filter() {
     let store = SparqlStore::new(None).unwrap();
     let ts_base = 1700000000000i64;
 
-    // Item 1: plain literal (old format)
     store
         .add_link(&make_link(
-            "test://old",
+            "test://a",
             "ns://type",
             "ns://msg",
             &format!("{ts_base}"),
@@ -3523,17 +3530,16 @@ async fn test_mixed_plain_and_signed_envelope_where() {
         .unwrap();
     store
         .add_link(&make_link(
-            "test://old",
+            "test://a",
             "ns://body",
-            &signed_literal("hello plain"),
+            &signed_literal("hello world"),
             &format!("{ts_base}"),
         ))
         .unwrap();
 
-    // Item 2: signed envelope (new format)
     store
         .add_link(&make_link(
-            "test://new",
+            "test://b",
             "ns://type",
             "ns://msg",
             &format!("{}", ts_base + 1),
@@ -3541,9 +3547,9 @@ async fn test_mixed_plain_and_signed_envelope_where() {
         .unwrap();
     store
         .add_link(&make_link(
-            "test://new",
+            "test://b",
             "ns://body",
-            &signed_envelope_literal("hello signed"),
+            &signed_literal("goodbye world"),
             &format!("{}", ts_base + 1),
         ))
         .unwrap();
@@ -3557,7 +3563,6 @@ async fn test_mixed_plain_and_signed_envelope_where() {
         "relations": {}
     }"#;
 
-    // Query with contains "hello" — should match both formats
     let mut wc = BTreeMap::new();
     wc.insert(
         "body".to_string(),
@@ -3579,36 +3584,12 @@ async fn test_mixed_plain_and_signed_envelope_where() {
     .await
     .unwrap();
 
-    assert_eq!(result.instances.len(), 2, "Both formats should match");
-    assert_eq!(result.instances[0]["body"].as_str().unwrap(), "hello plain");
     assert_eq!(
-        result.instances[1]["body"].as_str().unwrap(),
-        "hello signed"
+        result.instances.len(),
+        1,
+        "contains 'hello' should match only one row"
     );
-
-    // Exact match on signed envelope value
-    let mut wc2 = BTreeMap::new();
-    wc2.insert(
-        "body".to_string(),
-        WhereCondition::String("hello signed".to_string()),
-    );
-    let result2 = execute_model_query_from_json(
-        &store,
-        "Msg",
-        &ModelQueryInput {
-            where_clause: Some(wc2),
-            ..Default::default()
-        },
-        shape_json,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(result2.instances.len(), 1, "Exact match on signed envelope");
-    assert_eq!(
-        result2.instances[0]["body"].as_str().unwrap(),
-        "hello signed"
-    );
+    assert_eq!(result.instances[0]["body"].as_str().unwrap(), "hello world");
 }
 
 // -----------------------------------------------------------------------
@@ -3776,7 +3757,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
         &store,
         "Message",
         &ModelQueryInput {
-            parent: Some(ParentScope::Raw {
+            parent: Some(Scope::Raw {
                 id: "test://channel-2".to_string(),
                 predicate: "ad4m://has_child".to_string(),
             }),
@@ -4136,8 +4117,9 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     //   }
     // where signalTypeId is a @Property stored via literal_encode, and the WHERE
     // filter value is the plain decoded form (what the TS caller passes).
-    // The fn/parse_literal FILTER decodes the stored literal:string:X IRI back to "X"
-    // for comparison — so caller passes "like_type_id123", not "literal:string:like_type_id123".
+    // The WHERE builder emits a typed-literal match (`"X"^^xsd:string`) for
+    // the stored value — so caller passes "like_type_id123", not
+    // "literal:string:like_type_id123".
     let store = SparqlStore::new(None).unwrap();
 
     let parent_a = "test://parent/a";
@@ -4207,13 +4189,16 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             where_filter: None,
             where_predicates: None,
             transform: None,
+            interpretation_hint: None,
+            identity: false,
         }],
         include_relations: vec![],
+        interpretation_hint: None,
     };
     resolver.register("Signal", signal_shape);
 
-    // Filter passes the plain decoded value — fn/parse_literal in SPARQL decodes
-    // the stored literal:string:like_type_id123 IRI back to "like_type_id123".
+    // Filter passes the plain decoded value — the WHERE builder emits a
+    // typed-literal match against the storage form `"like_type_id123"^^xsd:string`.
     let mut wc = BTreeMap::new();
     wc.insert(
         "signalTypeId".to_string(),
@@ -4885,5 +4870,516 @@ async fn test_sort_by_relation_property_with_missing_relation() {
         ids,
         vec!["test://post3/b", "test://post3/a", "test://post3/c"],
         "post without location should sort to end: got {ids:?}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Indexed-WHERE benchmark
+// -----------------------------------------------------------------------------
+//
+// `cargo test --release --lib perspectives::model_query::integration_tests::bench_indexed_literal_vs_str_filter`
+//
+// Compares two equivalent SPARQL queries against the same `literal:string:`
+// data: an indexed direct-typed-literal probe vs. a `FILTER(STR(?t) = ...)`
+// comparison. The former is what the WHERE builders now emit; the latter is
+// the shape they emitted before. Both queries find the same rows; the
+// difference is whether Oxigraph's planner can use the POS index.
+
+#[test]
+fn bench_indexed_literal_vs_str_filter() {
+    use std::time::Instant;
+
+    // Skip in debug builds — comparing per-row function call to an index probe
+    // is meaningless without optimisations.
+    if cfg!(debug_assertions) {
+        eprintln!("(bench skipped — run with --release)");
+        return;
+    }
+
+    // Toggle scale with WT_BENCH_LINKS; 10k by default.
+    let n_links: usize = std::env::var("WT_BENCH_LINKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_000);
+
+    assert!(
+        n_links > 0,
+        "WT_BENCH_LINKS must be > 0 (got 0); omit the variable to use the default (10 000)"
+    );
+
+    let store = SparqlStore::new(None).unwrap();
+    let pred = "ns://body";
+    let target_value = "needle";
+    let stored_target = format!("literal:string:{}", literal_percent_encode(target_value));
+
+    // Seed N rows; only the last carries the matching target.
+    let needle_idx = n_links - 1;
+    for i in 0..n_links {
+        let source = format!("test://row/{i}");
+        store
+            .add_link(&make_link(
+                &source,
+                "ns://type",
+                "ns://row",
+                &format!("{}", 1_700_000_000_000_i64 + i as i64),
+            ))
+            .unwrap();
+        let target = if i == needle_idx {
+            stored_target.clone()
+        } else {
+            format!(
+                "literal:string:{}",
+                literal_percent_encode(&format!("row-{i}"))
+            )
+        };
+        store
+            .add_link(&make_link(
+                &source,
+                pred,
+                &target,
+                &format!("{}", 1_700_000_000_000_i64 + i as i64),
+            ))
+            .unwrap();
+    }
+
+    let indexed = format!("SELECT ?source WHERE {{ ?source <{pred}> \"{target_value}\" . }}");
+    let filtered = format!(
+        "SELECT ?source WHERE {{ \
+            ?source <{pred}> ?t . \
+            FILTER(STR(?t) = \"{target_value}\") \
+        }}"
+    );
+
+    // Warm-up — touch every triple under both query plans before timing.
+    let _ = store.query(&indexed).unwrap();
+    let _ = store.query(&filtered).unwrap();
+
+    let runs = 5;
+    let mut indexed_total = std::time::Duration::ZERO;
+    let mut filtered_total = std::time::Duration::ZERO;
+    let expected = format!("test://row/{needle_idx}");
+
+    for _ in 0..runs {
+        let start = Instant::now();
+        let r = store.query(&indexed).unwrap();
+        indexed_total += start.elapsed();
+        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
+        assert_eq!(rows.len(), 1, "indexed query must return exactly 1 row");
+        assert_eq!(
+            rows[0]["source"].as_str(),
+            Some(expected.as_str()),
+            "indexed query must return only the needle source",
+        );
+
+        let start = Instant::now();
+        let r = store.query(&filtered).unwrap();
+        filtered_total += start.elapsed();
+        let rows: Vec<Value> = serde_json::from_str(&r).unwrap();
+        assert_eq!(rows.len(), 1, "filtered query must return exactly 1 row");
+        assert_eq!(
+            rows[0]["source"].as_str(),
+            Some(expected.as_str()),
+            "filtered query must return only the needle source",
+        );
+    }
+
+    let indexed_us = (indexed_total.as_secs_f64() * 1_000_000.0) / runs as f64;
+    let filtered_us = (filtered_total.as_secs_f64() * 1_000_000.0) / runs as f64;
+    let speedup = filtered_us / indexed_us;
+    eprintln!(
+        "[bench] n={n_links}  indexed={indexed_us:.1}µs  fn_parse_literal_filter={filtered_us:.1}µs  speedup={speedup:.1}x"
+    );
+}
+
+#[tokio::test]
+async fn test_persistent_store_typed_literal_comparison() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap();
+    let ts = "1700000000000";
+
+    let items: Vec<String> = (0..5).map(|i| format!("test://item-{i}")).collect();
+    let scores = [10.0, 30.0, 50.0, 70.0, 90.0];
+    let names = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+
+    for (i, item) in items.iter().enumerate() {
+        store
+            .add_link(&make_link(item, "ns://type", "ns://scored", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "ns://score",
+                &signed_literal_number(scores[i]),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(item, "ns://name", &signed_literal(names[i]), ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Scored",
+        "properties": {
+            "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://scored" },
+            "score": { "predicate": "ns://score", "required": false, "resolveLanguage": "literal" },
+            "name": { "predicate": "ns://name", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // Test 1: gt numeric
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "score".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gt: Some(50.0),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "persistent: gt:50 should match 70 and 90, got {:?}",
+        result.instances
+    );
+
+    // Test 2: not string
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "name".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(Value::String("Alpha".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        4,
+        "persistent: not:Alpha should match 4 items, got {:?}",
+        result.instances
+    );
+
+    // Test 3: not string array
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "name".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(Value::Array(vec![
+                Value::String("Alpha".to_string()),
+                Value::String("Beta".to_string()),
+            ])),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query_from_json(
+        &store,
+        "Scored",
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        shape_json,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        3,
+        "persistent: not:[Alpha,Beta] should match 3 items, got {:?}",
+        result.instances
+    );
+
+    // Diagnostic: raw SPARQL to verify typed literal comparison
+    let raw_gt = store
+        .query(
+            r#"SELECT ?s WHERE {
+                ?s <ns://score> ?v .
+                FILTER(?v > "50"^^<http://www.w3.org/2001/XMLSchema#integer>)
+            }"#,
+        )
+        .unwrap();
+    let raw_gt_rows: Vec<Value> = serde_json::from_str(&raw_gt).unwrap();
+    eprintln!(
+        "[diag] raw gt:50 query returned {} rows: {:?}",
+        raw_gt_rows.len(),
+        raw_gt_rows
+    );
+    assert_eq!(raw_gt_rows.len(), 2, "raw SPARQL gt:50 must return 2 rows");
+
+    let raw_neq = store
+        .query(
+            r#"SELECT ?s WHERE {
+                ?s <ns://name> ?v .
+                FILTER(?v != "Alpha"^^<http://www.w3.org/2001/XMLSchema#string>)
+            }"#,
+        )
+        .unwrap();
+    let raw_neq_rows: Vec<Value> = serde_json::from_str(&raw_neq).unwrap();
+    eprintln!(
+        "[diag] raw neq:Alpha query returned {} rows: {:?}",
+        raw_neq_rows.len(),
+        raw_neq_rows
+    );
+    assert_eq!(
+        raw_neq_rows.len(),
+        4,
+        "raw SPARQL neq:Alpha must return 4 rows"
+    );
+}
+
+#[tokio::test]
+async fn test_model_query_from_js_wire_format() {
+    use super::query::execute_model_query;
+
+    let store = SparqlStore::new(None).unwrap();
+    let ts = "1700000000000";
+
+    let items: Vec<String> = (0..5).map(|i| format!("test://item-{i}")).collect();
+    let titles = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    let counts = [10i64, 20, 30, 40, 50];
+
+    for (i, item) in items.iter().enumerate() {
+        store
+            .add_link(&make_link(item, "test://post_type", "test://post", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "test://title",
+                &signed_literal(titles[i]),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                item,
+                "test://view_count",
+                &format!("literal:number:{}", counts[i]),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "TestPost",
+        "properties": {
+            "type": { "predicate": "test://post_type", "required": true, "flag": true, "initial": "test://post" },
+            "title": { "predicate": "test://title", "required": true, "resolveLanguage": "literal" },
+            "viewCount": { "predicate": "test://view_count", "required": false, "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // Simulate exact JSON wire format from JS client:
+    // { "where": { "viewCount": { "gt": 30 } }, "deepQuery": true }
+    let wire_json = r#"{"where": {"viewCount": {"gt": 30}}, "deepQuery": true}"#;
+    let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
+    eprintln!("[wire] parsed query: {:?}", query_input);
+
+    let (resolver, shape) = StaticShapeResolver::from_json("TestPost", shape_json).unwrap();
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "wire gt:30 should match 40 and 50, got {:?}",
+        result.instances
+    );
+
+    // not:Alpha from JS wire format
+    let wire_json = r#"{"where": {"title": {"not": "Alpha"}}, "deepQuery": true}"#;
+    let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
+    eprintln!("[wire] parsed not query: {:?}", query_input);
+
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        4,
+        "wire not:Alpha should match 4, got {:?}",
+        result.instances
+    );
+
+    // between from JS wire format
+    let wire_json = r#"{"where": {"viewCount": {"between": [20, 40]}}, "deepQuery": true}"#;
+    let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        3,
+        "wire between:[20,40] should match 3, got {:?}",
+        result.instances
+    );
+}
+
+#[tokio::test]
+async fn test_duplicate_literal_property_values_keep_instances_distinct() {
+    // Two Message-like instances with IDENTICAL body text must remain two
+    // distinct, independently addressable/queryable entities. Uniqueness
+    // comes from each instance's own subject-class base IRI (the source of
+    // the property triple), never from the shared literal object — see PR
+    // #842 discussion on why bare literals cannot provide entity identity.
+    let store = SparqlStore::new(None).unwrap();
+
+    let base1 = "ad4m://obj/aaaaaaaaaaaaaaaaaaaaaaaa";
+    let base2 = "ad4m://obj/bbbbbbbbbbbbbbbbbbbbbbbb";
+    let hello_target = format!("literal:string:{}", literal_percent_encode("hello"));
+
+    for base in [base1, base2] {
+        store
+            .add_link(&make_link(
+                base,
+                "ad4m://type",
+                "message://Message",
+                "1700000000000",
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "message://body",
+                &hello_target,
+                "1700000000001",
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Message",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "message://Message"
+            },
+            "body": {
+                "predicate": "message://body",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // Identical body text must NOT collapse the two instances into one.
+    let result =
+        execute_model_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+            .await
+            .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "two instances with identical body text must both be returned, not deduplicated: {:?}",
+        result.instances
+    );
+
+    let mut ids: Vec<String> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap().to_string())
+        .collect();
+    ids.sort();
+    let mut expected_ids = vec![base1.to_string(), base2.to_string()];
+    expected_ids.sort();
+    assert_eq!(
+        ids, expected_ids,
+        "each instance must keep its own distinct base IRI"
+    );
+    for instance in &result.instances {
+        assert_eq!(instance["body"], json!("hello"));
+    }
+
+    // A WHERE clause on the shared value must match both — the store
+    // indexes triples by (subject, predicate, object), not by object value
+    // alone, so a shared literal never merges two subjects into one.
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "body".to_string(),
+        WhereCondition::String("hello".to_string()),
+    );
+    let query_where = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+    let result2 = execute_model_query_from_json(&store, "Message", &query_where, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result2.instances.len(),
+        2,
+        "WHERE body='hello' must match both instances sharing that literal value"
+    );
+
+    // Mutating one instance's property must never leak onto the other —
+    // this is what `setSingleTarget` relies on in production: remove+add
+    // scoped by (source, predicate), where `source` is the instance's own
+    // base IRI, not the literal value being replaced.
+    store
+        .remove_link(&make_link(
+            base1,
+            "message://body",
+            &hello_target,
+            "1700000000001",
+        ))
+        .unwrap();
+    let goodbye_target = format!("literal:string:{}", literal_percent_encode("goodbye"));
+    store
+        .add_link(&make_link(
+            base1,
+            "message://body",
+            &goodbye_target,
+            "1700000000002",
+        ))
+        .unwrap();
+
+    let result3 =
+        execute_model_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+            .await
+            .unwrap();
+    let body_by_id: HashMap<String, String> = result3
+        .instances
+        .iter()
+        .map(|i| {
+            (
+                i["id"].as_str().unwrap().to_string(),
+                i["body"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        body_by_id[base1], "goodbye",
+        "base1's body should reflect its own update"
+    );
+    assert_eq!(
+        body_by_id[base2], "hello",
+        "base2's body must be unaffected by base1's independent update"
     );
 }

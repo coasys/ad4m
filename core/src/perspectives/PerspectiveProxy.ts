@@ -12,9 +12,11 @@ import { AIClient } from "../ai/AIClient";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
+import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -547,6 +549,143 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Runs generic LLM interpretation over a conversation transcript, turning it
+     * into typed instances of this perspective's own SHACL subject classes
+     * (steered by each class's `@InterpretationHint`). The target shapes are
+     * resolved automatically from the perspective's registered classes, so you
+     * pass only the transcript. New instances are written as links into this
+     * perspective; the returned placements list each instance's base URI and
+     * the links written for it.
+     *
+     * @param transcript ordered `{ speaker, text }` turns
+     * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
+     * @param classes local names of the subject classes to extract into; omit for all
+     */
+    async runInterpretation(
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        classes?: string[],
+        options?: {
+            existingScope?: RawScope,
+            mintScope?: RawScope,
+            /** Report progress while the pass runs — see {@link RunInterpretationObserveOptions}. */
+            observe?: RunInterpretationObserveOptions,
+        },
+    ): Promise<string[]> {
+        // Grouped into an options bag rather than continuing the client's positional list.
+        // The scopes were already unreachable from here for that reason, and a fourth, fifth and
+        // sixth positional parameter would have made `undefined, undefined, { … }` the normal way
+        // to ask for the only one of them most callers want.
+        return await this.#client.runInterpretation(
+            this.#handle.uuid,
+            transcript,
+            basePrefix,
+            classes,
+            options?.existingScope,
+            options?.mintScope,
+            options?.observe,
+        )
+    }
+
+    /**
+     * Harness-dispatched interpretation pass over this perspective (design v3
+     * §6 — the tool-calling counterpart to {@link runInterpretation}). The LLM
+     * sees a live per-class tool surface (`{Class}_query`, `{Class}_get`,
+     * `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives
+     * the extraction via tool calls; buffered proposals drain through the
+     * same overlay gate the single-shot path uses.
+     *
+     * @param transcript ordered `{ speaker, text }` turns
+     * @param basePrefix URI namespace new instance identities are minted under
+     * @param maxToolCalls upper bound on tool calls the harness will make in
+     *   one pass (must be > 0 — use {@link runInterpretation} for the
+     *   classic single-shot path)
+     * @param classes local names of the subject classes to extract into; omit for all
+     * @param modelOverride optional model override; omit for the default LLM
+     */
+    async runInterpretationWithHarness(
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        maxToolCalls: number,
+        classes?: string[],
+        modelOverride?: string,
+        // Optional live-debug observability. When both `observationId` and
+        // `emitDebugEvents` are supplied, every dispatched tool call fires
+        // `ToolCall` + `ToolResult` events on the `auto-processor-event`
+        // topic keyed by `observationId`. Subscribe with
+        // {@link addAutoProcessorEventListener} to render the harness loop
+        // live in a UI. Absent = fast headless path (no telemetry cost).
+        observationId?: string,
+        emitDebugEvents?: boolean,
+    ): Promise<string[]> {
+        return await this.#client.runInterpretationWithHarness(
+            this.#handle.uuid,
+            transcript,
+            basePrefix,
+            maxToolCalls,
+            classes,
+            modelOverride,
+            undefined,
+            observationId,
+            emitDebugEvents,
+        )
+    }
+
+    /**
+     * Register a neighbourhood auto-processor on this perspective. The executor
+     * then runs interpretation automatically over new source items (like Flux
+     * per channel), coordinating which peer processes each batch. Returns the
+     * processor id. Subscribe to progress via {@link addAutoProcessorEventListener}.
+     */
+    async addAutoProcessor(config: AddAutoProcessorConfig): Promise<string> {
+        return await this.#client.addAutoProcessor(this.#handle.uuid, config)
+    }
+
+    /**
+     * Pending interpretation overlays on this perspective — LLM suggestions the
+     * §4 divergence gate staged rather than applied, awaiting human accept/reject.
+     */
+    async interpretationOverlays(): Promise<InterpretationOverlayInfo[]> {
+        return await this.#client.interpretationOverlays(this.#handle.uuid)
+    }
+
+    /**
+     * Accept an interpretation overlay's suggestion(s): the LLM's staged value
+     * becomes the real, human-owned value and the overlay is deleted. Pass
+     * `property` to accept a single predicate; omit it for the whole base.
+     */
+    async acceptInterpretation(base: string, property?: string): Promise<boolean> {
+        return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+    }
+
+    /**
+     * Reject an interpretation overlay's suggestion(s). Omit `property` to reject
+     * the whole base — a rejected `create` deletes the suggested instance, a
+     * rejected `update` drops the overlay and keeps the real value.
+     */
+    async rejectInterpretation(base: string, property?: string): Promise<boolean> {
+        return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+    }
+
+    /** Subscribe to this perspective's auto-processor step signals. */
+    async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
+        return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+    }
+
+    /**
+     * Subscribe to this perspective's auto-processor neighbourhood-state
+     * events — fires when this executor claims / finishes / abandons a
+     * batch. Perspective-scoped, so a UI can render "someone is
+     * auto-processing this" without receiving the batch payload. See
+     * `AutoProcessorNeighbourhoodStateEvent`.
+     */
+    async addAutoProcessorNeighbourhoodStateListener(
+        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
+    ): Promise<void> {
+        return await this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb)
+    }
+
+    /**
      * Executes a Prolog query against the perspective's knowledge base.
      * This is a powerful way to find complex patterns in the graph.
      * 
@@ -639,7 +778,7 @@ export class PerspectiveProxy {
      * internally in Rust, registers a subscription, runs the initial query, and
      * pushes updated results when relevant links change.
      *
-     * The subscription reuses the same GraphQL subscription channel as subscribeQuery().
+     * The subscription reuses the same WS-RPC subscription channel as subscribeQuery().
      * Use keepAliveQuery() / disposeQuerySubscription() with the returned subscriptionId.
      *
      * @param className - The model class name
@@ -1462,36 +1601,39 @@ export class PerspectiveProxy {
      */
     async getFlow(name: string): Promise<SHACLFlow | null> {
         const flowNameLiteral = Literal.from(name).toUrl();
-        
+
         // Find flow URI from name mapping
         const flowUriLinks = await this.get(new LinkQuery({
             source: flowNameLiteral,
             predicate: "ad4m://flow_uri"
         }));
-        
+
         if (flowUriLinks.length === 0) {
             return null;
         }
-        
+
         const flowUri = flowUriLinks[0].data.target;
-        // Compute alternate prefix for state/transition URIs
-        const alternatePrefix = flowUri.endsWith('Flow') 
-            ? flowUri.slice(0, -4) + '.'
-            : flowUri + '.';
-        
-        // Fetch flow links using SPARQL to match flowUri source OR alternatePrefix sources
-        const sparqlQuery = `SELECT ?s ?p ?o WHERE {
-            ?s ?p ?o .
-            FILTER(?s = <${flowUri}> || STRSTARTS(STR(?s), "${alternatePrefix}"))
-        }`;
-        const sparqlResult = await this.querySparql(sparqlQuery);
-        
-        const flowLinks = (sparqlResult || []).map((r: any) => ({
-            source: r.s,
-            predicate: r.p,
-            target: r.o
+
+        // Fetch flow-level links (hasState, hasTransition, flowable, startAction)
+        const flowLevelLinks = await this.get(new LinkQuery({ source: flowUri }));
+
+        // Collect state and transition URIs, then fetch their child links
+        const childUris = flowLevelLinks
+            .filter(l => l.data.predicate === "ad4m://hasState"
+                      || l.data.predicate === "ad4m://hasTransition")
+            .map(l => l.data.target);
+        const childResults = await Promise.all(
+            childUris.map(uri => this.get(new LinkQuery({ source: uri })))
+        );
+
+        // Flatten into the {source, predicate, target} shape fromLinks expects
+        const allExprs = [...flowLevelLinks, ...childResults.flat()];
+        const flowLinks = allExprs.map(l => ({
+            source: l.data.source,
+            predicate: l.data.predicate,
+            target: l.data.target
         }));
-        
+
         return SHACLFlow.fromLinks(flowLinks, flowUri);
     }
 

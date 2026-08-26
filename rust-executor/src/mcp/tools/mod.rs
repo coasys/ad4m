@@ -24,10 +24,12 @@ pub mod auth;
 pub mod children;
 pub mod dynamic;
 pub mod flows;
+pub mod harness_bridge;
 pub mod languages;
 pub mod neighbourhoods;
 pub mod perspectives;
 pub mod profiles;
+pub mod provider_impl;
 pub mod subjects;
 pub mod subscriptions;
 
@@ -577,14 +579,13 @@ impl Ad4mMcpHandler {
         super::shacl::resolve_property_predicate(perspective, class_name, property_name).await
     }
 
-    /// Resolve a property value through the appropriate language, respecting
-    /// the SHACL `resolve_language` setting for the property.
+    /// Resolve a property value through the appropriate storage path, respecting
+    /// the SHACL `resolveLanguage` setting for the property.
     ///
     /// If the value already has a URI scheme (e.g. `literal://...`, `did:...`),
     /// it is returned as-is. Otherwise, the value is parsed as JSON to recover
     /// its native type (boolean, number, etc.) and resolved through the
-    /// perspective's `resolve_property_value` method, which uses the language
-    /// controller when a `resolve_language` is set on the property.
+    /// perspective's `resolve_property_value` method.
     ///
     /// Handles case-insensitive property name matching: dynamic tool names are
     /// lowercased but SHACL stores original case. We resolve to the original
@@ -596,11 +597,13 @@ impl Ad4mMcpHandler {
         value: &str,
         agent_context: &crate::agent::AgentContext,
     ) -> String {
-        // Use anchored regex to check if value is a full URI scheme (not just contains "://")
-        static URI_SCHEME_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let re = URI_SCHEME_RE
-            .get_or_init(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9+\-._]*:").unwrap());
-        if re.is_match(value) {
+        // Short-circuit only when the value is a well-formed absolute IRI —
+        // the same predicate the SPARQL query builder uses to gate its
+        // `UNION { ?s <pred> <val> }` IRI arm. Sharing the check keeps write
+        // and read agreeing on what "already a URI" means; otherwise values
+        // like `"Note: buy milk"` would slip through and become invalid
+        // `NamedNode::new_unchecked` targets that no query can match.
+        if crate::perspectives::model_query::is_safe_iri_target(value) {
             return value.to_string();
         }
 

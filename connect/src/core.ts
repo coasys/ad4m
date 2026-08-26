@@ -370,7 +370,7 @@ export default class Ad4mConnect extends EventTarget {
         }
 
         // Verify origin is in allowlist (if configured).
-        // In proxy mode the parent sees ALL GraphQL traffic, so the allowlist is the
+        // In proxy mode the parent sees ALL API traffic, so the allowlist is the
         // only gate against a malicious site embedding this app — enforce it strictly.
         if (event.data.proxy) {
           if (!this.options.allowedOrigins || this.options.allowedOrigins.length === 0) {
@@ -421,7 +421,7 @@ export default class Ad4mConnect extends EventTarget {
               throw new Error('AD4M proxy mode requires a non-opaque parent origin. Ensure the host iframe is not sandboxed without allow-same-origin.');
             }
             const parentOrigin = event.origin;
-            // Must be a real constructor class — graphql-ws calls `new webSocketImpl(url)`.
+            // Must be a real constructor class — the WS client calls `new webSocketImpl(url)`.
             // Arrow functions cannot be called with `new`, so we use a class expression here.
             class WsImpl extends PostMessageWebSocket {
               constructor(url: string) { super(url, parentOrigin); }

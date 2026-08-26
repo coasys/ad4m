@@ -354,8 +354,16 @@ export async function isExecutorRunning(
       })
         .then(async (res) => {
           clearTimeout(timeout);
-          if (!res.ok) return resolve(false);
-          if (!validate) return resolve(true);
+          if (!res.ok) {
+            try { await res.body?.cancel(); } catch { /* ignore */ }
+            return resolve(false);
+          }
+          if (!validate) {
+            // Release the (possibly event-stream) body so the probe leaks no
+            // open connection.
+            try { await res.body?.cancel(); } catch { /* ignore */ }
+            return resolve(true);
+          }
           try {
             const json = await res.json();
             resolve(validate(json));
@@ -375,8 +383,24 @@ export async function isExecutorRunning(
       endpoint,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 0, method: "tools/list", params: {} }),
+        // The rmcp streamable-HTTP server requires this Accept header; without it
+        // the request is Not Acceptable and MCP looks absent. `initialize` also
+        // needs no session (unlike tools/list, which 4xx's without one), so a 200
+        // here reliably means the MCP server is live.
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 0,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "openclaw-ad4m-probe", version: "0.1.0" },
+          },
+        }),
       },
     ),
     probe(
@@ -413,6 +437,7 @@ export async function ensureExecutorRunning(
   binaryPath?: string,
   rustLog?: string,
   logTarget: "file" | "openclaw" | "both" = "file",
+  runHolochain: boolean = true,
 ): Promise<ExecutorStartResult> {
   logger.info(`[ad4m] Checking if executor is running at ${endpoint}...`);
 
@@ -479,19 +504,24 @@ export async function ensureExecutorRunning(
     }
 
     // Start the executor as a child process
+    const runArgs = [
+      "run",
+      "--enable-mcp",
+      "true",
+      "--admin-credential",
+      adminCredential,
+      "--mcp-port",
+      "3001",
+      "--run-dapp-server",
+      "false",
+    ];
+    if (!runHolochain) {
+      logger.info("[ad4m] Starting executor with Holochain disabled (--run-holochain false)");
+      runArgs.push("--run-holochain", "false");
+    }
     executorProcess = spawn(
       executorPath,
-      [
-        "run",
-        "--enable-mcp",
-        "true",
-        "--admin-credential",
-        adminCredential,
-        "--mcp-port",
-        "3001",
-        "--run-dapp-server",
-        "false",
-      ],
+      runArgs,
       {
         stdio: ["ignore", "pipe", "pipe"],
         detached: false,

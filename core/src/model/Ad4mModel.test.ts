@@ -18,7 +18,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract property metadata with all fields", () => {
     @Model({ name: "PropertyModel" })
     class PropertyModel extends Ad4mModel {
-      @Property({ through: "test://name", resolveLanguage: "literal" })
+      @Property({ through: "test://name" })
       name: string = "";
       
       @Optional({ through: "test://optional" })
@@ -40,7 +40,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.name.predicate).toBe("test://name");
     expect(metadata.properties.name.required).toBe(false);
     expect(metadata.properties.name.readOnly).toBe(false);
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // A bare @Property has no resolveLanguage → deterministic typed literal
+    // storage (default fast path).
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     
     // Verify "optional" property
     expect(metadata.properties.optional.predicate).toBe("test://optional");
@@ -148,7 +150,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   it("should handle complex model with mixed property and relation types", () => {
     @Model({ name: "Recipe" })
     class Recipe extends Ad4mModel {
-      @Property({ through: "recipe://name", resolveLanguage: "literal" })
+      @Property({ through: "recipe://name" })
       name: string = "";
       
       @Optional({ through: "recipe://description" })
@@ -182,7 +184,8 @@ describe("Ad4mModel.getModelMetadata()", () => {
     
     // Verify all metadata fields are correctly extracted
     expect(metadata.properties.name.predicate).toBe("recipe://name");
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // Bare @Property → no resolveLanguage → deterministic typed literal.
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     expect(metadata.properties.description.predicate).toBe("recipe://description");
     expect(metadata.properties.rating.predicate).toBe("recipe://rating");
     expect(metadata.properties.rating.prologGetter).toBe("avg_rating(Base, Value)");
@@ -207,8 +210,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     const ProductClass = Ad4mModel.fromJSONSchema(schema, {
       name: "Product",
-      namespace: "product://",
-      resolveLanguage: "literal"
+      namespace: "product://"
     });
 
     const metadata = ProductClass.getModelMetadata();
@@ -222,12 +224,13 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.name.predicate).toBe("product://name");
     expect(metadata.properties.name.required).toBe(true);
     expect(metadata.properties.name.readOnly).toBe(false);
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // No resolveLanguage set → deterministic typed literal storage (default).
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.price).toBeDefined();
     expect(metadata.properties.price.predicate).toBe("product://price");
     expect(metadata.properties.price.required).toBe(true);
-    expect(metadata.properties.price.resolveLanguage).toBe("literal");
+    expect(metadata.properties.price.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.description).toBeDefined();
     expect(metadata.properties.description.predicate).toBe("product://description");
@@ -288,7 +291,6 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
           type: "string",
           "x-ad4m": {
             through: "foaf://name",
-            resolveLanguage: "literal",
             writable: true
           }
         },
@@ -311,7 +313,8 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     // Verify x-ad4m metadata is respected
     expect(metadata.properties.name.predicate).toBe("foaf://name");
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // No resolveLanguage set → deterministic typed literal (default).
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.required).toBe(true);
 
@@ -371,8 +374,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     const ArticleClass = Ad4mModel.fromJSONSchema(schema, {
       name: "Article",
-      namespace: "article://",
-      resolveLanguage: "literal"
+      namespace: "article://"
     });
 
     const metadata = ArticleClass.getModelMetadata();
@@ -384,11 +386,12 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.title).toBeDefined();
     expect(metadata.properties.title.predicate).toBe("article://title");
     expect(metadata.properties.title.required).toBe(true);
-    expect(metadata.properties.title.resolveLanguage).toBe("literal");
+    // No resolveLanguage set → deterministic typed literal (default).
+    expect(metadata.properties.title.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.views).toBeDefined();
     expect(metadata.properties.views.predicate).toBe("article://views");
-    expect(metadata.properties.views.resolveLanguage).toBe("literal");
+    expect(metadata.properties.views.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.published).toBeDefined();
     expect(metadata.properties.published.predicate).toBe("article://published");
@@ -522,13 +525,13 @@ describe("Ad4mModel.queryToSPARQL()", () => {
 
   @Model({ name: "Task" })
   class Task extends Ad4mModel {
-    @Property({ through: "task://title", resolveLanguage: "literal", required: true })
+    @Property({ through: "task://title", required: true })
     title: string = "";
 
-    @Property({ through: "task://priority", resolveLanguage: "literal" })
+    @Property({ through: "task://priority" })
     priority: number = 0;
 
-    @Property({ through: "task://done", resolveLanguage: "literal" })
+    @Property({ through: "task://done" })
     done: boolean = false;
 
     @Optional({ through: "task://description" })
@@ -951,7 +954,7 @@ describe("SPARQL direct triple pattern generation", () => {
     @Flag({ through: "flux://entry_type", value: "flux://channel" })
     type: string = "";
 
-    @Property({ through: "flux://name", resolveLanguage: "literal", required: true })
+    @Property({ through: "flux://name", required: true })
     name: string = "";
 
     @Optional({ through: "flux://description" })
@@ -1034,13 +1037,13 @@ describe("buildSPARQLQuery edge cases", () => {
     @Flag({ through: "flag://type", value: "flag://FlagModel" })
     type: string = "";
 
-    @Property({ through: "flag://name", resolveLanguage: "literal", required: true })
+    @Property({ through: "flag://name", required: true })
     name: string = "";
   }
 
   @Model({ name: "NoFlagModel" })
   class NoFlagModel extends Ad4mModel {
-    @Property({ through: "noflag://title", resolveLanguage: "literal" })
+    @Property({ through: "noflag://title" })
     title: string = "";
   }
 
@@ -1735,7 +1738,7 @@ describe("SHACL recursion — self-referential relations", () => {
   it("should generate SHACL for a directly self-referential model without overflowing the stack", () => {
     @Model({ name: "RecursiveChannel" })
     class RecursiveChannel extends Ad4mModel {
-      @Property({ through: "channel://name", resolveLanguage: "literal" })
+      @Property({ through: "channel://name" })
       name: string = "";
 
       @HasMany(() => RecursiveChannel, { through: "channel://child" })
@@ -1862,7 +1865,7 @@ describe("deepQuery — getter evaluation", () => {
     @Flag({ through: "flux://entry_type", value: "flux://message" })
     type: string = "";
 
-    @Property({ through: "flux://body", resolveLanguage: "literal" })
+    @Property({ through: "flux://body" })
     body: string = "";
 
     @Property({
@@ -2430,5 +2433,64 @@ describe("IncludeProjection type guard and key splitting", () => {
     // Only one modelQuery call — no follow-up findAll for count projections.
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect((results[0] as any).$signalCount).toBe(5);
+  });
+});
+
+describe("Ad4mModel instance identity (uniqueness without envelopes)", () => {
+  // Without a signed envelope, the only thing that keeps two instances from
+  // collapsing onto the same node is their auto-generated base expression.
+  // These tests pin that guarantee down: identity must come from the
+  // instance's own IRI, never from (possibly duplicate) property content.
+  const mockPerspective = {} as any;
+
+  it("auto-generates a distinct id for every instance, even with identical property values", () => {
+    @Model({ name: "IdentityTestMessage" })
+    class IdentityTestMessage extends Ad4mModel {
+      @Property({ through: "identity://body", resolveLanguage: "literal" })
+      body: string = "";
+    }
+
+    const message1 = new IdentityTestMessage(mockPerspective);
+    const message2 = new IdentityTestMessage(mockPerspective);
+
+    message1.body = "hello";
+    message2.body = "hello";
+
+    expect(message1.body).toBe(message2.body);
+    expect(message1.id).not.toBe(message2.id);
+  });
+
+  it("uses the ad4m://obj/<random> scheme, not content-derived addressing", () => {
+    @Model({ name: "IdentityTestSchemeCheck" })
+    class IdentityTestSchemeCheck extends Ad4mModel {}
+
+    const instance = new IdentityTestSchemeCheck(mockPerspective);
+
+    // 24 lowercase a-z chars after the prefix (see makeRandomId in ./util.ts).
+    // Locks in the scheme so a regression toward hashing property content
+    // for the base expression — which would reintroduce the exact collision
+    // this scheme exists to prevent — fails this test.
+    expect(instance.id).toMatch(/^ad4m:\/\/obj\/[a-z]{24}$/);
+  });
+
+  it("never reuses an id across many instances", () => {
+    @Model({ name: "IdentityTestManyInstances" })
+    class IdentityTestManyInstances extends Ad4mModel {}
+
+    const ids = Array.from(
+      { length: 200 },
+      () => new IdentityTestManyInstances(mockPerspective).id
+    );
+
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("respects an explicitly-provided base expression instead of generating one", () => {
+    @Model({ name: "IdentityTestExplicitId" })
+    class IdentityTestExplicitId extends Ad4mModel {}
+
+    const instance = new IdentityTestExplicitId(mockPerspective, "flux://existing-instance");
+
+    expect(instance.id).toBe("flux://existing-instance");
   });
 });

@@ -21,10 +21,13 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
-/// Helper: build a ShapeProperty for a collection relation.
+/// Helper: build a ShapeProperty for a URI-valued collection relation
+/// (no `sh:datatype`, so targets pass through byte-for-byte on hydration).
 pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
     ShapeProperty {
         name: name.to_string(),
@@ -41,7 +44,20 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
+}
+
+/// Helper: build a ShapeProperty for a literal-valued collection relation
+/// (declares `sh:datatype`, so `literal:<type>:<value>` wire form is
+/// decoded on hydration — the `@HasMany({ datatype: "xsd:string" })`
+/// case in TypeScript). Use `xsd://string` for the common
+/// `HasMany<string>` scenario.
+pub fn relation_with_datatype(name: &str, predicate: &str, datatype: &str) -> ShapeProperty {
+    let mut p = relation(name, predicate);
+    p.datatype = Some(datatype.to_string());
+    p
 }
 
 /// Helper: build a ShapeProperty for a flag field.
@@ -61,6 +77,8 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
     }
 }
 
@@ -71,6 +89,7 @@ pub fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
         shape_uri: format!("{class}Shape"),
         properties,
         include_relations: Vec::new(),
+        interpretation_hint: None,
     }
 }
 

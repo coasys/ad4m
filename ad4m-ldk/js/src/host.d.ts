@@ -24,7 +24,11 @@ declare module "ad4m:host" {
     export function holochainCallAsync(dnaNick: string, zome: string, fnName: string, params: unknown): Promise<unknown>;
 
     // HTTP fetch (Spec section 7.2b)
-    export function httpFetch(url: string, method: string, headersJson: string, body: string): Promise<string>;
+    export interface HttpFetchResponse {
+        status: number;
+        body: string;
+    }
+    export function httpFetch(url: string, method: string, headersJson: string, body: string): Promise<HttpFetchResponse>;
 
     // Runtime utilities (Spec section 7.7)
     // Canonical AD4M content-address hash: SHA-256 -> CIDv1 -> base58btc,

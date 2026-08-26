@@ -112,7 +112,8 @@ export async function holochainCallAsync(dnaNick, zome, fnName, params) {
 // HTTP fetch (Spec section 7.2b)
 // ============================================================================
 // Wraps the standard fetch() API so WASM languages can call HTTP APIs
-// without linking against web_sys. Returns the response body as a string.
+// without linking against web_sys. Returns { status, body } so callers
+// can distinguish 200 from 4xx/5xx without catching exceptions.
 
 async function httpFetchImpl(url, method, headersJson, body) {
     var headers = {};
@@ -130,10 +131,7 @@ async function httpFetchImpl(url, method, headersJson, body) {
     }
     var res = await globalThis.fetch(url, init);
     var text = await res.text();
-    if (!res.ok) {
-        throw new Error("http_fetch " + init.method + " " + url + " -> " + res.status + ": " + text);
-    }
-    return text;
+    return { status: res.status, body: text };
 }
 
 export function httpFetch(url, method, headersJson, body) {

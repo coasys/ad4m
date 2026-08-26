@@ -2,7 +2,7 @@
  * Shared query helpers used by both the Prolog and SPARQL query pipelines.
  */
 
-import type { ParentScope } from "./types";
+import type { Scope } from "./types";
 import { getRelationsMetadata } from "./decorators";
 
 /**
@@ -15,7 +15,7 @@ import { getRelationsMetadata } from "./decorators";
  *   - Without `field`: scan for a relation whose `target()` matches `childCtor`
  */
 export function resolveParentPredicate(
-  parent: ParentScope,
+  parent: Scope,
   childCtor: Function,
 ): string {
   // Raw form — explicit predicate

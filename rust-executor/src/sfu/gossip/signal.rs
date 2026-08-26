@@ -93,7 +93,11 @@ impl SignalGossip {
         let signal: CascadeSignal = serde_json::from_str(json_payload)
             .map_err(|e| format!("SignalGossip: invalid JSON: {}", e))?;
 
-        debug!("SignalGossip[{}] injected inbound {}", self.local_did, signal.variant_name());
+        debug!(
+            "SignalGossip[{}] injected inbound {}",
+            self.local_did,
+            signal.variant_name()
+        );
 
         self.inbound_tx
             .try_send(signal)
@@ -130,10 +134,7 @@ impl CascadeGossip for SignalGossip {
                     json.len()
                 );
                 if let Err(e) = self.sender.send_signal(Some(&did), &json) {
-                    warn!(
-                        "SignalGossip directed {} to {} failed: {}",
-                        variant, did, e
-                    );
+                    warn!("SignalGossip directed {} to {} failed: {}", variant, did, e);
                 }
             }
         }
@@ -163,10 +164,11 @@ mod tests {
     fn test_inject_and_take() {
         let counter = Arc::new(AtomicUsize::new(0));
         let c = counter.clone();
-        let sender: Arc<dyn SignalSender> = Arc::new(move |_target: Option<&str>, _payload: &str| {
-            c.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        });
+        let sender: Arc<dyn SignalSender> =
+            Arc::new(move |_target: Option<&str>, _payload: &str| {
+                c.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            });
 
         let gossip = SignalGossip::new("did:test:local".into(), 8, sender);
 
@@ -194,13 +196,12 @@ mod tests {
         let payloads: Arc<StdMutex<Vec<(Option<String>, String)>>> =
             Arc::new(StdMutex::new(Vec::new()));
         let p = payloads.clone();
-        let sender: Arc<dyn SignalSender> =
-            Arc::new(move |target: Option<&str>, payload: &str| {
-                p.lock()
-                    .unwrap()
-                    .push((target.map(|s| s.to_string()), payload.to_string()));
-                Ok(())
-            });
+        let sender: Arc<dyn SignalSender> = Arc::new(move |target: Option<&str>, payload: &str| {
+            p.lock()
+                .unwrap()
+                .push((target.map(|s| s.to_string()), payload.to_string()));
+            Ok(())
+        });
 
         let gossip = SignalGossip::new("did:test:local".into(), 4, sender);
 
@@ -221,13 +222,12 @@ mod tests {
         let payloads: Arc<StdMutex<Vec<(Option<String>, String)>>> =
             Arc::new(StdMutex::new(Vec::new()));
         let p = payloads.clone();
-        let sender: Arc<dyn SignalSender> =
-            Arc::new(move |target: Option<&str>, payload: &str| {
-                p.lock()
-                    .unwrap()
-                    .push((target.map(|s| s.to_string()), payload.to_string()));
-                Ok(())
-            });
+        let sender: Arc<dyn SignalSender> = Arc::new(move |target: Option<&str>, payload: &str| {
+            p.lock()
+                .unwrap()
+                .push((target.map(|s| s.to_string()), payload.to_string()));
+            Ok(())
+        });
 
         let gossip = SignalGossip::new("did:test:local".into(), 4, sender);
 
@@ -242,9 +242,6 @@ mod tests {
 
         let captured = payloads.lock().unwrap();
         assert_eq!(captured.len(), 1);
-        assert_eq!(
-            captured[0].0.as_deref(),
-            Some("did:test:remote")
-        );
+        assert_eq!(captured[0].0.as_deref(), Some("did:test:remote"));
     }
 }

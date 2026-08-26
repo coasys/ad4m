@@ -36,11 +36,13 @@ export type { PublishNeighbourhoodRequest } from "./PublishNeighbourhoodRequest"
 export type { QueryRequest } from "./QueryRequest";
 export type { RemoveLinkRequest } from "./RemoveLinkRequest";
 export type { RemoveLinksBulkRequest } from "./RemoveLinksBulkRequest";
+export type { RunInterpretationRequest } from "./RunInterpretationRequest";
 export type { SetDefaultModelRequest } from "./SetDefaultModelRequest";
 export type { SetFreeHostingEnabledRequest } from "./SetFreeHostingEnabledRequest";
 export type { SetMultiUserRequest } from "./SetMultiUserRequest";
 export type { SetStatusRequest } from "./SetStatusRequest";
 export type { SignMessageRequest } from "./SignMessageRequest";
+export type { TranscriptTurn } from "./TranscriptTurn";
 export type { TrustedAgentsRequest } from "./TrustedAgentsRequest";
 export type { UnlockAgentRequest } from "./UnlockAgentRequest";
 export type { UpdateLinkRequest } from "./UpdateLinkRequest";

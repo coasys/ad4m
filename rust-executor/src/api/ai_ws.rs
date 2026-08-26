@@ -249,7 +249,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .prompt(body.task_id, body.prompt)
+        .prompt(body.task_id, body.prompt, Some(ctx.auth_token.clone()))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -269,7 +269,7 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let embedding = service
-        .embed(body.model_id, body.text)
+        .embed(body.model_id, body.text, Some(ctx.auth_token.clone()))
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 

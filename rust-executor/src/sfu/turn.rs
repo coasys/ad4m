@@ -57,8 +57,7 @@ pub fn mint_turn_credential(
 
     let username = format!("{}:{}", expiry, user_label);
 
-    let mut mac =
-        HmacSha1::new_from_slice(shared_secret).expect("HMAC accepts any key length");
+    let mut mac = HmacSha1::new_from_slice(shared_secret).expect("HMAC accepts any key length");
     mac.update(username.as_bytes());
     let result = mac.finalize();
     let credential = base64_encode(result.into_bytes().as_slice());

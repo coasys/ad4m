@@ -1,0 +1,256 @@
+/**
+ * InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @Model
+ * classes that mirror the Rust SDNA for the generic interpretation subsystem.
+ *
+ * These tests verify that:
+ *   1. The TS SHACL shapes can be registered in a perspective.
+ *   2. `InterpretationOverlay.findAll()` returns nodes that carry the
+ *      discriminating `ad4m://interp/kind` link (the pending-proposals query
+ *      James will use from Flux to show "LLM proposals awaiting your review").
+ *   3. `InterpretationRun.findAll()` returns completed-run nodes.
+ *   4. `AutoProcessorConfig.findAll()` returns processor configuration nodes.
+ *
+ * Overlays, runs, and configs are normally written by the Rust executor.
+ * Here we add the raw links manually so the test does not require a running
+ * LLM — it is a pure graph-layer check.
+ *
+ * Run standalone (from tests/js, with a built executor):
+ *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit \
+ *     --require tests/model/hooks.ts tests/model/interpretation-models.test.ts
+ */
+
+import { expect } from "chai";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
+import { AutoProcessorConfig, InterpretationOverlay, InterpretationRun } from "@coasys/ad4m";
+import { getSharedAgent } from "./hooks.js";
+import { startAgent } from "../../helpers/index.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @Model", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("interpretation-models");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("interp-models-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    // Register the three SHACL shapes so the model query engine knows them.
+    await InterpretationOverlay.register(p);
+    await InterpretationRun.register(p);
+    await AutoProcessorConfig.register(p);
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  // ── InterpretationOverlay ──────────────────────────────────────────────────
+
+  it("InterpretationOverlay.findAll() returns pending proposals by kind link", async () => {
+    // Simulate what the Rust executor writes when it stages an LLM proposal.
+    await p.add(new Link({
+      source: "test://instance/1",
+      predicate: "ad4m://interp/kind",
+      target: "literal:string:create",
+    }));
+    await p.add(new Link({
+      source: "test://instance/1",
+      predicate: "ad4m://interp/run",
+      target: "literal:string:run-abc",
+    }));
+    // A second overlay on a different base.
+    await p.add(new Link({
+      source: "test://instance/2",
+      predicate: "ad4m://interp/kind",
+      target: "literal:string:update",
+    }));
+
+    const overlays = await InterpretationOverlay.findAll(p);
+    expect(overlays.length, "should find both overlay nodes").to.equal(2);
+
+    const kinds = overlays.map((o) => o.kind).sort();
+    expect(kinds).to.deep.equal(["create", "update"]);
+
+    const withRun = overlays.find((o) => o.run != null);
+    expect(withRun, "one overlay should have a run reference").to.exist;
+    expect(withRun!.run).to.equal("run-abc");
+  });
+
+  it("InterpretationOverlay.findAll() returns empty when no overlays exist", async () => {
+    // No overlay links → findAll must return [].
+    const overlays = await InterpretationOverlay.findAll(p);
+    expect(overlays).to.be.an("array").with.length(0);
+  });
+
+  // ── InterpretationRun ──────────────────────────────────────────────────────
+
+  it("InterpretationRun.findAll() returns completed-run nodes", async () => {
+    // Simulate a completed interpretation run. No `ad4m://type` link
+    // needed — the class dropped its type discriminator; conformance is
+    // by `runId` (identity) alone.
+    await p.add(new Link({
+      source: "ad4m://interp/run/run-001",
+      predicate: "ad4m://interp/run_id",
+      target: "literal:string:run-001",
+    }));
+    await p.add(new Link({
+      source: "ad4m://interp/run/run-001",
+      predicate: "ad4m://interp/model",
+      target: "literal:string:gemma3:12b",
+    }));
+
+    const runs = await InterpretationRun.findAll(p);
+    expect(runs.length).to.equal(1);
+    expect(runs[0].runId).to.equal("run-001");
+    expect(runs[0].model).to.equal("gemma3:12b");
+  });
+
+  // ── AutoProcessorConfig ────────────────────────────────────────────────────
+
+  it("AutoProcessorConfig.findAll() returns processor configuration nodes", async () => {
+    // Simulate what addAutoProcessor writes to the perspective. No
+    // `rdf://type` link needed — the class dropped its type discriminator;
+    // conformance is by the presence of the required scalars
+    // (`processor_id`, `source_scope_query`, `debounce_ms`, `batch_max`,
+    // `claim_ttl_ms`, `interpretation_class`).
+    await p.add(new Link({
+      source: "ad4m://autoprocessor/my-proc",
+      predicate: "ad4m://processor_id",
+      target: "literal:string:my-proc",
+    }));
+    await p.add(new Link({
+      source: "ad4m://autoprocessor/my-proc",
+      predicate: "ad4m://source_scope_query",
+      target: "literal:string:SELECT ?x WHERE { ?x a ?y }",
+    }));
+    await p.add(new Link({
+      source: "ad4m://autoprocessor/my-proc",
+      predicate: "ad4m://debounce_ms",
+      target: "literal:string:300",
+    }));
+    await p.add(new Link({
+      source: "ad4m://autoprocessor/my-proc",
+      predicate: "ad4m://batch_max",
+      target: "literal:string:16",
+    }));
+    await p.add(new Link({
+      source: "ad4m://autoprocessor/my-proc",
+      predicate: "ad4m://claim_ttl_ms",
+      target: "literal:string:30000",
+    }));
+    // `interpretation_class` is min_count: 1 in the Rust SDNA; without it
+    // the Rust loader skips the config. Seed one so the fixture models what
+    // the loader would actually accept (CodeRabbit #881, 2026-08-19).
+    await p.add(new Link({
+      source: "ad4m://autoprocessor/my-proc",
+      predicate: "ad4m://interpretation_class",
+      target: "ad4m://Task",
+    }));
+
+    const configs = await AutoProcessorConfig.findAll(p);
+    expect(configs.length).to.equal(1);
+    expect(configs[0].processorId).to.equal("my-proc");
+    expect(configs[0].debounceMs).to.equal("300");
+    expect(configs[0].batchMax).to.equal("16");
+    expect(configs[0].interpretationClasses).to.deep.equal(["ad4m://Task"]);
+  });
+
+  // ── SDNA parity — TS @Model shape agrees with Rust hardwired SDNA ──────────
+  //
+  // The hardwired classes carry a SHACL declaration on both sides: the Rust
+  // executor `include_str!`s `rust-executor/src/perspectives/hardwired_sdna/
+  // *.json`; the TS side generates its shape from the `@Model` decorators in
+  // `InterpretationModels.ts`. They MUST agree — a TS-written instance that
+  // uses a different setter name from the Rust reader silently no-ops the
+  // write (2026-08-20 debug: paths matched, names diverged, and every earlier
+  // hardcoded-reference-set parity test happily passed).
+  //
+  // The tests below defend against that by loading the SAME JSON files the
+  // executor uses and comparing (path, name) pairs. Path = the RDF predicate
+  // on the link; name = the `create_subject({name: value})` setter lookup
+  // key. Both must match for a write to land.
+
+  const SDNA_DIR = path.resolve(
+    __dirname,
+    "../../../../rust-executor/src/perspectives/hardwired_sdna",
+  );
+
+  function loadSdnaPathNamePairs(fileName: string): Map<string, string> {
+    const raw = fs.readFileSync(path.join(SDNA_DIR, fileName), "utf-8");
+    const parsed = JSON.parse(raw) as {
+      properties: Array<{ path: string; name: string }>;
+    };
+    return new Map(parsed.properties.map((p) => [p.path, p.name]));
+  }
+
+  function loadSdnaTargetClass(fileName: string): string {
+    const raw = fs.readFileSync(path.join(SDNA_DIR, fileName), "utf-8");
+    return (JSON.parse(raw) as { target_class: string }).target_class;
+  }
+
+  it("AutoProcessorConfig @Model shape matches Rust AUTO_PROCESSOR_SDNA", () => {
+    const { shape } = (AutoProcessorConfig as any).generateSHACL();
+    const actual = new Map<string, string>(
+      shape.properties.map((p: any): [string, string] => [p.path, p.name]),
+    );
+
+    const expectedTargetClass = loadSdnaTargetClass("auto_processor.json");
+    const expected = loadSdnaPathNamePairs("auto_processor.json");
+
+    expect(shape.targetClass, "target class must match Rust SDNA")
+      .to.equal(expectedTargetClass);
+    expect(actual, "TS shape must match Rust SDNA path→name pairs")
+      .to.deep.equal(expected);
+  });
+
+  it("InterpretationRun @Model shape matches Rust INTERP_RUN_SDNA", () => {
+    const { shape } = (InterpretationRun as any).generateSHACL();
+    const actual = new Map<string, string>(
+      shape.properties.map((p: any): [string, string] => [p.path, p.name]),
+    );
+
+    const expectedTargetClass = loadSdnaTargetClass("interpretation_run.json");
+    const expected = loadSdnaPathNamePairs("interpretation_run.json");
+
+    expect(shape.targetClass, "target class must match Rust SDNA")
+      .to.equal(expectedTargetClass);
+    expect(actual, "TS shape must match Rust SDNA path→name pairs")
+      .to.deep.equal(expected);
+  });
+
+  it("InterpretationOverlay @Model shape matches Rust INTERP_OVERLAY_SDNA", () => {
+    const { shape } = (InterpretationOverlay as any).generateSHACL();
+    const actual = new Map<string, string>(
+      shape.properties.map((p: any): [string, string] => [p.path, p.name]),
+    );
+
+    const expectedTargetClass = loadSdnaTargetClass("interpretation_overlay.json");
+    const expected = loadSdnaPathNamePairs("interpretation_overlay.json");
+
+    expect(shape.targetClass, "target class must match Rust SDNA")
+      .to.equal(expectedTargetClass);
+    expect(actual, "TS shape must match Rust SDNA path→name pairs")
+      .to.deep.equal(expected);
+  });
+});

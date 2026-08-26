@@ -73,6 +73,13 @@ export class Literal {
             return parseFloat(numberString)
         }
 
+        if(body.startsWith("boolean:")) {
+            const boolString = decodeURIComponent(body.substring(8))
+            if (boolString === "true") return true
+            if (boolString === "false") return false
+            throw new Error(`Can't parse boolean literal: ${boolString}`)
+        }
+
         if(body.startsWith("json:")) {
             const json = body.substring(5)
             return JSON.parse(decodeURIComponent(json))

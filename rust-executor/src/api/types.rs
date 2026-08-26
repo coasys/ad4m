@@ -528,6 +528,229 @@ pub struct RemoveLinksBulkRequest {
     pub batch_id: Option<String>,
 }
 
+// ── Generic LLM interpretation (perspective.runInterpretation) ──
+
+/// One conversation turn fed to the extractor.
+#[derive(Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TranscriptTurn {
+    pub speaker: String,
+    pub text: String,
+}
+
+/// Run generic LLM interpretation over a transcript into the perspective's own
+/// SHACL subject classes. Shapes are resolved server-side from the
+/// perspective's registered classes, so callers pass only the transcript.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RunInterpretationRequest {
+    pub uuid: String,
+    pub transcript: Vec<TranscriptTurn>,
+    /// URI namespace new instance identities are minted under, e.g. `soa://ext/`.
+    pub base_prefix: String,
+    /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
+    /// `None`/empty selects all subject classes registered in the perspective.
+    #[serde(default)]
+    #[ts(optional)]
+    pub classes: Option<Vec<String>>,
+    /// Optional parent-scope filter for the dedup lookup: when set, only
+    /// existing instances of the target classes that live under this scope
+    /// are candidates for upsert. `None` = whole-perspective dedup set (the
+    /// pre-scope default). Same semantics as `AutoProcessorConfig.existingScope`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Optional parent-scope target for newly minted instances: when set,
+    /// every base URI the pass CREATES is additionally linked as a child of
+    /// `mintScope.id` via the scope's predicate. Upserts of pre-existing
+    /// instances are NOT linked (would multi-parent unrelated graph state).
+    /// Must be the `Raw` variant of `Scope` (id + predicate). Same semantics
+    /// as `AutoProcessorConfig.mintScope`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Opt into live observability for this one-shot pass, under an id the
+    /// **caller** chooses.
+    ///
+    /// A watch pass is identified by its `batch_key` — a hash of the source
+    /// items the watcher gathered. A one-shot pass has neither: the caller
+    /// supplies the transcript directly, so there are no source item ids to
+    /// hash and no claim to key off. Rather than invent a server-side id the
+    /// caller would then have to correlate by guesswork (the pass is one
+    /// blocking RPC, so there is no earlier response to carry it), the caller
+    /// names the pass and gets its own id back on every event.
+    ///
+    /// Present: the pass emits `RunningInterpretation` → `Processed` on the
+    /// `auto-processor-event` topic, plus `Claimed` → `Finished`/`Abandoned`
+    /// on the neighbourhood topic, all carrying this value as both
+    /// `processor_id` and `batch_key`. Absent: the pass is silent, exactly as
+    /// before — no existing caller changes behaviour.
+    #[serde(default)]
+    #[ts(optional)]
+    pub observation_id: Option<String>,
+    /// Emit `LlmRequestSent` / `LlmResponseReceived` (carrying the raw prompt
+    /// and response) for this pass. Ignored without `observation_id` — there
+    /// would be nothing to correlate the payloads to. Same switch, same
+    /// reasons, as `AutoProcessorConfig.emit_debug_events`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub emit_debug_events: Option<bool>,
+}
+
+/// Run harness-dispatched LLM interpretation over a transcript. Mirrors
+/// [`RunInterpretationRequest`] but takes the tool-calling path — the LLM
+/// sees a live `{Class}_query` / `{Class}_propose_create` /
+/// `{Class}_propose_link_child` tool surface (design v3 §6) and drives the
+/// extraction by tool calls rather than by emitting one big JSON blob.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RunInterpretationWithHarnessRequest {
+    pub uuid: String,
+    pub transcript: Vec<TranscriptTurn>,
+    /// URI namespace new instance identities are minted under, e.g. `soa://ext/`.
+    pub base_prefix: String,
+    /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
+    /// `None`/empty selects all subject classes registered in the perspective.
+    #[serde(default)]
+    #[ts(optional)]
+    pub classes: Option<Vec<String>>,
+    /// Upper bound on tool calls the harness will make in one pass. Reaching
+    /// the bound forces a final-answer step (no more tools). Must be > 0 —
+    /// zero would collapse the loop to the classic single-shot path and
+    /// should be routed there instead.
+    pub max_tool_calls: u32,
+    /// Optional model override — same semantics as the auto-processor's
+    /// `modelOverride`. `None` uses the default LLM.
+    #[serde(default)]
+    #[ts(optional)]
+    pub model_override: Option<String>,
+    /// Optional parent-scope filter for existing-instance context (fed into
+    /// the pre-loop prompt). Same semantics as `RunInterpretationRequest`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Present: the pass emits `ToolCall` / `ToolResult` events on the
+    /// `auto-processor-event` topic carrying this value as both
+    /// `processor_id` and `batch_key`, so a subscribed UI can render the
+    /// harness loop live. Absent: the pass is silent (fast headless path).
+    /// Same wire-shape as `RunInterpretationRequest.observation_id`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub observation_id: Option<String>,
+    /// Enable per-tool-call `ToolCall` + `ToolResult` events on the
+    /// auto-processor topic. Dead-letter without `observation_id` (nothing
+    /// to key against); the server gates on both.
+    #[serde(default)]
+    #[ts(optional)]
+    pub emit_debug_events: Option<bool>,
+}
+
+/// Register a neighbourhood auto-processor on a perspective. The executor's
+/// watch loop then runs LLM interpretation automatically over new source items
+/// (mirrors what Flux does per channel), coordinating which peer processes each
+/// batch via the shared-graph `ProcessingClaim`. Emits step signals on the
+/// events WebSocket (`auto-processor-event`).
+///
+/// Server-side deserialization only: the TypeScript client hand-mirrors this as
+/// `AddAutoProcessorConfig` (uuid passed separately), so no `ts-rs` export is
+/// needed here.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddAutoProcessorRequest {
+    pub uuid: String,
+    /// Human-meaningful processor id (unique per perspective).
+    pub processor_id: String,
+    /// SPARQL `SELECT ?speaker ?text ?timestamp` over the source items to
+    /// interpret (e.g. a channel's messages). All three bindings are required:
+    /// `?timestamp` is what makes a turn identifiable, so the processed-turn
+    /// cursor can tell a re-gathered turn from the same wording said again
+    /// later. Copy `BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY` (it reads the body
+    /// link's reifier — `ad4m://ontology/author` + `ad4m://ontology/timestamp`
+    /// — rather than an app-level `ns://author` predicate) and swap in your own
+    /// body predicate; a query binding only speaker+text fails the gather.
+    pub source_scope_query: String,
+    /// URI namespace new interpreted instances are minted under (the spawn
+    /// scope), e.g. `soa://project/42/`. Omit for a per-processor default.
+    #[serde(default)]
+    pub base_prefix: Option<String>,
+    /// Class URIs (SHACL `target_class`) to materialize each pass.
+    pub interpretation_classes: Vec<String>,
+    /// Quiet-window (ms) after the last new item before a pass runs.
+    pub debounce_ms: i64,
+    /// Minimum items before a pass runs (Flux "wait for N inputs"). Default 1.
+    #[serde(default)]
+    pub batch_min: Option<usize>,
+    /// Cap on items per pass.
+    pub batch_max: usize,
+    /// Safety flush (ms) for a sub-`batch_min` batch; `None` = wait indefinitely.
+    #[serde(default)]
+    pub max_wait_ms: Option<i64>,
+    /// How long a won claim is authoritative before peers may re-claim (ms).
+    pub claim_ttl_ms: i64,
+    /// Optional serialized `DedupStrategy` JSON (else NormalizedString).
+    #[serde(default)]
+    pub dedup_strategy_json: Option<String>,
+    /// How far back (ms) each pass looks: turns older than `now - window` are
+    /// dropped, and the processed-turn cursor only counts runs that finished
+    /// inside the same window. Omit for **no window** — every gathered turn is
+    /// a candidate and the cursor is the unbounded union of this processor's
+    /// past runs.
+    #[serde(default)]
+    pub source_window_ms: Option<i64>,
+    /// Optional parent-scope filter for the dedup lookup: when set, only
+    /// existing instances of the interpretation classes that live under this
+    /// scope are candidates for upsert. Omit for the whole-perspective dedup
+    /// set (pre-scope behaviour).
+    #[serde(default)]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Optional parent-scope target for newly minted instances: when set, every
+    /// base URI the pass CREATES is additionally linked as a child of
+    /// `mint_scope.id` via the scope's predicate. Upserts of pre-existing
+    /// instances are NOT linked. Must be the `Raw` variant of `Scope`
+    /// (id + predicate); `Model` scopes carry no linking predicate and error
+    /// at watch time.
+    #[serde(default)]
+    pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Tool-call budget for the interpretation-pass harness this processor
+    /// runs. Omit / `0` → single-shot LLM path. `N > 0` → engage the
+    /// tool-calling harness with a cap of N calls per pass. Round-tripped
+    /// through the SDNA via `AutoProcessorConfig.maxToolCalls`.
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
+    /// Enable full debug observability on the auto-processor's passes:
+    /// persist raw LLM prompt/response on the InterpretationRun +
+    /// emit `LlmRequestSent` / `LlmResponseReceived` (classic) and
+    /// `ToolCall` / `ToolResult` (harness) events. Round-tripped through
+    /// the SDNA via `AutoProcessorConfig.emitDebugEvents`.
+    #[serde(default)]
+    pub emit_debug_events: Option<bool>,
+}
+
+/// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —
+/// resolve an LLM interpretation overlay's suggestion(s) on a base. `property`
+/// scopes to one predicate; omit it to accept/reject the whole base.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveInterpretationRequest {
+    pub uuid: String,
+    /// Base instance the overlay sits on.
+    pub base: String,
+    /// Real predicate to scope to; omit for the whole base.
+    #[serde(default)]
+    pub property: Option<String>,
+}
+
+/// `perspective.interpretationOverlays` — list pending overlay suggestions in a
+/// perspective so a UI can surface them for human accept/reject.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterpretationOverlaysRequest {
+    pub uuid: String,
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

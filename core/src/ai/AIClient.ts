@@ -83,7 +83,9 @@ export class AIClient {
         const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text });
 
         const compressed = base64js.toByteArray(aiEmbed);
-        const decompressed = JSON.parse(pako.inflate(compressed, { to: 'string' }));
+        // Decode to a string via TextDecoder rather than pako's `{ to: 'string' }`
+        // option: newer @types/pako dropped that overload, which broke the build.
+        const decompressed = JSON.parse(new TextDecoder().decode(pako.inflate(compressed)));
 
         return decompressed;
     }

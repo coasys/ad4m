@@ -219,7 +219,7 @@ Here's how a Todo class maps to SHACL:
     # SHACL shapes are stored as links in the perspective:
 
     (ad4m://self) --ad4m://has_sdna--> (ad4m://sdna_Todo)
-    (ad4m://sdna_Todo) --ad4m://sdna_type--> (literal://string:subject_class)
+    (ad4m://sdna_Todo) --ad4m://sdna_type--> (literal:string:subject_class)
 
     # The shape URI and its properties:
     (ad4m://sdna_Todo) --sh:targetClass--> (todo://Todo)
@@ -228,8 +228,8 @@ Here's how a Todo class maps to SHACL:
     # Property shape for "state":
     (ad4m://sdna_Todo_prop_0) --sh:path--> (todo://state)
     (ad4m://sdna_Todo_prop_0) --sh:datatype--> (xsd:string)
-    (ad4m://sdna_Todo_prop_0) --sh:maxCount--> (literal://number:1)
-    (ad4m://sdna_Todo_prop_0) --sh:minCount--> (literal://number:1)
+    (ad4m://sdna_Todo_prop_0) --sh:maxCount--> (literal:number:1)
+    (ad4m://sdna_Todo_prop_0) --sh:minCount--> (literal:number:1)
     (ad4m://sdna_Todo_prop_0) --ad4m://initial--> (todo://ready)
 
     # ... and so on for each property
@@ -244,7 +244,7 @@ Here's how a Todo class maps to SHACL:
 | `sh:maxCount 1` | Scalar property (single value) | `state`, `title`, `name` |
 | No `sh:maxCount` | Collection (multiple values) | `comments`, `tags`, `members` |
 | `sh:minCount 1` | Required property | Must be set on creation |
-| `sh:datatype xsd:string` | String value | Stored as `literal://string:...` |
+| `sh:datatype xsd:string` | String value | Stored as `literal:string:...` |
 | `sh:class <uri>` | Reference to another Subject Class | Typed relationship |
 | `ad4m://initial` | Default value on creation | Initial state |
 | `ad4m://resolveLanguage` | Expression language for values | `"literal"` for inline values |
