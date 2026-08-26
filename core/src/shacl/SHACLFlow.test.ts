@@ -901,6 +901,82 @@ describe('SHACLFlow', () => {
       expect(flow.states[1].consensusRule).toBeUndefined();
     });
 
+    it('rejects malformed `or` branches inside a role query (recursive isModelQueryShape) — fromLinks', () => {
+      const flowUri = 'ns://BadOrRoleFlow';
+      const stateUri = 'ns://BadOrRoleFlow.gate';
+      const badLinks: Link[] = [
+        { source: flowUri, predicate: 'rdf://type', target: 'ad4m://Flow' },
+        { source: flowUri, predicate: 'ad4m://flowName', target: Literal.from('BadOrRoleFlow').toUrl() },
+        { source: flowUri, predicate: 'ad4m://hasState', target: stateUri },
+        { source: stateUri, predicate: 'rdf://type', target: 'ad4m://FlowState' },
+        { source: stateUri, predicate: 'ad4m://stateName', target: Literal.from('gate').toUrl() },
+        { source: stateUri, predicate: 'ad4m://stateValue', target: Literal.from(0).toUrl() },
+        {
+          source: stateUri,
+          predicate: 'ad4m://stateCheck',
+          target: `literal:string:${encodeURIComponent(JSON.stringify({ predicate: 'p', target: 't' }))}`,
+        },
+        {
+          source: stateUri,
+          predicate: 'ad4m://consensusRule',
+          target: `literal:string:${encodeURIComponent(
+            JSON.stringify({
+              n: 1,
+              fromRole: {
+                className: 'ns://Composed',
+                or: [{ className: 'ns://Ok' }, null, { didProperty: 'agent' }],
+              },
+            }),
+          )}`,
+        },
+      ];
+
+      const flow = SHACLFlow.fromLinks(badLinks, flowUri);
+      expect(flow.states[0].consensusRule).toBeUndefined();
+    });
+
+    it('rejects malformed `or` branches inside a role query (recursive isModelQueryShape) — fromJSON', () => {
+      const flow = SHACLFlow.fromJSON({
+        name: 'BadOrRole',
+        namespace: 'ns://',
+        startAction: [],
+        states: [
+          {
+            name: 'Gate',
+            value: 0,
+            stateCheck: { predicate: 'p', target: 't' },
+            consensusRule: {
+              n: 1,
+              fromRole: {
+                className: 'ns://Composed',
+                or: [{ className: 'ns://Ok' }, null, { didProperty: 'agent' }],
+              },
+            },
+          },
+        ],
+        transitions: [],
+      } as any);
+      expect(flow.states[0].consensusRule).toBeUndefined();
+    });
+
+    it('rejects a `requires` ModelQuery whose nested `or` branch is malformed', () => {
+      const flow = SHACLFlow.fromJSON({
+        name: 'BadRequiresOr',
+        namespace: 'ns://',
+        startAction: [],
+        states: [
+          {
+            name: 'Gate',
+            value: 0,
+            stateCheck: { predicate: 'p', target: 't' },
+            requires: [{ className: 'ns://Root', or: [{ className: 'ns://Ok' }, null] }],
+          },
+        ],
+        transitions: [],
+      } as any);
+      expect(flow.states[0].requires).toBeUndefined();
+    });
+
     it('accepts a role query in `$did`-templated Shape 2 form (no didProperty)', () => {
       const flow = new SHACLFlow('Gated', 'ns://');
       const rule: ConsensusRule = {

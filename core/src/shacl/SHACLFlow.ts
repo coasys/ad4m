@@ -202,12 +202,19 @@ export interface FlowState {
  * query.
  */
 function isModelQueryShape(v: unknown): v is ModelQuery {
-  return (
-    typeof v === "object" &&
-    v !== null &&
-    typeof (v as { className?: unknown }).className === "string" &&
-    (v as { className: string }).className.length > 0
-  );
+  if (
+    typeof v !== "object" ||
+    v === null ||
+    typeof (v as { className?: unknown }).className !== "string" ||
+    (v as { className: string }).className.length === 0
+  ) {
+    return false;
+  }
+  const or = (v as { or?: unknown }).or;
+  if (or !== undefined) {
+    if (!Array.isArray(or) || !or.every(isModelQueryShape)) return false;
+  }
+  return true;
 }
 
 /**
