@@ -16,6 +16,7 @@ import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
     SfuConfig,
+    SfuDataMessage,
     SfuQualityPreference,
     TrackMapEntry,
 } from "./SfuTypes"
@@ -63,6 +64,21 @@ export interface SfuNeighbourhoodApi {
             roomName: string
             migrateToDid: string
         }) => void,
+    ): () => void
+    addIceCandidate(
+        neighbourhoodUrl: string,
+        roomName: string,
+        candidate: string,
+    ): Promise<boolean>
+    sendData(
+        neighbourhoodUrl: string,
+        roomName: string,
+        channelLabel: string,
+        data: string,
+        binary?: boolean,
+    ): Promise<boolean>
+    subscribeDataChannel(
+        callback: (message: SfuDataMessage) => void,
     ): () => void
 }
 
@@ -118,8 +134,6 @@ export interface SfuIceConfig {
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
     { urls: "stun:stun.l.google.com:19302" },
 ]
-
-const ICE_GATHERING_TIMEOUT_MS = 8000
 
 // ── Topology resolution ───────────────────────────────────────────
 
@@ -187,6 +201,7 @@ export class SfuManager {
     private trackDidIndex: number = 0
     private renegotiationUnsubscribe: (() => void) | null = null
     private migrateUnsubscribe: (() => void) | null = null
+    private dataChannelUnsubscribe: (() => void) | null = null
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -429,28 +444,36 @@ export class SfuManager {
                 this.emit("stream-removed", stream, event.track)
         }
 
-        // Create and send offer
+        // ── Trickle ICE ──────────────────────────────────────────────
+        //
+        // Buffer candidates gathered before callJoin returns (the
+        // server needs the participant registered first).  After
+        // callJoin completes, flush the buffer and trickle live.
+
+        const pendingCandidates: string[] = []
+        let joinComplete = false
+
+        pc.onicecandidate = (event) => {
+            if (!event.candidate) return
+            if (joinComplete) {
+                this.neighbourhood.addIceCandidate(
+                    this.neighbourhoodUrl,
+                    this.roomId,
+                    event.candidate.candidate,
+                ).catch((err) => {
+                    console.error(
+                        "SFU: failed to trickle ICE candidate:",
+                        err,
+                    )
+                })
+            } else {
+                pendingCandidates.push(event.candidate.candidate)
+            }
+        }
+
+        // Create offer and send immediately — no ICE gathering wait
         const offer = await pc.createOffer()
         await pc.setLocalDescription(offer)
-
-        // Wait for ICE gathering with timeout
-        await new Promise<void>((resolve) => {
-            if (pc.iceGatheringState === "complete") return resolve()
-            const timeout = setTimeout(() => {
-                pc.onicegatheringstatechange = null
-                console.warn(
-                    "SFU: ICE gathering timed out, proceeding with partial candidates",
-                )
-                resolve()
-            }, ICE_GATHERING_TIMEOUT_MS)
-            pc.onicegatheringstatechange = () => {
-                if (pc.iceGatheringState === "complete") {
-                    clearTimeout(timeout)
-                    pc.onicegatheringstatechange = null
-                    resolve()
-                }
-            }
-        })
 
         const sdpOffer = JSON.stringify(pc.localDescription)
         const session: CallSessionInfo =
@@ -484,6 +507,21 @@ export class SfuManager {
         const answer = JSON.parse(session.sdpAnswer)
         await pc.setRemoteDescription(new RTCSessionDescription(answer))
         this.failoverAttempts = 0
+
+        // Flush buffered trickle ICE candidates
+        joinComplete = true
+        for (const candidate of pendingCandidates) {
+            this.neighbourhood.addIceCandidate(
+                this.neighbourhoodUrl,
+                this.roomId,
+                candidate,
+            ).catch((err) => {
+                console.error(
+                    "SFU: failed to trickle buffered ICE candidate:",
+                    err,
+                )
+            })
+        }
 
         // Subscribe to server-initiated renegotiation offers
         this.renegotiationUnsubscribe =
@@ -620,6 +658,14 @@ export class SfuManager {
             }
             this.migrateUnsubscribe = null
         }
+        if (this.dataChannelUnsubscribe) {
+            try {
+                this.dataChannelUnsubscribe()
+            } catch {
+                /* swallow */
+            }
+            this.dataChannelUnsubscribe = null
+        }
         if (this.state.peerConnection) {
             this.state.peerConnection.close()
             this.state.peerConnection = null
@@ -670,6 +716,66 @@ export class SfuManager {
 
     getParticipants(): SfuParticipantState[] {
         return Array.from(this.state.participants.values())
+    }
+
+    // ── Data channel relay ──────────────────────────────────────────
+
+    /**
+     * Send data to all other participants in the room via the SFU.
+     * Text payloads pass as-is; binary payloads should arrive
+     * base64-encoded with `binary: true`.
+     */
+    async sendData(
+        channelLabel: string,
+        data: string,
+        binary: boolean = false,
+    ): Promise<void> {
+        if (!this.state.participantId) {
+            console.warn("Cannot send data: not connected to SFU")
+            return
+        }
+        try {
+            await this.neighbourhood.sendData(
+                this.neighbourhoodUrl,
+                this.roomId,
+                channelLabel,
+                data,
+                binary,
+            )
+        } catch (e) {
+            console.error("SFU: sendData failed:", e)
+            this.emit("error", e)
+        }
+    }
+
+    /**
+     * Subscribe to data channel messages from other participants.
+     * Returns an unsubscribe function.  Only one subscription per
+     * manager instance — a second call replaces the first.
+     */
+    subscribeDataChannel(
+        callback: (message: SfuDataMessage) => void,
+    ): () => void {
+        // Tear down any existing subscription
+        if (this.dataChannelUnsubscribe) {
+            try {
+                this.dataChannelUnsubscribe()
+            } catch {
+                /* swallow */
+            }
+        }
+        this.dataChannelUnsubscribe =
+            this.neighbourhood.subscribeDataChannel(callback)
+        return () => {
+            if (this.dataChannelUnsubscribe) {
+                try {
+                    this.dataChannelUnsubscribe()
+                } catch {
+                    /* swallow */
+                }
+                this.dataChannelUnsubscribe = null
+            }
+        }
     }
 
     async destroy(): Promise<void> {

@@ -5,6 +5,7 @@ import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import type {
     CallSessionInfo,
     SfuConfig,
+    SfuDataMessage,
     SfuQualityPreference,
     SfuRoomInfo,
     TrackMapEntry,
@@ -163,6 +164,40 @@ export class NeighbourhoodProxy {
         }) => void,
     ): () => void {
         return this.#client.subscribeSfuMigrateEvent(targetDid, callback)
+    }
+
+    // ── SFU trickle ICE ─────────────────────────────────────────────────
+
+    async addIceCandidate(
+        neighbourhoodUrl: string,
+        roomName: string,
+        candidate: string,
+    ): Promise<boolean> {
+        return await this.#client.sfuAddIceCandidate(neighbourhoodUrl, roomName, candidate)
+    }
+
+    // ── SFU data channel relay ────────────────────────────────────────
+
+    async sendData(
+        neighbourhoodUrl: string,
+        roomName: string,
+        channelLabel: string,
+        data: string,
+        binary: boolean = false,
+    ): Promise<boolean> {
+        return await this.#client.sfuSendData(
+            neighbourhoodUrl,
+            roomName,
+            channelLabel,
+            data,
+            binary,
+        )
+    }
+
+    subscribeDataChannel(
+        callback: (message: SfuDataMessage) => void,
+    ): () => void {
+        return this.#client.subscribeSfuDataChannel(callback)
     }
 
     // ── SFU diagnostic / test-harness ──────────────────────────────────

@@ -9,6 +9,7 @@ import type { JoinNeighbourhoodRequest, PublishNeighbourhoodRequest } from "../g
 import type {
     CallSessionInfo,
     SfuConfig,
+    SfuDataMessage,
     SfuQualityPreference,
     SfuRoomInfo,
     TrackMapEntry,
@@ -211,6 +212,65 @@ export class NeighbourhoodClient {
 
     async sfuPeersForNeighbourhood(neighbourhoodUrl: string): Promise<string[]> {
         return this.#apiClient.call<string[]>("sfu.sfuPeersForNeighbourhood", { neighbourhoodUrl })
+    }
+
+    // ── Trickle ICE ───────────────────────────────────────────────────
+
+    /**
+     * Add a remote ICE candidate to an existing SFU call.  Enables
+     * trickle ICE: the client sends its SDP offer immediately after
+     * `setLocalDescription` and then calls this method for each
+     * candidate as it arrives, rather than waiting for gathering to
+     * complete (which can take up to 8 seconds on restrictive
+     * networks).
+     */
+    async sfuAddIceCandidate(
+        neighbourhoodUrl: string,
+        roomName: string,
+        candidate: string,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.addIceCandidate", {
+            neighbourhoodUrl,
+            roomName,
+            candidate,
+        })
+    }
+
+    // ── Data channel relay ────────────────────────────────────────────
+
+    /**
+     * Send data through the SFU to all other participants in the room.
+     * The server relays it to their matching data channel and
+     * publishes it on the `sfu-data` events_ws topic.
+     */
+    async sfuSendData(
+        neighbourhoodUrl: string,
+        roomName: string,
+        channelLabel: string,
+        data: string,
+        binary: boolean = false,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.sendData", {
+            neighbourhoodUrl,
+            roomName,
+            channelLabel,
+            data,
+            binary,
+        })
+    }
+
+    /**
+     * Subscribe to SFU data channel messages.  Returns an unsubscribe
+     * function.  Messages arrive for every participant in the room;
+     * filter by `senderDid` if needed.
+     */
+    subscribeSfuDataChannel(
+        callback: (message: SfuDataMessage) => void,
+    ): () => void {
+        return this.#apiClient.subscribe((data: any) => {
+            if (data?.type !== "sfu-data") return
+            callback(data as SfuDataMessage)
+        })
     }
 
     /**

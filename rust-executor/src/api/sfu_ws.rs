@@ -14,6 +14,7 @@
 //! When `get_sfu_service()` returns None it means the service hasn't
 //! finished booting yet, which surfaces as a 503.
 
+use base64::Engine;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -231,6 +232,76 @@ async fn call_answer_server_offer(
     Ok(Value::Bool(ok))
 }
 
+// ── Trickle ICE ───────────────────────────────────────────────────────────────
+//
+// Companion to `callJoin`: when the client gathers ICE candidates
+// incrementally (trickle) instead of waiting for gathering to complete,
+// each candidate arrives here.  The SFU adds it to the peer's str0m
+// Rtc instance via `Rtc::add_remote_candidate`.
+
+async fn add_ice_candidate(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
+    let room_name = params.require_str("roomName")?;
+    let candidate_sdp = params.require_str("candidate")?;
+    let agent_did = caller_did(&ctx)?;
+    let ok = service()?
+        .add_ice_candidate(&neighbourhood_url, &room_name, &agent_did, &candidate_sdp)
+        .await
+        .map_err(map_room_err)?;
+    Ok(Value::Bool(ok))
+}
+
+// ── Data channel relay ────────────────────────────────────────────────────────
+//
+// Applications that use WebRTC data channels in mesh mode (chat,
+// cursor sync, file transfer) need those messages to flow through
+// the SFU too.  This RPC lets them push data; the SFU relays it to
+// all other participants' matching data channels and publishes it
+// on the `sfu-data` events_ws topic.
+
+async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
+    let room_name = params.require_str("roomName")?;
+    let channel_label = params.require_str("channelLabel")?;
+    let binary = params
+        .get("binary")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let data_value = params.require("data")?;
+    let data: Vec<u8> = if binary {
+        // Expect base64-encoded string for binary data.
+        let encoded = data_value
+            .as_str()
+            .ok_or_else(|| WsRpcError::bad_request("binary data must be a base64 string"))?;
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            .map_err(|e| WsRpcError::bad_request(format!("Invalid base64: {}", e)))?
+    } else {
+        // Text data — UTF-8 string.
+        data_value
+            .as_str()
+            .ok_or_else(|| WsRpcError::bad_request("text data must be a string"))?
+            .as_bytes()
+            .to_vec()
+    };
+    let agent_did = caller_did(&ctx)?;
+    let ok = service()?
+        .send_data(
+            &neighbourhood_url,
+            &room_name,
+            &agent_did,
+            &channel_label,
+            data,
+            binary,
+        )
+        .await
+        .map_err(map_room_err)?;
+    Ok(Value::Bool(ok))
+}
+
 /// Read-only query: how many SFU↔SFU pipe transports are fully
 /// established right now.  The cascade scenarios poll this to assert
 /// the gossip-driven offer/answer round-trip lit up.
@@ -317,6 +388,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("sfu.setConfig", set_config);
     map.register("sfu.sfuPeerForNeighbourhood", sfu_peer_for_neighbourhood);
     map.register("sfu.sfuPeersForNeighbourhood", sfu_peers_for_neighbourhood);
+    map.register("sfu.addIceCandidate", add_ice_candidate);
+    map.register("sfu.sendData", send_data);
     map.register("sfu.cascadeStatus", cascade_status);
     map.register("sfu.qualityPreferences", quality_preferences);
     map.register("sfu.ensureMembership", ensure_membership);
