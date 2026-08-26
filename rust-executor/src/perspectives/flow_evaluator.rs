@@ -1,54 +1,67 @@
-//! Slice 10.4a of the flow-implementation arc — the pure primitives that turn a
-//! [`ModelQuery`] guard into a [`ModelQueryInput`] the perspective's
-//! `model_query` accepts, check cardinality against the returned result, and
-//! content-hash the evidence bag that a satisfied transition carries into the
-//! [`SatisfiedTransition`] produced by slice 10.4a2's async evaluator.
+//! Slice 10.4a of the flow-implementation arc — the deterministic
+//! `FlowTransitionProposal` post-processing pass. Turns each active
+//! `FlowInstance` and its reachable next-states into a
+//! [`SatisfiedTransition`] per (record, next-state) whose `requires` array
+//! is fully satisfied against the committed perspective graph.
 //!
 //! Design authority: `planning/flow-interpretation-hints-design.md` §5 step 5
 //! ("Post-processing (engine, deterministic)") and §7 (`ConsensusRule` +
 //! `didProperty` role-gate).
 //!
-//! # What this module owns (slice 10.4a — this commit)
+//! # What this module owns
 //!
-//! - [`SatisfiedTransition`] — the record slice 10.4a2's async evaluator
-//!   returns per (flow_instance, reachable_next_state) whose `requires` are
-//!   fully satisfied.
-//! - [`build_query_input_for_requires`] — pure translator from `ModelQuery`
-//!   (flow-side type) to `serde_json::Value` (`model_query`'s input shape).
-//!   Substitutes `$did` in `didProperty` at translation time. Recursive over
-//!   `ModelQuery.or`.
-//! - [`cardinality_satisfied`] — pure `count.{min,max}` cardinality check.
-//! - [`evidence_hash`] — deterministic SHA256 of a (class, sorted matched-ids)
-//!   pair. Used to seed the evidence field on the FlowTransitionProposal that
-//!   slice 10.4b emits, so a re-verification pass in slice 10.6 can catch a
-//!   tampered proposal.
+//! Pure primitives (slice 10.4a1):
 //!
-//! # What slice 10.4a2 adds (next commit, NOT here)
+//! - [`SatisfiedTransition`] — the record slice 10.4b's writer stage
+//!   consumes.
+//! - [`build_query_input_for_requires`] — translator from `ModelQuery`
+//!   (flow-side type) to `serde_json::Value` (`model_query`'s input
+//!   shape). Substitutes `$did` in `didProperty` at translation time.
+//!   Recursive over `ModelQuery.or`.
+//! - [`cardinality_satisfied`] — `count.{min,max}` cardinality check.
+//! - [`evidence_hash`] — deterministic SHA256 of a (class, sorted
+//!   matched-ids) pair. Used to seed the evidence field on the
+//!   `FlowTransitionProposal` that slice 10.4b emits, so a re-verification
+//!   pass in slice 10.6 can catch a tampered proposal.
 //!
-//! - `evaluate_single_query(perspective, mq, acting_did) -> Result<(bool, Vec<String>)>`
-//!   — the one async call site into `PerspectiveInstance::model_query`.
-//! - `evaluate_state_requires(perspective, requires, acting_did) -> Result<Option<Vec<String>>>`
-//!   — AND across the array; returns `Some(evidence_ids)` when all satisfied.
-//! - `evaluate_flow_transitions(perspective, active_flows, flows_by_name, acting_did)`
-//!   — the top composer that walks every active flow's reachable next-states
-//!   and returns `Vec<SatisfiedTransition>`.
+//! Async layer (slice 10.4a2, this commit):
 //!
-//! # Why pure
+//! - [`RequiresQueryable`] — the one perspective-side call the evaluator
+//!   needs, factored behind a trait so tests can stub it without a live
+//!   `PerspectiveInstance`. `PerspectiveInstance` gets a blanket impl.
+//! - [`evaluate_single_query`] — one `model_query` call + cardinality
+//!   check + evidence extraction.
+//! - [`evaluate_state_requires`] — AND across a state's `requires` array;
+//!   returns `Some((class_names, evidence_ids))` when all guards match.
+//! - [`evaluate_flow_transitions`] — the top composer that walks every
+//!   active flow's reachable next-states and returns
+//!   `Vec<SatisfiedTransition>`. Silent-skip on unknown flow name,
+//!   guardless states, and query errors so a single bad shape cannot
+//!   poison the whole pass.
+//!
+//! # Why pure primitives + trait-backed async layer
 //!
 //! Slice 10.4b will emit `FlowTransitionProposal` writes on behalf of the
 //! extraction DID from these results. Any bug in the ModelQuery→ModelQueryInput
-//! translation would either miss a satisfied requires (flow silently stalls)
-//! or synthesize a wrong-guard proposal (garbage in the flow's evidence
-//! chain). Isolating the translation from graph I/O gives us fixture-driven
-//! unit tests for every `PropertyCondition` variant + $did substitution
-//! without needing a live perspective.
+//! translation would either miss a satisfied requires (flow silently
+//! stalls) or synthesize a wrong-guard proposal (garbage in the flow's
+//! evidence chain). Isolating the translation from graph I/O gives us
+//! fixture-driven unit tests for every `PropertyCondition` variant +
+//! `$did` substitution; the [`RequiresQueryable`] trait gives us the same
+//! coverage for the composition and error-handling shape without paying
+//! the cost of a live perspective per test.
 
 #![allow(dead_code)]
 
+use crate::perspectives::flow_context::{reachable_next_states, FlowInstanceRecord};
 use crate::perspectives::shacl_parser::ConsensusRule;
-use crate::perspectives::shacl_parser::{ModelQuery, ModelQueryCount, PropertyCondition};
+use crate::perspectives::shacl_parser::{
+    ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
+};
+use async_trait::async_trait;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 
 /// One (flow_instance, next-state) pair whose `requires` array has been
 /// evaluated to fully-satisfied on the committed perspective graph. The
@@ -255,6 +268,209 @@ fn property_condition_to_where(cond: &PropertyCondition) -> Value {
         }
         PropertyCondition::Matches { matches } => json!({ "regex": matches }),
     }
+}
+
+// ============================================================================
+// Slice 10.4a2 — async layer over `model_query`
+// ============================================================================
+
+/// The one perspective-side call the evaluator needs. Trait-based so tests
+/// can stub `model_query` deterministically without spinning up a full
+/// `PerspectiveInstance` (SPARQL store, Prolog engine, SDNA resolver,
+/// shape cache). `PerspectiveInstance` gets a blanket impl below so
+/// slice 10.4a3's call-site in `run.rs` can pass `&perspective` verbatim.
+///
+/// The return contract mirrors `PerspectiveInstance::model_query`: a JSON
+/// string of `{ instances: [...], totalCount: N }`. The evaluator only
+/// reads `instances[*].id` off the parsed shape — anything richer we'd
+/// wire in when a `requires` sub-query needs it.
+#[async_trait]
+pub trait RequiresQueryable: Send + Sync {
+    async fn model_query(
+        &self,
+        class_name: &str,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error>;
+}
+
+#[async_trait]
+impl RequiresQueryable for crate::perspectives::perspective_instance::PerspectiveInstance {
+    async fn model_query(
+        &self,
+        class_name: &str,
+        query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        // Delegate to the inherent method — same signature, no impl gymnastics.
+        crate::perspectives::perspective_instance::PerspectiveInstance::model_query(
+            self, class_name, query_json,
+        )
+        .await
+    }
+}
+
+/// Evaluate one `ModelQuery` against the live perspective.
+///
+/// Returns `(satisfied, evidence_ids)`:
+/// - `satisfied` folds the cardinality check ([`cardinality_satisfied`])
+///   over the number of matched instances — the caller does not have to
+///   re-check `query.count`.
+/// - `evidence_ids` is every instance URI the query matched, in the
+///   perspective's returned order. Kept even when `!satisfied` so the
+///   caller can log or reason about near-misses.
+///
+/// Errors bubble up when `model_query` fails or when its result is not
+/// the documented `{ instances: [...], totalCount: N }` shape.
+/// Slice 10.4a3 wraps this in a `debug!` + skip so one malformed shape
+/// registration cannot poison the whole post-processing pass.
+pub async fn evaluate_single_query<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    query: &ModelQuery,
+    acting_did: &str,
+) -> Result<(bool, Vec<String>), deno_core::anyhow::Error> {
+    let input = build_query_input_for_requires(query, acting_did);
+    let input_str = serde_json::to_string(&input)?;
+    let result_str = perspective
+        .model_query(&query.class_name, &input_str)
+        .await?;
+    let result_json: Value = serde_json::from_str(&result_str).map_err(|e| {
+        deno_core::anyhow::anyhow!(
+            "model_query for `{}` returned non-JSON payload: {}",
+            query.class_name,
+            e
+        )
+    })?;
+    let instances = result_json
+        .get("instances")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            deno_core::anyhow::anyhow!(
+                "model_query for `{}` result missing `instances` array (got: {})",
+                query.class_name,
+                result_json
+            )
+        })?;
+    let ids: Vec<String> = instances
+        .iter()
+        .filter_map(|inst| inst.get("id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    let satisfied = cardinality_satisfied(query.count.as_ref(), ids.len());
+    Ok((satisfied, ids))
+}
+
+/// AND across the `requires` array — every guard in the array must be
+/// satisfied for a state's `requires` to hold.
+///
+/// Returns:
+/// - `Ok(None)` — at least one guard failed. Short-circuits: the caller
+///   does not need to distinguish "which one" for the deterministic
+///   post-processing pass; slice 10.5's `semanticCheck` layer only fires
+///   when this returns `Some(_)`.
+/// - `Ok(Some((class_names, evidence_ids)))` — every guard was satisfied.
+///   `class_names` is deduplicated and preserves first-occurrence order;
+///   `evidence_ids` is the union of every satisfied guard's matches,
+///   deduplicated globally. The pair is what feeds [`evidence_hash`] so
+///   the seal on a `SatisfiedTransition` covers all evidence used.
+///
+/// Errors bubble up when any single query errors — same rationale as
+/// [`evaluate_single_query`]: a query surface should not be silently
+/// swallowed at the state level; slice 10.4a3 handles skip-on-error
+/// at the top composer.
+pub async fn evaluate_state_requires<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    requires: &[ModelQuery],
+    acting_did: &str,
+) -> Result<Option<(Vec<String>, Vec<String>)>, deno_core::anyhow::Error> {
+    let mut class_names: Vec<String> = Vec::new();
+    let mut evidence_ids: Vec<String> = Vec::new();
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut seen_classes: HashSet<String> = HashSet::new();
+    for query in requires {
+        let (satisfied, ids) = evaluate_single_query(perspective, query, acting_did).await?;
+        if !satisfied {
+            return Ok(None);
+        }
+        if seen_classes.insert(query.class_name.clone()) {
+            class_names.push(query.class_name.clone());
+        }
+        for id in ids {
+            if seen_ids.insert(id.clone()) {
+                evidence_ids.push(id);
+            }
+        }
+    }
+    Ok(Some((class_names, evidence_ids)))
+}
+
+/// Walk every active flow record's reachable next-states, evaluate each
+/// state's `requires`, and return a [`SatisfiedTransition`] per satisfied
+/// (record, next-state) pair.
+///
+/// Silent-skip rules mirror slice 10.1b (`load_flow_instances`) — the
+/// deterministic post-processing pass should never blow up because *one*
+/// flow definition or SDNA class went sideways:
+///
+/// - Record whose `flow_name` is not in `flows_by_name` → skipped
+///   (definition unpublished or hasn't synced yet).
+/// - State whose `requires` is `None` or empty → skipped (no
+///   deterministic guard; slice 10.5's `semanticCheck` picks these up
+///   separately when 10.5 lands).
+/// - A `model_query` call that errors → logged at `debug!` and skipped.
+///   The consensus engine (slice 10.6) will re-evaluate on the next tick
+///   so a transient perspective error is self-healing.
+///
+/// The effective `consensus_rule` per output prefers the per-state
+/// override (§7.1) and falls back to the flow-level default when unset.
+pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    records: &[FlowInstanceRecord],
+    flows_by_name: &HashMap<String, SHACLFlow>,
+    acting_did: &str,
+) -> Vec<SatisfiedTransition> {
+    let mut out = Vec::new();
+    for record in records {
+        let Some(flow) = flows_by_name.get(&record.flow_name) else {
+            continue;
+        };
+        for state in reachable_next_states(flow, &record.current_state) {
+            let Some(requires) = state.requires.as_deref() else {
+                continue;
+            };
+            if requires.is_empty() {
+                continue;
+            }
+            match evaluate_state_requires(perspective, requires, acting_did).await {
+                Ok(None) => {}
+                Ok(Some((class_names, evidence_ids))) => {
+                    let hash = evidence_hash(&class_names, &evidence_ids);
+                    let effective_consensus = state
+                        .consensus_rule
+                        .clone()
+                        .or_else(|| flow.consensus_rule.clone());
+                    out.push(SatisfiedTransition {
+                        flow_name: record.flow_name.clone(),
+                        instance_uri: record.instance_uri.clone(),
+                        subject: record.subject.clone(),
+                        from_state: record.current_state.clone(),
+                        to_state: state.name.clone(),
+                        evidence_ids,
+                        evidence_hash: hash,
+                        semantic_check: state.semantic_check.clone(),
+                        consensus_rule: effective_consensus,
+                    });
+                }
+                Err(e) => {
+                    log::debug!(
+                        "flow evaluator: model_query failed for {}.{} on {}: {:#}",
+                        record.flow_name,
+                        state.name,
+                        record.instance_uri,
+                        e
+                    );
+                }
+            }
+        }
+    }
+    out
 }
 
 // ============================================================================
@@ -640,5 +856,477 @@ mod tests {
         assert_eq!(branches.len(), 2);
         assert_eq!(branches[0], json!({"role": "owner"}));
         assert_eq!(branches[1], json!({"OR": [{"role": "admin"}]}));
+    }
+
+    // ============================================================================
+    // Slice 10.4a2 — async layer tests (stubbed perspective)
+    // ============================================================================
+    //
+    // These stub `RequiresQueryable` in-process so the evaluator's async
+    // composition can be exercised deterministically without spinning up a
+    // `PerspectiveInstance`. The end-to-end e2e_tests module below adds a
+    // live-perspective integration test that pins the same behaviour against
+    // the real SPARQL/Prolog/SDNA stack.
+
+    use crate::perspectives::flow_context::FlowInstanceRecord;
+    use crate::perspectives::shacl_parser::{FlowState, FlowTransition, LinkPattern, SHACLFlow};
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// In-process stub. Records every `model_query` call for assertions,
+    /// and either returns a canned JSON string or an error keyed on
+    /// `class_name`.
+    struct StubPerspective {
+        // (class_name, query_json) recorded in call order.
+        calls: Mutex<Vec<(String, String)>>,
+        // class_name -> either a raw JSON response or an error string.
+        responses: HashMap<String, Result<String, String>>,
+    }
+
+    impl StubPerspective {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                responses: HashMap::new(),
+            }
+        }
+        fn with_instances(mut self, class: &str, ids: &[&str]) -> Self {
+            let payload = json!({
+                "instances": ids.iter().map(|id| json!({"id": *id})).collect::<Vec<_>>(),
+                "totalCount": ids.len(),
+            })
+            .to_string();
+            self.responses.insert(class.to_string(), Ok(payload));
+            self
+        }
+        fn with_error(mut self, class: &str, msg: &str) -> Self {
+            self.responses
+                .insert(class.to_string(), Err(msg.to_string()));
+            self
+        }
+        fn call_count_for(&self, class: &str) -> usize {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(c, _)| c == class)
+                .count()
+        }
+    }
+
+    #[async_trait]
+    impl RequiresQueryable for StubPerspective {
+        async fn model_query(
+            &self,
+            class_name: &str,
+            query_json: &str,
+        ) -> Result<String, deno_core::anyhow::Error> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((class_name.to_string(), query_json.to_string()));
+            match self.responses.get(class_name) {
+                Some(Ok(payload)) => Ok(payload.clone()),
+                Some(Err(msg)) => Err(deno_core::anyhow::anyhow!(msg.clone())),
+                None => Err(deno_core::anyhow::anyhow!(
+                    "StubPerspective: no canned response for `{}`",
+                    class_name
+                )),
+            }
+        }
+    }
+
+    // ---- evaluate_single_query ----
+
+    #[tokio::test]
+    async fn single_query_satisfied_with_unset_count_at_one_match() {
+        let stub = StubPerspective::new().with_instances("ns://T", &["ad4m://t/1"]);
+        let (ok, ids) = evaluate_single_query(&stub, &mq("ns://T"), "did:key:x")
+            .await
+            .unwrap();
+        assert!(ok);
+        assert_eq!(ids, vec!["ad4m://t/1".to_string()]);
+        assert_eq!(stub.call_count_for("ns://T"), 1);
+    }
+
+    #[tokio::test]
+    async fn single_query_unsatisfied_when_zero_matches_and_unset_count() {
+        let stub = StubPerspective::new().with_instances("ns://T", &[]);
+        let (ok, ids) = evaluate_single_query(&stub, &mq("ns://T"), "did:key:x")
+            .await
+            .unwrap();
+        assert!(!ok);
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn single_query_folds_cardinality_min_and_max() {
+        let mut q = mq("ns://T");
+        q.count = Some(ModelQueryCount {
+            min: Some(2),
+            max: Some(3),
+        });
+
+        // 2 matches → satisfied
+        let stub = StubPerspective::new().with_instances("ns://T", &["a", "b"]);
+        let (ok, _) = evaluate_single_query(&stub, &q, "did:key:x").await.unwrap();
+        assert!(ok);
+
+        // 1 match → unsatisfied (below min)
+        let stub = StubPerspective::new().with_instances("ns://T", &["a"]);
+        let (ok, _) = evaluate_single_query(&stub, &q, "did:key:x").await.unwrap();
+        assert!(!ok);
+
+        // 4 matches → unsatisfied (above max) but ids still returned
+        let stub = StubPerspective::new().with_instances("ns://T", &["a", "b", "c", "d"]);
+        let (ok, ids) = evaluate_single_query(&stub, &q, "did:key:x").await.unwrap();
+        assert!(!ok);
+        assert_eq!(ids.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn single_query_bubbles_perspective_error() {
+        let stub = StubPerspective::new().with_error("ns://T", "SDNA class not registered");
+        let err = evaluate_single_query(&stub, &mq("ns://T"), "did:key:x")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("SDNA class not registered"));
+    }
+
+    #[tokio::test]
+    async fn single_query_errors_on_missing_instances_key() {
+        let mut stub = StubPerspective::new();
+        stub.responses.insert(
+            "ns://T".to_string(),
+            Ok(json!({"totalCount": 0}).to_string()),
+        );
+        let err = evaluate_single_query(&stub, &mq("ns://T"), "did:key:x")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("missing `instances`"));
+    }
+
+    #[tokio::test]
+    async fn single_query_serializes_translated_input() {
+        // Guards that the async layer forwards the pure translator's
+        // output verbatim — a regression in either half would show up
+        // here as a diff on the recorded query JSON.
+        let mut w: BTreeMap<String, PropertyCondition> = BTreeMap::new();
+        w.insert(
+            "author".into(),
+            PropertyCondition::Str("did:key:xyz".into()),
+        );
+        let q = ModelQuery {
+            class_name: "ns://T".into(),
+            r#where: Some(w),
+            ..mq("ns://T")
+        };
+        let stub = StubPerspective::new().with_instances("ns://T", &["ad4m://t/1"]);
+        let _ = evaluate_single_query(&stub, &q, "did:key:acting")
+            .await
+            .unwrap();
+        let calls = stub.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let recorded: Value = serde_json::from_str(&calls[0].1).unwrap();
+        assert_eq!(recorded, json!({"where": {"author": "did:key:xyz"}}));
+    }
+
+    // ---- evaluate_state_requires ----
+
+    #[tokio::test]
+    async fn state_requires_empty_returns_some_empty_evidence() {
+        let stub = StubPerspective::new();
+        let out = evaluate_state_requires(&stub, &[], "did:key:x")
+            .await
+            .unwrap();
+        assert_eq!(out, Some((Vec::new(), Vec::new())));
+        // No calls should be made — vacuous truth.
+        assert_eq!(stub.calls.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn state_requires_and_short_circuits_on_first_unsat() {
+        let stub = StubPerspective::new()
+            .with_instances("ns://A", &["ad4m://a/1"])
+            .with_instances("ns://B", &[]) // fails the AND
+            .with_instances("ns://C", &["ad4m://c/1"]);
+        let requires = vec![mq("ns://A"), mq("ns://B"), mq("ns://C")];
+        let out = evaluate_state_requires(&stub, &requires, "did:key:x")
+            .await
+            .unwrap();
+        assert_eq!(out, None);
+        // A + B queried, C skipped after B failed.
+        assert_eq!(stub.call_count_for("ns://A"), 1);
+        assert_eq!(stub.call_count_for("ns://B"), 1);
+        assert_eq!(stub.call_count_for("ns://C"), 0);
+    }
+
+    #[tokio::test]
+    async fn state_requires_unions_evidence_and_dedups_across_queries() {
+        // Same instance URI returned by two different guards; classes de-dup
+        // and IDs de-dup while preserving first-occurrence order.
+        let stub = StubPerspective::new()
+            .with_instances("ns://A", &["ad4m://x/1", "ad4m://x/2"])
+            .with_instances("ns://B", &["ad4m://x/2", "ad4m://x/3"]);
+        let requires = vec![mq("ns://A"), mq("ns://B"), mq("ns://A")];
+        let out = evaluate_state_requires(&stub, &requires, "did:key:x")
+            .await
+            .unwrap();
+        let (classes, ids) = out.expect("all guards satisfied");
+        assert_eq!(classes, vec!["ns://A".to_string(), "ns://B".to_string()]);
+        assert_eq!(
+            ids,
+            vec![
+                "ad4m://x/1".to_string(),
+                "ad4m://x/2".to_string(),
+                "ad4m://x/3".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn state_requires_bubbles_query_error() {
+        let stub = StubPerspective::new()
+            .with_instances("ns://A", &["ad4m://a/1"])
+            .with_error("ns://B", "SDNA class not registered");
+        let requires = vec![mq("ns://A"), mq("ns://B")];
+        let err = evaluate_state_requires(&stub, &requires, "did:key:x")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("SDNA class not registered"));
+    }
+
+    // ---- evaluate_flow_transitions ----
+
+    fn simple_flow(name: &str, transitions: &[(&str, &str)]) -> SHACLFlow {
+        let mut states: Vec<FlowState> = Vec::new();
+        let mut seen = HashSet::new();
+        for (from, to) in transitions {
+            for s in [from, to] {
+                if seen.insert(s.to_string()) {
+                    states.push(FlowState {
+                        name: s.to_string(),
+                        value: 0.0,
+                        state_check: LinkPattern {
+                            source: None,
+                            predicate: format!("{}://state", name.to_lowercase()),
+                            target: format!("{}://{}", name.to_lowercase(), s),
+                        },
+                        interpretation_hint: None,
+                        requires: None,
+                        semantic_check: None,
+                        consensus_rule: None,
+                    });
+                }
+            }
+        }
+        SHACLFlow {
+            name: name.to_string(),
+            namespace: format!("{}://", name.to_lowercase()),
+            start_action: Vec::new(),
+            states,
+            transitions: transitions
+                .iter()
+                .map(|(f, t)| FlowTransition {
+                    action_name: format!("{}To{}", f, t),
+                    from_state: f.to_string(),
+                    to_state: t.to_string(),
+                    actions: Vec::new(),
+                })
+                .collect(),
+            interpretation_hint: None,
+            input_types: Vec::new(),
+            output_types: Vec::new(),
+            creation_hint: None,
+            context: None,
+            consensus_rule: None,
+        }
+    }
+
+    fn set_requires(state: &mut FlowState, requires: Vec<ModelQuery>) {
+        state.requires = Some(requires);
+    }
+
+    fn record(flow: &str, uri: &str, subject: &str, state: &str) -> FlowInstanceRecord {
+        FlowInstanceRecord {
+            flow_name: flow.into(),
+            instance_uri: uri.into(),
+            subject: subject.into(),
+            current_state: state.into(),
+            started_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn flow_transitions_emits_one_satisfied_per_reachable_state() {
+        let mut flow = simple_flow("Delivery", &[("identified", "scoped")]);
+        let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
+        set_requires(scoped, vec![mq("ns://Task")]);
+        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let recs = vec![record(
+            "Delivery",
+            "ad4m://flow/instance/1",
+            "ad4m://task/1",
+            "identified",
+        )];
+        let stub = StubPerspective::new().with_instances("ns://Task", &["ad4m://task/1"]);
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].flow_name, "Delivery");
+        assert_eq!(out[0].instance_uri, "ad4m://flow/instance/1");
+        assert_eq!(out[0].subject, "ad4m://task/1");
+        assert_eq!(out[0].from_state, "identified");
+        assert_eq!(out[0].to_state, "scoped");
+        assert_eq!(out[0].evidence_ids, vec!["ad4m://task/1".to_string()]);
+        assert_eq!(out[0].evidence_hash.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn flow_transitions_skips_state_when_requires_unsatisfied() {
+        let mut flow = simple_flow("Delivery", &[("identified", "scoped")]);
+        let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
+        set_requires(scoped, vec![mq("ns://Task")]);
+        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let recs = vec![record(
+            "Delivery",
+            "ad4m://flow/instance/1",
+            "ad4m://task/1",
+            "identified",
+        )];
+        let stub = StubPerspective::new().with_instances("ns://Task", &[]);
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flow_transitions_skips_states_without_requires() {
+        // No `requires` = no deterministic guard; slice 10.5's semanticCheck
+        // is a separate concern and doesn't fire here.
+        let flow = simple_flow("Delivery", &[("identified", "scoped")]);
+        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let recs = vec![record(
+            "Delivery",
+            "ad4m://flow/instance/1",
+            "ad4m://task/1",
+            "identified",
+        )];
+        let stub = StubPerspective::new();
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
+        assert!(out.is_empty());
+        // No query should have run — no guards.
+        assert_eq!(stub.calls.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn flow_transitions_skips_records_with_unknown_flow_name() {
+        // Definition unpublished or not yet synced — must not blow up.
+        let flow = simple_flow("Delivery", &[("identified", "scoped")]);
+        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let recs = vec![
+            record(
+                "Delivery",
+                "ad4m://flow/instance/1",
+                "ad4m://task/1",
+                "identified",
+            ),
+            record("Unknown", "ad4m://flow/instance/2", "ad4m://task/2", "some"),
+        ];
+        let stub = StubPerspective::new();
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
+        assert!(out.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flow_transitions_swallows_query_error_at_debug_and_continues() {
+        // A `requires` on state A errors; state B in another record should
+        // still be evaluated. Guards against one bad shape poisoning the
+        // whole pass.
+        let mut delivery = simple_flow("Delivery", &[("identified", "scoped")]);
+        let scoped = delivery
+            .states
+            .iter_mut()
+            .find(|s| s.name == "scoped")
+            .unwrap();
+        set_requires(scoped, vec![mq("ns://Broken")]);
+        let mut deliberation = simple_flow("Deliberation", &[("proposal", "tension")]);
+        let tension = deliberation
+            .states
+            .iter_mut()
+            .find(|s| s.name == "tension")
+            .unwrap();
+        set_requires(tension, vec![mq("ns://Perspective")]);
+        let flows = HashMap::from([
+            ("Delivery".into(), delivery),
+            ("Deliberation".into(), deliberation),
+        ]);
+        let recs = vec![
+            record(
+                "Delivery",
+                "ad4m://flow/instance/1",
+                "ad4m://task/1",
+                "identified",
+            ),
+            record(
+                "Deliberation",
+                "ad4m://flow/instance/2",
+                "ad4m://proposal/1",
+                "proposal",
+            ),
+        ];
+        let stub = StubPerspective::new()
+            .with_error("ns://Broken", "unregistered class")
+            .with_instances("ns://Perspective", &["ad4m://persp/1"]);
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].flow_name, "Deliberation");
+        assert_eq!(out[0].to_state, "tension");
+    }
+
+    #[tokio::test]
+    async fn flow_transitions_uses_state_consensus_over_flow_default() {
+        let mut flow = simple_flow("Delivery", &[("identified", "scoped")]);
+        flow.consensus_rule = Some(ConsensusRule {
+            n: 1,
+            from_role: None,
+        });
+        let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
+        set_requires(scoped, vec![mq("ns://Task")]);
+        scoped.consensus_rule = Some(ConsensusRule {
+            n: 3,
+            from_role: None,
+        });
+        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let recs = vec![record(
+            "Delivery",
+            "ad4m://flow/instance/1",
+            "ad4m://task/1",
+            "identified",
+        )];
+        let stub = StubPerspective::new().with_instances("ns://Task", &["ad4m://task/1"]);
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].consensus_rule.as_ref().unwrap().n, 3);
+    }
+
+    #[tokio::test]
+    async fn flow_transitions_falls_back_to_flow_consensus_when_state_unset() {
+        let mut flow = simple_flow("Delivery", &[("identified", "scoped")]);
+        flow.consensus_rule = Some(ConsensusRule {
+            n: 2,
+            from_role: None,
+        });
+        let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
+        set_requires(scoped, vec![mq("ns://Task")]);
+        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let recs = vec![record(
+            "Delivery",
+            "ad4m://flow/instance/1",
+            "ad4m://task/1",
+            "identified",
+        )];
+        let stub = StubPerspective::new().with_instances("ns://Task", &["ad4m://task/1"]);
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].consensus_rule.as_ref().unwrap().n, 2);
     }
 }
