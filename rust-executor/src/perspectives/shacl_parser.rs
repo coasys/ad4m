@@ -480,6 +480,248 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
     Ok(links)
 }
 
+// ---------------------------------------------------------------------------
+// Reverse of parse_flow_to_links — read flow definitions off the graph.
+// Mirrors the canonical TS `SHACLFlow.fromLinks` in core/src/shacl/SHACLFlow.ts
+// including all v5 predicates. Consumed by Model C (`load_shacl_flows` →
+// `build_flow_contexts` → prompt block) so the extraction pass can see what
+// flows are declared on the perspective without a JS/GraphQL round-trip.
+// ---------------------------------------------------------------------------
+
+/// Strip a `literal:string:` / `literal://string:` prefix and url-decode
+/// the tail. Returns `None` when the target isn't a string literal or
+/// when the url-decoded tail isn't valid UTF-8.
+fn decode_literal_string(target: &str) -> Option<String> {
+    let payload = target
+        .strip_prefix("literal://string:")
+        .or_else(|| target.strip_prefix("literal:string:"))?;
+    urlencoding::decode(payload).ok().map(|c| c.into_owned())
+}
+
+/// Strip a `literal:number:` / `literal://number:` prefix and parse
+/// the tail as f64. Both prefix shapes are accepted so wire-format
+/// migration doesn't require reprocessing every flow node.
+fn decode_literal_number(target: &str) -> Option<f64> {
+    let payload = target
+        .strip_prefix("literal://number:")
+        .or_else(|| target.strip_prefix("literal:number:"))?;
+    payload.parse().ok()
+}
+
+/// Decode a JSON payload stored inside a `literal:string:<urlencoded json>`
+/// target. Silently returns `None` on any decode / parse / shape failure —
+/// callers that see `None` leave the corresponding field unset rather than
+/// failing the whole flow read (mirrors the TS side's try/catch policy).
+fn decode_json_literal<T: for<'de> Deserialize<'de>>(target: &str) -> Option<T> {
+    let s = decode_literal_string(target)?;
+    serde_json::from_str(&s).ok()
+}
+
+fn find_link<'a>(links: &'a [Link], source: &str, predicate: &str) -> Option<&'a Link> {
+    links
+        .iter()
+        .find(|l| l.source == source && l.predicate.as_deref() == Some(predicate))
+}
+
+fn find_links<'a>(links: &'a [Link], source: &str, predicate: &str) -> Vec<&'a Link> {
+    links
+        .iter()
+        .filter(|l| l.source == source && l.predicate.as_deref() == Some(predicate))
+        .collect()
+}
+
+/// Reader-side validator: a `Vec<ModelQuery>` payload is only accepted
+/// when every entry has a non-empty `className` string. The `#[serde(untagged)]`
+/// on `PropertyCondition` makes it too permissive to reject `[{}]` /
+/// `[{"className": 42}]` at the serde layer — this catches those before
+/// they end up in the returned `SHACLFlow`. Symmetric with the TS
+/// `isModelQueryShape` guard.
+fn model_query_array_ok(qs: &[ModelQuery]) -> bool {
+    qs.iter().all(|q| !q.class_name.is_empty())
+}
+
+fn decode_model_query_array(target: &str) -> Option<Vec<ModelQuery>> {
+    let qs: Vec<ModelQuery> = decode_json_literal(target)?;
+    if model_query_array_ok(&qs) {
+        Some(qs)
+    } else {
+        None
+    }
+}
+
+fn decode_string_array(target: &str) -> Option<Vec<String>> {
+    let arr: Vec<String> = decode_json_literal(target)?;
+    if arr.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    Some(arr)
+}
+
+/// Reverse of `parse_flow_to_links` — reconstruct a [`SHACLFlow`] from
+/// its RDF representation. Mirrors the canonical TS
+/// `SHACLFlow.fromLinks` in `core/src/shacl/SHACLFlow.ts`, including
+/// every v5 predicate (`interpretationHint`, `requires`,
+/// `semanticCheck`, `consensusRule` at both flow and state scope, plus
+/// `inputTypes`, `outputTypes`, `creationHint`, `context` on the flow).
+///
+/// Malformed literals (bad JSON, wrong shape, non-string ModelQuery
+/// `className`) leave the field unset rather than propagating the error.
+/// Same policy as the TS reader and as [`load_flow_instances`] — a
+/// stale / hand-mangled flow definition on-graph shouldn't poison every
+/// Model C extraction pass on the perspective until it's manually cleaned.
+pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow, AnyError> {
+    // Expected format: `{namespace}{Name}Flow` — same rule as the TS side.
+    let without_suffix = flow_uri
+        .strip_suffix("Flow")
+        .ok_or_else(|| anyhow::anyhow!("Invalid flow URI: {flow_uri} (must end with 'Flow')"))?;
+    let split_idx = without_suffix
+        .rfind(|c: char| c == '/' || c == ':')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let (namespace, name) = without_suffix.split_at(split_idx);
+
+    let mut flow = SHACLFlow {
+        name: name.to_string(),
+        namespace: namespace.to_string(),
+        start_action: Vec::new(),
+        states: Vec::new(),
+        transitions: Vec::new(),
+        interpretation_hint: None,
+        input_types: Vec::new(),
+        output_types: Vec::new(),
+        creation_hint: None,
+        context: None,
+        consensus_rule: None,
+    };
+
+    // Flow-level `interpretationHint` — non-empty-string only.
+    if let Some(link) = find_link(links, flow_uri, "ad4m://interpretationHint") {
+        if let Some(hint) = decode_literal_string(&link.target) {
+            if !hint.is_empty() {
+                flow.interpretation_hint = Some(hint);
+            }
+        }
+    }
+
+    // Flow-level `inputTypes` / `outputTypes` — non-empty string arrays.
+    if let Some(link) = find_link(links, flow_uri, "ad4m://inputTypes") {
+        if let Some(arr) = decode_string_array(&link.target) {
+            flow.input_types = arr;
+        }
+    }
+    if let Some(link) = find_link(links, flow_uri, "ad4m://outputTypes") {
+        if let Some(arr) = decode_string_array(&link.target) {
+            flow.output_types = arr;
+        }
+    }
+
+    // Flow-level `creationHint` — non-empty-string only.
+    if let Some(link) = find_link(links, flow_uri, "ad4m://creationHint") {
+        if let Some(hint) = decode_literal_string(&link.target) {
+            if !hint.is_empty() {
+                flow.creation_hint = Some(hint);
+            }
+        }
+    }
+
+    // Flow-level `context` — ModelQuery[] with the same className guard
+    // as `requires`.
+    if let Some(link) = find_link(links, flow_uri, "ad4m://context") {
+        flow.context = decode_model_query_array(&link.target);
+    }
+
+    // Flow-level `consensusRule` — untagged; a missing `n` or invalid
+    // `fromRole` leaves the field unset rather than shipping half-typed
+    // data to the consensus engine.
+    if let Some(link) = find_link(links, flow_uri, "ad4m://consensusRule") {
+        if let Some(rule) = decode_json_literal::<ConsensusRule>(&link.target) {
+            flow.consensus_rule = Some(rule);
+        }
+    }
+
+    // Start action — v4 field, always emitted as a single JSON literal
+    // when non-empty. Absent-link and empty-array wire shapes both
+    // read as `start_action = vec![]`.
+    if let Some(link) = find_link(links, flow_uri, "ad4m://startAction") {
+        if let Some(actions) = decode_json_literal::<Vec<AD4MAction>>(&link.target) {
+            flow.start_action = actions;
+        }
+    }
+
+    // States — walk every `hasState` edge, gather each state's own
+    // properties. Build a state-uri → state-name index so transition
+    // parsing can resolve endpoints.
+    let mut state_uri_to_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for state_link in find_links(links, flow_uri, "ad4m://hasState") {
+        let state_uri = &state_link.target;
+        let state_name = find_link(links, state_uri, "ad4m://stateName")
+            .and_then(|l| decode_literal_string(&l.target))
+            .unwrap_or_default();
+        state_uri_to_name.insert(state_uri.clone(), state_name.clone());
+
+        let value = find_link(links, state_uri, "ad4m://stateValue")
+            .and_then(|l| decode_literal_number(&l.target))
+            .unwrap_or(0.0);
+
+        let state_check = find_link(links, state_uri, "ad4m://stateCheck")
+            .and_then(|l| decode_json_literal::<LinkPattern>(&l.target))
+            .unwrap_or(LinkPattern {
+                source: None,
+                predicate: String::new(),
+                target: String::new(),
+            });
+
+        let interpretation_hint = find_link(links, state_uri, "ad4m://interpretationHint")
+            .and_then(|l| decode_literal_string(&l.target).filter(|s| !s.is_empty()));
+
+        let requires = find_link(links, state_uri, "ad4m://requires")
+            .and_then(|l| decode_model_query_array(&l.target));
+
+        let semantic_check = find_link(links, state_uri, "ad4m://semanticCheck")
+            .and_then(|l| decode_literal_string(&l.target).filter(|s| !s.is_empty()));
+
+        let consensus_rule = find_link(links, state_uri, "ad4m://consensusRule")
+            .and_then(|l| decode_json_literal::<ConsensusRule>(&l.target));
+
+        flow.states.push(FlowState {
+            name: state_name,
+            value,
+            state_check,
+            interpretation_hint,
+            requires,
+            semantic_check,
+            consensus_rule,
+        });
+    }
+
+    // Transitions — walk every `hasTransition` edge, resolve endpoints
+    // via the state-name index.
+    for transition_link in find_links(links, flow_uri, "ad4m://hasTransition") {
+        let transition_uri = &transition_link.target;
+        let action_name = find_link(links, transition_uri, "ad4m://actionName")
+            .and_then(|l| decode_literal_string(&l.target))
+            .unwrap_or_default();
+        let from_state = find_link(links, transition_uri, "ad4m://fromState")
+            .and_then(|l| state_uri_to_name.get(&l.target).cloned())
+            .unwrap_or_default();
+        let to_state = find_link(links, transition_uri, "ad4m://toState")
+            .and_then(|l| state_uri_to_name.get(&l.target).cloned())
+            .unwrap_or_default();
+        let actions = find_link(links, transition_uri, "ad4m://transitionActions")
+            .and_then(|l| decode_json_literal::<Vec<AD4MAction>>(&l.target))
+            .unwrap_or_default();
+        flow.transitions.push(FlowTransition {
+            action_name,
+            from_state,
+            to_state,
+            actions,
+        });
+    }
+
+    Ok(flow)
+}
+
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
 pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
     let shape: SHACLShape = serde_json::from_str(shacl_json)
@@ -1346,5 +1588,311 @@ mod tests {
         assert_eq!(or.len(), 2);
         assert_eq!(or[0].did_property.as_deref(), Some("member"));
         assert_eq!(or[1].did_property.as_deref(), Some("owner"));
+    }
+
+    // ---------------------------------------------------------------------
+    // parse_flow_from_links — reverse-of-parse_flow_to_links (v4 shape) and
+    // round-trip against the canonical TS toLinks writer (v5 shape).
+    // ---------------------------------------------------------------------
+
+    fn lit_str(s: &str) -> String {
+        format!("literal:string:{}", urlencoding::encode(s))
+    }
+
+    fn lit_num(n: f64) -> String {
+        format!("literal:number:{}", n)
+    }
+
+    fn lit_json<T: serde::Serialize>(v: &T) -> String {
+        let json = serde_json::to_string(v).expect("serializable");
+        format!("literal:string:{}", urlencoding::encode(&json))
+    }
+
+    fn mk_link(source: &str, predicate: &str, target: &str) -> Link {
+        Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        }
+    }
+
+    /// End-to-end round-trip against `parse_flow_to_links`: everything
+    /// the writer emits must survive the reader unchanged. This is the
+    /// v4 shape only (all fields the current writer touches).
+    #[test]
+    fn parse_flow_from_links_roundtrips_v4_writer_output() {
+        let flow_json = r#"{
+            "name": "TODO",
+            "namespace": "todo://",
+            "start_action": [
+                {"action": "addLink", "source": "this", "predicate": "todo://state", "target": "todo://ready"}
+            ],
+            "states": [
+                {"name": "ready", "value": 0.0, "state_check": {"predicate": "todo://state", "target": "todo://ready"}},
+                {"name": "done",  "value": 1.0, "state_check": {"predicate": "todo://state", "target": "todo://done"}}
+            ],
+            "transitions": [
+                {
+                    "action_name": "Complete",
+                    "from_state": "ready",
+                    "to_state": "done",
+                    "actions": [
+                        {"action": "addLink", "source": "this", "predicate": "todo://state", "target": "todo://done"}
+                    ]
+                }
+            ]
+        }"#;
+
+        let links = parse_flow_to_links(flow_json, "TODO").expect("v4 writer");
+        let flow = parse_flow_from_links(&links, "todo://TODOFlow").expect("reader");
+
+        assert_eq!(flow.name, "TODO");
+        assert_eq!(flow.namespace, "todo://");
+        assert_eq!(flow.start_action.len(), 1);
+        assert_eq!(flow.states.len(), 2);
+        assert_eq!(flow.states[0].name, "ready");
+        assert!((flow.states[0].value - 0.0).abs() < f64::EPSILON);
+        assert_eq!(flow.states[0].state_check.predicate, "todo://state");
+        assert_eq!(flow.states[0].state_check.target, "todo://ready");
+        assert_eq!(flow.states[1].name, "done");
+        assert!((flow.states[1].value - 1.0).abs() < f64::EPSILON);
+        assert_eq!(flow.transitions.len(), 1);
+        assert_eq!(flow.transitions[0].action_name, "Complete");
+        assert_eq!(flow.transitions[0].from_state, "ready");
+        assert_eq!(flow.transitions[0].to_state, "done");
+        assert_eq!(flow.transitions[0].actions.len(), 1);
+
+        // v5 fields never emitted by v4 writer → all unset / empty.
+        assert!(flow.interpretation_hint.is_none());
+        assert!(flow.creation_hint.is_none());
+        assert!(flow.consensus_rule.is_none());
+        assert!(flow.context.is_none());
+        assert!(flow.input_types.is_empty());
+        assert!(flow.output_types.is_empty());
+        for state in &flow.states {
+            assert!(state.interpretation_hint.is_none());
+            assert!(state.requires.is_none());
+            assert!(state.semantic_check.is_none());
+            assert!(state.consensus_rule.is_none());
+        }
+    }
+
+    /// Full v5-shape read — hand-built links matching what
+    /// `core/src/shacl/SHACLFlow.ts::toLinks()` emits. Catches drift
+    /// between the TS writer and the Rust reader (which are the two
+    /// halves Model C hangs on).
+    #[test]
+    fn parse_flow_from_links_reads_v5_predicates() {
+        let flow_uri = "coasys://DeliberationFlow";
+        let state_uri = "coasys://Deliberation.Resolution";
+        let transition_uri = "coasys://Deliberation.OverlapToResolution";
+        let overlap_uri = "coasys://Deliberation.Overlap";
+        let requires_json = r#"[{"className": "coasys://Perspective", "count": {"min": 3}}]"#;
+        let context_json = r#"[{"className": "coasys://Proposal"}]"#;
+        let consensus_json =
+            r#"{"n": 2, "fromRole": {"className": "coasys://Role", "didProperty": "member"}}"#;
+
+        let links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Deliberation")),
+            mk_link(
+                flow_uri,
+                "ad4m://interpretationHint",
+                &lit_str("guide toward overlap"),
+            ),
+            mk_link(
+                flow_uri,
+                "ad4m://inputTypes",
+                &lit_json(&vec!["coasys://Proposal".to_string()]),
+            ),
+            mk_link(
+                flow_uri,
+                "ad4m://outputTypes",
+                &lit_json(&vec!["coasys://Resolution".to_string()]),
+            ),
+            mk_link(
+                flow_uri,
+                "ad4m://creationHint",
+                &lit_str("controversial claim surfaces"),
+            ),
+            mk_link(
+                flow_uri,
+                "ad4m://context",
+                &format!("literal:string:{}", urlencoding::encode(context_json)),
+            ),
+            mk_link(
+                flow_uri,
+                "ad4m://consensusRule",
+                &format!("literal:string:{}", urlencoding::encode(consensus_json)),
+            ),
+            mk_link(flow_uri, "ad4m://hasState", overlap_uri),
+            mk_link(overlap_uri, "rdf://type", "ad4m://FlowState"),
+            mk_link(overlap_uri, "ad4m://stateName", &lit_str("Overlap")),
+            mk_link(overlap_uri, "ad4m://stateValue", &lit_num(0.5)),
+            mk_link(
+                overlap_uri,
+                "ad4m://stateCheck",
+                &lit_json(&LinkPattern {
+                    source: None,
+                    predicate: "coasys://state".to_string(),
+                    target: "coasys://overlap".to_string(),
+                }),
+            ),
+            mk_link(flow_uri, "ad4m://hasState", state_uri),
+            mk_link(state_uri, "rdf://type", "ad4m://FlowState"),
+            mk_link(state_uri, "ad4m://stateName", &lit_str("Resolution")),
+            mk_link(state_uri, "ad4m://stateValue", &lit_num(1.0)),
+            mk_link(
+                state_uri,
+                "ad4m://stateCheck",
+                &lit_json(&LinkPattern {
+                    source: None,
+                    predicate: "coasys://state".to_string(),
+                    target: "coasys://resolved".to_string(),
+                }),
+            ),
+            mk_link(
+                state_uri,
+                "ad4m://interpretationHint",
+                &lit_str("participants agree"),
+            ),
+            mk_link(
+                state_uri,
+                "ad4m://requires",
+                &format!("literal:string:{}", urlencoding::encode(requires_json)),
+            ),
+            mk_link(
+                state_uri,
+                "ad4m://semanticCheck",
+                &lit_str("evidence of convergence"),
+            ),
+            mk_link(
+                state_uri,
+                "ad4m://consensusRule",
+                &lit_json(&ConsensusRule {
+                    n: 3,
+                    from_role: None,
+                }),
+            ),
+            mk_link(flow_uri, "ad4m://hasTransition", transition_uri),
+            mk_link(transition_uri, "rdf://type", "ad4m://FlowTransition"),
+            mk_link(transition_uri, "ad4m://actionName", &lit_str("Resolve")),
+            mk_link(transition_uri, "ad4m://fromState", overlap_uri),
+            mk_link(transition_uri, "ad4m://toState", state_uri),
+        ];
+
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+        assert_eq!(flow.name, "Deliberation");
+        assert_eq!(flow.namespace, "coasys://");
+        assert_eq!(
+            flow.interpretation_hint.as_deref(),
+            Some("guide toward overlap")
+        );
+        assert_eq!(flow.input_types, vec!["coasys://Proposal".to_string()]);
+        assert_eq!(flow.output_types, vec!["coasys://Resolution".to_string()]);
+        assert_eq!(
+            flow.creation_hint.as_deref(),
+            Some("controversial claim surfaces")
+        );
+        let ctx = flow.context.as_ref().expect("context present");
+        assert_eq!(ctx.len(), 1);
+        assert_eq!(ctx[0].class_name, "coasys://Proposal");
+        let rule = flow
+            .consensus_rule
+            .as_ref()
+            .expect("flow consensusRule present");
+        assert_eq!(rule.n, 2);
+        assert!(rule.from_role.is_some());
+        assert_eq!(flow.states.len(), 2);
+        let resolution = flow
+            .states
+            .iter()
+            .find(|s| s.name == "Resolution")
+            .expect("Resolution state");
+        assert_eq!(
+            resolution.interpretation_hint.as_deref(),
+            Some("participants agree")
+        );
+        let req = resolution.requires.as_ref().expect("requires present");
+        assert_eq!(req.len(), 1);
+        assert_eq!(req[0].class_name, "coasys://Perspective");
+        assert_eq!(
+            resolution.semantic_check.as_deref(),
+            Some("evidence of convergence")
+        );
+        let state_rule = resolution
+            .consensus_rule
+            .as_ref()
+            .expect("state consensusRule present");
+        assert_eq!(state_rule.n, 3);
+        assert_eq!(flow.transitions.len(), 1);
+        let t = &flow.transitions[0];
+        assert_eq!(t.action_name, "Resolve");
+        assert_eq!(t.from_state, "Overlap");
+        assert_eq!(t.to_state, "Resolution");
+    }
+
+    /// Bad-shape rejection: a `requires` payload whose entries fail
+    /// the `className` guard must be dropped (same policy as the TS
+    /// `isModelQueryShape` reader). Leaving corrupt ModelQueries in
+    /// the returned SHACLFlow would break the consensus engine's
+    /// evidence-lookup with a cryptic empty-classname error at eval
+    /// time — better to swallow at read time.
+    #[test]
+    fn parse_flow_from_links_rejects_malformed_requires() {
+        let flow_uri = "test://BadFlow";
+        let state_uri = "test://Bad.S1";
+        let bad_requires = r#"[{"count": {"min": 1}}]"#; // missing className
+        let links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Bad")),
+            mk_link(flow_uri, "ad4m://hasState", state_uri),
+            mk_link(state_uri, "rdf://type", "ad4m://FlowState"),
+            mk_link(state_uri, "ad4m://stateName", &lit_str("S1")),
+            mk_link(state_uri, "ad4m://stateValue", &lit_num(0.0)),
+            mk_link(
+                state_uri,
+                "ad4m://stateCheck",
+                &lit_json(&LinkPattern {
+                    source: None,
+                    predicate: "".to_string(),
+                    target: "".to_string(),
+                }),
+            ),
+            mk_link(
+                state_uri,
+                "ad4m://requires",
+                &format!("literal:string:{}", urlencoding::encode(bad_requires)),
+            ),
+        ];
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+        assert_eq!(flow.states.len(), 1);
+        // Malformed requires → left unset rather than propagated as a
+        // ModelQuery with empty className.
+        assert!(flow.states[0].requires.is_none());
+    }
+
+    /// Non-Flow-suffix URI → error. Prevents silent misuse where a
+    /// caller passes a state URI expecting flow output.
+    #[test]
+    fn parse_flow_from_links_rejects_non_flow_uri() {
+        let err = parse_flow_from_links(&[], "test://NotEndingProperly").unwrap_err();
+        assert!(format!("{err}").contains("must end with 'Flow'"));
+    }
+
+    /// Empty inputTypes array on-graph → reader treats as unset
+    /// (mirrors TS `if (this.inputTypes.length > 0)` on the write side,
+    /// so absence and empty-array are indistinguishable — both read as
+    /// empty vec).
+    #[test]
+    fn parse_flow_from_links_treats_absent_input_types_as_empty() {
+        let flow_uri = "test://EmptyFlow";
+        let links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Empty")),
+        ];
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+        assert!(flow.input_types.is_empty());
+        assert!(flow.output_types.is_empty());
     }
 }
