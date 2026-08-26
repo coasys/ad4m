@@ -588,6 +588,50 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Harness-dispatched interpretation pass over this perspective (design v3
+     * §6 — the tool-calling counterpart to {@link runInterpretation}). The LLM
+     * sees a live per-class tool surface (`{Class}_query`, `{Class}_get`,
+     * `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives
+     * the extraction via tool calls; buffered proposals drain through the
+     * same overlay gate the single-shot path uses.
+     *
+     * @param transcript ordered `{ speaker, text }` turns
+     * @param basePrefix URI namespace new instance identities are minted under
+     * @param maxToolCalls upper bound on tool calls the harness will make in
+     *   one pass (must be > 0 — use {@link runInterpretation} for the
+     *   classic single-shot path)
+     * @param classes local names of the subject classes to extract into; omit for all
+     * @param modelOverride optional model override; omit for the default LLM
+     */
+    async runInterpretationWithHarness(
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        maxToolCalls: number,
+        classes?: string[],
+        modelOverride?: string,
+        // Optional live-debug observability. When both `observationId` and
+        // `emitDebugEvents` are supplied, every dispatched tool call fires
+        // `ToolCall` + `ToolResult` events on the `auto-processor-event`
+        // topic keyed by `observationId`. Subscribe with
+        // {@link addAutoProcessorEventListener} to render the harness loop
+        // live in a UI. Absent = fast headless path (no telemetry cost).
+        observationId?: string,
+        emitDebugEvents?: boolean,
+    ): Promise<string[]> {
+        return await this.#client.runInterpretationWithHarness(
+            this.#handle.uuid,
+            transcript,
+            basePrefix,
+            maxToolCalls,
+            classes,
+            modelOverride,
+            undefined,
+            observationId,
+            emitDebugEvents,
+        )
+    }
+
+    /**
      * Register a neighbourhood auto-processor on this perspective. The executor
      * then runs interpretation automatically over new source items (like Flux
      * per channel), coordinating which peer processes each batch. Returns the

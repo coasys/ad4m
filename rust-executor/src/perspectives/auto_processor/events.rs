@@ -55,6 +55,18 @@ pub enum AutoProcessorStep {
     /// commit writes. Emitted only when the processor has
     /// `emit_debug_events: true`; carries the response on `llm_output`.
     LlmResponseReceived,
+    /// The harness LLM issued a tool call. Emitted mid-loop (once per
+    /// tool_call in the round), carries `tool_name` + `tool_args_json` so
+    /// a UI can render "LLM asked for X with these args" live, before the
+    /// tool has returned. Fires only from the tool-calling harness path
+    /// (`AutoProcessorConfig.max_tool_calls > 0`) AND only when the
+    /// processor has `emit_debug_events: true`.
+    ToolCall,
+    /// The tool dispatched by the harness returned. Emitted right after
+    /// `ToolCall`; carries `tool_name` + `tool_result` (truncated to a
+    /// bounded prefix, so a large query result doesn't inflate every
+    /// event). Same gating as `ToolCall`.
+    ToolResult,
     /// The pass completed and wrote `bases` (the created/updated instance
     /// URIs; may be empty if the model proposed nothing new).
     Processed,
@@ -128,6 +140,24 @@ pub struct AutoProcessorEvent {
     /// `Processed`. Same size / privacy rules as `llm_input`.
     #[serde(default)]
     pub llm_output: Option<String>,
+    /// Name of the tool the harness LLM invoked (or that just returned).
+    /// Present on [`AutoProcessorStep::ToolCall`] +
+    /// [`AutoProcessorStep::ToolResult`] events; absent on every other
+    /// step. Present only when the processor has `emit_debug_events: true`.
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    /// JSON-encoded arguments the LLM sent to the tool. Present ONLY on
+    /// [`AutoProcessorStep::ToolCall`]; absent on `ToolResult` (where
+    /// `tool_result` carries the return text instead). Same size / gating
+    /// rules as `llm_input` / `llm_output`.
+    #[serde(default)]
+    pub tool_args_json: Option<String>,
+    /// The tool's return text. Present ONLY on
+    /// [`AutoProcessorStep::ToolResult`]; may be truncated by the emitter
+    /// when the tool returns a large payload (e.g. a `_query` result).
+    /// Same size / gating rules as `llm_input` / `llm_output`.
+    #[serde(default)]
+    pub tool_result: Option<String>,
 }
 
 impl AutoProcessorEvent {
@@ -143,6 +173,9 @@ impl AutoProcessorEvent {
             detail: None,
             llm_input: None,
             llm_output: None,
+            tool_name: None,
+            tool_args_json: None,
+            tool_result: None,
         }
     }
     pub fn with_agent_did(mut self, did: &str) -> Self {
@@ -192,6 +225,23 @@ impl AutoProcessorEvent {
     /// finish.
     pub fn with_llm_output(mut self, output: String) -> Self {
         self.llm_output = Some(output);
+        self
+    }
+    /// Attach a tool name + JSON-encoded args — used for
+    /// [`AutoProcessorStep::ToolCall`] so a UI can render "LLM asked for
+    /// `<name>`" live, before the tool returns.
+    pub fn with_tool_call(mut self, name: &str, args_json: String) -> Self {
+        self.tool_name = Some(name.to_string());
+        self.tool_args_json = Some(args_json);
+        self
+    }
+    /// Attach a tool name + return text — used for
+    /// [`AutoProcessorStep::ToolResult`] so a UI can render what the tool
+    /// answered. `result` may be pre-truncated by the emitter (query tools
+    /// can return sizable payloads).
+    pub fn with_tool_result(mut self, name: &str, result: String) -> Self {
+        self.tool_name = Some(name.to_string());
+        self.tool_result = Some(result);
         self
     }
 }

@@ -166,6 +166,13 @@ pub struct AutoProcessorConfig {
     /// May differ from [`Self::existing_scope`] — a watcher can read from a
     /// broader subtree than it writes into, or vice-versa.
     pub mint_scope: Option<Scope>,
+    /// Interpretation-pass tool-call budget. `None` or `Some(0)` = the
+    /// original single-shot LLM path (no tools). `Some(N)` with `N > 0` =
+    /// engage the tool-calling harness (see [`crate::ai_service::harness`])
+    /// and let the LLM make up to `N` tool calls per pass before being
+    /// forced to answer. The cap prevents a stuck or adversarial model
+    /// from DoS'ing the extraction pass.
+    pub max_tool_calls: Option<u32>,
     /// When `true`, enables full debug observability for this processor:
     /// 1. Persists the raw LLM prompt + response on the pass's
     ///    `InterpretationRun` node (`debugPrompt`/`debugResponse`) for
@@ -267,6 +274,9 @@ pub async fn write_processor(
         let json = serde_json::to_string(mint_scope)
             .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
         values["mintScope"] = json.into();
+    }
+    if let Some(max_tool_calls) = cfg.max_tool_calls {
+        values["maxToolCalls"] = max_tool_calls.to_string().into();
     }
     if let Some(v) = emit_debug_events_write {
         values["emitDebugEvents"] = v.to_string().into();
@@ -387,7 +397,7 @@ pub async fn load_processors(
             "processorId", "sourceScopeQuery", "basePrefix",
             "interpretationClasses", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
-            "existingScope", "mintScope", "emitDebugEvents",
+            "existingScope", "mintScope", "maxToolCalls", "emitDebugEvents",
         ]
     })
     .to_string();
@@ -520,6 +530,13 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         None => None,
     };
 
+    // `maxToolCalls`: absent → `None` (single-shot, no harness). Present but
+    // unparseable → bail like the other required-shape fields; silently
+    // defaulting to "no tool calls" on a typo would mask the config bug.
+    let max_tool_calls = match scalar("maxToolCalls") {
+        Some(s) => Some(s.parse::<u32>().ok()?),
+        None => None,
+    };
     let parse_bool = |name: &str| -> Option<Option<bool>> {
         match scalar(name) {
             Some(s) => match s.parse::<bool>() {
@@ -548,6 +565,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         source_window_ms,
         existing_scope,
         mint_scope,
+        max_tool_calls,
         emit_debug_events,
     })
 }
@@ -588,6 +606,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         }
     }
