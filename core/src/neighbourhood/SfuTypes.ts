@@ -122,3 +122,17 @@ export interface CallSessionInfo {
 
 /** Quality preference for selective forwarding (simulcast layer choice). */
 export type SfuQualityPreference = "high" | "medium" | "low" | "auto"
+
+/** Data channel message relayed through the SFU. */
+export interface SfuDataMessage {
+    /** DID of the participant who sent the data. */
+    senderDid: string
+    neighbourhoodUrl: string
+    roomName: string
+    /** Label of the data channel. */
+    channelLabel: string
+    /** True when the payload is binary (base64-encoded in `data`). */
+    binary: boolean
+    /** The payload — UTF-8 text or base64-encoded binary. */
+    data: string
+}

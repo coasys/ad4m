@@ -99,7 +99,7 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
     PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
-    SFU_CALL_RENEGOTIATION_OFFER_TOPIC, SFU_MIGRATE_TOPIC,
+    SFU_CALL_RENEGOTIATION_OFFER_TOPIC, SFU_DATA_CHANNEL_TOPIC, SFU_MIGRATE_TOPIC,
 };
 
 use super::auth::{AppState, AuthContext};
@@ -545,6 +545,22 @@ pub(crate) async fn build_event_stream(
             })
     };
 
+    // SFU data channel relay — fan out to connected clients.
+    // No DID filtering: every participant in the room receives
+    // every data message (same as media relay).  The `senderDid`
+    // field lets clients ignore their own messages.
+    let s_sfu_data = {
+        let rx = pubsub.subscribe(&SFU_DATA_CHANNEL_TOPIC).await;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| async move {
+                match result {
+                    Ok(ref msg) => Some(wrap_event("sfu-data", msg)),
+                    _ => None,
+                }
+            })
+    };
+
     // ── Merge all streams ──
     let agent = stream::select(
         stream::select(s_status, s_apps),
@@ -566,7 +582,10 @@ pub(crate) async fn build_event_stream(
             ),
         ),
     );
-    let sfu = stream::select(s_sfu_reneg, s_sfu_migrate);
+    let sfu = stream::select(
+        stream::select(s_sfu_reneg, s_sfu_migrate),
+        s_sfu_data,
+    );
 
     let top = stream::select(
         stream::select(agent, persp),

@@ -1,6 +1,7 @@
 //! SFU server — manages the shared UDP socket, str0m Rtc instances,
 //! and the Sans I/O event loop driven by tokio.
 
+use base64::Engine;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
 use str0m::change::SdpOffer;
+use str0m::channel::ChannelId;
 use str0m::media::{KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid};
 use str0m::net::Protocol;
 use str0m::{net::Receive, Candidate, Event, IceConnectionState, Input, Output, Rtc};
@@ -57,6 +59,9 @@ pub struct SfuPeer {
     /// Affects how renegotiation offers are routed and how forward
     /// loops treat the participant.
     pub is_pipe: bool,
+    /// Open data channels: ChannelId → label.  Populated from
+    /// `Event::ChannelOpen`; used for data relay routing.
+    pub channels: HashMap<ChannelId, String>,
 }
 
 impl SfuPeer {
@@ -79,6 +84,7 @@ impl SfuPeer {
             pending_offer_sent: None,
             deferred_tracks: Vec::new(),
             is_pipe,
+            channels: HashMap::new(),
         }
     }
 }
@@ -96,6 +102,7 @@ impl std::fmt::Debug for SfuPeer {
             .field("pending_offer", &self.pending_offer.is_some())
             .field("pending_offer_sent", &self.pending_offer_sent)
             .field("is_pipe", &self.is_pipe)
+            .field("channels", &self.channels.len())
             .finish()
     }
 }
@@ -159,6 +166,24 @@ pub enum SfuCommand {
         remote_did: String,
         /// String form of the [`crate::sfu::room::RoomId`].
         room_id: String,
+    },
+    /// Trickle ICE: add a remote ICE candidate to an existing peer.
+    /// The candidate arrives as an SDP candidate-attribute string
+    /// (the `candidate:` line from an `RTCIceCandidateInit`).
+    AddIceCandidate {
+        participant_id: ParticipantId,
+        /// SDP candidate-attribute string, e.g.
+        /// `"candidate:0 1 UDP 2130706431 192.168.1.3 12345 typ host"`.
+        candidate_sdp: String,
+    },
+    /// Relay data to other peers in a room via the data-channel path.
+    /// The event loop writes the payload to every other peer's
+    /// matching data channel (by label).
+    RelayData {
+        participant_id: ParticipantId,
+        channel_label: String,
+        data: Vec<u8>,
+        binary: bool,
     },
     /// Query the quality preferences map.  Returns a snapshot via
     /// oneshot so callers outside the event loop can read it.
@@ -470,6 +495,106 @@ impl SfuServer {
                             }
                         }
                     }
+                    Ok(SfuCommand::AddIceCandidate {
+                        participant_id,
+                        candidate_sdp,
+                    }) => {
+                        let Some(peer) = peers.get_mut(&participant_id) else {
+                            debug!(
+                                "SFU: AddIceCandidate for unknown participant {}",
+                                participant_id
+                            );
+                            continue;
+                        };
+                        match Candidate::from_sdp_string(&candidate_sdp) {
+                            Ok(candidate) => {
+                                peer.rtc.add_remote_candidate(candidate);
+                                debug!(
+                                    "SFU: trickle ICE candidate added for {}",
+                                    participant_id
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "SFU: failed to parse ICE candidate for {}: {:?}",
+                                    participant_id, e
+                                );
+                            }
+                        }
+                    }
+                    Ok(SfuCommand::RelayData {
+                        participant_id,
+                        channel_label,
+                        data,
+                        binary,
+                    }) => {
+                        let origin_room = match peers.get(&participant_id) {
+                            Some(p) => p.room_id.clone(),
+                            None => {
+                                debug!(
+                                    "SFU: RelayData for unknown participant {}",
+                                    participant_id
+                                );
+                                continue;
+                            }
+                        };
+                        let origin_did = peers
+                            .get(&participant_id)
+                            .map(|p| p.agent_did.clone())
+                            .unwrap_or_default();
+
+                        // Relay to all other peers in the same room that
+                        // have an open data channel with a matching label.
+                        for (target_pid, target_peer) in peers.iter_mut() {
+                            if *target_pid == participant_id {
+                                continue;
+                            }
+                            if target_peer.room_id != origin_room {
+                                continue;
+                            }
+                            if let Some((&cid, _)) = target_peer
+                                .channels
+                                .iter()
+                                .find(|(_, label)| *label == &channel_label)
+                            {
+                                if let Some(mut ch) = target_peer.rtc.channel(cid) {
+                                    if let Err(e) = ch.write(binary, &data) {
+                                        debug!(
+                                            "SFU: data relay to {} channel '{}' failed: {:?}",
+                                            target_pid, channel_label, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        // Publish to events_ws so non-WebRTC clients can
+                        // receive data channel messages too.
+                        let payload = serde_json::json!({
+                            "type": "sfu-data",
+                            "senderDid": origin_did,
+                            "neighbourhoodUrl": origin_room.neighbourhood_url,
+                            "roomName": origin_room.room_name,
+                            "channelLabel": channel_label,
+                            "binary": binary,
+                            "data": if binary {
+                                serde_json::Value::String(base64::Engine::encode(
+                                    &base64::engine::general_purpose::STANDARD,
+                                    &data,
+                                ))
+                            } else {
+                                serde_json::Value::String(
+                                    String::from_utf8_lossy(&data).into_owned(),
+                                )
+                            },
+                        });
+                        if let Ok(payload_json) = serde_json::to_string(&payload) {
+                            crate::pubsub::get_global_pubsub_sync().publish_sync(
+                                &crate::pubsub::SFU_DATA_CHANNEL_TOPIC,
+                                &payload_json,
+                            );
+                        }
+                    }
                     Ok(SfuCommand::GetQualityPreferences { reply }) => {
                         let _ = reply.send(quality_preferences.clone());
                     }
@@ -574,6 +699,62 @@ impl SfuServer {
                             }
                             Event::KeyframeRequest(req) => {
                                 keyframe_requests.push((pid.clone(), req));
+                            }
+                            Event::ChannelOpen(cid, label) => {
+                                info!(
+                                    "SFU: peer {} opened data channel '{}' (id {:?})",
+                                    pid, label, cid
+                                );
+                                peer.channels.insert(cid, label);
+                            }
+                            Event::ChannelData(data) => {
+                                // Relay data to all other peers in the same
+                                // room that have a channel with the same
+                                // label.  Collected here and relayed after
+                                // the poll loop (same pattern as media).
+                                if let Some(label) = peer.channels.get(&data.id).cloned() {
+                                    let origin_room = peer.room_id.clone();
+                                    let origin_did = peer.agent_did.clone();
+                                    let relay_binary = data.binary;
+                                    let relay_data = data.data;
+
+                                    // Can't relay inside this loop (borrows
+                                    // peers mutably), so push for deferred
+                                    // relay below.  Simpler: publish via
+                                    // pubsub so events_ws fans it out.
+                                    let payload = serde_json::json!({
+                                        "type": "sfu-data",
+                                        "senderDid": origin_did,
+                                        "neighbourhoodUrl": origin_room.neighbourhood_url,
+                                        "roomName": origin_room.room_name,
+                                        "channelLabel": label,
+                                        "binary": relay_binary,
+                                        "data": if relay_binary {
+                                            serde_json::Value::String(base64::Engine::encode(
+                                                &base64::engine::general_purpose::STANDARD,
+                                                &relay_data,
+                                            ))
+                                        } else {
+                                            serde_json::Value::String(
+                                                String::from_utf8_lossy(&relay_data).into_owned(),
+                                            )
+                                        },
+                                    });
+                                    if let Ok(payload_json) = serde_json::to_string(&payload) {
+                                        crate::pubsub::get_global_pubsub_sync().publish_sync(
+                                            &crate::pubsub::SFU_DATA_CHANNEL_TOPIC,
+                                            &payload_json,
+                                        );
+                                    }
+                                }
+                            }
+                            Event::ChannelClose(cid) => {
+                                if let Some(label) = peer.channels.remove(&cid) {
+                                    info!(
+                                        "SFU: peer {} closed data channel '{}'",
+                                        pid, label
+                                    );
+                                }
                             }
                             _ => {}
                         },

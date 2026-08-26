@@ -168,6 +168,13 @@ lazy_static::lazy_static! {
     /// [`crate::sfu::types::SfuMigrateEvent`].  Filtered by `targetDid`
     /// in the events_ws fanout — only the named participant receives it.
     pub static ref SFU_MIGRATE_TOPIC: String = "sfu-migrate-topic".to_owned();
+    /// SFU data channel relay.  When a participant sends data on a
+    /// WebRTC data channel, the SFU publishes it here so events_ws can
+    /// fan it out to subscribers.  Payload carries `senderDid`,
+    /// `channelLabel`, `binary`, and `data` (base64 for binary, UTF-8
+    /// text otherwise).  Filtered by room membership in the events_ws
+    /// fanout.
+    pub static ref SFU_DATA_CHANNEL_TOPIC: String = "sfu-data-channel-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

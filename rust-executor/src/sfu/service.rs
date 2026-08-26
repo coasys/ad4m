@@ -953,6 +953,70 @@ impl SfuService {
         Ok(true)
     }
 
+    /// Trickle ICE: add a remote ICE candidate to a participant's
+    /// WebRTC connection.  The candidate arrives as the raw SDP
+    /// candidate-attribute string (the `candidate:` line extracted from
+    /// an `RTCIceCandidateInit`).
+    pub async fn add_ice_candidate(
+        &self,
+        neighbourhood_url: &str,
+        room_name: &str,
+        agent_did: &str,
+        candidate_sdp: &str,
+    ) -> Result<bool, String> {
+        let room_id = RoomId::new(neighbourhood_url, room_name);
+        let rooms = self.rooms.read().await;
+        let room = rooms
+            .get_room(&room_id)
+            .ok_or_else(|| RoomError::NotFound.to_string())?;
+        let pid = room
+            .participant_id_for_did(agent_did)
+            .ok_or_else(|| "Agent not in room".to_string())?;
+        self.server
+            .command_tx
+            .send(SfuCommand::AddIceCandidate {
+                participant_id: pid,
+                candidate_sdp: candidate_sdp.to_string(),
+            })
+            .await
+            .map_err(|e| format!("Failed to send AddIceCandidate command: {}", e))?;
+        Ok(true)
+    }
+
+    /// Relay data through the SFU to all other participants in a room.
+    /// The data is written to their matching data channel (by label) if
+    /// one exists, and always published to the `sfu-data` events_ws
+    /// topic so non-WebRTC subscribers can receive it.
+    pub async fn send_data(
+        &self,
+        neighbourhood_url: &str,
+        room_name: &str,
+        agent_did: &str,
+        channel_label: &str,
+        data: Vec<u8>,
+        binary: bool,
+    ) -> Result<bool, String> {
+        let room_id = RoomId::new(neighbourhood_url, room_name);
+        let rooms = self.rooms.read().await;
+        let room = rooms
+            .get_room(&room_id)
+            .ok_or_else(|| RoomError::NotFound.to_string())?;
+        let pid = room
+            .participant_id_for_did(agent_did)
+            .ok_or_else(|| "Agent not in room".to_string())?;
+        self.server
+            .command_tx
+            .send(SfuCommand::RelayData {
+                participant_id: pid,
+                channel_label: channel_label.to_string(),
+                data,
+                binary,
+            })
+            .await
+            .map_err(|e| format!("Failed to send RelayData command: {}", e))?;
+        Ok(true)
+    }
+
     /// Number of fully-established pipe transports to other SFU nodes
     /// across all rooms.  Used by the wind tunnel cascade scenarios to
     /// assert that auto-establish + the gossip-driven offer/answer
