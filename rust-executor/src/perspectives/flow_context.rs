@@ -12,14 +12,26 @@
 //! - Pure helpers that turn a parsed [`SHACLFlow`] + current-state name into
 //!   the above.
 //!
-//! # What slice 10.1b will add (NOT here)
+//! # What slice 10.1b adds (this commit)
 //!
-//! `gather_active_flow_context(&mut PerspectiveInstance, &AgentContext)
-//! -> Vec<FlowContext>` — the perspective-side loader that reads every
-//! live `FlowInstance` off the graph and calls
-//! [`summarize_flow_instance`] for each. Kept out of this slice so the
-//! pure logic can be exhaustively unit-tested without any perspective /
-//! model_query wiring.
+//! - [`FlowInstanceRecord`] — the raw scalar row for one live
+//!   `FlowInstance`, as it comes off the perspective graph.
+//! - [`parse_flow_instance_from_hydrated`] — pure JSON→record parser
+//!   (isolated for exhaustive testing without a live perspective).
+//! - [`load_flow_instances`] — thin `PerspectiveInstance::model_query`
+//!   wrapper that returns every active `FlowInstance` (optionally
+//!   filtered to one `subject` base expression).
+//! - [`build_flow_contexts`] — pairs each record with its parsed
+//!   [`SHACLFlow`] and hands the pair to [`summarize_flow_instance`].
+//!
+//! # What slice 10.1c will add (NOT here)
+//!
+//! `parse_flow_from_links` — the Rust-side mirror of TS
+//! `SHACLFlow.fromLinks`. Needed so [`build_flow_contexts`]' caller can
+//! materialise a `flows_by_name: HashMap<String, SHACLFlow>` off the
+//! perspective's SDNA links without a JS RPC round-trip. Deferred out
+//! of this commit because the TS `fromLinks` is ~400 lines and porting
+//! it deserves its own PR scope.
 //!
 //! # Why pure
 //!
@@ -31,9 +43,12 @@
 
 #![allow(dead_code)]
 
+use crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ConsensusRule, FlowState, ModelQuery, PropertyCondition, SHACLFlow,
 };
+use std::collections::HashMap;
 
 /// One live `FlowInstance` summarized for the LLM prompt-builder.
 ///
@@ -271,6 +286,141 @@ pub fn render_consensus_rule(rule: &ConsensusRule) -> String {
             render_model_query(role)
         ),
     }
+}
+
+// ============================================================================
+// Slice 10.1b — perspective-side FlowInstance loading + record→context pairing
+// ============================================================================
+
+/// One live `FlowInstance` as read off the perspective graph — the raw
+/// scalar row that pairs with a parsed [`SHACLFlow`] to produce a
+/// [`FlowContext`].
+///
+/// Kept flat (no reference to the parsed flow definition) so the
+/// perspective read can be independent of the SDNA-flow catalogue read.
+/// The two are joined by [`build_flow_contexts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowInstanceRecord {
+    /// The flow-name discriminator — matches `SHACLFlow.name` and is
+    /// the identity property of the `FlowInstance` @Model class.
+    pub flow_name: String,
+    /// Instance URI — `ad4m://flow/instance/{id}` (see
+    /// [`super::flow_classes::flow_instance_uri`]).
+    pub instance_uri: String,
+    /// Base expression this instance is bound to. Named `subject` on
+    /// the `FlowInstance` class to avoid the Ad4mModel synthetic-field
+    /// collision that broke `baseExpression` in the reserved-field
+    /// rename fix (commit `e6362e5ca`).
+    pub subject: String,
+    /// Current state name (matches a `FlowState.name` on the flow).
+    pub current_state: String,
+    /// ISO-8601 timestamp the instance was minted at. `None` when the
+    /// scalar wasn't set on-graph — rare but not fatal; the extraction
+    /// pass renders "start time unknown" rather than skipping the record.
+    pub started_at: Option<String>,
+}
+
+/// Parse one hydrated `FlowInstance` JSON object (as returned by
+/// [`PerspectiveInstance::model_query`]) into a [`FlowInstanceRecord`].
+///
+/// Returns `None` when any of `id` / `flow` / `subject` / `currentState`
+/// is missing — an untyped or half-written FlowInstance is silently
+/// skipped rather than failing the whole extraction pass. The typical
+/// cause is a mid-mint crash between constructor and setter writes; the
+/// half-record shows up in the next model_query result and we don't
+/// want that to poison every future extraction until it's hand-cleaned.
+pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowInstanceRecord> {
+    let instance_uri = v.get("id").and_then(|x| x.as_str())?.to_string();
+    let flow_name = v.get("flow").and_then(|x| x.as_str())?.to_string();
+    let subject = v.get("subject").and_then(|x| x.as_str())?.to_string();
+    let current_state = v.get("currentState").and_then(|x| x.as_str())?.to_string();
+    let started_at = v
+        .get("startedAt")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    Some(FlowInstanceRecord {
+        flow_name,
+        instance_uri,
+        subject,
+        current_state,
+        started_at,
+    })
+}
+
+/// Load every live `FlowInstance` on the perspective. When `subject` is
+/// `Some(uri)`, filters to instances tied to that base expression;
+/// otherwise returns every instance on the perspective.
+///
+/// Silently returns `Ok(vec![])` when the `FlowInstance` class hasn't
+/// been registered yet on this perspective — a freshly-created
+/// perspective simply has no live flows, and treating that as a
+/// perspective-wide error would poison the extraction pass on every
+/// call before the first flow is ever spawned.
+pub async fn load_flow_instances(
+    perspective: &PerspectiveInstance,
+    subject: Option<&str>,
+) -> anyhow::Result<Vec<FlowInstanceRecord>> {
+    let query = match subject {
+        None => serde_json::json!({}),
+        Some(uri) => serde_json::json!({ "where": { "subject": uri } }),
+    };
+    let json = match perspective
+        .model_query(FLOW_INSTANCE_CLASS, &query.to_string())
+        .await
+    {
+        Ok(j) => j,
+        Err(e) => {
+            // Absent-class case: no FlowInstances have ever been minted
+            // on this perspective, so the SHACL shape isn't registered
+            // yet. That's a valid steady state — return empty rather
+            // than propagating an error that would break Model C's
+            // extraction pass on every call.
+            let msg = format!("{e:#}");
+            if msg.contains("Shape not found") || msg.contains("shape not found") {
+                return Ok(vec![]);
+            }
+            return Err(anyhow::anyhow!(
+                "load_flow_instances: model_query failed: {msg}"
+            ));
+        }
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("load_flow_instances: response not JSON: {e:#}"))?;
+    let instances = parsed
+        .get("instances")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(instances
+        .iter()
+        .filter_map(parse_flow_instance_from_hydrated)
+        .collect())
+}
+
+/// Pair each active [`FlowInstanceRecord`] with its parsed
+/// [`SHACLFlow`] definition and produce [`FlowContext`]s for prompt
+/// insertion.
+///
+/// Records whose `flow_name` is absent from `flows_by_name` are
+/// silently skipped — a stale FlowInstance (its flow was
+/// unregistered) shouldn't fail the whole extraction pass. Order is
+/// preserved from `records`.
+pub fn build_flow_contexts(
+    records: &[FlowInstanceRecord],
+    flows_by_name: &HashMap<String, SHACLFlow>,
+) -> Vec<FlowContext> {
+    records
+        .iter()
+        .filter_map(|r| {
+            let flow = flows_by_name.get(&r.flow_name)?;
+            Some(summarize_flow_instance(
+                flow,
+                r.instance_uri.clone(),
+                r.subject.clone(),
+                r.current_state.clone(),
+            ))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -652,6 +802,184 @@ mod tests {
         assert_eq!(
             sum.semantic_check.as_deref(),
             Some("Does the scope match what was actually agreed?")
+        );
+    }
+
+    // ------------- parse_flow_instance_from_hydrated (slice 10.1b) -------------
+
+    #[test]
+    fn parse_flow_instance_happy_path() {
+        let v = serde_json::json!({
+            "id": "ad4m://flow/instance/inst-1",
+            "baseExpression": "ad4m://flow/instance/inst-1",
+            "flow": "Delivery",
+            "subject": "ad4m://task/foo",
+            "currentState": "scoped",
+            "startedAt": "2026-08-26T09:00:00Z",
+            "author": "did:key:z6Mk…",
+            "timestamp": "2026-08-26T09:00:00.001Z"
+        });
+        let r = parse_flow_instance_from_hydrated(&v).expect("required scalars present");
+        assert_eq!(r.instance_uri, "ad4m://flow/instance/inst-1");
+        assert_eq!(r.flow_name, "Delivery");
+        assert_eq!(r.subject, "ad4m://task/foo");
+        assert_eq!(r.current_state, "scoped");
+        assert_eq!(r.started_at.as_deref(), Some("2026-08-26T09:00:00Z"));
+    }
+
+    #[test]
+    fn parse_flow_instance_extra_fields_ignored() {
+        // The Ad4mModel hydration path emits synthetic fields (createdAt,
+        // updatedAt, author, timestamp) alongside the class properties. The
+        // parser must ignore anything it doesn't need — accepting a superset
+        // of keys is how the reader stays forward-compatible with new
+        // properties (see the reserved-field fix in `e6362e5ca`).
+        let v = serde_json::json!({
+            "id": "ad4m://flow/instance/inst-x",
+            "flow": "Deliberation",
+            "subject": "ad4m://proposal/bar",
+            "currentState": "perspectives",
+            "startedAt": "2026-08-26T10:00:00Z",
+            "createdAt": 1787751652750_u64,
+            "updatedAt": 1787751652751_u64,
+            "author": "did:key:zzzz",
+            "some_future_property_the_llm_added": "hello",
+        });
+        let r = parse_flow_instance_from_hydrated(&v).expect("required scalars present");
+        assert_eq!(r.flow_name, "Deliberation");
+        assert_eq!(r.current_state, "perspectives");
+    }
+
+    #[test]
+    fn parse_flow_instance_missing_required_returns_none() {
+        // Missing `flow` → mid-mint crash between constructor and setter
+        // writes. Skip the record rather than pollute Vec<FlowContext>
+        // with a half-typed instance.
+        let v = serde_json::json!({
+            "id": "ad4m://flow/instance/half",
+            "subject": "ad4m://task/foo",
+            "currentState": "identified",
+        });
+        assert!(parse_flow_instance_from_hydrated(&v).is_none());
+    }
+
+    #[test]
+    fn parse_flow_instance_missing_started_at_still_parses() {
+        // startedAt is optional — the record still parses; the extraction
+        // pass renders "start time unknown" rather than skipping.
+        let v = serde_json::json!({
+            "id": "ad4m://flow/instance/no-ts",
+            "flow": "Delivery",
+            "subject": "ad4m://task/foo",
+            "currentState": "identified",
+        });
+        let r = parse_flow_instance_from_hydrated(&v).expect("required scalars present");
+        assert!(r.started_at.is_none());
+    }
+
+    #[test]
+    fn parse_flow_instance_non_string_required_returns_none() {
+        // A scalar that's on-graph as a non-string (e.g. flow name mistakenly
+        // stored as a number) is treated the same as missing — one half-typed
+        // record must not block extraction of the well-typed rest.
+        let v = serde_json::json!({
+            "id": "ad4m://flow/instance/bad",
+            "flow": 42, // wrong type
+            "subject": "ad4m://task/foo",
+            "currentState": "identified",
+        });
+        assert!(parse_flow_instance_from_hydrated(&v).is_none());
+    }
+
+    // ------------- build_flow_contexts (slice 10.1b) -------------
+
+    fn record(flow: &str, uri: &str, subject: &str, state: &str) -> FlowInstanceRecord {
+        FlowInstanceRecord {
+            flow_name: flow.to_string(),
+            instance_uri: uri.to_string(),
+            subject: subject.to_string(),
+            current_state: state.to_string(),
+            started_at: Some("2026-08-26T09:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn build_flow_contexts_pairs_records_with_flows() {
+        let flow = delivery_flow();
+        let mut catalogue = HashMap::new();
+        catalogue.insert("Delivery".to_string(), flow);
+        let records = vec![record(
+            "Delivery",
+            "ad4m://flow/instance/inst-1",
+            "ad4m://task/foo",
+            "in_progress",
+        )];
+        let ctxs = build_flow_contexts(&records, &catalogue);
+        assert_eq!(ctxs.len(), 1);
+        assert_eq!(ctxs[0].flow_name, "Delivery");
+        assert_eq!(ctxs[0].current_state, "in_progress");
+        // Wiring through summarize_flow_instance — reachable states from
+        // `in_progress` on the delivery flow are `review` + `identified`.
+        let names: Vec<&str> = ctxs[0]
+            .reachable_next_states
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["review", "identified"]);
+    }
+
+    #[test]
+    fn build_flow_contexts_skips_records_with_unknown_flow() {
+        // A stale FlowInstance whose flow was unregistered must not fail
+        // extraction — silently skip and keep processing the rest.
+        let records = vec![
+            record("Ghost", "ad4m://flow/instance/g", "ad4m://x", "s0"),
+            record(
+                "Delivery",
+                "ad4m://flow/instance/d",
+                "ad4m://task/y",
+                "identified",
+            ),
+        ];
+
+        // Empty catalogue → all skipped, empty result (not error).
+        let empty: HashMap<String, SHACLFlow> = HashMap::new();
+        assert!(build_flow_contexts(&records, &empty).is_empty());
+
+        // Only Delivery known → Ghost skipped, Delivery kept.
+        let mut catalogue_with_delivery: HashMap<String, SHACLFlow> = HashMap::new();
+        catalogue_with_delivery.insert("Delivery".to_string(), delivery_flow());
+        let ctxs = build_flow_contexts(&records, &catalogue_with_delivery);
+        assert_eq!(ctxs.len(), 1);
+        assert_eq!(ctxs[0].flow_name, "Delivery");
+    }
+
+    #[test]
+    fn build_flow_contexts_preserves_record_order() {
+        // Order matters — the prompt-builder inserts flows in the order
+        // the caller supplies. A HashMap-based iteration would be
+        // non-deterministic; we iterate `records`.
+        let mut catalogue = HashMap::new();
+        catalogue.insert("Delivery".to_string(), delivery_flow());
+        let records = vec![
+            record(
+                "Delivery",
+                "ad4m://flow/instance/a",
+                "ad4m://x",
+                "identified",
+            ),
+            record("Delivery", "ad4m://flow/instance/b", "ad4m://y", "scoped"),
+            record("Delivery", "ad4m://flow/instance/c", "ad4m://z", "review"),
+        ];
+        let ctxs = build_flow_contexts(&records, &catalogue);
+        let uris: Vec<&str> = ctxs.iter().map(|c| c.instance_uri.as_str()).collect();
+        assert_eq!(
+            uris,
+            vec![
+                "ad4m://flow/instance/a",
+                "ad4m://flow/instance/b",
+                "ad4m://flow/instance/c",
+            ]
         );
     }
 
