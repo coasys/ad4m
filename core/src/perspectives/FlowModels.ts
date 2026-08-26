@@ -94,3 +94,34 @@ export class FlowTransitionProposal extends Ad4mModel {
   @Property({ through: "ad4m://flow/created_at", required: true })
   createdAt: string = "";
 }
+
+// ── FlowInstance ────────────────────────────────────────────────────────────
+// On-graph node minted by the engine when a flow is started on a specific
+// base expression. Its URI is the value that `FlowTransitionProposal.flowInstance`
+// references. Mirrors `rust-executor/src/perspectives/hardwired_sdna/flow_instance.json`.
+
+@Model({ name: "FlowInstance" })
+export class FlowInstance extends Ad4mModel {
+  /**
+   * Name of the `SHACLFlow` this instance runs. First-declared property so
+   * `buildSHACL` derives the shape namespace from its `through` prefix —
+   * `ad4m://flow/flow_name` → `ad4m://` → target_class `ad4m://FlowInstance`.
+   * Also the discriminator predicate `findAll` uses to isolate instance nodes.
+   * (Presence-based discrimination — the same value can appear on many
+   * `FlowInstance` nodes when a flow is running on multiple bases.)
+   */
+  @Property({ through: "ad4m://flow/flow_name", required: true, identity: true })
+  flow: string = "";
+
+  /** URI of the subject expression this flow runs on. */
+  @Property({ through: "ad4m://flow/base", required: true })
+  baseExpression: string = "";
+
+  /** Name of the state the flow is currently in. */
+  @Property({ through: "ad4m://flow/current_state", required: true })
+  currentState: string = "";
+
+  /** RFC3339 timestamp when the flow was started on this base. */
+  @Property({ through: "ad4m://flow/created_at", required: true })
+  createdAt: string = "";
+}

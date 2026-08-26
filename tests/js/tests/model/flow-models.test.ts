@@ -28,7 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ad4mClient, Link, PerspectiveProxy } from "@coasys/ad4m";
-import { FlowTransitionProposal } from "@coasys/ad4m";
+import { FlowInstance, FlowTransitionProposal } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
 import { startAgent } from "../../helpers/index.js";
 
@@ -210,6 +210,94 @@ describe("FlowTransitionProposal — @Model", function () {
 
     expect(shape.targetClass, "target class must match Rust SDNA")
       .to.equal(expectedTargetClass);
+    expect(actual, "TS shape must match Rust SDNA path→name pairs")
+      .to.deep.equal(expected);
+  });
+});
+
+describe("FlowInstance — @Model", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-models-instance");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-models-instance-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    await FlowInstance.register(p);
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  it("FlowInstance.findAll() returns instances by flow-name discriminator", async () => {
+    // Simulate what the Rust flow engine writes when startFlow lands.
+    const instance = "ad4m://flow/instance/inst-1";
+    await p.add(new Link({
+      source: instance,
+      predicate: "ad4m://flow/flow_name",
+      target: "literal:string:Delivery",
+    }));
+    await p.add(new Link({
+      source: instance,
+      predicate: "ad4m://flow/base",
+      target: "literal:string:ad4m%3A%2F%2Fsome-subject",
+    }));
+    await p.add(new Link({
+      source: instance,
+      predicate: "ad4m://flow/current_state",
+      target: "literal:string:Scoped",
+    }));
+    await p.add(new Link({
+      source: instance,
+      predicate: "ad4m://flow/created_at",
+      target: "literal:string:2026-08-26T09%3A45%3A00Z",
+    }));
+
+    const all = await FlowInstance.findAll(p);
+    expect(all.length).to.equal(1);
+    expect(all[0].flow).to.equal("Delivery");
+    expect(all[0].baseExpression).to.equal("ad4m://some-subject");
+    expect(all[0].currentState).to.equal("Scoped");
+    expect(all[0].createdAt).to.equal("2026-08-26T09:45:00Z");
+  });
+
+  it("FlowInstance @Model shape matches Rust flow_instance.json", () => {
+    const SDNA_DIR = path.resolve(
+      __dirname,
+      "../../../../rust-executor/src/perspectives/hardwired_sdna",
+    );
+    const raw = fs.readFileSync(path.join(SDNA_DIR, "flow_instance.json"), "utf-8");
+    const parsed = JSON.parse(raw) as {
+      target_class: string;
+      properties: Array<{ path: string; name: string }>;
+    };
+
+    const { shape } = (FlowInstance as any).generateSHACL();
+    const actual = new Map<string, string>(
+      shape.properties.map((prop: any): [string, string] => [prop.path, prop.name]),
+    );
+    const expected = new Map(parsed.properties.map((prop) => [prop.path, prop.name]));
+
+    expect(shape.targetClass, "target class must match Rust SDNA")
+      .to.equal(parsed.target_class);
     expect(actual, "TS shape must match Rust SDNA path→name pairs")
       .to.deep.equal(expected);
   });
