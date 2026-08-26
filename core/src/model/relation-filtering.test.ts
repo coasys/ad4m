@@ -617,6 +617,21 @@ describe("where clause validation", () => {
       }
     }).toThrow(/where.*filter.*contradictory/i);
   });
+
+  it("should throw if both where and filter:false are provided on a getter relation", () => {
+    expect(() => {
+      @Model({ name: "InvalidGetterWhereFilterFalse" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+          target: () => FlaggedTarget,
+          where: { status: "active" },
+          filter: false,
+        })
+        items: string[] = [];
+      }
+    }).toThrow(/where.*filter.*contradictory/i);
+  });
 });
 
 describe("where clause compilation", () => {

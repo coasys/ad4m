@@ -815,7 +815,7 @@ export interface RelationOptions {
      */
     through?: string;
     /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations.
-     *  Cannot be combined with `getter`. */
+     *  Combines with `getter`, where it names the class the traversal's values hydrate into. */
     target?: () => Ad4mModelLike;
     /**
      * Custom getter to resolve the relation values. Use this for custom graph traversals.
@@ -863,7 +863,8 @@ export interface RelationOptions {
      * auto-derived from the target shape (flags + required properties).
      * Providing `where` overrides this auto-derivation.
      *
-     * Mutually exclusive with `getter` and `filter: false`.
+     * Mutually exclusive with `filter: false`. Combines with `getter`, where it
+     * is applied as a post-getter filter against the target class.
      *
      * @example
      * ```typescript
@@ -942,7 +943,16 @@ function resolveRelationArgs(
         ? { ...(second || {}), target: first }
         : first;
 
-    // getter is mutually exclusive with through, target, and where
+    // `where` and `filter: false` contradict each other on every relation,
+    // getter-backed ones included — checked before the getter path returns.
+    if (opts.where && opts.filter === false) {
+        throw new Error(
+            'Relation decorator: `where` and `filter: false` are contradictory. ' +
+            '`where` adds filtering constraints; `filter: false` disables filtering.'
+        );
+    }
+
+    // getter is mutually exclusive with through
     if (opts.getter) {
         if (opts.through) {
             throw new Error(
@@ -989,16 +999,6 @@ function resolveRelationArgs(
     // Default predicate when not provided
     if (!opts.through) {
         opts.through = 'ad4m://has_child';
-    }
-
-    // where validation
-    if (opts.where) {
-        if (opts.filter === false) {
-            throw new Error(
-                'Relation decorator: `where` and `filter: false` are contradictory. ' +
-                '`where` adds filtering constraints; `filter: false` disables filtering.'
-            );
-        }
     }
 
     return opts;
