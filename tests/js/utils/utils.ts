@@ -182,8 +182,13 @@ export async function startExecutor(dataPath: string,
     hcAppPort: number,
     languageLanguageOnly: boolean = false,
     adminCredential?: string,
-    proxyUrl: string = "wss://dev-test-bootstrap2.holochain.org",
-    bootstrapUrl: string = "https://dev-test-bootstrap2.holochain.org",
+    // NEVER default to dev-test-bootstrap2.holochain.org — that server is
+    // an outdated HC test bootstrap that our HC 0.7.0 fork does not target.
+    // Tests MUST pass the local kitsune2-bootstrap-srv URLs from
+    // runHcLocalServices(). Non-test callers should pass bootstrap.atom.dev.
+    // Made required to fail-loud instead of silently talking to a stale server.
+    proxyUrl: string,
+    bootstrapUrl: string,
     relayUrl?: string,
     enableMcp: boolean = false,
     mcpPort?: number,
