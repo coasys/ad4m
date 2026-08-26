@@ -58,6 +58,13 @@ pub struct ShaclProperty {
     ///                          language.
     ///   - `Some(<addr>)`     → expression on that custom language.
     pub resolve_language: Option<String>,
+    /// Natural-language hint describing this property (or relation's) meaning.
+    /// Read back from the `ad4m://interpretation_hint` link on the property
+    /// node. Steers the harness LLM's tool descriptions — for a relation, this
+    /// is what makes `basedOn` mean "which prior beliefs did this intention
+    /// derive from" instead of just "some link". `None` when the SDNA
+    /// declared no hint on this property.
+    pub interpretation_hint: Option<String>,
 }
 
 impl ShaclClass {
@@ -199,6 +206,7 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
                 getter: p.getter.clone(),
                 class: class_uri,
                 resolve_language: p.resolve_language.clone(),
+                interpretation_hint: p.interpretation_hint.clone(),
             }
         })
         .collect();
@@ -419,6 +427,28 @@ pub async fn load_class_properties_with_uri(
             _ => None,
         };
 
+        // Interpretation hint (ad4m://interpretation_hint) — natural-language
+        // meaning for this property/relation, used by the harness's tool
+        // schema generation to explain what a predicate is for.
+        let interpretation_hint = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("ad4m://interpretation_hint".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => {
+                let target = &links[0].data.target;
+                let raw = target
+                    .strip_prefix("literal://string:")
+                    .or_else(|| target.strip_prefix("literal:string:"))
+                    .unwrap_or(target);
+                Some(urlencoding::decode(raw).unwrap_or_default().to_string())
+            }
+            _ => None,
+        };
+
         properties.push(ShaclProperty {
             name: prop_name,
             is_collection,
@@ -430,6 +460,7 @@ pub async fn load_class_properties_with_uri(
             getter,
             class: class_uri,
             resolve_language,
+            interpretation_hint,
         });
     }
 

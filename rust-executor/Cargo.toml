@@ -101,6 +101,7 @@ argon2 = { version = "0.5.0", features = ["simple"] }
 rand = "0.8.5"
 base64 = "0.21.0"
 rmcp = { version = "0.15.0", features = ["server", "transport-streamable-http-server"] }
+async-trait = "0.1"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { version = "0.6", features = ["cors", "set-header", "catch-panic"] }

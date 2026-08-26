@@ -62,6 +62,7 @@ dependencies = [
  "ad4m-client",
  "anyhow",
  "argon2 0.5.3",
+ "async-trait",
  "aws-lc-sys 0.35.0",
  "axum",
  "axum-server",
