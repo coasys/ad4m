@@ -2,7 +2,7 @@ use cid::Cid;
 use deno_core::op2;
 use log::{debug, error, info, warn};
 use multibase::Base;
-use multihash::{Code, MultihashDigest};
+use multihash_codetable::{Code, MultihashDigest};
 
 use crate::js_core::error::AnyhowWrapperError;
 #[op2]
