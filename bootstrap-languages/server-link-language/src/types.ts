@@ -157,7 +157,7 @@ export interface AclResponse {
 }
 
 export interface KeysResponse {
-    encryptedKey: string;
+    encryptedKey: SealedRoomKeyEnvelope;
     version: number;
 }
 
