@@ -661,25 +661,19 @@ impl HolochainService {
             }
         }
 
-        // Two-stage network readiness gate before we hand control back to the
-        // caller. Both stages are needed because HC 0.7's `JoinComplete` and
-        // "the peer store has at least one entry" are distinct events, and
-        // the caller's very next step is typically `add_agent_infos`, which
-        // routes via `holochain_p2p.publish_agent_info`. That routing lookup
-        // needs a resolvable peer entry in the target space — an empty peer
-        // store yields K2SpaceNotFound and the info is silently skipped,
-        // which manifests upstream as "cross-node discovery never completes".
-        //
-        // Stage 1 — per-cell: wait for JoinComplete via the fork's built-in
-        //   event-driven method. Fast (~ms) once the k2 space join returns
-        //   Ok. The fork's own enum doc says JoinComplete means "the agent
-        //   has successfully joined the k2 space, but peers may not yet be
-        //   discovered via bootstrap" — hence stage 2.
-        //
-        // Stage 2 — per DNA: wait until at least one peer has appeared in
-        //   the peer store for that DNA, or the fork's internal peer-monitoring
-        //   task has given up. See `await_initial_peer_discovery` below for
-        //   the naming rationale and the polling-vs-subscribe trade-off.
+        // Wait per-cell for the fork's `JoinComplete` event via its built-in
+        // event-driven method. Fast (~ms) once the k2 space join returns Ok.
+        // The fork's own enum doc says JoinComplete means "the agent has
+        // successfully joined the k2 space, but peers may not yet be
+        // discovered via bootstrap" — so an immediately-following
+        // `add_agent_infos` may still hit K2SpaceNotFound. Handling that
+        // was previously done here via a second sync per-DNA peer-store
+        // wait, but that punished the common solo-node startup with ~11s
+        // per DNA (Nico's PR #907 review). Fire-and-forget instead:
+        // `add_agent_infos` already has bounded per-space retries plus a
+        // fingerprint cache to short-circuit truly-unavailable spaces, so
+        // the empty-store case is handled at the correct layer and
+        // install_app returns as soon as the k2 join completes.
         for cell_id in &app_cell_ids {
             if let Err(e) = self
                 .conductor
@@ -693,49 +687,31 @@ impl HolochainService {
             }
         }
 
-        let dna_hashes: std::collections::HashSet<_> =
-            app_cell_ids.iter().map(|c| c.dna_hash().clone()).collect();
-        for dna_hash in &dna_hashes {
-            self.await_initial_peer_discovery(dna_hash, std::time::Duration::from_secs(11))
-                .await;
-        }
-
         let app_info = self.conductor.get_app_info(&app_id).await?;
         let app_info = app_info.ok_or_else(|| anyhow!("App not found: {}", app_id))?;
         Ok(app_info)
     }
 
-    /// Wait until the peer store for `dna_hash` holds at least one peer, or
-    /// the fork's internal peer-monitoring task has given up (whichever is
-    /// sooner). Returns silently in either case — not being able to reach a
-    /// peer at startup is common (single-node deployments, isolated tests,
-    /// first node online) and is surfaced only via log level.
-    ///
-    /// # Naming
-    ///
-    /// Deliberately not called `await_bootstrap_complete`. In a fully p2p
-    /// network the peer store is *never* "complete" — it just accumulates
-    /// as new peers are discovered. "Initial peer discovery" reflects what
-    /// this actually gates on: the *first* peer showing up (so a following
-    /// `add_agent_infos` burst has somewhere to route to), not a false
-    /// milestone that discovery has finished. Framing per Nico's discussion
-    /// with Guillem and Joost from the Holochain team.
-    ///
-    /// # Implementation
-    ///
-    /// Polls `ConductorNetworkState::is_bootstrap_complete` (which is the
-    /// state-side mirror of `NetworkEvent::BootstrapComplete`, fired by the
-    /// fork's `start_peer_monitoring` task once the first peer appears OR
-    /// after its internal 10s cap). We poll rather than subscribe to the
-    /// broadcast channel because subscription races with already-fired
-    /// events — the fork's own `await_cell_network_join_complete` uses a
-    /// subscribe-then-recheck-state bracket to work around this. For this
-    /// call site polling at 200ms with an 11s cap is cheap, simple, and
-    /// avoids re-implementing that bracket AD4M-side. If this ever needs
-    /// to be tighter it should move upstream as a proper `Conductor`
-    /// wrapper (see `crates/holochain/src/conductor/conductor.rs` next to
-    /// `await_cell_network_join_complete`) and dropped here.
-    async fn await_initial_peer_discovery(&self, dna_hash: &DnaHash, timeout: std::time::Duration) {
+    // Note: `await_initial_peer_discovery` (a synchronous per-DNA wait for the
+    // first peer to appear in the peer store, gated on
+    // `ConductorNetworkState::is_bootstrap_complete`) was removed in response
+    // to Nico's PR #907 review. It made solo-node startup pay up to ~11s per
+    // DNA of dead time before the first zome call, and the empty-peer-store
+    // case it was defending against is now handled entirely by
+    // `add_agent_infos` below via bounded per-space retries + a fingerprint
+    // cache. If a future flow again needs a peer-arrival gate, the correct
+    // shape is a `Conductor` wrapper method on the fork that subscribes to
+    // `NetworkEvent::BootstrapComplete` (see
+    // `crates/holochain/src/conductor/conductor.rs` next to
+    // `await_cell_network_join_complete`), not an AD4M-side poll loop.
+    // Historical shape preserved in git via commit that removed it.
+
+    #[cfg(any())]
+    async fn _removed_await_initial_peer_discovery(
+        &self,
+        dna_hash: &DnaHash,
+        timeout: std::time::Duration,
+    ) {
         const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
         let start = std::time::Instant::now();
