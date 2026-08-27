@@ -791,9 +791,12 @@ export class PerspectiveProxy {
      * unrelated classes requiring the same number of triples, which is exactly
      * the case the full list exists to expose.
      *
-     * URIs that match no registered class are **absent from the result** rather
-     * than mapped to an empty list: "not a subject instance" and "an instance of
-     * something this perspective cannot name" are different answers.
+     * A URI is **absent from the result** when no *registered* class matched it.
+     * That covers two situations, and nothing here separates them: the URI may
+     * not be a subject instance at all, or it may be an instance of a class this
+     * perspective has not registered. Absence is used rather than an empty list
+     * because an empty list would claim the stronger thing — that the URI belongs
+     * to no class — which this cannot know.
      *
      * @param uris The expression URIs to classify.
      */
