@@ -76,7 +76,7 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     {
         let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
         return format!(
-            "?_r <{rdf_reifies}> <<( ?source <{}> ?cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts .",
+            "?_r <{rdf_reifies}> <<( ?source <{}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts .",
             prop.predicate
         );
     }
@@ -296,12 +296,7 @@ pub(super) fn all_where_pushable(
 /// interpolated into both the instance query and the `COUNT` query.
 ///
 /// **Conformance patterns** ensure only instances of the target model class
-/// are matched.  They are derived from the shape's required and flag
-/// properties, with multiple fallback tiers:
-/// 1. Required properties → `?source <pred> ?cf_name .`
-/// 2. Flag properties with initial values → `?source <pred> <initial> .`
-/// 3. Any property with an initial value (first match)
-/// 4. Structural fallback using known predicates via `FILTER(?_structPred IN (...))`
+/// are matched — see [`shape_conformance_patterns`] for the tiers.
 ///
 /// **Where patterns** translate the query's `where` clause into SPARQL
 /// `FILTER`/`VALUES` expressions for server-side evaluation.
@@ -352,7 +347,50 @@ pub(super) fn build_query_patterns(
         }
     }
 
-    // Conformance patterns from shape properties
+    // The structural fallback is a last resort, and a parent scope has already
+    // narrowed `?source` to one node's children — narrow enough that a scan of
+    // every node sharing a predicate would cost more than it excludes.
+    let scoped_by_parent = !conformance_patterns.is_empty();
+    conformance_patterns.extend(shape_conformance_patterns(shape, !scoped_by_parent));
+
+    // WHERE clause filters that can be pushed to SPARQL.
+    let where_patterns = query
+        .where_clause
+        .as_ref()
+        .map(|wc| compile_where_clause(wc, shape, resolver).patterns)
+        .unwrap_or_default();
+
+    let conformance = conformance_patterns.join("\n");
+    let where_extra = where_patterns.join("\n");
+
+    (conformance, where_extra)
+}
+
+/// The patterns that say "`?source` is an instance of this class", derived from
+/// the shape alone, in fallback tiers:
+/// 1. Required properties → `?source <pred> ?_cf_name .`
+/// 2. Flag properties with initial values → `?source <pred> <initial> .`
+/// 3. Any property with an initial value (first match)
+/// 4. Structural fallback using known predicates via `FILTER(?_structPred IN (...))`
+///
+/// The helper variables begin `?_` so that [`rebase_into_subquery`] namespaces
+/// them: emitted into a nested clause under their bare names they would collide
+/// with the enclosing class's conformance variable for a property of the same
+/// name, silently requiring the two records to share a value for it.
+///
+/// Split out of [`build_query_patterns`] because a relation quantifier needs the
+/// same answer about its *target* class: `FILTER EXISTS` over the relation's
+/// predicate alone asks whether the record links to anything with the right
+/// properties, while hydration resolves that relation through the target class's
+/// own query — which applies these. Without them a record can match a clause and
+/// come back with the relation empty.
+///
+/// `allow_structural_fallback` gates the final tier, which scans every node
+/// carrying any of the class's predicates. It is the weakest signal and the most
+/// expensive one, so a caller that has already narrowed the subject declines it.
+fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: bool) -> Vec<String> {
+    let mut conformance_patterns = Vec::new();
+
     let mut has_conformance = false;
     for prop in &shape.properties {
         if prop.is_required {
@@ -369,19 +407,19 @@ pub(super) fn build_query_patterns(
                     } else {
                         let escaped = escape_sparql_string(initial);
                         conformance_patterns.push(format!(
-                            "    ?source <{}> ?cf_{safe_name} . FILTER(STR(?cf_{safe_name}) = \"{escaped}\")",
+                            "    ?source <{}> ?_cf_{safe_name} . FILTER(STR(?_cf_{safe_name}) = \"{escaped}\")",
                             prop.predicate
                         ));
                     }
                 } else {
                     conformance_patterns.push(format!(
-                        "    ?source <{}> ?cf_{safe_name} .",
+                        "    ?source <{}> ?_cf_{safe_name} .",
                         prop.predicate
                     ));
                 }
             } else {
                 conformance_patterns.push(format!(
-                    "    ?source <{}> ?cf_{safe_name} .",
+                    "    ?source <{}> ?_cf_{safe_name} .",
                     prop.predicate
                 ));
             }
@@ -404,13 +442,13 @@ pub(super) fn build_query_patterns(
                     } else {
                         let escaped = escape_sparql_string(initial);
                         conformance_patterns.push(format!(
-                            "    ?source <{}> ?cfInit_{safe_name} . FILTER(STR(?cfInit_{safe_name}) = \"{escaped}\")",
+                            "    ?source <{}> ?_cfInit_{safe_name} . FILTER(STR(?_cfInit_{safe_name}) = \"{escaped}\")",
                             prop.predicate
                         ));
                     }
                 } else {
                     conformance_patterns.push(format!(
-                        "    ?source <{}> ?cfInit_{safe_name} .",
+                        "    ?source <{}> ?_cfInit_{safe_name} .",
                         prop.predicate
                     ));
                 }
@@ -420,7 +458,7 @@ pub(super) fn build_query_patterns(
     }
 
     // Fallback: structural matching using known predicates.
-    if !has_conformance && conformance_patterns.is_empty() {
+    if !has_conformance && allow_structural_fallback {
         log::debug!(
             "Model class uses structural conformance fallback — no required/flag properties found. \
              This may match instances from other model classes sharing the same predicates."
@@ -440,17 +478,7 @@ pub(super) fn build_query_patterns(
         }
     }
 
-    // WHERE clause filters that can be pushed to SPARQL.
-    let where_patterns = query
-        .where_clause
-        .as_ref()
-        .map(|wc| compile_where_clause(wc, shape, resolver).patterns)
-        .unwrap_or_default();
-
-    let conformance = conformance_patterns.join("\n");
-    let where_extra = where_patterns.join("\n");
-
-    (conformance, where_extra)
+    conformance_patterns
 }
 
 /// The outcome of compiling a where clause into SPARQL patterns.
@@ -1569,16 +1597,37 @@ fn compile_relation_quantifier(
 
     let mut body = vec![link];
 
+    let target_class = shape
+        .include_relations
+        .iter()
+        .find(|r| r.name == prop_name)
+        .map(|r| r.target_class_name.as_str())
+        .filter(|n| !n.is_empty());
+    let target_shape = match (target_class, resolver) {
+        (Some(class), Some(r)) => r.get_shape(class).ok(),
+        _ => None,
+    };
+
+    // Being linked by the relation's predicate is not the same as being an
+    // instance of the class it names. Hydration resolves the relation through
+    // the target class's own query, which applies these patterns, so without
+    // them a record can satisfy `some: { body: … }` and come back with its
+    // `comments` empty — the filter and the row disagreeing about the same
+    // link. The structural fallback is declined: the link triple has already
+    // narrowed the subject to this record's targets, and a scan of every node
+    // sharing a predicate would cost more inside an `EXISTS` than it excludes.
+    if let Some(ref target_shape) = target_shape {
+        body.extend(rebase_into_subquery(
+            &shape_conformance_patterns(target_shape.as_ref(), false),
+            &namespace,
+            &target_var,
+        ));
+    }
+
     if !inner.is_empty() {
         // The nested clause names properties of the *target* class, so it can
         // only be compiled with that class's shape in hand.
-        let target_class = shape
-            .include_relations
-            .iter()
-            .find(|r| r.name == prop_name)
-            .map(|r| r.target_class_name.as_str())
-            .filter(|n| !n.is_empty())?;
-        let target_shape = resolver?.get_shape(target_class).ok()?;
+        let target_shape = target_shape.as_ref()?;
 
         let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver);
         if !compiled.complete || compiled.patterns.is_empty() {
@@ -1603,7 +1652,7 @@ fn compile_relation_quantifier(
 mod relation_quantifier_tests {
     use super::*;
     use crate::perspectives::model_query::test_helpers::{
-        prop, relation, shape, StaticShapeResolver,
+        flag, prop, relation, shape, StaticShapeResolver,
     };
     use crate::perspectives::model_query::types::{ShapeRelation, WhereOps};
 
@@ -1650,6 +1699,24 @@ mod relation_quantifier_tests {
     fn resolver_with_comment() -> StaticShapeResolver {
         let r = StaticShapeResolver::new();
         r.register("Comment", comment_shape());
+        r
+    }
+
+    /// A Comment that declares its class the way a real model does — a required
+    /// flag — so conformance has something to assert.
+    fn flagged_comment_shape() -> ModelShape {
+        shape(
+            "Comment",
+            vec![
+                flag("type", "we://type", "we://comment"),
+                prop("body", "we://body"),
+            ],
+        )
+    }
+
+    fn resolver_with_flagged_comment() -> StaticShapeResolver {
+        let r = StaticShapeResolver::new();
+        r.register("Comment", flagged_comment_shape());
         r
     }
 
@@ -1783,6 +1850,95 @@ mod relation_quantifier_tests {
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
         assert!(sparql.contains("<we://mention> ?source ."), "{sparql}");
+    }
+
+    #[test]
+    fn the_linked_record_must_conform_to_the_target_class() {
+        // Being linked by `we://comment` is not being a Comment. Hydration
+        // resolves the relation through Comment's own query, so a quantifier
+        // that asks only about the predicate can match a Post whose `comments`
+        // then comes back empty.
+        let s = post_shape();
+        let r = resolver_with_flagged_comment();
+        let clause = wc(vec![(
+            "comments",
+            ops_with(
+                Some(vec![("body", WhereCondition::String("spam".to_string()))]),
+                None,
+            ),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, Some(&r));
+
+        assert!(compiled.complete);
+        let sparql = compiled.patterns.join("\n");
+        let conformance = sparql
+            .lines()
+            .find(|l| l.contains("<we://type> <we://comment>"))
+            .expect("the target class's flag must be asserted: {sparql}");
+        // On the *linked* record, never the Post.
+        assert!(
+            !conformance.contains("?source"),
+            "conformance must be rebased onto the linked record: {conformance}"
+        );
+    }
+
+    #[test]
+    fn conformance_helpers_are_namespaced_like_every_other_helper() {
+        // A required non-flag property binds a helper variable. Left unprefixed
+        // it would collide with the outer class's conformance variable of the
+        // same name, silently requiring the Post and the Comment to share a
+        // value for it.
+        let s = post_shape();
+        let r = StaticShapeResolver::new();
+        let mut c = shape("Comment", vec![prop("body", "we://body")]);
+        c.properties.push({
+            let mut p = prop("title", "we://title");
+            p.is_required = true;
+            p
+        });
+        r.register("Comment", c);
+        let clause = wc(vec![(
+            "comments",
+            ops_with(
+                Some(vec![("body", WhereCondition::String("spam".to_string()))]),
+                None,
+            ),
+        )]);
+
+        let sparql = compile_where_clause(&clause, &s, Some(&r))
+            .patterns
+            .join("\n");
+
+        assert!(
+            sparql.contains("<we://title> ?_q"),
+            "the conformance helper must carry this quantifier's namespace: {sparql}"
+        );
+    }
+
+    #[test]
+    fn a_target_class_with_no_conformance_adds_nothing() {
+        // The structural fallback is declined inside an EXISTS — the link triple
+        // has already narrowed the subject, and a scan of every node sharing a
+        // predicate would cost more than it excludes.
+        let s = post_shape();
+        let r = resolver_with_comment();
+        let clause = wc(vec![(
+            "comments",
+            ops_with(
+                Some(vec![("body", WhereCondition::String("spam".to_string()))]),
+                None,
+            ),
+        )]);
+
+        let sparql = compile_where_clause(&clause, &s, Some(&r))
+            .patterns
+            .join("\n");
+
+        assert!(
+            !sparql.contains("SELECT DISTINCT"),
+            "no structural scan inside the EXISTS: {sparql}"
+        );
     }
 
     #[test]

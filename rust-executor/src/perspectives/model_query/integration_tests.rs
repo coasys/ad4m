@@ -5936,3 +5936,138 @@ async fn test_getter_relation_with_target_class_hydrates_via_include() {
          naming the target class buys",
     );
 }
+
+#[tokio::test]
+async fn test_relation_quantifier_requires_the_target_class() {
+    // A relation quantifier asks "does this Post have a Comment whose body is
+    // 'spam'". Being linked by `we://comment` is not the same as being a
+    // Comment, and hydration knows the difference — it resolves `comments`
+    // through Comment's own query, which applies that class's conformance. A
+    // quantifier that asks only about the predicate matches a Post whose
+    // `comments` then comes back without the node that matched: the filter and
+    // the row disagreeing about one link.
+    let store = SparqlStore::new(None).unwrap();
+
+    let spam = format!("literal:string:{}", literal_percent_encode("spam"));
+
+    // Post A is linked only to a node carrying the body but not the flag.
+    let post_a = "we://postA";
+    let imposter = "we://imposter";
+    store
+        .add_link(&make_link(
+            post_a,
+            "ad4m://type",
+            "we://post",
+            "1700000000000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            post_a,
+            "we://comment",
+            imposter,
+            "1700000000001",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(imposter, "we://body", &spam, "1700000000002"))
+        .unwrap();
+
+    // Post B is linked to a real Comment with the same body.
+    let post_b = "we://postB";
+    let comment = "we://comment1";
+    store
+        .add_link(&make_link(
+            post_b,
+            "ad4m://type",
+            "we://post",
+            "1700000000003",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(post_b, "we://comment", comment, "1700000000004"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            comment,
+            "ad4m://type",
+            "we://comment",
+            "1700000000005",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(comment, "we://body", &spam, "1700000000006"))
+        .unwrap();
+
+    let post_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            }
+        },
+        "relations": {
+            "comments": {
+                "predicate": "we://comment",
+                "targetClassName": "Comment"
+            }
+        }
+    }"#;
+    let comment_json = r#"{
+        "className": "Comment",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "we://comment"
+            },
+            "body": {
+                "predicate": "we://body",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    let resolver = StaticShapeResolver::new();
+    let post_shape = parse_shape_from_json(post_json, "Post").unwrap();
+    resolver.register(
+        "Comment",
+        parse_shape_from_json(comment_json, "Comment").unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "comments".to_string(),
+            WhereCondition::Ops(super::types::WhereOps {
+                some: Some(BTreeMap::from([(
+                    "body".to_string(),
+                    WhereCondition::String("spam".to_string()),
+                )])),
+                ..Default::default()
+            }),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, &post_shape, &query, &resolver)
+        .await
+        .unwrap();
+
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![post_b],
+        "only the Post linked to a real Comment matches — the imposter carries \
+         the body but not the class",
+    );
+}
