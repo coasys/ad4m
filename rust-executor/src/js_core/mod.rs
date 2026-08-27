@@ -22,6 +22,7 @@ use url::Url;
 pub mod agent_extension;
 pub mod error;
 mod futures;
+pub mod holograph_service_extension;
 pub mod languages_extension;
 mod options;
 pub mod pubsub_extension;

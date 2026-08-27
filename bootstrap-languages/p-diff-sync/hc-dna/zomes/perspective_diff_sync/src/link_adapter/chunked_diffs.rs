@@ -1,4 +1,14 @@
+//! Holochain-side adapter onto the substrate-agnostic chunked-diff
+//! splitter / aggregator.
+//!
+//! Step 13a (the wide extraction Nico asked for in the wake-13 audio
+//! note): the pure splitter/aggregator logic now lives in
+//! `perspective_diff_algorithm::ChunkedDiffs`. This module keeps the
+//! HDK IO side (create-entry / get / DHT round-trips) plus the
+//! integrity-zome ↔ algorithm-mirror-type conversions.
+
 use hdk::prelude::*;
+use perspective_diff_algorithm::ChunkedDiffs as AlgoChunkedDiffs;
 use perspective_diff_sync_integrity::{
     EntryTypes, LinkExpression, PerspectiveDiff, PerspectiveDiffEntryReference,
 };
@@ -7,69 +17,110 @@ use crate::errors::SocialContextResult;
 use crate::retriever::PerspectiveDiffRetreiver;
 use crate::{Hash, CHUNK_SIZE};
 
+// ---- integrity ↔ algorithm conversions ---------------------------------
+//
+// The algorithm crate's mirror types have identical serde shape but no
+// HDI/SerializedBytes derives, so the conversions are field-by-field
+// (cheap; no allocations beyond the inner Vecs).
+
+fn link_to_algo(l: LinkExpression) -> perspective_diff_algorithm::LinkExpression {
+    perspective_diff_algorithm::LinkExpression {
+        author: l.author,
+        data: perspective_diff_algorithm::Triple {
+            source: l.data.source,
+            target: l.data.target,
+            predicate: l.data.predicate,
+        },
+        timestamp: l.timestamp,
+        proof: perspective_diff_algorithm::ExpressionProof {
+            signature: l.proof.signature,
+            key: l.proof.key,
+        },
+    }
+}
+
+fn link_from_algo(l: perspective_diff_algorithm::LinkExpression) -> LinkExpression {
+    use perspective_diff_sync_integrity::{ExpressionProof, Triple};
+    LinkExpression {
+        author: l.author,
+        data: Triple {
+            source: l.data.source,
+            target: l.data.target,
+            predicate: l.data.predicate,
+        },
+        timestamp: l.timestamp,
+        proof: ExpressionProof {
+            signature: l.proof.signature,
+            key: l.proof.key,
+        },
+    }
+}
+
+fn diff_to_algo(d: PerspectiveDiff) -> perspective_diff_algorithm::PerspectiveDiff {
+    perspective_diff_algorithm::PerspectiveDiff {
+        additions: d.additions.into_iter().map(link_to_algo).collect(),
+        removals: d.removals.into_iter().map(link_to_algo).collect(),
+    }
+}
+
+fn diff_from_algo(d: perspective_diff_algorithm::PerspectiveDiff) -> PerspectiveDiff {
+    PerspectiveDiff {
+        additions: d.additions.into_iter().map(link_from_algo).collect(),
+        removals: d.removals.into_iter().map(link_from_algo).collect(),
+    }
+}
+
+// ---- HDK adapter -------------------------------------------------------
+
+/// Holochain-flavored wrapper around the algorithm crate's `ChunkedDiffs`.
+/// The internal field is an `AlgoChunkedDiffs` whose chunks are the
+/// algorithm mirror `PerspectiveDiff` — conversions happen on the IO
+/// boundary (`into_entries` / `from_entries`).
 #[derive(Clone)]
 pub struct ChunkedDiffs {
-    max_changes_per_chunk: u16,
-    pub chunks: Vec<PerspectiveDiff>,
+    inner: AlgoChunkedDiffs,
 }
 
 impl ChunkedDiffs {
     pub fn new(max: u16) -> Self {
         Self {
-            max_changes_per_chunk: max,
-            chunks: vec![PerspectiveDiff::new()],
+            inner: AlgoChunkedDiffs::new(max),
         }
+    }
+
+    /// View the underlying chunks as integrity-zome `PerspectiveDiff`
+    /// values. Used by the tests and a couple of `format!("{:?}")`
+    /// debug assertions in pull/commit.
+    pub fn chunks(&self) -> Vec<PerspectiveDiff> {
+        self.inner
+            .chunks
+            .iter()
+            .cloned()
+            .map(diff_from_algo)
+            .collect()
     }
 
     pub fn add_additions(&mut self, links: Vec<LinkExpression>) {
-        let mut reverse_links = links.into_iter().rev().collect::<Vec<_>>();
-        while reverse_links.len() > 0 {
-            let len = self.chunks.len();
-            let current_chunk = self
-                .chunks
-                .get_mut(len - 1)
-                .expect("must have at least one");
-
-            while current_chunk.total_diff_number() < self.max_changes_per_chunk.into()
-                && reverse_links.len() > 0
-            {
-                current_chunk.additions.push(reverse_links.pop().unwrap());
-            }
-
-            if reverse_links.len() > 0 {
-                self.chunks.push(PerspectiveDiff::new())
-            }
-        }
+        self.inner
+            .add_additions(links.into_iter().map(link_to_algo).collect())
     }
 
     pub fn add_removals(&mut self, links: Vec<LinkExpression>) {
-        let mut reverse_links = links.into_iter().rev().collect::<Vec<_>>();
-        while reverse_links.len() > 0 {
-            let len = self.chunks.len();
-            let current_chunk = self
-                .chunks
-                .get_mut(len - 1)
-                .expect("must have at least one");
-
-            while current_chunk.total_diff_number() < self.max_changes_per_chunk.into()
-                && reverse_links.len() > 0
-            {
-                current_chunk.removals.push(reverse_links.pop().unwrap());
-            }
-
-            if reverse_links.len() > 0 {
-                self.chunks.push(PerspectiveDiff::new())
-            }
-        }
+        self.inner
+            .add_removals(links.into_iter().map(link_to_algo).collect())
     }
 
+    /// Write each chunk to the DHT as a `PerspectiveDiffEntryReference`
+    /// with no parents, returning the action hashes.
     pub fn into_entries<Retreiver: PerspectiveDiffRetreiver>(
         self,
     ) -> SocialContextResult<Vec<Hash>> {
         debug!("ChunkedDiffs.into_entries()");
-        self.chunks
+        self.inner
+            .chunks
             .into_iter()
-            .map(|chunk_diff| {
+            .map(|algo_chunk| {
+                let chunk_diff = diff_from_algo(algo_chunk);
                 debug!(
                     "ChunkedDiffs writing chunk of size: {}",
                     chunk_diff.total_diff_number()
@@ -82,6 +133,7 @@ impl ChunkedDiffs {
             .collect()
     }
 
+    /// Recover chunks from the DHT by their action hashes.
     pub fn from_entries<Retreiver: PerspectiveDiffRetreiver>(
         hashes: Vec<Hash>,
     ) -> SocialContextResult<Self> {
@@ -94,20 +146,23 @@ impl ChunkedDiffs {
         for (idx, hash) in hashes.iter().enumerate() {
             debug!(
                 "ChunkedDiffs::from_entries: Loading chunk {}/{} (hash: {:?})",
-                idx + 1, hashes.len(), hash
+                idx + 1,
+                hashes.len(),
+                hash
             );
 
             // NO RETRY LOOP - fail fast if chunks aren't available
             // Validation dependencies ensure chunks arrive before parent entry validates
             // If this fails, the caller will retry the entire operation later
-            let diff_entry = match Retreiver::get::<PerspectiveDiffEntryReference>(hash.clone()) {
+            let diff_entry = match Retreiver::get(hash.clone()) {
                 Ok(entry) => {
                     debug!(
                         "ChunkedDiffs::from_entries: ✓ Chunk {}/{} retrieved successfully",
-                        idx + 1, hashes.len()
+                        idx + 1,
+                        hashes.len()
                     );
                     entry
-                },
+                }
                 Err(e) => {
                     warn!(
                         "ChunkedDiffs::from_entries: ✗ FAILED to retrieve chunk {}/{} (hash: {:?}) - Error: {:?}",
@@ -129,9 +184,12 @@ impl ChunkedDiffs {
             let diff = load_diff_from_entry::<Retreiver>(&diff_entry)?;
             debug!(
                 "ChunkedDiffs::from_entries: Chunk {}/{} processed - additions: {}, removals: {}",
-                idx + 1, hashes.len(), diff.additions.len(), diff.removals.len()
+                idx + 1,
+                hashes.len(),
+                diff.additions.len(),
+                diff.removals.len()
             );
-            diffs.push(diff);
+            diffs.push(diff_to_algo(diff));
         }
 
         debug!(
@@ -140,21 +198,12 @@ impl ChunkedDiffs {
         );
 
         Ok(ChunkedDiffs {
-            max_changes_per_chunk: *CHUNK_SIZE,
-            chunks: diffs,
+            inner: AlgoChunkedDiffs::from_chunks(*CHUNK_SIZE, diffs),
         })
     }
 
     pub fn into_aggregated_diff(self) -> PerspectiveDiff {
-        self.chunks
-            .into_iter()
-            .reduce(|mut accum, mut item| {
-                // No need to clone - we own both accum and item from the iterator
-                accum.additions.append(&mut item.additions);
-                accum.removals.append(&mut item.removals);
-                accum
-            })
-            .unwrap_or(PerspectiveDiff::new())
+        diff_from_algo(self.inner.into_aggregated_diff())
     }
 }
 
@@ -181,7 +230,8 @@ pub fn load_diff_from_entry<Retriever: PerspectiveDiffRetreiver>(
         // Return inline diff
         debug!(
             "load_diff_from_entry: Entry is INLINE - additions: {}, removals: {}",
-            entry.diff.additions.len(), entry.diff.removals.len()
+            entry.diff.additions.len(),
+            entry.diff.removals.len()
         );
         Ok(entry.diff.clone())
     }
@@ -193,89 +243,11 @@ mod tests {
     use crate::retriever::{MockPerspectiveGraph, GLOBAL_MOCKED_GRAPH};
     use crate::utils::create_link_expression;
 
-    #[test]
-    fn can_chunk() {
-        let mut chunks = ChunkedDiffs::new(5);
-
-        chunks.add_additions(vec![
-            create_link_expression("a", "1"),
-            create_link_expression("a", "2"),
-            create_link_expression("a", "3"),
-        ]);
-
-        assert_eq!(chunks.chunks.len(), 1);
-
-        chunks.add_additions(vec![
-            create_link_expression("a", "4"),
-            create_link_expression("a", "5"),
-            create_link_expression("a", "6"),
-        ]);
-
-        assert_eq!(chunks.chunks.len(), 2);
-
-        chunks.add_removals(vec![
-            create_link_expression("a", "1"),
-            create_link_expression("a", "2"),
-            create_link_expression("a", "3"),
-            create_link_expression("a", "4"),
-            create_link_expression("a", "5"),
-            create_link_expression("a", "6"),
-        ]);
-
-        assert_eq!(chunks.chunks.len(), 3);
-    }
-
-    #[test]
-    fn can_aggregate() {
-        let mut chunks = ChunkedDiffs::new(5);
-
-        let _a1 = create_link_expression("a", "1");
-        let _a2 = create_link_expression("a", "2");
-        let _r1 = create_link_expression("r", "1");
-        let _r2 = create_link_expression("r", "2");
-        let _r3 = create_link_expression("r", "3");
-        let _r4 = create_link_expression("r", "4");
-
-        chunks.add_additions(vec![_a1.clone()]);
-        chunks.add_additions(vec![_a2.clone()]);
-        chunks.add_removals(vec![_r1.clone(), _r2.clone(), _r3.clone(), _r4.clone()]);
-
-        assert_eq!(chunks.chunks.len(), 2);
-
-        let diff = chunks.into_aggregated_diff();
-
-        assert_eq!(diff.additions, vec![_a1, _a2]);
-        assert_eq!(diff.removals, vec![_r1, _r2, _r3, _r4]);
-    }
-
-    #[test]
-    fn can_chunk_big_diffs() {
-        let mut chunks = ChunkedDiffs::new(500);
-
-        let mut big_diff_add = Vec::new();
-        for i in 0..5000 {
-            big_diff_add.push(create_link_expression("a", &format!("{}", i)));
-        }
-        chunks.add_additions(big_diff_add);
-
-        let mut big_diff_remove = Vec::new();
-        for i in 0..800 {
-            big_diff_remove.push(create_link_expression("a", &format!("{}", i)));
-        }
-        chunks.add_removals(big_diff_remove);
-
-        let mut big_diff_add = Vec::new();
-        for i in 0..213 {
-            big_diff_add.push(create_link_expression("a", &format!("{}", i)));
-        }
-        chunks.add_additions(big_diff_add);
-
-        assert_eq!(chunks.chunks.len(), 13);
-        for i in 0..12 {
-            assert_eq!(chunks.chunks[i].total_diff_number(), 500);
-        }
-        assert_eq!(chunks.chunks[12].total_diff_number(), 13);
-    }
+    // NOTE: the pure splitter/aggregator unit tests (can_chunk,
+    // can_aggregate, can_chunk_big_diffs) moved to the algorithm crate
+    // alongside the `ChunkedDiffs` struct itself. The remaining tests
+    // exercise the HDK IO + integrity-conversion boundary, which still
+    // lives here.
 
     #[test]
     fn can_write_and_read_entries() {
@@ -294,7 +266,7 @@ mod tests {
         }
         chunks.add_additions(big_diff_add);
 
-        assert_eq!(chunks.chunks.len(), 10);
+        assert_eq!(chunks.chunks().len(), 10);
 
         let chunks_clone = chunks.clone();
         let hashes = chunks
@@ -303,10 +275,10 @@ mod tests {
         let read_chunks = ChunkedDiffs::from_entries::<MockPerspectiveGraph>(hashes)
             .expect("from_entries does not error");
 
-        assert_eq!(read_chunks.chunks.len(), 10);
+        assert_eq!(read_chunks.chunks().len(), 10);
         assert_eq!(
-            format!("{:?}", read_chunks.chunks),
-            format!("{:?}", chunks_clone.chunks)
+            format!("{:?}", read_chunks.chunks()),
+            format!("{:?}", chunks_clone.chunks())
         );
     }
 
@@ -337,7 +309,7 @@ mod tests {
         chunks.add_additions(big_diff.clone());
 
         // This creates 3 chunk entries (50 items each)
-        assert_eq!(chunks.chunks.len(), 3);
+        assert_eq!(chunks.chunks().len(), 3);
 
         // Store the chunk entries and get their hashes
         let chunk_hashes = chunks

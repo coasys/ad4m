@@ -1,108 +1,44 @@
+//! Holochain-side adapter onto the substrate-agnostic topo-sort.
+//!
+//! The algorithm itself now lives in the `perspective-diff-algorithm` crate
+//! (Step 1.5 of the holograph spike). This module concretizes it on
+//! `HoloHash<Action>` + the integrity-zome `PerspectiveDiffEntryReference`,
+//! and provides the `HasDiffParents` impl that bridges them.
+
 use crate::errors::{SocialContextError, SocialContextResult};
 use hdk::prelude::*;
+use perspective_diff_algorithm::TopoSortError;
 use perspective_diff_sync_integrity::PerspectiveDiffEntryReference;
-use std::collections::BTreeSet;
 
-// Applies Kahn's algorithm for topologically sorting a graph
+type Hash = HoloHash<holo_hash::hash_type::Action>;
+
+/// Backwards-compatible re-export of the topo-sort entry point used by
+/// `link_adapter::workspace` and `link_adapter::pull`.
+///
+/// The `HasDiffParents<Hash>` impl on `PerspectiveDiffEntryReference` lives
+/// in `perspective_diff_sync_integrity` (orphan rule), so we just call
+/// straight into the algorithm crate here.
 pub fn topo_sort_diff_references(
-    arr: &Vec<(
-        HoloHash<holo_hash::hash_type::Action>,
-        PerspectiveDiffEntryReference,
-    )>,
-) -> SocialContextResult<
-    Vec<(
-        HoloHash<holo_hash::hash_type::Action>,
-        PerspectiveDiffEntryReference,
-    )>,
-> {
-    type Hash = HoloHash<holo_hash::hash_type::Action>;
-    let mut result = Vec::<(Hash, PerspectiveDiffEntryReference)>::new();
-
-    // first collect orphaned nodes (=without parent) as starting points:
-    let mut orphaned_nodes: Vec<(Hash, PerspectiveDiffEntryReference)> = arr
-        .iter()
-        .filter(|&e| e.1.parents == None)
-        .cloned()
-        .collect();
-
-    if orphaned_nodes.len() == 0 {
-        debug!("No orphans found! Length: {}, list: {:?}", arr.len(), arr);
-        return Err(SocialContextError::InternalError(
-            "Can't topologically sort list without orphan!",
-        ));
-    }
-
-    let mut edges = BTreeSet::new();
-    for i in 0..arr.len() {
-        if let Some(parents) = &arr[i].1.parents {
-            for p in 0..parents.len() {
-                let child = arr[i].0.clone();
-                let parent = parents[p].clone();
-                edges.insert((child, parent));
-            }
+    arr: &Vec<(Hash, PerspectiveDiffEntryReference)>,
+) -> SocialContextResult<Vec<(Hash, PerspectiveDiffEntryReference)>> {
+    perspective_diff_algorithm::topo_sort_diff_references(arr).map_err(|e| match e {
+        TopoSortError::NoOrphan => {
+            debug!("No orphans found! Length: {}, list: {:?}", arr.len(), arr);
+            SocialContextError::InternalError("Can't topologically sort list without orphan!")
         }
-    }
-
-    // Starting from the nodes without parents...
-    while let Some(n) = orphaned_nodes.pop() {
-        //.. we put them into the result list.
-        result.push(n.clone());
-
-        println!("Added orphan {:?}", n);
-
-        // and then we look for any nodes that have it as parent
-        // (using the edges set)
-        let edges_with_n_as_parent = edges
-            .iter()
-            .filter(|&e| e.1 == n.0)
-            .cloned()
-            .collect::<Vec<(Hash, Hash)>>();
-
-        println!("Edges with orphan as parent {:?}", edges_with_n_as_parent);
-
-        // So for every parent relationship with n as parent...
-        for edge in &edges_with_n_as_parent {
-            println!("Removing edge {:?}", edge);
-            // we remove that edge
-            edges.remove(edge);
-
-            // and then check if that child of n has any other parents...
-            let child = edge.0.clone();
-
-            println!("Found child {:?}", child);
-            let edges_with_child_as_child = edges
-                .iter()
-                .filter(|&e| e.0 == child)
-                .cloned()
-                .collect::<Vec<(Hash, Hash)>>();
-
-            println!("Edges with child as child {:?}", edges_with_child_as_child);
-
-            // if the child does not have any other parents (left unprocessed)
-            if edges_with_child_as_child.len() == 0 {
-                // we're good to add the child to the results as well.
-                let child_item = arr.iter().find(|&e| e.0 == child).ok_or(SocialContextError::InternalError("Topological sort couldn't find child in input vector, which was mentioned in an edge. This can only be an error in the topological sorting code.."))?;
-                println!("Adding newly orphaned child {:?}", child_item);
-                orphaned_nodes.push((child.clone(), child_item.1.clone()));
-            }
+        TopoSortError::MissingChild(child) => {
+            debug!("Topo-sort missing child: {}", child);
+            SocialContextError::InternalError(
+                "Topological sort couldn't find child in input vector, which was mentioned in an edge. This can only be an error in the topological sorting code..",
+            )
         }
-    }
-
-    if edges.len() > 0 {
-        debug!(
-            "Unresolved parent links after topologically sorting: {:?}",
-            edges
-        );
-
-        debug!("Number of unresolved parent links {:?}", edges.len());
-        debug!("Number of items to sort: {:?}", arr.len());
-        Err(SocialContextError::InternalError(
-            "Cycle or missing nodes detected. Unresolved parent links after topologically sorting.",
-        ))
-        //Ok(result)
-    } else {
-        Ok(result)
-    }
+        TopoSortError::UnresolvedEdges => {
+            debug!("Unresolved parent links after topologically sorting");
+            SocialContextError::InternalError(
+                "Cycle or missing nodes detected. Unresolved parent links after topologically sorting.",
+            )
+        }
+    })
 }
 
 #[cfg(test)]

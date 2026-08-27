@@ -1,5 +1,6 @@
 //use chrono::Timelike;
 use hdk::prelude::*;
+use perspective_diff_algorithm as algo;
 use perspective_diff_sync_integrity::{
     EntryTypes, HashBroadcast, LinkTypes, LocalHashReference, PerspectiveDiff,
     PerspectiveDiffEntryReference,
@@ -19,7 +20,7 @@ use crate::{Hash, CHUNK_SIZE, ENABLE_SIGNALS, SNAPSHOT_INTERVAL};
 /// Holochain's 4MB entry size limit.
 const CHUNKING_THRESHOLD: usize = 500;
 
-pub fn commit<Retriever: PerspectiveDiffRetreiver>(
+pub fn commit<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
     diff: PerspectiveDiff,
     my_did: String,
 ) -> SocialContextResult<HoloHash<holo_hash::hash_type::Action>> {
@@ -29,9 +30,7 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
 
     let mut entries_since_snapshot = 0;
     if initial_current_revision.is_some() {
-        let current = Retriever::get::<PerspectiveDiffEntryReference>(
-            initial_current_revision.clone().unwrap().hash,
-        )?;
+        let current = Retriever::get(initial_current_revision.clone().unwrap().hash)?;
         entries_since_snapshot = current.diffs_since_snapshot;
     };
     debug!(
@@ -80,16 +79,20 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             const RETRY_DELAY_MS: u64 = 100;
 
             loop {
-                match Retriever::get::<PerspectiveDiffEntryReference>(chunk_hash.clone()) {
+                match Retriever::get(chunk_hash.clone()) {
                     Ok(_) => {
-                        debug!("===PerspectiveDiffSync.commit(): Chunk {}/{} verified available", idx + 1, chunk_hashes.len());
+                        debug!(
+                            "===PerspectiveDiffSync.commit(): Chunk {}/{} verified available",
+                            idx + 1,
+                            chunk_hashes.len()
+                        );
                         break;
                     }
                     Err(e) => {
                         retry_count += 1;
                         if retry_count >= MAX_RETRIES {
                             return Err(SocialContextError::InternalError(
-                                "Failed to verify chunk availability after creation"
+                                "Failed to verify chunk availability after creation",
                             ));
                         }
                         debug!(
@@ -110,7 +113,10 @@ pub fn commit<Retriever: PerspectiveDiffRetreiver>(
             }
         }
 
-        debug!("===PerspectiveDiffSync.commit(): All {} chunks verified, creating parent entry", chunk_hashes.len());
+        debug!(
+            "===PerspectiveDiffSync.commit(): All {} chunks verified, creating parent entry",
+            chunk_hashes.len()
+        );
 
         // Create the main entry reference with chunk hashes instead of inline diff
         let entry = PerspectiveDiffEntryReference {
@@ -240,7 +246,7 @@ pub fn add_active_agent_link<Retriever: PerspectiveDiffRetreiver>() -> SocialCon
     Ok(())
 }
 
-pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(
+pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver + algo::RevisionsRetriever>(
     my_did: &str,
 ) -> SocialContextResult<Option<Hash>> {
     //debug!("Running broadcast_current");
@@ -249,8 +255,7 @@ pub fn broadcast_current<Retriever: PerspectiveDiffRetreiver>(
 
     if current.is_some() {
         let current_revision = current.clone().unwrap();
-        let entry_ref =
-            Retriever::get::<PerspectiveDiffEntryReference>(current_revision.hash.clone())?;
+        let entry_ref = Retriever::get(current_revision.hash.clone())?;
 
         let signal_data = HashBroadcast {
             reference: entry_ref,

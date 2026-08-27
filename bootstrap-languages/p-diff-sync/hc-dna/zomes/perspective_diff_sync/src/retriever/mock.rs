@@ -12,9 +12,14 @@ use std::sync::Mutex;
 
 use super::PerspectiveDiffRetreiver;
 use crate::errors::{SocialContextError, SocialContextResult};
+use crate::link_adapter::conversions::{
+    entry_ref_from_algo, entry_ref_to_algo, hash_from_algo, hash_ref_to_algo, hash_to_algo,
+    local_hash_ref_to_algo,
+};
 use crate::link_adapter::workspace::NULL_NODE;
 use crate::utils::create_link_expression;
 use crate::Hash;
+use perspective_diff_algorithm as algo;
 
 #[derive(Debug)]
 pub struct MockPerspectiveGraph {
@@ -22,42 +27,33 @@ pub struct MockPerspectiveGraph {
 }
 
 impl PerspectiveDiffRetreiver for MockPerspectiveGraph {
-    fn get<T>(hash: Hash) -> SocialContextResult<T>
-    where
-        T: TryFrom<SerializedBytes, Error = SerializedBytesError>,
-    {
-        let value = &GLOBAL_MOCKED_GRAPH
+    fn get(hash: Hash) -> SocialContextResult<PerspectiveDiffEntryReference> {
+        let value = GLOBAL_MOCKED_GRAPH
             .lock()
             .expect("Could not get lock on graph map")
             .graph_map
             .get(&hash)
             .expect("Could not find entry in map")
             .to_owned();
-        Ok(T::try_from(value.to_owned())?)
+        Ok(PerspectiveDiffEntryReference::try_from(value)?)
     }
 
-    fn get_with_timestamp<T>(hash: Hash) -> SocialContextResult<(T, DateTime<Utc>)>
-    where
-        T: TryFrom<SerializedBytes, Error = SerializedBytesError>,
-    {
-        let value = &GLOBAL_MOCKED_GRAPH
+    fn get_with_timestamp(
+        hash: Hash,
+    ) -> SocialContextResult<(PerspectiveDiffEntryReference, DateTime<Utc>)> {
+        let value = GLOBAL_MOCKED_GRAPH
             .lock()
             .expect("Could not get lock on graph map")
             .graph_map
             .get(&hash)
             .expect("Could not find entry in map")
             .to_owned();
-        Ok((T::try_from(value.to_owned())?, Utc::now()))
+        Ok((PerspectiveDiffEntryReference::try_from(value)?, Utc::now()))
     }
 
-    fn create_entry<I, E: std::fmt::Debug, E2>(entry: I) -> SocialContextResult<Hash>
-    where
-        ScopedEntryDefIndex: for<'a> TryFrom<&'a I, Error = E2>,
-        EntryVisibility: for<'a> From<&'a I>,
-        Entry: TryFrom<I, Error = E>,
-        WasmError: From<E>,
-        WasmError: From<E2>,
-    {
+    fn create_entry(
+        entry: perspective_diff_sync_integrity::EntryTypes,
+    ) -> SocialContextResult<Hash> {
         let mut object_store = GLOBAL_MOCKED_GRAPH
             .lock()
             .expect("Could not get lock on OBJECT_STORE");
@@ -113,6 +109,75 @@ impl PerspectiveDiffRetreiver for MockPerspectiveGraph {
             .expect("Could not get lock on LATEST_REVISION");
         *revision = Some(hash);
         Ok(())
+    }
+}
+
+// Step 13b-C phase 2: bridge to the algorithm-crate's `WorkspaceRetriever`
+// trait. Conversions take the algo `Hash` → HoloHash via the existing
+// integrity-zome retrieval, then return the algo mirror entry-ref.
+//
+// The mock graph never carries Snapshot links — the workspace tests
+// that need snapshots are the holochain-side `snapshots::tests`, not
+// the algorithm-crate's BFS tests. Return `Ok(None)` for snapshots.
+impl algo::WorkspaceRetriever for MockPerspectiveGraph {
+    fn get_p_diff_reference(
+        hash: &algo::Hash,
+    ) -> algo::AlgoResult<algo::PerspectiveDiffEntryReference> {
+        let h = hash_from_algo(hash);
+        let entry = <Self as PerspectiveDiffRetreiver>::get(h)
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(entry_ref_to_algo(entry))
+    }
+
+    fn get_snapshot_by_target(
+        _target_hash: &algo::Hash,
+    ) -> algo::AlgoResult<Option<algo::Snapshot>> {
+        Ok(None)
+    }
+}
+
+// Step 13b-D — round-trips through the existing
+// `PerspectiveDiffRetreiver::create_entry` (which hashes the
+// SerializedBytes payload, matching MockPerspectiveGraph's hashing
+// convention).
+impl algo::SnapshotRetriever for MockPerspectiveGraph {
+    fn create_diff_entry(
+        entry: algo::PerspectiveDiffEntryReference,
+    ) -> algo::AlgoResult<algo::Hash> {
+        let integrity = entry_ref_from_algo(entry);
+        let hash = <Self as PerspectiveDiffRetreiver>::create_entry(
+            perspective_diff_sync_integrity::EntryTypes::PerspectiveDiffEntryReference(integrity),
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(hash_to_algo(&hash))
+    }
+}
+
+// Step 13b-E — forwards to the existing HDK-trait methods, which back
+// onto the in-process `CURRENT_REVISION` / `LATEST_REVISION` Mutex
+// statics declared further down this file.
+impl algo::RevisionsRetriever for MockPerspectiveGraph {
+    fn current_revision() -> algo::AlgoResult<Option<algo::LocalHashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::current_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(local_hash_ref_to_algo))
+    }
+
+    fn latest_revision() -> algo::AlgoResult<Option<algo::HashReference>> {
+        let rev = <Self as PerspectiveDiffRetreiver>::latest_revision()
+            .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))?;
+        Ok(rev.map(hash_ref_to_algo))
+    }
+
+    fn update_current_revision(
+        hash: algo::Hash,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> algo::AlgoResult<()> {
+        <Self as PerspectiveDiffRetreiver>::update_current_revision(
+            hash_from_algo(&hash),
+            timestamp,
+        )
+        .map_err(|e| algo::AlgoError::Retriever(format!("{}", e)))
     }
 }
 
@@ -434,6 +499,7 @@ fn can_create_graph_from_dot() {
 
 #[test]
 fn example_test() {
+    use crate::link_adapter::conversions::hash_to_algo;
     use crate::link_adapter::workspace::Workspace;
 
     fn update() {
@@ -468,8 +534,8 @@ fn example_test() {
 
     let mut workspace = Workspace::new();
     let res = workspace.collect_until_common_ancestor::<MockPerspectiveGraph>(
-        ActionHash::from_raw_36(vec![5; 36]),
-        ActionHash::from_raw_36(vec![4; 36]),
+        hash_to_algo(&ActionHash::from_raw_36(vec![5; 36])),
+        hash_to_algo(&ActionHash::from_raw_36(vec![4; 36])),
     );
     println!("Got result: {:#?}", res);
 }
@@ -509,9 +575,8 @@ fn can_get_and_create_mocked_holochain_objects() {
         *graph = MockPerspectiveGraph::from_dot(dot).expect("Could not create graph");
     }
     update();
-    let diff_ref = MockPerspectiveGraph::get::<PerspectiveDiffEntryReference>(node_id_hash(
-        &dot_structures::Id::Plain(String::from("1")),
-    ));
+    let diff_ref =
+        MockPerspectiveGraph::get(node_id_hash(&dot_structures::Id::Plain(String::from("1"))));
     assert!(diff_ref.is_ok());
 
     use perspective_diff_sync_integrity::{
@@ -528,6 +593,6 @@ fn can_get_and_create_mocked_holochain_objects() {
     ));
     assert!(commit.is_ok());
 
-    let get_commit = MockPerspectiveGraph::get::<PerspectiveDiffEntryReference>(commit.unwrap());
+    let get_commit = MockPerspectiveGraph::get(commit.unwrap());
     assert!(get_commit.is_ok());
 }

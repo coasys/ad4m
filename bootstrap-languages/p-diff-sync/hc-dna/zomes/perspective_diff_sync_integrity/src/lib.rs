@@ -1,6 +1,13 @@
 use chrono::{DateTime, Utc};
 use hdi::prelude::*;
 
+// Bridge to the substrate-agnostic algorithm crate (Step 1.5):
+// implementing `HasDiffParents` on `PerspectiveDiffEntryReference` here —
+// rather than in p-diff-sync — sidesteps the orphan rule, since both
+// the trait (in `perspective_diff_algorithm`) and the type (here in
+// `perspective_diff_sync_integrity`) are foreign to p-diff-sync.
+use perspective_diff_algorithm::HasDiffParents;
+
 #[derive(
     Serialize, Deserialize, Clone, SerializedBytes, Debug, PartialEq, Eq, Hash, Ord, PartialOrd,
 )]
@@ -26,7 +33,19 @@ pub struct LinkExpression {
     pub proof: ExpressionProof,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes, Default, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    SerializedBytes,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Ord,
+    PartialOrd,
+)]
 pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
@@ -56,7 +75,7 @@ impl PerspectiveDiff {
     pub fn total_diff_number(&self) -> usize {
         self.additions.len() + self.removals.len()
     }
-    
+
     pub fn get_sb(self) -> ExternResult<SerializedBytes> {
         self.try_into()
             .map_err(|error| wasm_error!(WasmErrorInner::Host(String::from(error))))
@@ -245,7 +264,9 @@ impl PerspectiveDiffEntryReference {
 
     /// Check if this entry uses chunked storage
     pub fn is_chunked(&self) -> bool {
-        self.diff_chunks.as_ref().map_or(false, |chunks| !chunks.is_empty())
+        self.diff_chunks
+            .as_ref()
+            .map_or(false, |chunks| !chunks.is_empty())
     }
 
     /// Backward compatibility method to extract the diff data
@@ -257,9 +278,23 @@ impl PerspectiveDiffEntryReference {
     // Compare using tuple ordering: entries with parents come first,
     // then by parent hashes, then by diffs_since_snapshot,
     // then by total diff count, then by diff contents
-    fn comparison_key(&self) -> (bool, &Option<Vec<HoloHash<holo_hash::hash_type::Action>>>, usize, usize, &PerspectiveDiff) {
+    fn comparison_key(
+        &self,
+    ) -> (
+        bool,
+        &Option<Vec<HoloHash<holo_hash::hash_type::Action>>>,
+        usize,
+        usize,
+        &PerspectiveDiff,
+    ) {
         let has_parents = self.parents.is_some();
-        (!has_parents, &self.parents, self.diffs_since_snapshot, self.diff.total_diff_number(), &self.diff)
+        (
+            !has_parents,
+            &self.parents,
+            self.diffs_since_snapshot,
+            self.diff.total_diff_number(),
+            &self.diff,
+        )
     }
 }
 
@@ -272,6 +307,12 @@ impl PartialOrd for PerspectiveDiffEntryReference {
 impl Ord for PerspectiveDiffEntryReference {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.comparison_key().cmp(&other.comparison_key())
+    }
+}
+
+impl HasDiffParents<HoloHash<holo_hash::hash_type::Action>> for PerspectiveDiffEntryReference {
+    fn parents(&self) -> Option<&[HoloHash<holo_hash::hash_type::Action>]> {
+        self.parents.as_deref()
     }
 }
 
@@ -317,7 +358,9 @@ pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
                 }
 
                 if !missing.is_empty() {
-                    return Ok(ValidateCallbackResult::UnresolvedDependencies(UnresolvedDependencies::Hashes(missing)));
+                    return Ok(ValidateCallbackResult::UnresolvedDependencies(
+                        UnresolvedDependencies::Hashes(missing),
+                    ));
                 }
             }
 

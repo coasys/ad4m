@@ -173,6 +173,75 @@ globalThis.__handleHolochainSignal__ = async function(signal) {
 };
 
 /**
+ * Creates a Holograph delegate object for a given language address.
+ *
+ * Mirrors createHolochainDelegate: a thin facade around the
+ * process-global HOLOGRAPH_SERVICE (installed by the
+ * holograph_service deno extension), scoped lazily to the language's
+ * neighborhood handle. The language calls
+ * `holographDelegate.commit(diff)` etc. without having to thread the
+ * numeric handle through every call.
+ *
+ * The Step-5 host.js exports (holographCreateNeighborhood, etc.) keep
+ * the *raw* numeric-handle shape for WASM languages that prefer it;
+ * this wrapper exposes the AD4M JS Language ergonomic shape on
+ * __holographDelegate__.
+ */
+function createHolographDelegate(languageAddress) {
+    let handle = null;
+    return {
+        async createNeighborhood(spaceId, storageDir) {
+            handle = await globalThis.HOLOGRAPH_SERVICE.createNeighborhood(spaceId, storageDir);
+            return handle;
+        },
+        // host.js's `holographCommit(handle, diff)` forwards both args
+        // for the raw-handle shape; this delegate uses its own captured
+        // handle (set by createNeighborhood). Accept the extra handle
+        // positionally so `diff` lands in the right slot.
+        async commit(_handleArg, diff) {
+            if (handle == null) {
+                throw new Error(
+                    `[${languageAddress}] holograph: commit called before createNeighborhood`
+                );
+            }
+            return await globalThis.HOLOGRAPH_SERVICE.commit(handle, diff);
+        },
+        // For all single-handle methods host.js passes (handle); we
+        // accept the positional arg but use the captured handle as
+        // source of truth. Multi-arg methods (joinAgent) likewise.
+        async render(_handleArg) {
+            if (handle == null) return { links: [] };
+            return await globalThis.HOLOGRAPH_SERVICE.render(handle);
+        },
+        async nextEmitted(_handleArg) {
+            if (handle == null) return null;
+            return await globalThis.HOLOGRAPH_SERVICE.nextEmitted(handle);
+        },
+        async joinAgent(_handleArg, agentKeyB64) {
+            if (handle == null) return null;
+            return await globalThis.HOLOGRAPH_SERVICE.joinAgent(handle, agentKeyB64);
+        },
+        async currentRevision(_handleArg) {
+            if (handle == null) return null;
+            return await globalThis.HOLOGRAPH_SERVICE.currentRevision(handle);
+        },
+        async latestRevision(_handleArg) {
+            if (handle == null) return null;
+            return await globalThis.HOLOGRAPH_SERVICE.latestRevision(handle);
+        },
+        async closeNeighborhood(_handleArg) {
+            if (handle == null) return;
+            const h = handle;
+            handle = null;
+            return await globalThis.HOLOGRAPH_SERVICE.closeNeighborhood(h);
+        },
+        currentHandle() {
+            return handle;
+        },
+    };
+}
+
+/**
  * Creates a Holochain delegate object for a given language address.
  * Provides registerDNAs, call, and callAsync methods.
  */
@@ -288,6 +357,7 @@ async function initLanguage(contextJson) {
     const languageAddress = context.Holochain.__languageAddress;
 
     const holochainDelegate = createHolochainDelegate(languageAddress);
+    const holographDelegate = createHolographDelegate(languageAddress);
     const ad4mSignal = createAd4mSignal(languageAddress);
 
     // Build an agent proxy that delegates to the global AGENT ops.
@@ -309,6 +379,7 @@ async function initLanguage(contextJson) {
 
     // Set globals for non-serializable delegates (WASM languages access these via globalThis)
     globalThis.__holochainDelegate__ = holochainDelegate;
+    globalThis.__holographDelegate__ = holographDelegate;
     globalThis.__ad4mSignal__ = ad4mSignal;
     globalThis.__agentProxy__ = agentProxy;
 
@@ -414,4 +485,5 @@ async function initLanguage(contextJson) {
 
 globalThis.initLanguage = initLanguage;
 globalThis.createHolochainDelegate = createHolochainDelegate;
+globalThis.createHolographDelegate = createHolographDelegate;
 globalThis.createAd4mSignal = createAd4mSignal;
