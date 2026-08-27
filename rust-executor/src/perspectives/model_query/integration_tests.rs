@@ -5537,3 +5537,116 @@ async fn test_subject_class_of_prefers_the_more_specific_class() {
         "the instance conforms to Post too, but the derived class is the answer",
     );
 }
+
+/// A getter relation that names a target class hydrates through `include`.
+///
+/// This is the traversal a link-shaped relation cannot express: the connection
+/// between two nodes is itself a record (a reified edge), so there is no single
+/// predicate for `through` to name. A getter walks the two hops; `targetClassName`
+/// is what lets the result become typed instances rather than bare URIs.
+///
+/// The two were mutually exclusive in the TypeScript decorator until this change,
+/// even though every layer beneath — SHACL emission, shape parsing, getter
+/// evaluation, include resolution — already supported the pair.
+#[tokio::test]
+async fn test_getter_relation_with_target_class_hydrates_via_include() {
+    let store = SparqlStore::new(None).unwrap();
+
+    let node_a = "we://node/a";
+    let node_b = "we://node/b";
+    let edge = "we://rel/1";
+
+    // Two nodes of the same class.
+    for (base, text, ts) in [
+        (node_a, "Node A", "1700000000000"),
+        (node_b, "Node B", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://text_block", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://text",
+                &format!("literal:string:{}", literal_percent_encode(text)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    // The edge: a record whose two to-one relations name the ends it joins.
+    store
+        .add_link(&make_link(
+            edge,
+            "we://relationship_source",
+            node_a,
+            "1700000000004",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            edge,
+            "we://relationship_target",
+            node_b,
+            "1700000000005",
+        ))
+        .unwrap();
+
+    // `related` is defined by a two-hop traversal through the edge record, and
+    // names its own class so the values can be hydrated. Self-referential —
+    // a node relates to other nodes — which also exercises the target shape
+    // resolving to the shape currently being queried.
+    let shape_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://text_block"
+            },
+            "text": { "predicate": "we://text", "resolveLanguage": "literal" }
+        },
+        "relations": {
+            "related": {
+                "kind": "hasMany",
+                "getter": "SELECT ?target WHERE { ?rel <we://relationship_source> <Base> . ?rel <we://relationship_target> ?target . }",
+                "targetClassName": "TextBlock"
+            }
+        }
+    }"#;
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "id".to_string(),
+            super::types::WhereCondition::String(node_a.to_string()),
+        )])),
+        include: Some(HashMap::from([(
+            "related".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "TextBlock", &query, shape_json)
+        .await
+        .unwrap();
+
+    assert_eq!(result.instances.len(), 1, "expected node A");
+    let related = result.instances[0]["related"]
+        .as_array()
+        .expect("related must hydrate as an array");
+
+    assert_eq!(related.len(), 1, "A is joined to exactly one node");
+    assert_eq!(
+        related[0]["id"].as_str().unwrap(),
+        node_b,
+        "the traversal must land on the far end of the edge",
+    );
+    assert_eq!(
+        related[0]["text"].as_str().unwrap(),
+        "Node B",
+        "and it must be a hydrated instance, not a bare URI — which is what \
+         naming the target class buys",
+    );
+}

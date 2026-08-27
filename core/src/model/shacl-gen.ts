@@ -314,6 +314,16 @@ export function buildSHACL(
             relShape.local = relMeta.local;
         }
 
+        // Per-relation interpretation hint — sentence-level meaning that
+        // steers the harness LLM's `_propose_link_child` `predicate` field
+        // description. Read back on the Rust side by
+        // `ShaclProperty.interpretation_hint` and rendered into the tool
+        // schema alongside the predicate URI enum (so `basedOn` reads
+        // "prior beliefs this intention derives from", not just "some link").
+        if (relMeta.interpretationHint) {
+            relShape.interpretationHint = relMeta.interpretationHint;
+        }
+
         // Adder / Remover actions — only meaningful for relations backed
         // by a real link predicate.  Getter-only relations are read-only.
         if (relMeta.predicate) {

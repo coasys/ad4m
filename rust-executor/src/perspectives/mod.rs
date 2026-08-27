@@ -4,6 +4,8 @@ pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
 #[cfg(test)]
+mod interpretation_harness_e2e;
+#[cfg(test)]
 mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;

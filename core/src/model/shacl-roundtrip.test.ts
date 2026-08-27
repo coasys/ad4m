@@ -234,6 +234,59 @@ describe("Decorators → SHACL writer round-trip", () => {
     ).toBeUndefined();
   });
 
+  it("emits ad4m://interpretation_hint on relation properties", () => {
+    // Relation-level interpretation hints (RelationOptions.interpretationHint)
+    // are read by the Rust harness's `ShaclProperty.interpretation_hint` and
+    // rendered into the `_propose_link_child` predicate-field description so
+    // the LLM knows what each relation MEANS semantically, not just that it
+    // exists. Regression against the follow-up-branch scope creep: pulled
+    // into PR #911 per Nico's 2026-08-24 ask.
+    @Model({ name: "Intention" })
+    class Intention extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        interpretationHint: "Imperative statement of intent.",
+      })
+      title: string = "";
+
+      @HasMany(() => Belief, {
+        through: "ns://basedOn",
+        interpretationHint:
+          "The prior beliefs this intention derives from.",
+      })
+      basedOn: Belief[] = [];
+
+      @HasMany(() => Belief, { through: "ns://contradicts" })
+      contradicts: Belief[] = [];
+    }
+    @Model({ name: "Belief" })
+    class Belief extends Ad4mModel {
+      @Property({ through: "ns://title", required: true }) title: string = "";
+    }
+
+    const { shape } = Intention.generateSHACL();
+    const links = flatten(shape);
+
+    // Named relation with a hint → link present on the relation's property
+    // node with the hint text.
+    expect(
+      findLinkTarget(links, "ns://Intention.basedOn", "ad4m://interpretation_hint"),
+    ).toBe(
+      "literal:string:The prior beliefs this intention derives from.",
+    );
+
+    // Named relation WITHOUT a hint → no interpretation_hint link (the
+    // scalar-property "no hint = no link" path is what relations follow too).
+    expect(
+      findLinkTarget(
+        links,
+        "ns://Intention.contradicts",
+        "ad4m://interpretation_hint",
+      ),
+    ).toBeUndefined();
+  });
+
   it("round-trips interpretationHint through toJSON/fromJSON", () => {
     @Model({
       name: "Task",

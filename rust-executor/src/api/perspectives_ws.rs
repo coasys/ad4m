@@ -85,6 +85,44 @@ fn reserve_credits(user_email: &Option<String>, amount: f64) -> Result<(), WsRpc
 
 const DEFAULT_LINK_WRITE: f64 = 0.25;
 
+/// Adapter that implements the harness's `CreditGate` trait against the
+/// per-user credit ledger. Each `check()` (a) refuses if the ledger says
+/// insufficient, and (b) reserves `DEFAULT_LINK_WRITE` from the ledger
+/// so the mid-loop opportunity cost is accounted for — not just the
+/// bases the pass eventually lands.
+///
+/// Rationale (James's review 2026-08-25): the old shape was
+/// `check_credits` once at entry, then `reserve_credits(bases.len() * DEFAULT_LINK_WRITE)`
+/// at exit. Up-to-`max_tool_calls + 1` completions in between hit
+/// neither, and `AIService::bill_prompt_if_authed` is a
+/// fire-and-forget deduction that logs on `InsufficientCredits` but
+/// doesn't halt the loop. A pass that ends with zero bases used to be
+/// free regardless of how many completions it burned.
+struct WsHarnessCreditGate {
+    user_email: Option<String>,
+}
+
+impl WsHarnessCreditGate {
+    fn new(user_email: Option<String>) -> Self {
+        Self { user_email }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ai_service::harness::CreditGate for WsHarnessCreditGate {
+    async fn check(&self) -> anyhow::Result<()> {
+        // Pre-check: cheap "credits > 0" gate. Free hosting / free-access
+        // paths short-circuit inside `check_credits`.
+        check_credits(&self.user_email).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        // Reserve the per-completion opportunity cost. Fire-and-forget
+        // wrt success — the ledger deduction happens atomically and any
+        // downstream `InsufficientCredits` will fail the NEXT `check`.
+        reserve_credits(&self.user_email, DEFAULT_LINK_WRITE)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        Ok(())
+    }
+}
+
 fn parse_link_status(s: Option<&str>) -> LinkStatus {
     match s {
         Some("shared" | "SHARED") => LinkStatus::Shared,
@@ -540,6 +578,15 @@ const SPARQL_QUERY_TIMEOUT_SECS: u64 = 30;
 /// models; short enough that a stalled provider cannot pin a WS slot
 /// forever (a slot held past this bound returns a 408 to the caller).
 const RUN_INTERPRETATION_TIMEOUT_SECS: u64 = 300;
+
+/// Longer server budget for the harness (tool-calling) path. A single
+/// harness pass is N tool round-trips plus a final answer, so it
+/// legitimately takes longer than a single-shot generation. Matches the
+/// 20-minute RPC timeout the client (`PerspectiveClient
+/// .runInterpretationWithHarness`) sets on this method; if the server
+/// budget were shorter, slow local models would 408 on the server while
+/// the client still waited.
+const RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS: u64 = 1200;
 
 async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
@@ -1301,6 +1348,196 @@ async fn run_interpretation_handler(
     Ok(serde_json::to_value(bases)?)
 }
 
+/// Harness-dispatched interpretation pass over WS-RPC — the tool-calling
+/// counterpart to `perspective.runInterpretation`. Wraps
+/// [`run_interpretation_with_harness_and_model`] with the same guardrails
+/// (capability + credit checks, class resolution, timeout, credit
+/// reservation). The LLM sees a live tool surface (`{Class}_query`,
+/// `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives
+/// the extraction by tool calls; buffered proposals drain through the
+/// same overlay gate the single-shot path uses.
+async fn run_interpretation_with_harness_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_credits(&ctx.user_email)?;
+
+    let body: RunInterpretationWithHarnessRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    // `max_tool_calls == 0` would collapse the harness loop to a no-op
+    // final-answer step. Callers wanting the classic path should use
+    // `perspective.runInterpretation` instead — bounce it here so the
+    // mistake surfaces at the boundary.
+    if body.max_tool_calls == 0 {
+        return Err(WsRpcError::bad_request(
+            "`maxToolCalls` must be > 0; use `perspective.runInterpretation` for the single-shot path",
+        ));
+    }
+
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+
+    // Class resolution mirrors `run_interpretation_handler`: explicit
+    // selection if provided, otherwise every registered subject class in
+    // the perspective. Explicit-selection failure surfaces the actual
+    // cause rather than the "no subject classes" default-path message.
+    let explicit_selection = matches!(&body.classes, Some(sel) if !sel.is_empty());
+    let class_names = match &body.classes {
+        Some(sel) if !sel.is_empty() => sel.clone(),
+        _ => perspective
+            .get_subject_classes_from_shacl()
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?,
+    };
+    let mut shapes = Vec::with_capacity(class_names.len());
+    let mut unresolved: Vec<String> = Vec::new();
+    for name in &class_names {
+        match perspective.get_shape(name) {
+            Ok(shape) => shapes.push((*shape).clone()),
+            Err(e) => {
+                log::warn!(
+                    "runInterpretationWithHarness: skipping class '{}': {}",
+                    name,
+                    e
+                );
+                unresolved.push(name.clone());
+            }
+        }
+    }
+    if explicit_selection && !unresolved.is_empty() && shapes.is_empty() {
+        return Err(WsRpcError::bad_request(format!(
+            "runInterpretationWithHarness: none of the requested classes could be resolved: [{}]",
+            unresolved.join(", ")
+        )));
+    }
+    if shapes.is_empty() {
+        return Err(WsRpcError::bad_request(
+            "perspective has no subject classes to extract into",
+        ));
+    }
+
+    // Same as the single-shot path: WS turns carry speaker + text only.
+    let transcript: Vec<crate::perspectives::interpretation::TranscriptTurn> = body
+        .transcript
+        .into_iter()
+        .map(|t| {
+            crate::perspectives::interpretation::TranscriptTurn::from_speaker_text(
+                t.speaker, t.text,
+            )
+        })
+        .collect();
+
+    // Thread the caller's auth token into the harness so `Ad4mMcpHandler`'s
+    // tool dispatch executes with the caller's capabilities — same
+    // principle as the `/v1` openai-compat path. Empty string means an
+    // unauthenticated caller: don't propagate that as a phantom token
+    // (Ad4mMcpHandler treats `None` as "no user session; fall back to
+    // admin credential if configured").
+    let auth_token = if ctx.auth_token.is_empty() {
+        None
+    } else {
+        Some(ctx.auth_token.clone())
+    };
+
+    // Live-debug event surface: same shape as the classic single-shot
+    // handler. `observation_id` names both `processor_id` and `batch_key`
+    // on the emitted events so a subscribed UI can correlate this pass's
+    // events to the caller-supplied id. `emit_debug_events` is a
+    // dead-letter without an observation_id (nothing to key against), so
+    // gate on both.
+    let observer_did = match &body.observation_id {
+        Some(_) => crate::agent::did_for_context(&agent_context).ok(),
+        None => None,
+    };
+    let emit_ctx = body
+        .observation_id
+        .as_ref()
+        .zip(observer_did.as_ref())
+        .filter(|_| body.emit_debug_events.unwrap_or(false))
+        .map(|(id, did)| {
+            crate::perspectives::auto_processor::events::InterpretationEmitContext {
+                perspective_uuid: uuid.clone(),
+                processor_id: id.clone(),
+                agent_did: did.clone(),
+                // No source item ids — WS-RPC caller supplies the transcript
+                // directly rather than the watcher gathering it. `batch_key`
+                // carries the identity instead.
+                item_ids: Vec::new(),
+                batch_key: id.clone(),
+            }
+        });
+
+    // Per-completion credit gate — bounds the pass to the caller's
+    // available budget across the whole tool-calling loop. Replaces the
+    // entry-only `check_credits` guard which used to leave up-to-
+    // `max_tool_calls + 1` completions unmetered after credits ran out.
+    // Reserves `DEFAULT_LINK_WRITE` per gate call (same rate the pass'
+    // exit accounting uses for each landed base) so the accounting
+    // stays proportional to the mid-loop opportunity cost.
+    let credit_gate: Option<std::sync::Arc<dyn crate::ai_service::harness::CreditGate>> = Some(
+        std::sync::Arc::new(WsHarnessCreditGate::new(ctx.user_email.clone())),
+    );
+
+    let bases = match tokio::time::timeout(
+        Duration::from_secs(RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS),
+        crate::perspectives::interpretation::run_interpretation_with_harness_and_model(
+            &mut perspective,
+            &shapes,
+            &transcript,
+            &body.base_prefix,
+            &agent_context,
+            body.model_override.as_deref(),
+            body.existing_scope.as_ref(),
+            None,
+            body.max_tool_calls,
+            auth_token,
+            emit_ctx.as_ref(),
+            // WS-RPC is the one-shot path — dedup-on-drain stays off; the
+            // caller reaches for the harness specifically to trust the LLM
+            // to `_query` before proposing. The auto-processor watcher is
+            // the caller that passes `true`.
+            false,
+            credit_gate,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(bases)) => bases,
+        Ok(Err(e)) => return Err(WsRpcError::internal(e.to_string())),
+        Err(_) => {
+            log::warn!(
+                "run_interpretation_with_harness timed out after {}s",
+                RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS
+            );
+            return Err(WsRpcError {
+                code: 408,
+                message: format!(
+                    "runInterpretationWithHarness timed out after {}s",
+                    RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS
+                ),
+            });
+        }
+    };
+
+    if !bases.is_empty() {
+        if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {
+            log::warn!(
+                "Credit deduction failed for runInterpretationWithHarness (operation already committed): {}",
+                e
+            );
+        }
+    }
+
+    Ok(serde_json::to_value(bases)?)
+}
+
 /*
    One-shot telemetry helpers.
 
@@ -1387,6 +1624,19 @@ async fn emit_one_shot_abandoned(uuid: &str, observation_id: &str, did: &str, re
 /// `AutoProcessorConfig` into the shared graph; the executor watch loop reads it
 /// back and starts running interpretation automatically over new source items,
 /// emitting step signals on the events WebSocket (`auto-processor-event`).
+///
+/// **Registering is not idempotent in its class list.** Scalars overwrite through their
+/// `setSingleTarget` setters, but `interpretationClasses` is a collection written with the shape's
+/// `addLink` setter, so a second registration under the same `processorId` *unions* its classes
+/// with what is already stored rather than replacing them. Registering `[A]` and then `[B]` leaves
+/// a processor materializing both.
+///
+/// This endpoint is therefore for **creating** a processor. To change what an existing one
+/// extracts, edit its `AutoProcessorConfig` through the model API, where a collection can be set to
+/// exactly the values given; to stop it, use `perspective.removeAutoProcessor`. A client that
+/// re-registers on reconnect should check whether the config already exists first — the config is
+/// shared graph state that outlives any one agent's session, so "ensure it exists" is the shape
+/// that wants, not "register it again".
 async fn add_auto_processor_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -1410,6 +1660,14 @@ async fn add_auto_processor_handler(
     // back at the boundary instead. Ranges mirror
     // `AutoProcessorConfig::config_from_instance` (rust-executor/src/
     // perspectives/auto_processor/config.rs).
+    //
+    // `scalar_string` treats an empty scalar as absent, so `config_from_instance` rejects a config
+    // whose `processorId` is `""` — it writes, reports success, and never loads. It is also the
+    // identity: the node URI, the claim's batch nodes and the processed-turn cursor are all derived
+    // from it, so an empty one is not a processor that runs badly but a processor with no name.
+    if body.processor_id.is_empty() {
+        return Err(WsRpcError::bad_request("`processorId` must be non-empty"));
+    }
     if body.interpretation_classes.is_empty() {
         return Err(WsRpcError::bad_request(
             "`interpretationClasses` must be non-empty",
@@ -1451,6 +1709,7 @@ async fn add_auto_processor_handler(
         source_window_ms: body.source_window_ms,
         existing_scope: body.existing_scope,
         mint_scope: body.mint_scope,
+        max_tool_calls: body.max_tool_calls,
         emit_debug_events: emit_debug_events_write.unwrap_or(false),
     };
     write_processor(
@@ -1463,6 +1722,46 @@ async fn add_auto_processor_handler(
     .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(body.processor_id)?)
+}
+
+/// `perspective.removeAutoProcessor` — delete a processor's config instance, which is what stops
+/// its watch: the loop reads the processor set back out of the perspective's graph on every tick.
+///
+/// Answers `true` when there was a processor to remove and `false` when there was not, rather than
+/// erroring on the second case — a caller tidying up after a processor a peer has already removed
+/// has done the right thing, and a teardown path is the worst place to raise an avoidable failure.
+///
+/// Deliberately validates less than its `add` counterpart, which rejects an empty `processorId`.
+/// Strictness belongs on the way in: registration decides what may exist, and removal is how
+/// anything already there is recovered from. A config written before that validation existed — or
+/// by any writer that is not this handler — must stay removable, and refusing the id here would
+/// leave junk on the graph with no API able to take it away. The id is used verbatim to derive one
+/// node URI, so an empty one addresses exactly the node an empty-id write produced and nothing else.
+///
+/// Takes the same `update` capability as registering one. Deleting a processor is not a read: it
+/// changes what the neighbourhood extracts, for everyone.
+async fn remove_auto_processor_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    use crate::api::types::RemoveAutoProcessorRequest;
+    use crate::perspectives::auto_processor::config::remove_processor;
+
+    let body: RemoveAutoProcessorRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![body.uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let removed = remove_processor(&mut perspective, &body.processor_id, &agent_context)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(removed))
 }
 
 /// `perspective.acceptInterpretation` — materialize the overlay's staged
@@ -1585,7 +1884,15 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.modelSubscribe", model_subscribe_handler);
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
     map.register("perspective.runInterpretation", run_interpretation_handler);
+    map.register(
+        "perspective.runInterpretationWithHarness",
+        run_interpretation_with_harness_handler,
+    );
     map.register("perspective.addAutoProcessor", add_auto_processor_handler);
+    map.register(
+        "perspective.removeAutoProcessor",
+        remove_auto_processor_handler,
+    );
     map.register(
         "perspective.acceptInterpretation",
         accept_interpretation_handler,
