@@ -578,6 +578,13 @@ pub struct InterpretationDebug {
 pub struct InterpretationOutcome {
     pub bases: Vec<String>,
     pub debug: Option<InterpretationDebug>,
+    /// Slice 10.4c — URIs of every `FlowTransitionProposal` the
+    /// deterministic post-processing pass minted on the graph after
+    /// `apply_with_overlay` committed this pass's writes. Empty when
+    /// the perspective has no active flows, no satisfied transitions,
+    /// or the loader path silent-failed (see
+    /// [`crate::perspectives::flow_evaluator::run_engine_proposal_pass`]).
+    pub flow_proposals: Vec<String>,
 }
 
 pub async fn run_interpretation_with_strategy_and_model(
@@ -763,9 +770,23 @@ pub async fn run_interpretation_with_strategy_and_model(
     )
     .await?;
 
+    // Slice 10.4c — deterministic post-processing runs AFTER
+    // `apply_with_overlay`: the LLM's writes are now on the graph, so a
+    // `requires` model_query that was unmet pre-pass can now match on
+    // fresh evidence, and a `FlowTransitionProposal` is minted on behalf
+    // of the acting DID. Silent-fallback throughout (see the fn doc) so
+    // the extraction pass cannot break on a flow-layer stumble.
+    let flow_proposals =
+        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, scope, context)
+            .await;
+
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
-    Ok(InterpretationOutcome { bases, debug })
+    Ok(InterpretationOutcome {
+        bases,
+        debug,
+        flow_proposals,
+    })
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
@@ -991,6 +1012,23 @@ pub async fn run_interpretation_with_harness_and_model(
     .await?;
 
     log::warn!("harness: apply_with_overlay produced {} bases", bases.len());
+
+    // Slice 10.4c — same post-processing hook as the single-shot path.
+    // The harness return signature is `Vec<String>` (bases only) so the
+    // proposal URIs are surfaced via `warn!` rather than the outcome
+    // shape; extending the harness return to a struct is a separate
+    // slice. The proposals themselves land on the graph regardless,
+    // which is the load-bearing property.
+    let flow_proposals =
+        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, scope, context)
+            .await;
+    if !flow_proposals.is_empty() {
+        log::warn!(
+            "harness: engine-proposal pass minted {} FlowTransitionProposal(s): {:?}",
+            flow_proposals.len(),
+            flow_proposals
+        );
+    }
 
     Ok(bases)
 }

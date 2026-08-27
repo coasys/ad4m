@@ -522,6 +522,138 @@ pub async fn write_engine_proposal(
 }
 
 // ============================================================================
+// Slice 10.4c — the auto-processor entry point
+// ============================================================================
+
+/// Slice 10.4c — compose the load → evaluate → write pipeline into one
+/// call that the extraction pass (`interpretation::run`) invokes AFTER
+/// `apply_with_overlay` has committed the LLM-derived writes. At that
+/// point the graph state on which `requires` model-queries run is what
+/// the pass just produced, so a transition satisfied by fresh evidence
+/// is immediately turned into a proposal on behalf of the acting DID.
+///
+/// Silent-fail throughout — the extraction pass MUST NOT break because
+/// the flow layer stumbled. Loader errors, unknown-DID errors, and
+/// individual `write_engine_proposal` failures are logged (`warn!` for
+/// the loader path, `debug!` for per-transition writes) and downgraded
+/// to an empty result / a partial list.
+///
+/// `scope`, when `Some`, narrows the FlowInstance load to the pass's
+/// anchor URI (same policy as [`crate::perspectives::flow_context::gather_active_flow_contexts`]).
+///
+/// Returns the URIs of every `FlowTransitionProposal` this pass minted.
+/// The extraction pass threads these into
+/// [`crate::perspectives::interpretation::run::InterpretationOutcome::flow_proposals`]
+/// so tests / callers can observe.
+pub async fn run_engine_proposal_pass(
+    perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
+    scope: Option<&crate::perspectives::model_query::types::Scope>,
+    context: &crate::agent::AgentContext,
+) -> Vec<String> {
+    // Load the flow catalogue. Empty on I/O failure — same policy as
+    // `gather_active_flow_contexts`. An empty perspective has zero flows,
+    // and there's nothing to post-process.
+    let flows_by_name = match crate::perspectives::flow_context::load_shacl_flows(perspective).await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("run_engine_proposal_pass: load_shacl_flows failed: {e:#}");
+            return Vec::new();
+        }
+    };
+    if flows_by_name.is_empty() {
+        return Vec::new();
+    }
+
+    // Load active FlowInstances, scope-narrowed if the pass carries an
+    // anchor. Same silent-fallback as the pre-pass loader.
+    let subject = scope.map(crate::perspectives::flow_context::scope_subject);
+    let records =
+        match crate::perspectives::flow_context::load_flow_instances(perspective, subject).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("run_engine_proposal_pass: load_flow_instances failed: {e:#}");
+                return Vec::new();
+            }
+        };
+    if records.is_empty() {
+        return Vec::new();
+    }
+
+    // The proposer of an engine-generated proposal is the acting DID of
+    // the extraction pass — same identity that owns the InterpretationRun
+    // for the committed writes. Silent-fallback on lookup failure: no DID
+    // → no proposals; the transitions remain latent for the next pass.
+    let acting_did = match crate::agent::did_for_context(context) {
+        Ok(d) => d,
+        Err(e) => {
+            log::warn!("run_engine_proposal_pass: did_for_context failed: {e:#}");
+            return Vec::new();
+        }
+    };
+
+    let satisfied =
+        evaluate_flow_transitions(perspective, &records, &flows_by_name, &acting_did).await;
+    if satisfied.is_empty() {
+        return Vec::new();
+    }
+
+    // Each proposal writes inside its own batch — same
+    // create_batch / commit_batch discipline `apply_with_overlay` uses
+    // for `mint_interpretation_run`. `write_flow_transition_proposal`
+    // internally does `create_subject` + N-1 `update_subject` for the
+    // evidence bag, so wrapping them in a batch is what makes the
+    // proposal land atomically on-graph (readers never see a
+    // half-populated proposal). Per-transition batches — not one batch
+    // for the whole pass — so a single failure only rolls back that
+    // proposal and the others still ship.
+    let proposed_at = chrono::Utc::now().timestamp_millis().to_string();
+
+    let mut minted = Vec::with_capacity(satisfied.len());
+    for transition in &satisfied {
+        let proposal_id = uuid::Uuid::new_v4().to_string();
+        let batch_id = perspective.create_batch().await;
+        let write_res = write_engine_proposal(
+            perspective,
+            &proposal_id,
+            &acting_did,
+            &proposed_at,
+            transition,
+            Some(batch_id.clone()),
+            context,
+        )
+        .await;
+        match write_res {
+            Ok(uri) => match perspective.commit_batch(batch_id.clone(), context).await {
+                Ok(_) => minted.push(uri),
+                Err(e) => {
+                    let _ = perspective.discard_batch(&batch_id).await;
+                    log::debug!(
+                        "run_engine_proposal_pass: commit_batch for {}.{}→{} failed: {e:#}",
+                        transition.flow_name,
+                        transition.from_state,
+                        transition.to_state,
+                    );
+                }
+            },
+            Err(e) => {
+                // One bad write must not sink the rest — mirror the
+                // per-transition silent-skip policy `evaluate_flow_transitions`
+                // uses for query errors.
+                let _ = perspective.discard_batch(&batch_id).await;
+                log::debug!(
+                    "run_engine_proposal_pass: write_engine_proposal for {}.{}→{} failed: {e:#}",
+                    transition.flow_name,
+                    transition.from_state,
+                    transition.to_state,
+                );
+            }
+        }
+    }
+    minted
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1708,13 +1840,9 @@ mod e2e_tests {
         let flows_by_name = load_shacl_flows(&perspective)
             .await
             .expect("load_shacl_flows");
-        let satisfied = evaluate_flow_transitions(
-            &perspective,
-            &records,
-            &flows_by_name,
-            "did:key:acting",
-        )
-        .await;
+        let satisfied =
+            evaluate_flow_transitions(&perspective, &records, &flows_by_name, "did:key:acting")
+                .await;
         assert_eq!(
             satisfied.len(),
             1,
@@ -1823,6 +1951,173 @@ mod e2e_tests {
             assert!(
                 targets.iter().any(|t| t == &want),
                 "{pred} target must be `{want}`, got {targets:?}",
+            );
+        }
+    }
+
+    /// Slice 10.4c — the end-to-end onion shell for the auto-processor
+    /// entry point. Verifies that a single call to
+    /// [`run_engine_proposal_pass`] against a live perspective:
+    ///
+    /// 1. Loads flows + records + evaluates + writes without any
+    ///    caller-side plumbing.
+    /// 2. Returns the URIs of every minted proposal.
+    /// 3. Actually lands each proposal on-graph with the acting DID
+    ///    as `proposer` — a per-transition detail that would silently
+    ///    fail if `did_for_context` were bypassed.
+    ///
+    /// This is the shape `interpretation::run::run_interpretation_with_strategy_and_model`
+    /// calls after `apply_with_overlay`. If this test passes, the
+    /// extraction pass becomes flow-post-processing-aware end-to-end.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_engine_proposal_pass_lands_a_proposal_e2e() {
+        use crate::types::LinkQuery;
+
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        // Same Delivery + `requires` seed as the evaluator + writer
+        // e2e tests. `requires: 1 × ns://Task` on the `scoped` state,
+        // so an unseeded graph = 0 proposals, one seeded Task = 1.
+        let scoped_uri = "delivery://Delivery.scoped";
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        let requires_json = r#"[{"className":"ns://Task","count":{"min":1}}]"#;
+        perspective
+            .add_link(
+                Link {
+                    source: scoped_uri.to_string(),
+                    predicate: Some("ad4m://requires".to_string()),
+                    target: lit(requires_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(scoped.requires)");
+
+        let base_uri = "ad4m://task/onboarding";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.4c-inst",
+            "2026-08-27T02:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        // Empty graph — no Task seeded — must return zero proposals.
+        // Proves the pass is genuinely gated on the guard's satisfaction
+        // and doesn't optimistically mint on every pass.
+        let before = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+        )
+        .await;
+        assert!(
+            before.is_empty(),
+            "empty graph ⇒ 0 satisfied ⇒ 0 proposals, got {before:?}",
+        );
+
+        // Now seed the evidence — the exact same `create_subject` path
+        // the interpretation pipeline uses, so the eventual proposal
+        // reflects real committed graph state, not a canned response.
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "ad4m://task/1",
+            "Onboard Ana",
+        )
+        .await;
+
+        let minted = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+        )
+        .await;
+        assert_eq!(
+            minted.len(),
+            1,
+            "one satisfied transition ⇒ one proposal, got {minted:?}",
+        );
+        let proposal_uri = &minted[0];
+        assert!(
+            proposal_uri.starts_with("ad4m://flow/proposal/"),
+            "proposal URI must follow flow_transition_proposal_uri scheme, got {proposal_uri}",
+        );
+
+        // Resolve the acting DID the same way `run_engine_proposal_pass`
+        // did internally, so the assertion below tests actual identity
+        // threading rather than tolerating any DID that happens to land.
+        let acting_did =
+            crate::agent::did_for_context(&ctx).expect("did_for_context on test agent context");
+
+        // Walk the proposal on-graph and confirm proposer + linked
+        // instance + from/to states. The `write_engine_proposal` e2e
+        // test above already covers every declared predicate; here we
+        // spot-check the fields that would silently regress if the
+        // acting-DID plumbing broke or `run_engine_proposal_pass`
+        // truncated the SatisfiedTransition it hands to the writer.
+        let links = perspective
+            .get_links(&LinkQuery {
+                source: Some(proposal_uri.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links(proposal)");
+        let mut by_pred: HashMap<String, Vec<String>> = HashMap::new();
+        for l in &links {
+            if let Some(pred) = &l.data.predicate {
+                by_pred
+                    .entry(pred.clone())
+                    .or_default()
+                    .push(l.data.target.clone());
+            }
+        }
+
+        assert!(
+            by_pred
+                .get("ad4m://flow/proposer")
+                .map(|ts| ts.iter().any(|t| t == &acting_did))
+                .unwrap_or(false),
+            "proposer must be the acting DID resolved via did_for_context, \
+             got {:?}",
+            by_pred.get("ad4m://flow/proposer"),
+        );
+        assert!(
+            by_pred
+                .get("ad4m://flow/instance")
+                .map(|ts| ts.iter().any(|t| t == &inst_uri))
+                .unwrap_or(false),
+            "flow/instance must be the minted instance URI, got {:?}",
+            by_pred.get("ad4m://flow/instance"),
+        );
+        for (pred, expected) in [
+            ("ad4m://flow/from_state", "identified"),
+            ("ad4m://flow/to_state", "scoped"),
+        ] {
+            let want = format!("literal:string:{}", urlencoding::encode(expected));
+            assert!(
+                by_pred
+                    .get(pred)
+                    .map(|ts| ts.iter().any(|t| t == &want))
+                    .unwrap_or(false),
+                "{pred} must carry `{want}`, got {:?}",
+                by_pred.get(pred),
             );
         }
     }
