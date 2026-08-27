@@ -157,7 +157,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       // sealing. The language sends this during step 2 of the DID
       // challenge-response — the one point where DID ownership has
       // already been verified.
-      if (typeof body.x25519PublicKey === "string" && body.x25519PublicKey.length === 64) {
+      if (
+        typeof body.x25519PublicKey === "string" &&
+        body.x25519PublicKey.length === 64 &&
+        /^[0-9a-fA-F]{64}$/.test(body.x25519PublicKey)
+      ) {
         ctx.db.setX25519PublicKey(roomId, body.did, body.x25519PublicKey);
       }
 

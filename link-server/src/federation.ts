@@ -59,6 +59,10 @@ export type ReconcileResult =
   | { ok: true; response: ReconcileResponseBody }
   | { ok: false; status: 400 | 404 | 403; error: string };
 
+/** Hard ceiling on any single outbound federation HTTP request. Prevents
+ *  a peer that accepts TCP but never responds from stalling reconciliation. */
+const FEDERATION_FETCH_TIMEOUT_MS = 15_000;
+
 export class FederationManager {
   private db: LinkServerDB;
   private identity: FederationIdentity;
@@ -95,7 +99,9 @@ export class FederationManager {
   async addPeer(roomId: string, peerUrl: string): Promise<void> {
     let pubkey: string | undefined;
     try {
-      const res = await this.fetchImpl(`${peerUrl}/server/identity`);
+      const res = await this.fetchImpl(`${peerUrl}/server/identity`, {
+        signal: AbortSignal.timeout(FEDERATION_FETCH_TIMEOUT_MS),
+      });
       if (res.ok) {
         const body = (await res.json()) as { publicKey?: string };
         pubkey = body.publicKey;
@@ -133,7 +139,9 @@ export class FederationManager {
           // closes the TOFU race where an attacker reaching the endpoint
           // before the real peer could pin a rogue key.
           try {
-            const res = await this.fetchImpl(`${serverUrl}/server/identity`);
+            const res = await this.fetchImpl(`${serverUrl}/server/identity`, {
+              signal: AbortSignal.timeout(FEDERATION_FETCH_TIMEOUT_MS),
+            });
             if (res.ok) {
               const body = (await res.json()) as { publicKey?: string };
               if (body.publicKey === serverPublicKey) {
@@ -321,6 +329,9 @@ export class FederationManager {
   start(): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
+      // Skip this tick if a previous pass still runs — prevents overlap
+      // from accumulating when a pass exceeds the interval.
+      if (this.reconcileInFlight) return;
       this.reconcileInFlight = this.reconcileAll().finally(() => {
         this.reconcileInFlight = null;
       });
@@ -349,6 +360,7 @@ export class FederationManager {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(FEDERATION_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");

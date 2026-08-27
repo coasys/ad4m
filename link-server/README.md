@@ -74,19 +74,19 @@ Without `AUTO_ADMIT`, only the admin can access the room. The admin adds or remo
 
 ```bash
 # Add a member
-curl -X POST https://your-server:3457/rooms/YOUR_ROOM/acl \
+curl -X POST https://your-server:3456/rooms/YOUR_ROOM/acl \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"action": "add", "did": "did:key:z6Mk..."}'
 
 # Remove a member
-curl -X POST https://your-server:3457/rooms/YOUR_ROOM/acl \
+curl -X POST https://your-server:3456/rooms/YOUR_ROOM/acl \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"action": "remove", "did": "did:key:z6Mk..."}'
 
 # List all members
-curl https://your-server:3457/rooms/YOUR_ROOM/acl \
+curl https://your-server:3456/rooms/YOUR_ROOM/acl \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
@@ -102,10 +102,10 @@ Connect two link-server instances so they keep a room in sync:
 
 ```bash
 # Add a federation peer (admin only)
-curl -X POST https://your-server:3457/rooms/YOUR_ROOM/federation \
+curl -X POST https://your-server:3456/rooms/YOUR_ROOM/federation \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"action": "add", "peerUrl": "https://backup.example.com:3457"}'
+  -d '{"action": "add", "peerUrl": "https://backup.example.com:3456"}'
 ```
 
 Both servers forward committed diffs to each other automatically. Agents connected to either server see the same links.
@@ -116,7 +116,7 @@ Encrypt link data so the server operator cannot read it:
 
 ```bash
 # Enable or rotate the room key (admin only)
-curl -X POST https://your-server:3457/rooms/YOUR_ROOM/keys/rotate \
+curl -X POST https://your-server:3456/rooms/YOUR_ROOM/keys/rotate \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 

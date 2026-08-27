@@ -198,9 +198,9 @@ summary:
   public key rides along as an additive `x25519PublicKey` field on step 2 of
   the auth flow — the one point the agent already proves DID ownership to
   the server. A server that doesn't care about E2E just ignores the field.
-- **Room key distribution.** `GET /rooms/:roomId/keys` returns a sealed box
-  (`SealedRoomKeyEnvelope`: ephemeral X25519 public key + AES-GCM nonce +
-  ciphertext, base64(JSON)-framed as the `encryptedKey` string) — the same
+- **Room key distribution.** `GET /rooms/:roomId/keys` returns a
+  `SealedRoomKeyEnvelope` object (JSON with `ephemeralPublicKey`, `nonce`,
+  and `ciphertext` as hex strings) as the `encryptedKey` field — the same
   shape `libsodium`'s `crypto_box_seal` produces. Only the intended
   recipient's derived private key can open it.
 - **Link confidentiality.** Once a room key is available,
@@ -216,11 +216,10 @@ summary:
   wrong key), `commit()` refuses to send plaintext rather than risk leaking
   data into a room that expects encryption.
 
-The exact `encryptedKey` wire framing (base64(JSON) envelope) and the
-`x25519PublicKey` auth field are this **client's own documented convention**
-— `link-server` didn't exist yet when this language was built. Both are
-isolated in `src/encryption.ts` / `src/api.ts` / `src/auth.ts` so they're
-easy to reconcile against the real server implementation later.
+The `encryptedKey` wire framing (JSON `SealedRoomKeyEnvelope`) and the
+`x25519PublicKey` auth field are shared conventions between this client and
+`link-server`. Both are isolated in `src/encryption.ts` / `src/api.ts` /
+`src/auth.ts`.
 
 ## Template variables
 

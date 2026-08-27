@@ -49,15 +49,33 @@ function parseArgs(argv: string[]): CliArgs {
         port = parsed;
         break;
       }
-      case "--host":
-        host = argv[++i];
+      case "--host": {
+        const value = argv[++i];
+        if (!value || value.startsWith("-")) {
+          console.error(`Missing value for --host`);
+          process.exit(1);
+        }
+        host = value;
         break;
-      case "--data":
-        dataDir = argv[++i];
+      }
+      case "--data": {
+        const value = argv[++i];
+        if (!value || value.startsWith("-")) {
+          console.error(`Missing value for --data`);
+          process.exit(1);
+        }
+        dataDir = value;
         break;
-      case "--self-url":
-        selfUrl = argv[++i];
+      }
+      case "--self-url": {
+        const value = argv[++i];
+        if (!value || value.startsWith("-")) {
+          console.error(`Missing value for --self-url`);
+          process.exit(1);
+        }
+        selfUrl = value;
         break;
+      }
       case "--auto-admit":
         autoAdmit = true;
         break;

@@ -90,8 +90,10 @@ export class WsClient {
         const data = JSON.stringify(msg);
         if (this.conn && this.connected) {
             this.conn.send(data);
-        } else {
+        } else if (this.sendQueue.length < 1000) {
             this.sendQueue.push(data);
+        } else {
+            console.warn("[ws-client] send queue full (1000 msgs), dropping message");
         }
     }
 

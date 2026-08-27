@@ -29,7 +29,8 @@ export class ApiError extends Error {
 }
 
 function roomUrl(config: RoomConfig, path: string): string {
-    return `${config.serverUrl}/rooms/${encodeURIComponent(config.roomId)}${path}`;
+    const base = config.serverUrl.replace(/\/+$/, "");
+    return `${base}/rooms/${encodeURIComponent(config.roomId)}${path}`;
 }
 
 function jsonHeaders(token?: string): Record<string, string> {

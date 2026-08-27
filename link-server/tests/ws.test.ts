@@ -211,7 +211,11 @@ test("set-online-status updates status and is visible via HTTP peers + pushed on
 });
 
 test("disconnect marks an agent offline (peer-left) only after the grace period elapses", async () => {
-  await withServer(async (server) => {
+  // Use a longer grace period (1000ms) so the HTTP round trip for the
+  // "still online immediately after close" assertion doesn't race the
+  // timer on loaded CI runners (default 300ms can be tight).
+  const server = await startTestServer({ telepresenceGraceMs: 1000 });
+  try {
     const roomId = randomUUID();
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
@@ -227,7 +231,7 @@ test("disconnect marks an agent offline (peer-left) only after the grace period 
     wsA.close();
 
     // Immediately after close, agent A should still be considered online
-    // (grace period from startTestServer is 300ms).
+    // (the 1000ms grace period gives this round trip plenty of room).
     const immediate = await getJson<{ peers: string[] }>(`${server.url}/rooms/${roomId}/peers`, tokenB);
     assert.ok(immediate.body.peers.includes(agentA.did));
 
@@ -238,7 +242,9 @@ test("disconnect marks an agent offline (peer-left) only after the grace period 
     assert.ok(!after.body.peers.includes(agentA.did));
 
     closeAll(wsB);
-  });
+  } finally {
+    await server.close();
+  }
 });
 
 test("reconnecting within the grace period does not trigger peer-left", async () => {
