@@ -394,17 +394,44 @@ describe("Ad4mModel.getModelMetadata() relation filtering fields", () => {
 // ============================================================================
 
 describe("Relation decorator validation", () => {
-  it("should throw if both getter and target are provided", () => {
-    expect(() => {
-      @Model({ name: "InvalidGetterTarget" })
-      class _Invalid extends Ad4mModel {
-        @HasMany({
-          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
-          target: () => FlaggedTarget,
-        })
-        items: string[] = [];
-      }
-    }).toThrow(/getter.*target.*mutually exclusive/i);
+  it("accepts getter together with target, and keeps the getter verbatim", () => {
+    // `target` does two separable jobs — derive a conformance getter, and name
+    // the class values hydrate into. Only the first conflicts with an explicit
+    // getter, so the pair is legal and the explicit getter wins.
+    @Model({ name: "GetterWithTarget" })
+    class GetterWithTarget extends Ad4mModel {
+      @HasMany({
+        getter: "SELECT ?target WHERE { ?rel <we://src> <Base> . ?rel <we://tgt> ?target . }",
+        target: () => FlaggedTarget,
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (GetterWithTarget as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.getter).toBe(
+      "SELECT ?target WHERE { ?rel <we://src> <Base> . ?rel <we://tgt> ?target . }"
+    );
+  });
+
+  it("emits sh:class for a getter relation, so include has a shape to resolve", () => {
+    // Without a target class the executor resolves a shape named "" and the
+    // include fails — which is what made a custom traversal able to return only
+    // bare URIs.
+    @Model({ name: "GetterWithTargetClass" })
+    class GetterWithTargetClass extends Ad4mModel {
+      @HasMany({
+        getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+        target: () => FlaggedTarget,
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (GetterWithTargetClass as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.targetClassName).toBe("FlaggedTarget");
   });
 
   it("should throw if both getter and through are provided", () => {
@@ -556,17 +583,25 @@ describe("sh:class target shape reference", () => {
 // ============================================================================
 
 describe("where clause validation", () => {
-  it("should throw if both where and getter are provided", () => {
-    expect(() => {
-      @Model({ name: "InvalidWhereGetter" })
-      class _Invalid extends Ad4mModel {
-        @HasMany({
-          where: { status: "active" },
-          getter: "SELECT ?target WHERE { ?target ?p ?source . }",
-        })
-        items: string[] = [];
-      }
-    }).toThrow(/where.*getter.*mutually exclusive/i);
+  it("accepts where alongside a getter, as a post-getter filter", () => {
+    // The executor applies where filters specifically to getter-backed
+    // relations (`apply_where_filter_to_relation`), so the runtime was built
+    // for this pairing; only the decorator refused it.
+    @Model({ name: "WhereWithGetter" })
+    class WhereWithGetter extends Ad4mModel {
+      @HasMany({
+        where: { status: "active" },
+        getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+        target: () => FlaggedTarget,
+      })
+      items: string[] = [];
+    }
+
+    const { shape } = (WhereWithGetter as any).generateSHACL();
+    const rel = shape.properties.find((p: any) => p.name === "items");
+
+    expect(rel.whereFilter).toEqual({ status: "active" });
+    expect(rel.getter).toBe("SELECT ?target WHERE { ?target ?p <Base> . }");
   });
 
   it("should throw if both where and filter:false are provided", () => {
@@ -575,6 +610,21 @@ describe("where clause validation", () => {
       class _Invalid extends Ad4mModel {
         @HasMany(() => FlaggedTarget, {
           through: "test://pred",
+          where: { status: "active" },
+          filter: false,
+        })
+        items: string[] = [];
+      }
+    }).toThrow(/where.*filter.*contradictory/i);
+  });
+
+  it("should throw if both where and filter:false are provided on a getter relation", () => {
+    expect(() => {
+      @Model({ name: "InvalidGetterWhereFilterFalse" })
+      class _Invalid extends Ad4mModel {
+        @HasMany({
+          getter: "SELECT ?target WHERE { ?target ?p <Base> . }",
+          target: () => FlaggedTarget,
           where: { status: "active" },
           filter: false,
         })
