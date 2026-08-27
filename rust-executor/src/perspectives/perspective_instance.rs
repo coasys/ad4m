@@ -3342,15 +3342,15 @@ impl PerspectiveInstance {
     ///
     /// Membership is structural and therefore not exclusive — an instance
     /// conforms to its parent classes too — so the answer is a list. Use
-    /// [`subject_class_of::most_specific`] where only one class can be acted on.
+    /// [`subject_classes_of::most_specific`] where only one class can be acted on.
     ///
     /// URIs that match no registered class are simply absent from the map.
-    pub fn subject_class_of(
+    pub fn subject_classes_of(
         &self,
         uris: &[String],
     ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
         let resolver = self.shape_resolver();
-        super::subject_class_of::subject_class_of(&self.sparql_store, &resolver, uris)
+        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
     }
 
     /// Execute a model query — the executor-side replacement for

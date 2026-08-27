@@ -939,7 +939,7 @@ async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(Value::String(data))
 }
 
-async fn subject_class_of_handler(
+async fn subject_classes_of_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
@@ -963,7 +963,7 @@ async fn subject_class_of_handler(
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     perspective
-        .subject_class_of(&uris)
+        .subject_classes_of(&uris)
         .map(|map| serde_json::to_value(map).unwrap_or(Value::Null))
         .map_err(|e| WsRpcError::internal(e.to_string()))
 }
@@ -1880,7 +1880,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.keepAliveSparql", keep_alive_query);
     map.register("perspective.disposeSparql", dispose_query);
     map.register("perspective.modelQuery", model_query_handler);
-    map.register("perspective.subjectClassOf", subject_class_of_handler);
+    map.register("perspective.subjectClassesOf", subject_classes_of_handler);
     map.register("perspective.modelSubscribe", model_subscribe_handler);
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
     map.register("perspective.runInterpretation", run_interpretation_handler);

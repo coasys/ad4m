@@ -139,7 +139,7 @@ fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
 /// than an inline `[0]` repeated at every call site with its own justification.
 ///
 /// It is the *first* member under [`order_by_specificity`], which is the order
-/// [`subject_class_of`] already returns. Callers that can handle the whole set
+/// [`subject_classes_of`] already returns. Callers that can handle the whole set
 /// should use the whole set: a URI conforming to two unrelated classes is a real
 /// situation, and this function's answer to it is arbitrary by construction.
 pub fn most_specific(classes: &[String]) -> Option<&str> {
@@ -158,7 +158,7 @@ pub fn most_specific(classes: &[String]) -> Option<&str> {
 /// mapped to an empty list — "not a subject instance" and "an instance of
 /// something unnameable" are different answers, and a caller can tell them apart
 /// by absence.
-pub fn subject_class_of(
+pub fn subject_classes_of(
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
@@ -194,7 +194,7 @@ pub fn subject_class_of(
             }
             // A class whose SHACL will not parse cannot classify anything; skip
             // it rather than failing the whole batch for the others.
-            Err(e) => log::warn!("subjectClassOf: skipping class '{name}': {e}"),
+            Err(e) => log::warn!("subjectClassesOf: skipping class '{name}': {e}"),
         }
     }
     if shapes.is_empty() {

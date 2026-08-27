@@ -797,9 +797,9 @@ export class PerspectiveProxy {
      *
      * @param uris The expression URIs to classify.
      */
-    async subjectClassOf(uris: string[]): Promise<Record<string, string[]>> {
+    async subjectClassesOf(uris: string[]): Promise<Record<string, string[]>> {
         if (uris.length === 0) return {};
-        return await this.#client.subjectClassOf(this.#handle.uuid, uris);
+        return await this.#client.subjectClassesOf(this.#handle.uuid, uris);
     }
 
     /**

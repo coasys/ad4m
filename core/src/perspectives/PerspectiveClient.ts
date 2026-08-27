@@ -185,9 +185,9 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
-    async subjectClassOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
+    async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
         return await this.#apiClient.call<Record<string, string[]>>(
-            'perspective.subjectClassOf', { uuid, uris }
+            'perspective.subjectClassesOf', { uuid, uris }
         )
     }
 

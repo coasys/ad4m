@@ -5384,11 +5384,11 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
     );
 }
 
-/// `subjectClassOf` classifies a batch of URIs, finding flagged and flagless
+/// `subjectClassesOf` classifies a batch of URIs, finding flagged and flagless
 /// classes alike.
 #[tokio::test]
-async fn test_subject_class_of_batch() {
-    use crate::perspectives::subject_class_of::subject_class_of;
+async fn test_subject_classes_of_batch() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
 
     let store = SparqlStore::new(None).unwrap();
 
@@ -5466,7 +5466,7 @@ async fn test_subject_class_of_batch() {
         "ns://c".to_string(),
         "ns://nothing".to_string(),
     ];
-    let result = subject_class_of(&store, &resolver, &uris).unwrap();
+    let result = subject_classes_of(&store, &resolver, &uris).unwrap();
 
     assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
     assert_eq!(result.get("ns://b"), Some(&vec!["ImageBlock".to_string()]));
@@ -5485,8 +5485,8 @@ async fn test_subject_class_of_batch() {
 /// *every* triple it requires is present, which is what `isSubjectInstance`
 /// asks and therefore what this has to agree with.
 #[tokio::test]
-async fn test_subject_class_of_requires_every_triple_not_just_a_flag() {
-    use crate::perspectives::subject_class_of::subject_class_of;
+async fn test_subject_classes_of_requires_every_triple_not_just_a_flag() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
 
     let store = SparqlStore::new(None).unwrap();
     store
@@ -5516,7 +5516,7 @@ async fn test_subject_class_of_requires_every_triple_not_just_a_flag() {
         .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
         .unwrap();
 
-    let result = subject_class_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
 
     assert!(
         !result.contains_key("ns://a"),
@@ -5527,8 +5527,8 @@ async fn test_subject_class_of_requires_every_triple_not_just_a_flag() {
 /// Structural membership is not exclusive, so every class the URI conforms to
 /// is returned — ordered most specific first, but none of them dropped.
 #[tokio::test]
-async fn test_subject_class_of_returns_every_class_most_specific_first() {
-    use crate::perspectives::subject_class_of::subject_class_of;
+async fn test_subject_classes_of_returns_every_class_most_specific_first() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
 
     let store = SparqlStore::new(None).unwrap();
     for uri in ["ns://models/Post", "ns://models/ImagePost"] {
@@ -5573,7 +5573,7 @@ async fn test_subject_class_of_returns_every_class_most_specific_first() {
         .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
         .unwrap();
 
-    let result = subject_class_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
 
     let classes = result.get("ns://a").expect("ns://a is classified");
     assert_eq!(
@@ -5582,7 +5582,7 @@ async fn test_subject_class_of_returns_every_class_most_specific_first() {
         "the instance is a Post as well as an ImagePost, and both are reported",
     );
     assert_eq!(
-        crate::perspectives::subject_class_of::most_specific(classes),
+        crate::perspectives::subject_classes_of::most_specific(classes),
         Some("ImagePost"),
         "callers that can only act on one class get the derived one",
     );
