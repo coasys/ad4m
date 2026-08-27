@@ -105,7 +105,7 @@ export class DenoRuntimeAdapter implements RuntimeAdapter {
 /**
  * Wraps the native `WebSocket` global. This is what replaces socket.io in
  * this language: a plain, standards-compliant WebSocket client talking to
- * link-server's `/rooms/:roomId/ws?token=<jwt>` endpoint directly, no
+ * link-server's `/rooms/:roomId/ws` endpoint directly, no
  * client library, no polling-transport fallback.
  */
 export class DenoWebSocketFactory implements WebSocketFactory {

@@ -8,8 +8,8 @@
  *     tested without pulling in the ad4m:host runtime.
  *   - Server-facing "wire" types describe the JSON shapes exchanged
  *     with link-server over HTTP and WebSocket. When a room has
- *     E2E encryption enabled, wire link expressions carry an opaque
- *     `encrypted` blob instead of plaintext `data` — see src/encryption.ts.
+ *     E2E encryption enabled, encrypted rooms carry an `EncryptedLinkData`
+ *     shape (`{ciphertext, nonce}`) in the `data` field — see src/encryption.ts.
  */
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,23 @@ export interface Link {
     source: string;
     target: string;
     predicate?: string;
+}
+
+/** Encrypted link payload — matches link-server's EncryptedLinkData shape. */
+export interface EncryptedLinkData {
+    ciphertext: string;
+    nonce: string;
+}
+
+export function isEncryptedLinkData(
+    data: Link | EncryptedLinkData | null | undefined
+): data is EncryptedLinkData {
+    return (
+        !!data &&
+        typeof data === "object" &&
+        typeof (data as EncryptedLinkData).ciphertext === "string" &&
+        typeof (data as EncryptedLinkData).nonce === "string"
+    );
 }
 
 export interface LinkExpression extends Expression<Link> {
@@ -80,19 +97,17 @@ export interface OnlineAgent {
 
 /**
  * A LinkExpression as it travels over the wire. In a plaintext room this
- * is structurally identical to LinkExpression. In an E2E room, `data` is
- * replaced by an opaque `encrypted` envelope (hex-encoded nonce+ciphertext)
- * and `data` is omitted — see src/encryption.ts encryptLinkForWire /
- * decryptLinkFromWire.
+ * is structurally identical to LinkExpression. In an E2E room, the `data`
+ * field carries an `EncryptedLinkData` shape (`{ciphertext, nonce}`)
+ * instead of a plaintext `Link` — there is no separate `encrypted` field.
+ * See src/encryption.ts encryptLinkForWire / decryptLinkFromWire.
  */
 export interface WireLinkExpression {
     author: DID;
     timestamp: string;
     proof: ExpressionProof;
     status?: string;
-    data?: Link;
-    /** Present instead of `data` when the room has E2E encryption enabled. */
-    encrypted?: string;
+    data?: Link | EncryptedLinkData;
 }
 
 export interface WirePerspectiveDiff {

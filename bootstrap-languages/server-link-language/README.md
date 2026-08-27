@@ -1,7 +1,7 @@
 # Server Link Language
 
 An [AD4M](https://ad4m.dev) link language that syncs a perspective through a
-self-hosted [**link-server**](https://github.com/coasys/link-server)
+self-hosted [**link-server**](../../link-server/README.md)
 instance — HTTP for auth, commit, and catch-up sync; a native WebSocket for
 real-time diff push, presence, and telepresence. Every AD4M link-language capability is implemented:
 `perspective-commit`, `perspective-sync`, `perspective-query`, `peers`, and
@@ -36,13 +36,13 @@ npx tsc --noEmit
 
 #### 1. Run a server
 
-Deploy a [**link-server**](https://github.com/coasys/link-server) instance on your own hardware. One command gets you started:
+Deploy a [**link-server**](../../link-server/README.md) instance on your own hardware. One command gets you started:
 
 ```bash
 npx @coasys/link-server --port 3457 --data ./my-data
 ```
 
-See the [link-server README](https://github.com/coasys/link-server) for Docker setup, access control, federation, and encryption options.
+See the [link-server README](../../link-server/README.md) for Docker setup, access control, federation, and encryption options.
 
 #### 2. Publish the language template (one time)
 
@@ -102,7 +102,7 @@ Once joined, the neighbourhood works like any other. Links you create sync to th
 
 ## The server this language talks to
 
-[`link-server`](https://github.com/coasys/link-server) — a
+[`link-server`](../../link-server/README.md) — a
 self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 
 ### HTTP
@@ -118,7 +118,7 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 | `GET /rooms/:roomId/acl` | `{admin, members}` |
 | `GET /rooms/:roomId/keys` | This agent's sealed room key → `{encryptedKey, version}` (E2E rooms only) |
 
-### WebSocket — `/rooms/:roomId/ws?token=<jwt>`
+### WebSocket — `/rooms/:roomId/ws`
 
 Server → client: `diff`, `telepresence-signal`, `telepresence-broadcast`,
 `online-agents`, `peer-joined`, `peer-left`.
@@ -243,7 +243,7 @@ inert mode (logs and returns without attempting any network I/O).
         "name": "server-link-language",
         "description": "AD4M link language syncing through a self-hosted link-server",
         "possibleTemplateParams": ["SERVER_URL", "ROOM_ID"],
-        "sourceCodeLink": "https://github.com/coasys/server-link-language"
+        "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/server-link-language"
     }
 }
 ```

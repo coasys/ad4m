@@ -62,7 +62,7 @@ export interface BuiltServer {
 }
 
 /**
- * Builds (but does not start listening on) a fully-wired ADAM Simple Server:
+ * Builds (but does not start listening on) a fully-wired link-server:
  * SQLite storage, DID auth, ACL, OR-Set link sync, WebSocket telepresence,
  * federation and E2E encryption. Call `app.listen(...)` on the result, or
  * use `close()` to tear everything down (used heavily by tests).

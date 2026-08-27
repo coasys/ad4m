@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 /**
- * Shared types for the ADAM Simple Server.
+ * Shared types for the link-server.
  *
  * These mirror AD4M's wire shapes so link-language clients can serialize
  * against this server without translation:

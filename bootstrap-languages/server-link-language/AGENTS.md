@@ -101,28 +101,27 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 
 ## Known limitations / follow-ups
 
-- **No persistent commit outbox.** `commit()` applies to the local store
-  unconditionally, then pushes to the server with a single inline retry
-  (`commitWithRetry` in `index.ts`). If both attempts fail, the link stays
-  local-only and is **not** automatically retried later — the gap is only
-  closed if the user makes another edit or another instance later
-  overwrites/syncs the same state. A durable pending-commits queue
-  (persisted in the KV store, retried by `sync()` on its normal cadence)
-  would close this; scoped out of v1 because it needs its own conflict/
-  ordering story.
+- **Durable outbox is limited to in-memory retry.** `enqueueCommitBatched`
+  (src/sync.ts) coalesces contiguous commits into segments and retries
+  each segment up to 3 times with exponential backoff. If all attempts
+  fail, the failed segments re-enqueue for the next flush cycle and the
+  language emits `LinkLanguageInstalledButNotSynced`. This keeps links
+  local-only until the server recovers, but a process restart loses the
+  queue — a durable pending-commits queue (persisted in the KV store,
+  retried by `sync()`) would close this gap.
 - **No E2E key rotation handling.** The room key is fetched once during
   `init()`'s `setupRoomKey()` and held for the perspective's lifetime. The
   `version` field in `KeysResponse` is captured but unused — a real
   rotation flow would need to detect a version bump (e.g. periodic
   `/keys` re-fetch, or a dedicated WS push message not in the current
   server API) and re-key in place.
-- **E2E encryption incompatibilities have been resolved.** The server now
-  treats link data as opaque (no E2E validation at commit time), uses HKDF-SHA256
-  for key sealing (matching the client's KDF), returns the `encryptedKey`
-  envelope as a typed `SealedRoomKeyEnvelope` object (matching the client's
-  `KeysResponse` type), and accepts client-registered X25519 public keys
-  during auth rather than deriving from DID keys. The client receives and
-  opens the sealed envelope directly without base64 decoding.
+- **E2E encryption wire format is unified.** Both client and server use
+  the same `EncryptedLinkData` shape (`{ciphertext, nonce}`) in the link's
+  `data` field for encrypted rooms — no separate `encrypted` field. The
+  server treats link data as opaque (no E2E validation at commit time),
+  uses HKDF-SHA256 for key sealing (matching the client's KDF), returns
+  the `encryptedKey` envelope as a typed `SealedRoomKeyEnvelope` object,
+  and accepts client-registered X25519 public keys during auth.
 - **`peers.remote()` and E2E setup are not covered by the automated test
   suite directly** (only indirectly, through `api.ts`/`encryption.ts` unit
   tests) — there's no `index.ts`-level integration test because `index.ts`

@@ -16,12 +16,14 @@ import * as store from "./store.js";
 import * as api from "./api.js";
 import type { RoomConfig } from "./adapters.js";
 import type {
+    Link,
     LinkExpression,
     PerspectiveDiff,
     SyncDiffEntry,
     WireLinkExpression,
     WirePerspectiveDiff,
 } from "./types.js";
+import { isEncryptedLinkData } from "./types.js";
 import { decryptLinkFromWire, encryptLinkForWire, statusField } from "./encryption.js";
 
 export interface SyncDeps {
@@ -68,10 +70,10 @@ function toWireLink(link: LinkExpression): WireLinkExpression {
 
 function fromWireLink(wireLink: WireLinkExpression): LinkExpression {
     const roomKey = deps().getRoomKey();
-    if (wireLink.encrypted && roomKey) {
+    if (isEncryptedLinkData(wireLink.data) && roomKey) {
         return decryptLinkFromWire(wireLink, roomKey);
     }
-    if (wireLink.encrypted && !roomKey) {
+    if (isEncryptedLinkData(wireLink.data) && !roomKey) {
         throw new Error(
             "sync: received an encrypted link but no room key is available yet " +
             "(E2E key fetch may still be in flight, or this instance failed to decrypt it)",
@@ -82,7 +84,7 @@ function fromWireLink(wireLink: WireLinkExpression): LinkExpression {
         timestamp: wireLink.timestamp,
         proof: wireLink.proof,
         ...statusField(wireLink.status),
-        data: wireLink.data ?? { source: "", target: "" },
+        data: (wireLink.data as Link) ?? { source: "", target: "" },
     };
 }
 

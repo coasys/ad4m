@@ -56,7 +56,13 @@ import { gcm } from "@noble/ciphers/aes";
 import { sha256 } from "@noble/hashes/sha2";
 import { hkdf } from "@noble/hashes/hkdf";
 
-import type { Link, LinkExpression, SealedRoomKeyEnvelope, WireLinkExpression } from "./types.js";
+import type {
+    Link,
+    LinkExpression,
+    SealedRoomKeyEnvelope,
+    WireLinkExpression,
+} from "./types.js";
+import { isEncryptedLinkData } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Domain separation constants
@@ -250,6 +256,8 @@ export function statusField(status: string | undefined): { status?: string } {
  * were already signed by the runtime before this language ever saw the
  * diff. Uses a fresh random nonce per call (required for AES-GCM safety —
  * the room key is long-lived and shared across every link in the room).
+ * The encrypted payload is placed in the `data` field as
+ * `{ciphertext, nonce}` (matching link-server's EncryptedLinkData shape).
  */
 export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array): WireLinkExpression {
     const plaintext = utf8ToBytes(JSON.stringify(link.data));
@@ -261,7 +269,7 @@ export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array): W
         timestamp: link.timestamp,
         proof: link.proof,
         ...statusField(link.status),
-        encrypted: bytesToHex(concatBytes(nonce, ciphertext)),
+        data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
     };
 }
 
@@ -270,12 +278,11 @@ export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array): W
  * ciphertext was tampered with (AES-GCM auth tag failure).
  */
 export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKey: Uint8Array): LinkExpression {
-    if (!wireLink.encrypted) {
-        throw new Error("decryptLinkFromWire: wire link has no `encrypted` field");
+    if (!isEncryptedLinkData(wireLink.data)) {
+        throw new Error("decryptLinkFromWire: wire link has no encrypted data (expected {ciphertext, nonce} in data)");
     }
-    const combined = hexToBytes(wireLink.encrypted);
-    const nonce = combined.slice(0, AES_NONCE_BYTES);
-    const ciphertext = combined.slice(AES_NONCE_BYTES);
+    const nonce = hexToBytes(wireLink.data.nonce);
+    const ciphertext = hexToBytes(wireLink.data.ciphertext);
     const plaintext = gcm(roomKey, nonce).decrypt(ciphertext);
     const data = JSON.parse(bytesToUtf8(plaintext)) as Link;
 

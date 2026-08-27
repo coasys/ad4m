@@ -25,6 +25,7 @@ import {
     sealRoomKeyForRecipient,
 } from "../src/encryption.js";
 import type { LinkExpression } from "../src/types.js";
+import { isEncryptedLinkData } from "../src/types.js";
 
 /** Deterministic stand-in for AgentAdapter.signStringHex — mimics the one
  * property real EdDSA signing guarantees that this module depends on:
@@ -168,8 +169,9 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         const link = makeLink();
 
         const wire = encryptLinkForWire(link, roomKey);
-        assert.ok(wire.encrypted);
-        assert.equal(wire.data, undefined);
+        assert.ok(isEncryptedLinkData(wire.data));
+        assert.equal(typeof (wire.data as any).ciphertext, "string");
+        assert.equal(typeof (wire.data as any).nonce, "string");
         assert.equal(wire.author, link.author);
         assert.equal(wire.timestamp, link.timestamp);
         assert.deepEqual(wire.proof, link.proof);
@@ -184,7 +186,7 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         const wire = encryptLinkForWire(link, roomKey);
 
         // The plaintext source string must not appear anywhere in the ciphertext blob.
-        assert.equal(wire.encrypted!.includes(Buffer.from("s3cr3t").toString("hex")), false);
+        assert.equal((wire.data as any).ciphertext.includes(Buffer.from("s3cr3t").toString("hex")), false);
     });
 
     it("uses a fresh nonce per call (different ciphertext for identical input)", () => {
@@ -192,7 +194,7 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         const link = makeLink();
         const wire1 = encryptLinkForWire(link, roomKey);
         const wire2 = encryptLinkForWire(link, roomKey);
-        assert.notEqual(wire1.encrypted, wire2.encrypted);
+        assert.notEqual((wire1.data as any).ciphertext, (wire2.data as any).ciphertext);
     });
 
     it("fails to decrypt with the wrong room key", () => {
@@ -201,7 +203,7 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         assert.throws(() => decryptLinkFromWire(wire, generateRoomKey()));
     });
 
-    it("throws when asked to decrypt a wire link with no `encrypted` field", () => {
+    it("throws when asked to decrypt a wire link with no encrypted data in data field", () => {
         const roomKey = generateRoomKey();
         assert.throws(() => decryptLinkFromWire({ author: "a", timestamp: "t", proof: { signature: "s", key: "k" } }, roomKey));
     });
