@@ -1447,17 +1447,84 @@ mod where_compiler_tests {
 /// same helper variable and silently correlate the two — the inner condition
 /// would constrain the *outer* row rather than the linked one.
 ///
-/// The order matters: helper variables all begin `?_`, and the target variable
-/// this rebases `?source` onto does too, so `?source` must be substituted second
-/// or it would be rewritten twice. Nesting is safe because each pass prefixes
-/// whatever the previous pass produced, so depth keeps the names distinct
-/// without threading a counter.
+/// Only *variable tokens* are rewritten. A plain `str::replace` over the whole
+/// pattern would also rewrite the text inside quoted literals and IRIs, so a
+/// record whose title is the string `"?source"` would be searched for under the
+/// linked record's variable name instead — a wrong answer with nothing on the
+/// wire to say so. Scanning skips both, which also lets a single pass do the
+/// job: `?source` and the helper variables are distinguished by name rather
+/// than by substitution order, so nothing is rewritten twice. Nesting is still
+/// safe because each pass prefixes whatever the previous pass produced, so
+/// depth keeps the names distinct without threading a counter.
 fn rebase_into_subquery(patterns: &[String], namespace: &str, target_var: &str) -> Vec<String> {
-    let prefixed = format!("?_{namespace}");
     patterns
         .iter()
-        .map(|p| p.replace("?_", &prefixed).replace("?source", target_var))
+        .map(|p| rebase_pattern(p, namespace, target_var))
         .collect()
+}
+
+/// Rewrite the SPARQL variables in one pattern, leaving lexical values alone.
+fn rebase_pattern(pattern: &str, namespace: &str, target_var: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + namespace.len());
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            // A quoted literal is a value, not syntax. Copy it through verbatim,
+            // honouring the backslash escapes `escape_sparql_string` writes so a
+            // `\"` does not read as the end of the literal.
+            '"' => {
+                out.push(c);
+                while let Some(lit) = chars.next() {
+                    out.push(lit);
+                    if lit == '\\' {
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
+                    } else if lit == '"' {
+                        break;
+                    }
+                }
+            }
+            // An IRI is opaque too, and may legitimately carry `?source` in a
+            // query component. `validate_iri` guarantees no `>` inside one.
+            '<' => {
+                out.push(c);
+                for iri in chars.by_ref() {
+                    out.push(iri);
+                    if iri == '>' {
+                        break;
+                    }
+                }
+            }
+            '?' => {
+                let mut name = String::new();
+                while let Some(&n) = chars.peek() {
+                    if n.is_alphanumeric() || n == '_' {
+                        name.push(n);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if name == "source" {
+                    out.push_str(target_var);
+                } else if let Some(rest) = name.strip_prefix('_') {
+                    // Helper variables all begin `?_`; namespacing them is what
+                    // keeps an inner clause from correlating with the outer one.
+                    out.push_str("?_");
+                    out.push_str(namespace);
+                    out.push_str(rest);
+                } else {
+                    out.push('?');
+                    out.push_str(&name);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+
+    out
 }
 
 /// Compile `{ rel: { some | none: { … } } }` into `FILTER [NOT] EXISTS`.
@@ -1716,6 +1783,74 @@ mod relation_quantifier_tests {
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
         assert!(sparql.contains("<we://mention> ?source ."), "{sparql}");
+    }
+
+    #[test]
+    fn a_nested_value_that_looks_like_a_variable_is_left_alone() {
+        // Rebasing renames variables, and a value is not one. A comment whose
+        // body is literally "?source" must still be searched for by that text —
+        // rewriting inside the quotes would look for the linked record's
+        // variable name instead and quietly return the wrong rows.
+        let s = post_shape();
+        let r = resolver_with_comment();
+        let clause = wc(vec![(
+            "comments",
+            ops_with(
+                Some(vec![(
+                    "body",
+                    WhereCondition::String("?source".to_string()),
+                )]),
+                None,
+            ),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, Some(&r));
+
+        assert!(compiled.complete);
+        let sparql = compiled.patterns.join("\n");
+        assert!(
+            sparql.contains("\"?source\""),
+            "the literal value must survive rebasing: {sparql}"
+        );
+        // ...while the variable it shares a spelling with is still rebased: the
+        // relation triple is the only place `?source` legitimately remains, and
+        // that is the *outer* subject, above the rebased body.
+        let body_line = sparql
+            .lines()
+            .find(|l| l.contains("we://body"))
+            .expect("a pattern for the nested condition");
+        assert!(
+            !body_line.contains("?source <"),
+            "the nested condition must not be left on the outer subject: {body_line}"
+        );
+    }
+
+    #[test]
+    fn rebasing_skips_variable_names_inside_iris() {
+        // `?source` in a query component is part of the IRI, not a variable.
+        let patterns = vec!["    ?source <we://p?source=1> ?_ft_x .".to_string()];
+
+        let rebased = rebase_into_subquery(&patterns, "q0comments", "?_q0commentst");
+
+        assert_eq!(
+            rebased[0],
+            "    ?_q0commentst <we://p?source=1> ?_q0commentsft_x ."
+        );
+    }
+
+    #[test]
+    fn rebasing_survives_an_escaped_quote_in_a_literal() {
+        // An escaped quote does not end the literal; reading it as one would
+        // put the rest of the value back into scanning range.
+        let patterns =
+            vec!["    FILTER(STR(?_ft_x) = \"a\\\"?source\") ?source <we://p> ?_r .".to_string()];
+
+        let rebased = rebase_into_subquery(&patterns, "q0", "?_q0t");
+
+        assert_eq!(
+            rebased[0],
+            "    FILTER(STR(?_q0ft_x) = \"a\\\"?source\") ?_q0t <we://p> ?_q0r ."
+        );
     }
 
     #[test]
