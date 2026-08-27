@@ -2,6 +2,7 @@ pub mod auto_processor;
 pub(crate) mod flow_classes;
 pub(crate) mod flow_context;
 pub(crate) mod flow_evaluator;
+pub(crate) mod flow_semantic_check;
 pub(crate) mod hardwired_class;
 pub mod interpretation;
 #[cfg(test)]

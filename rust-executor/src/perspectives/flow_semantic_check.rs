@@ -1,0 +1,383 @@
+//! Slice 10.5a1 of the flow-implementation arc — pure primitives for the
+//! optional 2nd-pass semantic-check LLM confirmation gate.
+//!
+//! Design authority: `planning/flow-interpretation-hints-design.md` §5 step 5
+//! ("If any state has `semanticCheck` → targeted small LLM call; on 'no'
+//! the proposal is discarded") and §5.5.4 (the semantic-check demo).
+//!
+//! # What this module owns
+//!
+//! Pure primitives (no LLM call, no perspective I/O):
+//!
+//! - [`SemanticCheckVerdict`] — the tri-state outcome (`Pass` / `Fail` /
+//!   `Ambiguous`) the async layer (slice 10.5a2) will produce from an
+//!   LLM response and slice 10.5b will consume as the fire/discard gate.
+//! - [`build_semantic_check_prompt`] — assembles the targeted small
+//!   prompt from a `SatisfiedTransition` + its parent `FlowContext`.
+//!   Returns `None` when the transition carries no `semantic_check`
+//!   hint — the caller short-circuits and treats that as auto-pass.
+//! - [`parse_semantic_check_response`] — permissive parse of an LLM
+//!   response into a [`SemanticCheckVerdict`]. Accepts common
+//!   affirmations/negations, tolerates code fences and leading
+//!   whitespace, defaults to `Ambiguous` when the first non-empty line
+//!   does not carry a decisive token.
+//! - [`should_fire_proposal`] — the fire/discard policy the writer stage
+//!   (slice 10.5b) will apply per transition. Ambiguous defaults to
+//!   discard: an uncertain LLM must not silently advance a flow.
+//!
+//! # Why a separate module
+//!
+//! `flow_evaluator` is already responsible for producing the guarded
+//! `SatisfiedTransition`s; wedging the semantic-check prompt/parse logic
+//! in there would blur two responsibilities (deterministic guard vs.
+//! LLM confirmation) and inflate the module's test surface. Following
+//! the same shape as `flow_classes` / `flow_context` / `flow_evaluator`
+//! (leaf pure module → async wrapper → wire-up) keeps each slice
+//! digestible and the onion shells testable in isolation.
+
+#![allow(dead_code)]
+
+use crate::perspectives::flow_context::FlowContext;
+use crate::perspectives::flow_evaluator::SatisfiedTransition;
+
+/// Outcome of the optional 2nd-pass semantic-check LLM call.
+///
+/// - `Pass` — LLM affirmed the check; the deterministic proposal fires.
+/// - `Fail` — LLM negated the check; the proposal is discarded and the
+///   flow does not advance on this pass.
+/// - `Ambiguous` — LLM response did not carry a decisive token (empty,
+///   free-form, or off-vocabulary). Treated as fail-safe: the proposal
+///   is discarded so an uncertain confirmation cannot silently move a
+///   flow forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticCheckVerdict {
+    Pass,
+    Fail,
+    Ambiguous,
+}
+
+/// The fire/discard gate the writer stage applies per transition.
+///
+/// Currently a total function on the verdict: only `Pass` fires.
+/// Extracted as its own primitive so slice 10.5b's call site is a
+/// one-liner and future policy tweaks (e.g. a threshold on repeated
+/// ambiguous responses) live behind one symbol.
+pub fn should_fire_proposal(verdict: SemanticCheckVerdict) -> bool {
+    matches!(verdict, SemanticCheckVerdict::Pass)
+}
+
+/// Assemble the targeted small prompt that asks a confirmation LLM
+/// whether the transition's `semanticCheck` hint really holds against
+/// the just-satisfied structural evidence.
+///
+/// Returns `None` when the transition carries no `semantic_check`
+/// hint. Slice 10.5b short-circuits on `None` and treats the
+/// deterministic requires as sufficient (auto-pass). Returning a
+/// bare `String` here would force the caller to inspect the option
+/// twice.
+///
+/// The prompt structure is:
+///
+/// 1. One-sentence framing of the task (LLM as verifier).
+/// 2. Flow name + flow-level `interpretationHint` (when set) so the
+///    LLM has global framing.
+/// 3. Explicit `FROM` / `TO` states.
+/// 4. The `semanticCheck` string, quoted verbatim.
+/// 5. The evidence bag (matched instance IDs from the deterministic
+///    guard) so the LLM knows what the engine already accepted.
+/// 6. Instructions: answer exactly one of `YES` / `NO` / `UNCLEAR`
+///    on the first line. Case-insensitive matching is up to the
+///    parser.
+///
+/// The prompt deliberately does NOT include a transcript excerpt in
+/// this slice — that couples 10.5a1 to the auto-processor's transcript
+/// buffer and blocks the pure-testable shape. Slice 10.5a2 will thread
+/// a `Option<&str>` transcript_excerpt through when the async wrapper
+/// is added and the auto-processor's context is available.
+pub fn build_semantic_check_prompt(
+    transition: &SatisfiedTransition,
+    flow_ctx: &FlowContext,
+) -> Option<String> {
+    let hint = transition.semantic_check.as_deref()?;
+
+    let mut prompt = String::new();
+    prompt.push_str(
+        "You are checking whether a specific state transition in a group's shared workflow really applies.\n\n",
+    );
+    prompt.push_str(&format!("## Flow: {}\n", transition.flow_name));
+    if let Some(flow_hint) = flow_ctx.flow_interpretation_hint.as_deref() {
+        prompt.push_str(&format!("{flow_hint}\n"));
+    }
+    prompt.push('\n');
+    prompt.push_str("## Transition\n");
+    prompt.push_str(&format!("FROM: {}\n", transition.from_state));
+    prompt.push_str(&format!("TO:   {}\n\n", transition.to_state));
+    prompt.push_str("## Semantic check to verify\n");
+    prompt.push_str(hint);
+    prompt.push_str("\n\n## Evidence found in the graph\n");
+    if transition.evidence_ids.is_empty() {
+        prompt.push_str("(none)\n");
+    } else {
+        for id in &transition.evidence_ids {
+            prompt.push_str(&format!("- {id}\n"));
+        }
+    }
+    prompt.push_str(
+        "\n## Instructions\nAnswer with exactly one word on the first line: YES, NO, or UNCLEAR.\n",
+    );
+    prompt.push_str("YES = the semantic check is satisfied by the current evidence.\n");
+    prompt.push_str("NO = the evidence contradicts or does not support the check.\n");
+    prompt.push_str("UNCLEAR = the check cannot be confidently evaluated.\n");
+    Some(prompt)
+}
+
+/// Parse a raw LLM response string into a [`SemanticCheckVerdict`].
+///
+/// Permissive by design — small models routinely wrap answers in code
+/// fences, prepend reasoning, or emit trailing punctuation. The parser:
+///
+/// 1. Strips leading/trailing whitespace.
+/// 2. Peels off surrounding triple-backtick code fences if present.
+/// 3. Takes the first non-empty line.
+/// 4. Uppercases and strips punctuation from the first whitespace-
+///    separated token.
+/// 5. Matches against the vocabulary:
+///    - `YES` / `TRUE` / `PASS` / `CONFIRM` / `CONFIRMED` / `Y` → `Pass`
+///    - `NO` / `FALSE` / `FAIL` / `FAILED` / `REJECT` / `REJECTED` / `N`
+///      → `Fail`
+///    - anything else → `Ambiguous`
+///
+/// The vocabulary matches the [`build_semantic_check_prompt`] instructions
+/// (YES/NO/UNCLEAR) plus common synonyms so a small model that veers off
+/// vocabulary can still land on a decisive verdict — but only when its
+/// intent is unambiguous. `UNCLEAR` itself parses to `Ambiguous`.
+pub fn parse_semantic_check_response(raw: &str) -> SemanticCheckVerdict {
+    let stripped = strip_code_fence(raw.trim());
+    let first_line = stripped
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    let Some(first_token_raw) = first_line.split_whitespace().next() else {
+        return SemanticCheckVerdict::Ambiguous;
+    };
+    let first_token: String = first_token_raw
+        .trim_matches(|c: char| c.is_ascii_punctuation())
+        .to_uppercase();
+    match first_token.as_str() {
+        "YES" | "TRUE" | "PASS" | "CONFIRM" | "CONFIRMED" | "Y" => SemanticCheckVerdict::Pass,
+        "NO" | "FALSE" | "FAIL" | "FAILED" | "REJECT" | "REJECTED" | "N" => {
+            SemanticCheckVerdict::Fail
+        }
+        _ => SemanticCheckVerdict::Ambiguous,
+    }
+}
+
+/// Peel off a surrounding triple-backtick code fence if present. Handles
+/// both plain `` ``` `` and `` ```lang `` opening fences. Returns the
+/// inner content unchanged when no fence is present.
+fn strip_code_fence(input: &str) -> &str {
+    let trimmed = input.trim();
+    let Some(after_open) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    // Drop an optional language tag by advancing to the first newline.
+    let after_lang = match after_open.find('\n') {
+        Some(nl) => &after_open[nl + 1..],
+        None => after_open,
+    };
+    match after_lang.rfind("```") {
+        Some(idx) => after_lang[..idx].trim_end(),
+        None => after_lang,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::flow_context::FlowContext;
+    use crate::perspectives::flow_evaluator::SatisfiedTransition;
+
+    fn ctx() -> FlowContext {
+        FlowContext {
+            flow_name: "Deliberation".to_string(),
+            instance_uri: "ad4m://flow/instance/a".to_string(),
+            subject: "ad4m://proposal/x".to_string(),
+            current_state: "proposal".to_string(),
+            flow_interpretation_hint: Some("A workflow for resolving group tensions.".to_string()),
+            reachable_next_states: vec![],
+            consensus_rule: None,
+        }
+    }
+
+    fn transition(semantic_check: Option<&str>) -> SatisfiedTransition {
+        SatisfiedTransition {
+            flow_name: "Deliberation".to_string(),
+            instance_uri: "ad4m://flow/instance/a".to_string(),
+            subject: "ad4m://proposal/x".to_string(),
+            from_state: "proposal".to_string(),
+            to_state: "tension".to_string(),
+            evidence_ids: vec![
+                "ns://Perspective/1".to_string(),
+                "ns://Perspective/2".to_string(),
+            ],
+            evidence_hash: "deadbeef".to_string(),
+            semantic_check: semantic_check.map(str::to_string),
+            consensus_rule: None,
+        }
+    }
+
+    #[test]
+    fn should_fire_only_on_pass() {
+        assert!(should_fire_proposal(SemanticCheckVerdict::Pass));
+        assert!(!should_fire_proposal(SemanticCheckVerdict::Fail));
+        assert!(!should_fire_proposal(SemanticCheckVerdict::Ambiguous));
+    }
+
+    #[test]
+    fn build_returns_none_when_no_hint() {
+        let t = transition(None);
+        assert!(build_semantic_check_prompt(&t, &ctx()).is_none());
+    }
+
+    #[test]
+    fn build_includes_flow_hint_transition_and_evidence() {
+        let t = transition(Some(
+            "Confirm the positions actually conflict — not just two people speaking on the same side.",
+        ));
+        let prompt = build_semantic_check_prompt(&t, &ctx()).expect("hint present");
+        assert!(prompt.contains("## Flow: Deliberation"));
+        assert!(prompt.contains("A workflow for resolving group tensions."));
+        assert!(prompt.contains("FROM: proposal"));
+        assert!(prompt.contains("TO:   tension"));
+        assert!(prompt.contains("Confirm the positions actually conflict"));
+        assert!(prompt.contains("- ns://Perspective/1"));
+        assert!(prompt.contains("- ns://Perspective/2"));
+        assert!(prompt.contains("YES, NO, or UNCLEAR"));
+    }
+
+    #[test]
+    fn build_handles_missing_flow_hint() {
+        let t = transition(Some("Check it."));
+        let mut c = ctx();
+        c.flow_interpretation_hint = None;
+        let prompt = build_semantic_check_prompt(&t, &c).expect("hint present");
+        assert!(prompt.contains("## Flow: Deliberation"));
+        assert!(!prompt.contains("A workflow for resolving group tensions."));
+    }
+
+    #[test]
+    fn build_handles_empty_evidence() {
+        let mut t = transition(Some("Check it."));
+        t.evidence_ids.clear();
+        let prompt = build_semantic_check_prompt(&t, &ctx()).expect("hint present");
+        assert!(prompt.contains("(none)"));
+        assert!(!prompt.contains("- ns://"));
+    }
+
+    #[test]
+    fn parse_yes_variants() {
+        for input in [
+            "YES",
+            "yes",
+            "Yes.",
+            "y",
+            "Y",
+            "yes, absolutely",
+            "TRUE",
+            "true",
+            "confirmed",
+            "PASS",
+        ] {
+            assert_eq!(
+                parse_semantic_check_response(input),
+                SemanticCheckVerdict::Pass,
+                "input={input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_no_variants() {
+        for input in [
+            "NO",
+            "no",
+            "No.",
+            "n",
+            "N",
+            "no — evidence contradicts",
+            "FALSE",
+            "reject",
+            "rejected",
+            "FAIL",
+        ] {
+            assert_eq!(
+                parse_semantic_check_response(input),
+                SemanticCheckVerdict::Fail,
+                "input={input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ambiguous_for_off_vocabulary() {
+        for input in ["", "   ", "UNCLEAR", "maybe", "hmm", "42", "please clarify"] {
+            assert_eq!(
+                parse_semantic_check_response(input),
+                SemanticCheckVerdict::Ambiguous,
+                "input={input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_uses_first_non_empty_line() {
+        assert_eq!(
+            parse_semantic_check_response("\n\n  \nYES\n(details below)\nNO"),
+            SemanticCheckVerdict::Pass
+        );
+        assert_eq!(
+            parse_semantic_check_response("NO\nExplanation: the evidence...\nYES"),
+            SemanticCheckVerdict::Fail
+        );
+    }
+
+    #[test]
+    fn parse_strips_plain_code_fence() {
+        assert_eq!(
+            parse_semantic_check_response("```\nYES\n```"),
+            SemanticCheckVerdict::Pass
+        );
+    }
+
+    #[test]
+    fn parse_strips_language_tagged_code_fence() {
+        assert_eq!(
+            parse_semantic_check_response("```text\nNO\n```"),
+            SemanticCheckVerdict::Fail
+        );
+    }
+
+    #[test]
+    fn parse_strips_leading_and_trailing_whitespace() {
+        assert_eq!(
+            parse_semantic_check_response("   \n  YES  \n  "),
+            SemanticCheckVerdict::Pass
+        );
+    }
+
+    #[test]
+    fn parse_strips_punctuation_from_first_token() {
+        assert_eq!(
+            parse_semantic_check_response("YES!"),
+            SemanticCheckVerdict::Pass
+        );
+        assert_eq!(
+            parse_semantic_check_response("NO,"),
+            SemanticCheckVerdict::Fail
+        );
+        assert_eq!(
+            parse_semantic_check_response("(yes)"),
+            SemanticCheckVerdict::Pass
+        );
+    }
+}
