@@ -179,7 +179,16 @@ impl DecodedZomeCallResponse {
 // The duration to use for timeouts
 const TIMEOUT_DURATION: Duration = Duration::from_secs(90);
 
-const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
+// Bumped 20s → 45s to accommodate the two-stage network-readiness gate
+// added in install_app (see holochain_service/mod.rs): per-cell
+// await_cell_network_join_complete (up to 10s) + per-DNA
+// await_initial_peer_discovery (up to 11s). A single-cell / single-DNA
+// language install on a cold, isolated node routinely sits at ~21s
+// before install_app_bundle + enable_app even execute; the old 20s
+// budget was already tight on dev and would fire the dispatcher
+// timeout under the new gate. 45s gives comfortable headroom while
+// still catching genuinely stuck installs. (Data's PR #907 review item MED-1.)
+const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(45);
 
 #[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 async fn start_holochain_conductor(
