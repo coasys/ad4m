@@ -1,19 +1,6 @@
 #!/bin/bash
-# Prefer the workspace-local, version-pinned `hc` installed by
-# scripts/install-hc-toolchain.sh over the host's global one. See that script
-# for the rationale (Cargo.lock-pinned `holochain_cli_bundle` must match the
-# `hc` used to pack DNAs and hApps, otherwise the executor rejects the
-# bundle at install time — e.g. `unknown field 'signal_url'`).
+# Thin per-language shim over bootstrap-languages/hc-dna-build.sh.
+# See the shared script for the workspace-local-hc / RUSTFLAGS rationale.
 set -euo pipefail
-REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-LOCAL_HC="$REPO_ROOT/.hc-toolchain/bin/hc"
-if [ -x "$LOCAL_HC" ]; then
-    HC="$LOCAL_HC"
-else
-    HC="hc"
-fi
-echo "file-storage build.sh: using hc=$HC ($("$HC" --version))"
-
-CARGO_TARGET_DIR=target RUSTFLAGS='--cfg getrandom_backend="custom"' cargo build --release --target wasm32-unknown-unknown -p file_storage -p integrity
-"$HC" dna pack workdir
-"$HC" app pack workdir
+HC_DNA_NAME=file-storage exec "$(cd "$(dirname "$0")/../.." && pwd)/hc-dna-build.sh" \
+    -p file_storage -p integrity
