@@ -1,5 +1,5 @@
 import { InteractionCall, LanguageMetaInput, Literal, parseExprUrl } from '@coasys/ad4m'
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import fs from "fs";
 import { expect } from "chai";
 

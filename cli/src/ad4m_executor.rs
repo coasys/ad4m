@@ -152,6 +152,8 @@ enum Domain {
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
         #[arg(long, action)]
+        run_holochain: Option<bool>,
+        #[arg(long, action)]
         admin_credential: Option<String>,
         #[arg(long, action)]
         localhost: Option<bool>,
@@ -217,6 +219,7 @@ async fn main() -> Result<()> {
         hc_bootstrap_url,
         hc_relay_url,
         connect_holochain,
+        run_holochain,
         admin_credential,
         localhost,
         tls_cert_file,
@@ -258,6 +261,7 @@ async fn main() -> Result<()> {
                 hc_bootstrap_url,
                 hc_relay_url,
                 connect_holochain,
+                run_holochain,
                 admin_credential,
                 localhost,
                 auto_permit_cap_requests: Some(true),

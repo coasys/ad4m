@@ -1,5 +1,5 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "path";
@@ -163,6 +163,7 @@ export async function startExecutor(dataPath: string,
     relayUrl?: string,
     enableMcp: boolean = false,
     mcpPort?: number,
+    runHolochain: boolean = true,
 ): Promise<ChildProcess> {
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
@@ -180,6 +181,20 @@ export async function startExecutor(dataPath: string,
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
     execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
+
+    // Pre-populate published language bundles so the executor finds them on
+    // disk during bootstrap. In HC mode the language-language distributes
+    // bundles via the DHT; in local mode (local-language-store) there is no
+    // shared network, so we copy the bundles that publishTestLangs.ts placed
+    // in tst-tmp/published-languages/ into the executor's data directory.
+    const sharedLangsDir = path.join(__dirname, '..', 'tst-tmp', 'published-languages');
+    if (existsSync(sharedLangsDir)) {
+        const targetLangsDir = path.join(effectiveDataPath, 'ad4m', 'languages');
+        mkdirSync(targetLangsDir, { recursive: true });
+        cpSync(sharedLangsDir, targetLangsDir, { recursive: true });
+        const copied = readdirSync(sharedLangsDir).length;
+        console.log(`Pre-populated ${copied} published language(s) from shared directory`);
+    }
 
     // Symlink legacy dataPath → effectiveDataPath so test helpers that
     // reference the original path (e.g. injectPublishingAgent.js) still work.
@@ -214,6 +229,7 @@ export async function startExecutor(dataPath: string,
         '--language-language-only', String(languageLanguageOnly),
         '--run-dapp-server', 'false',
     ];
+    if (!runHolochain) { args.push('--run-holochain', 'false'); }
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
     if (enableMcp) { args.push('--enable-mcp', 'true'); }
     if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
