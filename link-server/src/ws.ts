@@ -71,6 +71,8 @@ export class WsManager {
       socket.close(4001, "auth timeout");
     }, this.authTimeoutMs);
 
+    let closedDuringAuth = false;
+
     const onMessage = async (raw: Buffer | ArrayBuffer | Buffer[]) => {
       clearTimeout(timeout);
       socket.removeListener("message", onMessage);
@@ -93,11 +95,16 @@ export class WsManager {
         socket.close(4004, result.error);
         return;
       }
+      // The socket may have closed while we awaited auth — don't register a dead connection.
+      if (closedDuringAuth || socket.readyState !== socket.OPEN) return;
       this.handleConnection(socket, roomId, result.did);
     };
 
     socket.on("message", onMessage);
-    socket.on("close", () => clearTimeout(timeout));
+    socket.on("close", () => {
+      closedDuringAuth = true;
+      clearTimeout(timeout);
+    });
   }
 
   private sendRaw(socket: WebSocket, msg: ServerWsMessage): void {
@@ -219,6 +226,7 @@ export class WsManager {
 
   private handleClose(conn: Connection): void {
     this.byId.delete(conn.id);
+    conn.limiter.close();
     this.telepresence.markConnectionClosed(conn.roomId, conn.did, conn.id);
     const room = this.rooms.get(conn.roomId);
     const didConns = room?.get(conn.did);

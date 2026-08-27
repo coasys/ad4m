@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS server_identity (
 CREATE INDEX IF NOT EXISTS idx_links_room ON links(room_id);
 CREATE INDEX IF NOT EXISTS idx_diffs_room_seq ON diffs(room_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_acl_room ON acl(room_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_room_did ON sessions(room_id, did);
 `;
 
 export interface RoomRow {

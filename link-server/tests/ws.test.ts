@@ -260,7 +260,11 @@ test("disconnect marks an agent offline (peer-left) only after the grace period 
 });
 
 test("reconnecting within the grace period does not trigger peer-left", async () => {
-  await withServer(async (server) => {
+  // Pin an explicit 1000ms grace period so slow CI WebSocket upgrades
+  // don't race the default (300ms). The reconnect itself takes ~50ms;
+  // the settle wait (500ms) fits comfortably inside the window.
+  const server = await startTestServer({ telepresenceGraceMs: 1000 });
+  try {
     const roomId = randomUUID();
     const agentA = await createTestAgent();
     const agentB = await createTestAgent();
@@ -273,19 +277,21 @@ test("reconnecting within the grace period does not trigger peer-left", async ()
     const collectorB = collectMessages(wsB);
 
     wsA1.close();
-    // Reconnect well within the 300ms grace period.
+    // Reconnect well within the 1000ms grace period.
     await new Promise((resolve) => setTimeout(resolve, 50));
     const wsA2 = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
 
     // Give the grace timer time to have fired if it were going to.
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 1200));
     assert.ok(!collectorB.messages.some((m) => m.type === "peer-left"));
 
     const peersRes = await getJson<{ peers: string[] }>(`${server.url}/rooms/${roomId}/peers`, tokenB);
     assert.ok(peersRes.body.peers.includes(agentA.did));
 
     closeAll(wsA2, wsB);
-  });
+  } finally {
+    await server.close();
+  }
 });
 
 test("ws rate limiting: excess messages are silently dropped", async () => {
@@ -349,6 +355,22 @@ test("commit rejects links missing required structural fields", async () => {
       token
     );
     assert.equal(res3.status, 400);
+
+    // Empty diff (both additions and removals empty)
+    const res4 = await postJson(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [], removals: [] },
+      token
+    );
+    assert.equal(res4.status, 400);
+
+    // Non-array additions
+    const res5 = await postJson(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: "not-an-array", removals: [] },
+      token
+    );
+    assert.equal(res5.status, 400);
   });
 });
 

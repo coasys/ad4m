@@ -411,6 +411,13 @@ export async function bootstrap(): Promise<void> {
     // extra fetchRevision round-trip that the old code made.
     const rendered = await api.fetchRender(config, token);
     const additions = rendered.links.map(fromWireLink);
+
+    // Replace the local link set atomically: remove any stale links left
+    // from a previous session, then apply the authoritative server snapshot.
+    // Without this, links deleted while the language was stopped would
+    // remain visible locally.
+    const existing = store.allLinks();
+    store.applyDiff({ additions: [], removals: existing.links });
     store.applyDiff({ additions, removals: [] });
 
     if (rendered.revision) store.setRevision(rendered.revision);

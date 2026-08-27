@@ -21,11 +21,13 @@ WORKDIR /app
 COPY package*.json ./
 COPY --from=build /app/node_modules/ ./node_modules/
 COPY --from=build /app/dist/ ./dist/
+RUN mkdir -p /data && chown -R node:node /data /app
 EXPOSE 3456
 VOLUME /data
 # PORT, DATA_DIR, AUTO_ADMIT read from env vars
 # (see src/index.ts parseArgs). Defaults: port 3456, data ./data.
 ENV DATA_DIR=/data
+USER node
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
   CMD node -e "fetch('http://localhost:'+(process.env.PORT||3456)+'/health').then(r=>{if(!r.ok)throw r.status}).catch(()=>process.exit(1))"
 CMD ["node", "dist/index.js"]

@@ -168,6 +168,9 @@ const language = defineLanguage({
                 onPeerLeft(msg) {
                     telepresenceModule.handlePeerLeft(msg);
                 },
+                onStatusChanged(msg) {
+                    telepresenceModule.handleStatusChanged(msg);
+                },
                 onOpen() {
                     getRuntime().emitSyncStateChange("Synced");
                     // Belt-and-braces catch-up: covers any diff that landed

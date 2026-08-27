@@ -29,8 +29,8 @@ function envBool(key: string): boolean {
 
 function parseArgs(argv: string[]): CliArgs {
   // Environment variables provide defaults; CLI args override.
-  let port = Number.parseInt(process.env.PORT ?? "3456", 10);
-  if (!Number.isFinite(port)) port = 3456;
+  let port = Number(process.env.PORT ?? "3456");
+  if (!Number.isInteger(port) || port < 0 || port > 65535) port = 3456;
   let host = process.env.HOST ?? "0.0.0.0";
   let dataDir = process.env.DATA_DIR ?? "./data";
   let selfUrl: string | undefined = process.env.SELF_URL;
@@ -41,9 +41,9 @@ function parseArgs(argv: string[]): CliArgs {
     switch (arg) {
       case "--port": {
         const value = argv[++i];
-        const parsed = Number.parseInt(value ?? "", 10);
-        if (!Number.isFinite(parsed)) {
-          console.error(`Invalid --port value: ${value}`);
+        const parsed = Number(value ?? "");
+        if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+          console.error(`Invalid --port value: ${value} (must be an integer 0-65535)`);
           process.exit(1);
         }
         port = parsed;
@@ -106,7 +106,7 @@ async function main(): Promise<void> {
   });
 
   await app.listen({ port: args.port, host: args.host });
-  app.log.info(`ADAM Simple Server listening on ${args.host}:${args.port} (data: ${args.dataDir})`);
+  app.log.info(`link-server listening on ${args.host}:${args.port} (data: ${args.dataDir})`);
 
   const shutdown = (signal: string) => {
     app.log.info(`received ${signal}, shutting down`);

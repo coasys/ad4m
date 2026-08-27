@@ -335,9 +335,13 @@ export class FederationManager {
       // Skip this tick if a previous pass still runs — prevents overlap
       // from accumulating when a pass exceeds the interval.
       if (this.reconcileInFlight) return;
-      this.reconcileInFlight = this.reconcileAll().finally(() => {
-        this.reconcileInFlight = null;
-      });
+      this.reconcileInFlight = this.reconcileAll()
+        .catch((err) => {
+          console.error("[federation] reconcileAll failed:", err);
+        })
+        .finally(() => {
+          this.reconcileInFlight = null;
+        });
     }, this.reconcileIntervalMs);
     this.timer.unref();
   }

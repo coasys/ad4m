@@ -55,6 +55,7 @@ function requireAdmin(ctx: RouteContext) {
     const room = ctx.db.getRoom(claims.roomId);
     if (!room || room.admin_did !== claims.did) {
       reply.code(403).send({ error: "admin only" });
+      return;
     }
   };
 }
@@ -184,8 +185,21 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     async (request, reply) => {
       const claims = request.authClaims!;
       const body = request.body as { additions?: unknown; removals?: unknown } | null;
-      const additions = Array.isArray(body?.additions) ? (body!.additions as LinkExpression[]) : [];
-      const removals = Array.isArray(body?.removals) ? (body!.removals as LinkExpression[]) : [];
+      if (!body || typeof body !== "object") {
+        return reply.code(400).send({ error: "request body must be an object with additions and/or removals" });
+      }
+      if (body.additions !== undefined && !Array.isArray(body.additions)) {
+        return reply.code(400).send({ error: "additions must be an array" });
+      }
+      if (body.removals !== undefined && !Array.isArray(body.removals)) {
+        return reply.code(400).send({ error: "removals must be an array" });
+      }
+      const additions = (body.additions as LinkExpression[] | undefined) ?? [];
+      const removals = (body.removals as LinkExpression[] | undefined) ?? [];
+
+      if (additions.length === 0 && removals.length === 0) {
+        return reply.code(400).send({ error: "commit must contain at least one addition or removal" });
+      }
 
       for (const link of [...additions, ...removals]) {
         if (!link || typeof link !== "object") {

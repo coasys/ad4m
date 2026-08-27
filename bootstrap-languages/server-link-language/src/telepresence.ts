@@ -48,6 +48,15 @@ export function handlePeerLeft(msg: Extract<ServerWsMessage, { type: "peer-left"
     onlineAgents.delete(msg.did);
 }
 
+export function handleStatusChanged(msg: Extract<ServerWsMessage, { type: "status-changed" }>): void {
+    const existing = onlineAgents.get(msg.did);
+    if (existing) {
+        existing.status = msg.status;
+    } else {
+        onlineAgents.set(msg.did, { did: msg.did, status: msg.status });
+    }
+}
+
 /** Clears the roster — call on disconnect since presence is only valid
  * while the WebSocket is actually live. */
 export function clearOnlineAgents(): void {

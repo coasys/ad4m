@@ -2,7 +2,7 @@
 
 A self-hostable link language server for [AD4M](https://github.com/coasys/ad4m). Communities run this on their own hardware; AD4M agents authenticate with their DID and sync link data through it. Think Matrix homeserver, but purpose-built for AD4M link sync instead of chat.
 
-**Companion repo:** [`server-link-language`](https://github.com/coasys/server-link-language) — the AD4M link language that talks to this server.
+**Companion package:** [`server-link-language`](../bootstrap-languages/server-link-language/README.md) — the AD4M link language that talks to this server.
 
 ![Setup & Join Guide](guide.svg)
 
@@ -95,7 +95,7 @@ For open communities, start the server with `AUTO_ADMIT=true` and skip member ma
 
 ### Connecting AD4M agents to this server
 
-The server handles storage and sync — it does not speak AD4M on its own. The companion [**server-link-language**](https://github.com/coasys/server-link-language) bridges the gap: AD4M agents load that language, which then connects to this server, authenticates, and syncs links automatically. See that repo for instructions on publishing the language and creating neighbourhoods.
+The server handles storage and sync — it does not speak AD4M on its own. The companion [**server-link-language**](../bootstrap-languages/server-link-language/README.md) bridges the gap: AD4M agents load that language, which then connects to this server, authenticates, and syncs links automatically. See that package for instructions on publishing the language and creating neighbourhoods.
 
 ### Federation (optional)
 
@@ -139,7 +139,7 @@ See [`AGENTS.md`](./AGENTS.md) for architecture, file layout, and implementation
 
 All endpoints except `/rooms/:roomId/auth`, `/server/identity`, and the federation transport (`/federate`, `/reconcile`) require `Authorization: Bearer <jwt>`.
 
-```
+```text
 POST /rooms/:roomId/auth      { did } -> { challenge }
                                { did, challenge, signature } -> { token, expiresAt }
 POST /rooms/:roomId/commit    { additions: LinkExpression[], removals: LinkExpression[] } -> { sequence, revision }

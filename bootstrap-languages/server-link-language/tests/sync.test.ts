@@ -327,6 +327,28 @@ describe("sync: bootstrap", () => {
         assert.equal(store.getSequence(), 7);
         assert.equal(emittedDiffs.length, 0);
     });
+
+    it("replaces stale local links with the server snapshot", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+
+        // Pre-populate with a stale link that the server no longer has.
+        const staleLink = makeLink({ source: "stale" });
+        store.putLink(staleLink);
+        assert.equal(store.allLinks().links.length, 1);
+
+        const freshLink = makeLink({ source: "fresh" });
+        transport.route(
+            (url, method) => method === "GET" && url.endsWith("/render"),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [freshLink], revision: "rev-2", sequence: 5 }) }),
+        );
+
+        await syncModule.bootstrap();
+
+        const links = store.allLinks().links;
+        assert.equal(links.length, 1, "stale link should have been removed");
+        assert.equal(links[0].data.source, "fresh");
+    });
 });
 
 // ---------------------------------------------------------------------------
