@@ -200,7 +200,18 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
       });
 
       it("divides successive waves between the executors without re-processing a turn", async () => {
-        const { aliceP, bobP, events } = await sharedChannel("flux-waves", { batchMin: 2 });
+        // Debounce raised to 1500ms (7.5x the default 200ms) specifically for
+        // this test: it stresses the cross-peer claim + cursor race, and the
+        // 200ms drain window is short enough that Alice's ProcessingClaim
+        // link routinely doesn't sync to Bob before Bob's own watch tick
+        // drains the same batch. The wider window gives the claim + cursor
+        // sync latency headroom without materially slowing the test — total
+        // added wall-clock is ≈ 2× (debounce - 200ms) ≈ 2.6s across the two
+        // waves. Every OTHER test in this file keeps the fast default.
+        const { aliceP, bobP, events } = await sharedChannel("flux-waves", {
+          batchMin: 2,
+          debounceMs: 1500,
+        });
 
         const aliceDid = await agentDid(testContext.alice);
         const bobDid = await agentDid(testContext.bob);
@@ -208,18 +219,66 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         const retired = () =>
           events.filter((e) => e.step === "processed").flatMap((e) => e.itemIds);
 
+        /**
+         * Wait for `retired().length` to reach `minCount` and then stay
+         * constant for `stableMs` milliseconds. Closes the flake pattern
+         * where a late Processed event from the other peer fires after the
+         * initial `.length >= minCount` check has passed — currently the
+         * observed failure mode in the retire-cursor race, where Bob's
+         * watch loop had wave-1 turns in its in-memory pending queue
+         * before the cursor sync arrived and processes them anyway.
+         */
+        async function waitForRetirementStable(
+          minCount: number,
+          stableMs: number,
+          budgetMs: number,
+          label: string,
+        ): Promise<void> {
+          await waitUntil(
+            () => retired().length >= minCount,
+            budgetMs,
+            `${label}: retirement count to reach ${minCount}`,
+          );
+          const deadline = Date.now() + budgetMs;
+          let lastCount = retired().length;
+          let lastChangeAt = Date.now();
+          while (Date.now() < deadline) {
+            await sleep(250);
+            const cur = retired().length;
+            if (cur !== lastCount) {
+              lastCount = cur;
+              lastChangeAt = Date.now();
+            } else if (Date.now() - lastChangeAt >= stableMs) {
+              return;
+            }
+          }
+          throw new Error(
+            `${label}: retirement count never stabilized (last count ${lastCount})`,
+          );
+        }
+
         // Wave 1 authored by Alice, wave 2 by Bob. Both land in the same shared
         // channel, so each peer re-gathers the other's turns on every tick —
         // only the claim and the cursor keep a turn from being interpreted
         // twice, once per executor.
         await say(aliceP, "msg://w1a", "Our webhook retries keep dropping during payment outages.");
         await say(aliceP, "msg://w1b", "Right, the payments queue cannot replay what got dropped.");
-        await waitUntil(() => retired().length >= 2, 240_000, "the first wave to be processed");
+
+        // Wait for wave-1 to be processed AND for `retired()` to stop
+        // growing for 6 seconds (≥ 12 watch-loop ticks at 500ms). If a
+        // second peer has a stale in-flight wave-1 batch, its Processed
+        // event fires within this window and the `wave1Dids.size === 1`
+        // assertion below catches the race with a clear "wave 1 processed
+        // by two peers" diagnostic — cleaner than the downstream "2 unique
+        // ids but 4 retirements" wall.
+        await waitForRetirementStable(2, 6_000, 240_000, "the first wave to be processed");
 
         const firstWave = retired();
 
-        // Wave-1 must be attributable to exactly one peer. Failing here (not
-        // downstream) points at the claim mechanism directly.
+        // Wave-1 must be attributable to exactly one peer. This assertion
+        // fires *after* the stabilization wait above, so a late Processed
+        // event from the other peer is caught here with a diagnostic that
+        // points at the claim/cursor race directly, not at wave-2.
         const wave1Dids = new Set(
           events
             .filter((e) => e.step === "processed" && (e.itemIds ?? []).some((id) => firstWave.includes(id)))
@@ -229,7 +288,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           wave1Dids.size,
           `wave 1 must be processed by exactly ONE peer, got dids=${JSON.stringify(
             [...wave1Dids],
-          )} (alice=${aliceDid} bob=${bobDid})`,
+          )} (alice=${aliceDid} bob=${bobDid}) after stabilization`,
         ).to.equal(1);
 
         // Wait for wave-1's InterpretationRun to sync ACROSS to the OTHER
@@ -269,6 +328,60 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           240_000,
           `wave-1 InterpretationRun to sync to ${otherLabel} with all firstWave sources`,
         );
+
+        // Second sync gate: the OTHER peer's exact cursor SPARQL — the one
+        // `auto_processor::cursor::processed_ids_query` runs on every
+        // watch tick — must return all firstWave turn IDs. The
+        // `InterpretationRun.findAll` above walks the shape hydration
+        // path; this one walks the raw store the cursor actually reads.
+        // The two views can diverge briefly (SHACL/store visibility gap)
+        // and this test used to flake in that gap. Query mirrors
+        // `rust-executor/src/perspectives/auto_processor/cursor.rs` —
+        // keep in sync when the cursor's SPARQL changes.
+        const processorNode = "ad4m://autoprocessor/flux-waves";
+        const cursorSparql = `SELECT ?id WHERE {
+  ?run <ad4m://interp/run_id> ?run_id .
+  ?run <ad4m://interp/processor> <${processorNode}> .
+  ?run <ad4m://interp/sources> ?id .
+}`;
+        await waitUntil(
+          async () => {
+            try {
+              const rows: Array<Record<string, string>> = await otherPeer.querySparql(cursorSparql);
+              const ids = new Set(
+                rows.map((r) => {
+                  const raw = r.id ?? "";
+                  // `?id` binds a literal:string:… IRI; strip the literal
+                  // wrapper to match the plain-hex ids we hold in
+                  // `firstWave` (mirrors the Rust cursor's decode).
+                  if (raw.startsWith("literal:string:")) {
+                    try {
+                      return decodeURIComponent(raw.slice("literal:string:".length));
+                    } catch {
+                      return raw;
+                    }
+                  }
+                  return raw;
+                }),
+              );
+              return firstWave.every((id) => ids.has(id));
+            } catch {
+              return false;
+            }
+          },
+          60_000,
+          `wave-1 cursor SPARQL on ${otherLabel} to return all firstWave ids`,
+        );
+
+        // Final cursor-barrier settle: give the other peer's watch loop
+        // (TICK_MS=500 in `perspective_instance.rs::auto_processor_watch_loop`)
+        // a full 4 tick cycles + the debounce window to observe the cursor
+        // and reconcile any pending in-memory batch before wave 2 lands.
+        // Without this, Bob's already-recorded wave-1 items in
+        // `WatcherState.per_processor` can drain despite the cursor being
+        // visible on-graph — the cursor is applied at gather time, not to
+        // items already in pending.
+        await sleep(4_000);
 
         await say(bobP, "msg://w2a", "Separately, the retro is moved to Thursday morning.");
         await say(bobP, "msg://w2b", "I'll book the room and send the invite.");
