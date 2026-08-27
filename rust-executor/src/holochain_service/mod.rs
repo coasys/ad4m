@@ -13,8 +13,8 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
-    AppManifest, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest, Signal,
-    Signature, Timestamp, ZomeCallParams, ZomeCallResponse,
+    AppManifest, DnaHash, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest,
+    Signal, Signature, Timestamp, ZomeCallParams, ZomeCallResponse,
 };
 use holochain::test_utils::itertools::Either;
 
@@ -661,34 +661,25 @@ impl HolochainService {
             }
         }
 
-        // Wait for all cells to complete their network join.
+        // Two-stage network readiness gate before we hand control back to the
+        // caller. Both stages are needed because HC 0.7's `JoinComplete` and
+        // "the peer store has at least one entry" are distinct events, and
+        // the caller's very next step is typically `add_agent_infos`, which
+        // routes via `holochain_p2p.publish_agent_info`. That routing lookup
+        // needs a resolvable peer entry in the target space — an empty peer
+        // store yields K2SpaceNotFound and the info is silently skipped,
+        // which manifests upstream as "cross-node discovery never completes".
         //
-        // NB per Nico's turn #6653: `await_cell_network_join_complete` is the
-        // WEAKER signal on our fork. It fires the instant
-        // `holochain_p2p_dna.join()` returns Ok(()), which the fork's own
-        // enum doc-comment describes as: "the agent has successfully joined
-        // the k2 space, but peers may not yet be discovered via bootstrap."
-        // The moment after this returns we call `add_agent_infos`, which
-        // internally routes via `holochain_p2p.publish_agent_info` — that
-        // needs a resolvable peer route in the target space, i.e. the peer
-        // store must have at least one entry. With an empty peer store on
-        // a fresh cell, the routing lookup returns K2SpaceNotFound and we
-        // silently "skip" it. Cross-node peer discovery never completes,
-        // which is exactly the multi-user-simple failure signature.
+        // Stage 1 — per-cell: wait for JoinComplete via the fork's built-in
+        //   event-driven method. Fast (~ms) once the k2 space join returns
+        //   Ok. The fork's own enum doc says JoinComplete means "the agent
+        //   has successfully joined the k2 space, but peers may not yet be
+        //   discovered via bootstrap" — hence stage 2.
         //
-        // The fork ALSO exposes a bootstrap-readiness signal:
-        // `NetworkEvent::BootstrapComplete { dna_hash, peer_count }`,
-        // fired by `network_events::start_peer_monitoring` once the first
-        // remote peer appears (or after 10s). And `ConductorNetworkState`
-        // has `is_bootstrap_complete(&dna_hash)` on the shared state
-        // handle. That's the correct signal to gate `add_agent_infos` on.
-        //
-        // Sequence per cell:
-        //   1. Wait for JoinComplete (fast, ~ms).
-        //   2. Additionally wait for BootstrapComplete on the cell's DNA
-        //      (up to ~11s: the fork's peer-monitoring task also has an
-        //      internal 10s cap, plus a small buffer). This makes the
-        //      first burst of add_agent_infos see a populated peer store.
+        // Stage 2 — per DNA: wait until at least one peer has appeared in
+        //   the peer store for that DNA, or the fork's internal peer-monitoring
+        //   task has given up. See `await_initial_peer_discovery` below for
+        //   the naming rationale and the polling-vs-subscribe trade-off.
         for cell_id in &app_cell_ids {
             if let Err(e) = self
                 .conductor
@@ -702,57 +693,81 @@ impl HolochainService {
             }
         }
 
-        // NET-DIAG (Nico turn #6653): wait for per-DNA BootstrapComplete
-        // before we hand back to the caller so the follow-up
-        // add_agent_infos doesn't run against an empty peer store. We
-        // poll the shared ConductorNetworkState because subscribing to the
-        // broadcast channel already-past events is racy (see fork's own
-        // await_cell_network_join_complete for the bracketing pattern).
-        //
-        // Total wait budget is ~11s per DNA (start_peer_monitoring caps at
-        // 10s internally + 1s slack for the state write to settle). This
-        // parallels the JoinComplete wait above.
         let dna_hashes: std::collections::HashSet<_> =
             app_cell_ids.iter().map(|c| c.dna_hash().clone()).collect();
-        let bootstrap_timeout = std::time::Duration::from_secs(11);
-        let poll_interval = std::time::Duration::from_millis(200);
         for dna_hash in &dna_hashes {
-            let start = std::time::Instant::now();
-            let mut ready = false;
-            while start.elapsed() < bootstrap_timeout {
-                let is_ready = {
-                    let state = self.conductor.network_state.read().await;
-                    state.is_bootstrap_complete(dna_hash)
-                };
-                if is_ready {
-                    ready = true;
-                    break;
-                }
-                tokio::time::sleep(poll_interval).await;
-            }
-            if !ready {
-                // Not fatal — the fork's peer monitor also emits
-                // BootstrapComplete after the 10s timeout even with zero
-                // peers, so this branch normally shouldn't trip. If it
-                // does, we surface it and continue: subsequent gossip
-                // rounds may still recover.
-                error!(
-                    "NET-DIAG install_app: BootstrapComplete not observed within {:?} for DNA {:?} \
-                     (peer store may still be empty; add_agent_infos rounds may skip this space)",
-                    bootstrap_timeout, dna_hash
-                );
-            } else {
-                info!(
-                    "NET-DIAG install_app: BootstrapComplete observed for DNA {:?} after {:?}",
-                    dna_hash,
-                    start.elapsed()
-                );
-            }
+            self.await_initial_peer_discovery(dna_hash, std::time::Duration::from_secs(11))
+                .await;
         }
 
         let app_info = self.conductor.get_app_info(&app_id).await?;
         let app_info = app_info.ok_or_else(|| anyhow!("App not found: {}", app_id))?;
         Ok(app_info)
+    }
+
+    /// Wait until the peer store for `dna_hash` holds at least one peer, or
+    /// the fork's internal peer-monitoring task has given up (whichever is
+    /// sooner). Returns silently in either case — not being able to reach a
+    /// peer at startup is common (single-node deployments, isolated tests,
+    /// first node online) and is surfaced only via log level.
+    ///
+    /// # Naming
+    ///
+    /// Deliberately not called `await_bootstrap_complete`. In a fully p2p
+    /// network the peer store is *never* "complete" — it just accumulates
+    /// as new peers are discovered. "Initial peer discovery" reflects what
+    /// this actually gates on: the *first* peer showing up (so a following
+    /// `add_agent_infos` burst has somewhere to route to), not a false
+    /// milestone that discovery has finished. Framing per Nico's discussion
+    /// with Guillem and Joost from the Holochain team.
+    ///
+    /// # Implementation
+    ///
+    /// Polls `ConductorNetworkState::is_bootstrap_complete` (which is the
+    /// state-side mirror of `NetworkEvent::BootstrapComplete`, fired by the
+    /// fork's `start_peer_monitoring` task once the first peer appears OR
+    /// after its internal 10s cap). We poll rather than subscribe to the
+    /// broadcast channel because subscription races with already-fired
+    /// events — the fork's own `await_cell_network_join_complete` uses a
+    /// subscribe-then-recheck-state bracket to work around this. For this
+    /// call site polling at 200ms with an 11s cap is cheap, simple, and
+    /// avoids re-implementing that bracket AD4M-side. If this ever needs
+    /// to be tighter it should move upstream as a proper `Conductor`
+    /// wrapper (see `crates/holochain/src/conductor/conductor.rs` next to
+    /// `await_cell_network_join_complete`) and dropped here.
+    async fn await_initial_peer_discovery(&self, dna_hash: &DnaHash, timeout: std::time::Duration) {
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+        let start = std::time::Instant::now();
+        loop {
+            let discovered = {
+                let state = self.conductor.network_state.read().await;
+                state.is_bootstrap_complete(dna_hash)
+            };
+            if discovered {
+                info!(
+                    "await_initial_peer_discovery: first peer observed for DNA {:?} after {:?}",
+                    dna_hash,
+                    start.elapsed()
+                );
+                return;
+            }
+            if start.elapsed() >= timeout {
+                // Not fatal — the fork's peer monitor also emits
+                // BootstrapComplete after its internal cap even with zero
+                // peers (which flips the state field we're polling), so
+                // this branch normally shouldn't trip. If it does, we
+                // surface it and continue: subsequent gossip rounds may
+                // still recover.
+                error!(
+                    "await_initial_peer_discovery: no peer observed within {:?} for DNA {:?} \
+                     (peer store may still be empty; add_agent_infos rounds may skip this space)",
+                    timeout, dna_hash
+                );
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 
     pub async fn call_zome_function(
