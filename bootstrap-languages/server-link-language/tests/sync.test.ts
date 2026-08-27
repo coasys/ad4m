@@ -14,6 +14,7 @@ import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
 import { encryptLinkForWire, generateRoomKey } from "../src/encryption.js";
 import type { LinkExpression, PerspectiveDiff } from "../src/types.js";
+import { isEncryptedLinkData } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapters
@@ -271,7 +272,7 @@ describe("sync: commit", () => {
 
         assert.ok(posted);
         assert.deepEqual(posted.additions[0].data, link.data);
-        assert.equal(posted.additions[0].encrypted, undefined);
+        assert.ok(!isEncryptedLinkData(posted.additions[0].data));
     });
 
     it("posts an encrypted wire diff when a room key is set", async () => {
@@ -291,8 +292,7 @@ describe("sync: commit", () => {
 
         await syncModule.commit({ additions: [link], removals: [] });
 
-        assert.ok(posted.additions[0].encrypted);
-        assert.equal(posted.additions[0].data, undefined);
+        assert.ok(isEncryptedLinkData(posted.additions[0].data));
     });
 
     it("propagates a network failure to the caller", async () => {
