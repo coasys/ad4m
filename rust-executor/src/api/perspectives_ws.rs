@@ -950,15 +950,21 @@ async fn subject_classes_of_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let uris: Vec<String> = params
-        .get("uris")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+    // A malformed element cannot be dropped here. The result map omits URIs that
+    // matched no class, so a silently discarded input would be indistinguishable
+    // from a URI that is simply not a subject instance — the caller would read a
+    // shape error as a legitimate answer. Absent (or null, which is how an
+    // undefined field arrives from JS) keeps the empty default; anything present
+    // has to be an array of strings.
+    let uris: Vec<String> = match params.get("uris") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+            WsRpcError::bad_request(format!(
+                "Invalid parameter 'uris': expected string[]: {}",
+                e
+            ))
+        })?,
+    };
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
