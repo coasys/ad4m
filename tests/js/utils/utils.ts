@@ -34,7 +34,21 @@ export async function isProcessRunning(processName: string): Promise<boolean> {
 }
 
 export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bootstrapUrl: string | null, relayUrl: string | null, process: ChildProcess}> {
-    let servicesProcess = exec(`kitsune2-bootstrap-srv`);
+    // Prefer the workspace-local, version-pinned kitsune2-bootstrap-srv
+    // installed by scripts/install-hc-toolchain.sh into $REPO/.hc-toolchain/bin/.
+    // This MUST match the kitsune2 version the executor is linked against
+    // (crates.io kitsune2 0.5.0 as of HC 0.7.0), otherwise the standalone
+    // bootstrap-srv and the executor speak different wire protocols and
+    // signals silently fail to route between agents on different nodes.
+    // Falls back to $PATH for dev convenience.
+    // tests/js/utils/utils.ts -> repo root is three parents up.
+    // (fs/path are already imported at the top of this module.)
+    const fs = await import("node:fs");
+    const repoRoot = path.resolve(__dirname, "..", "..", "..");
+    const localBin = path.join(repoRoot, ".hc-toolchain", "bin", "kitsune2-bootstrap-srv");
+    const bootstrapBin = fs.existsSync(localBin) ? localBin : "kitsune2-bootstrap-srv";
+    console.log(`runHcLocalServices: using ${bootstrapBin}`);
+    let servicesProcess = exec(bootstrapBin);
 
     let proxyUrl: string | null = null;
     let bootstrapUrl: string | null = null;
@@ -73,8 +87,19 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
                     const portPart = parts[3]; // "127.0.0.1:36353"
                     bootstrapPort = portPart.split(':')[1];
                     console.log("Bootstrap Port: ", bootstrapPort);
-                    bootstrapUrl = `https://127.0.0.1:${bootstrapPort}`;
-                    proxyUrl = `wss://127.0.0.1:${bootstrapPort}`;
+                    // kitsune2-bootstrap-srv serves PLAIN HTTP when no TLS
+                    // cert/key is configured (the self-signed cert it logs is
+                    // only for the QUIC/QAD listener). Both consumers require
+                    // http:// here:
+                    //   - bootstrap: kitsune2_bootstrap_client uses ureq; an
+                    //     https:// URL fails the TLS handshake outright.
+                    //   - relay (proxyUrl → conductor relay_url): iroh treats
+                    //     wss/https as TLS and fails the same way. http:// is
+                    //     accepted because holochain's test_utils feature sets
+                    //     relay_allow_plain_text=true. Holochain's own
+                    //     sweettest rendezvous uses http:// for both, too.
+                    bootstrapUrl = `http://127.0.0.1:${bootstrapPort}`;
+                    proxyUrl = `http://127.0.0.1:${bootstrapPort}`;
                     console.log("Bootstrap URL: ", bootstrapUrl);
                     console.log("Proxy URL: ", proxyUrl);
                 }
@@ -151,6 +176,29 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
     return {proxyUrl, bootstrapUrl, relayUrl, process: servicesProcess};
 }
 
+// Shared per-process local services, lazily started by startExecutor for
+// suites that don't manage their own bootstrap server. One server per mocha
+// process: executors started by the same suite share it, so two-node suites
+// that rely on the fallback still discover each other via bootstrap.
+let sharedLocalServices: ReturnType<typeof runHcLocalServices> | null = null;
+
+function ensureSharedLocalServices(): ReturnType<typeof runHcLocalServices> {
+    if (!sharedLocalServices) {
+        sharedLocalServices = runHcLocalServices().then((services) => {
+            // Tear the server down when mocha exits (--exit / SIGTERM paths
+            // both end in 'exit'). spawn() in runHcLocalServices runs the
+            // binary directly, so the signal reaches the actual server.
+            process.once('exit', () => {
+                try { services.process.kill('SIGKILL'); } catch {}
+            });
+            return services;
+        });
+        // On startup failure, allow a later retry instead of caching rejection.
+        sharedLocalServices.catch(() => { sharedLocalServices = null; });
+    }
+    return sharedLocalServices;
+}
+
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
     apiPort: number,
@@ -158,12 +206,26 @@ export async function startExecutor(dataPath: string,
     hcAppPort: number,
     languageLanguageOnly: boolean = false,
     adminCredential?: string,
-    proxyUrl: string = "wss://dev-test-bootstrap2.holochain.org",
-    bootstrapUrl: string = "https://dev-test-bootstrap2.holochain.org",
+    // NEVER default to dev-test-bootstrap2.holochain.org — that server is
+    // an outdated HC test bootstrap that our HC 0.7.0 fork does not target.
+    // Multi-node suites should pass the local kitsune2-bootstrap-srv URLs
+    // from their own runHcLocalServices() call so all their executors share
+    // one server. When omitted, a per-process shared local bootstrap-srv is
+    // started lazily — never a public server.
+    proxyUrl?: string,
+    bootstrapUrl?: string,
     relayUrl?: string,
     enableMcp: boolean = false,
     mcpPort?: number,
 ): Promise<ChildProcess> {
+    if (!proxyUrl || !bootstrapUrl) {
+        const services = await ensureSharedLocalServices();
+        proxyUrl = services.proxyUrl!;
+        bootstrapUrl = services.bootstrapUrl!;
+        if (!relayUrl && services.relayUrl) {
+            relayUrl = services.relayUrl;
+        }
+    }
     const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
 
     const effectiveDataPath = path.join(

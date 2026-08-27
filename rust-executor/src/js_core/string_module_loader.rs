@@ -39,17 +39,10 @@ fn maybe_transpile(
                 maybe_code_cache,
             ))
         }
-        Err(e) => Err(ModuleLoaderError::Core(CoreError::Js(JsError {
-            name: Some(e.get_class().to_string()),
-            message: Some(e.get_message().to_string()),
-            stack: None,
-            cause: None,
-            exception_message: String::new(),
-            frames: Vec::new(),
-            source_line: None,
-            source_line_frame_index: None,
-            aggregated: None,
-        }))),
+        // deno v2.9: ModuleLoaderError = JsErrorBox (type alias). Neither
+        // ::Core nor ::NotFound enum variants exist anymore — use the
+        // JsErrorBox constructor helpers instead.
+        Err(e) => Err(deno_error::JsErrorBox::new(e.get_class(), e.get_message())),
     }
 }
 
@@ -76,23 +69,36 @@ impl ModuleLoader for StringModuleLoader {
         referrer: &str,
         _kind: ResolutionKind,
     ) -> Result<ModuleSpecifier, ModuleLoaderError> {
-        let module_specifier = deno_core::resolve_import(specifier, referrer)?;
+        // deno v2.9: resolve_import returns ModuleResolutionError which
+        // doesn't have a From<..> for JsErrorBox; wrap manually.
+        let module_specifier = deno_core::resolve_import(specifier, referrer)
+            .map_err(|e| deno_error::JsErrorBox::type_error(e.to_string()))?;
         Ok(module_specifier)
     }
 
+    // deno v2.9 trait signature:
+    //   fn load(&self, &url::Url, Option<&ModuleLoadReferrer>, ModuleLoadOptions)
+    //     -> ModuleLoadResponse
+    // The old (specifier, referrer, is_dyn_import, request_module_type) 4-arg
+    // shape was collapsed — dyn_import + request_module_type moved onto the
+    // ModuleLoadOptions struct.
     fn load(
         &self,
-        module_specifier: &ModuleSpecifier,
-        _maybe_referrer: std::option::Option<&Url>,
-        _is_dyn_import: bool,
-        _request_module_type: RequestedModuleType,
+        module_specifier: &Url,
+        _maybe_referrer: std::option::Option<&deno_core::ModuleLoadReferrer>,
+        _options: deno_core::ModuleLoadOptions,
     ) -> ModuleLoadResponse {
         match module_specifier.to_file_path() {
             Ok(path) => match std::fs::read_to_string(&path) {
                 Ok(code) => ModuleLoadResponse::Sync(maybe_transpile(module_specifier, code)),
                 Err(e) => {
                     log::error!("Error reading file {:?}: {}", path, e);
-                    ModuleLoadResponse::Sync(Err(ModuleLoaderError::NotFound))
+                    // deno v2.9: ModuleLoaderError::NotFound gone. Use
+                    // JsErrorBox::new with the standard NotFound class.
+                    ModuleLoadResponse::Sync(Err(deno_error::JsErrorBox::new(
+                        "NotFound",
+                        format!("Module not found: {}", module_specifier),
+                    )))
                 }
             },
             Err(_err) => {
@@ -114,7 +120,11 @@ impl ModuleLoader for StringModuleLoader {
                             ))
                         }
                     }
-                    None => Err(ModuleLoaderError::NotFound),
+                    // deno v2.9: ::NotFound variant gone; use JsErrorBox::new.
+                    None => Err(deno_error::JsErrorBox::new(
+                        "NotFound",
+                        format!("Module not found: {}", module_specifier),
+                    )),
                 })
             }
         }
