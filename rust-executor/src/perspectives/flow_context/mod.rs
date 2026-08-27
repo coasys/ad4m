@@ -36,6 +36,9 @@ mod types;
 #[cfg(test)]
 mod e2e_tests;
 
+#[cfg(test)]
+mod real_llm_e2e;
+
 // Public re-exports — callers outside this module (`interpretation::run`,
 // `PerspectiveInstance::…`) import from `flow_context::` as before.
 pub use loader::{
