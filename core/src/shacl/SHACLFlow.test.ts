@@ -147,6 +147,30 @@ describe('SHACLFlow', () => {
       expect(reconstructed.transitions.length).toBe(1);
       expect(reconstructed.transitions[0].actionName).toBe('Complete');
     });
+
+    it('sorts states by value so states[0] is the lowest-value (initial) state after a graph round-trip', () => {
+      // Perspective link storage does not preserve insertion order — `hasState`
+      // links come back arbitrarily, which used to break the "initial state
+      // = states[0]" convention that `PerspectiveProxy.startFlowInstance`
+      // relies on to mint the first state of a fresh instance.
+      const original = new SHACLFlow('Delivery', 'ns://');
+      original.addState({ name: 'Identified', value: 0, stateCheck: { predicate: 'flow://legacy', target: 'flow://Identified' } });
+      original.addState({ name: 'InProgress', value: 1, stateCheck: { predicate: 'flow://legacy', target: 'flow://InProgress' } });
+      original.addState({ name: 'Done', value: 2, stateCheck: { predicate: 'flow://legacy', target: 'flow://Done' } });
+
+      const links = original.toLinks();
+      // Simulate perspective returning `hasState` links out of order (reverse).
+      const hasStateLinks = links.filter(l => l.predicate === 'ad4m://hasState');
+      const otherLinks = links.filter(l => l.predicate !== 'ad4m://hasState');
+      const shuffled = [...otherLinks, ...hasStateLinks.slice().reverse()];
+
+      const reconstructed = SHACLFlow.fromLinks(shuffled, 'ns://DeliveryFlow');
+      expect(reconstructed.states.length).toBe(3);
+      expect(reconstructed.states[0].name).toBe('Identified');
+      expect(reconstructed.states[1].name).toBe('InProgress');
+      expect(reconstructed.states[2].name).toBe('Done');
+      expect(reconstructed.states[0].value).toBe(0);
+    });
   });
 
   describe('JSON serialization', () => {

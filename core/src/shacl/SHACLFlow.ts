@@ -972,6 +972,14 @@ export class SHACLFlow {
       });
     }
 
+    // Perspective link storage does not preserve insertion order — `hasState`
+    // links come back in arbitrary order from the graph, so `flow.states[0]`
+    // was randomly one of the round-tripped states. Sort by `value` ascending
+    // so the "initial state = states[0]" convention (used by
+    // `PerspectiveProxy.startFlowInstance`) survives a fromGraph round trip.
+    // The `states` getter returns a defensive copy, so mutate `_states` directly.
+    flow._states.sort((a, b) => a.value - b.value);
+
     // Find transitions
     const transitionLinks = links.filter(l =>
       l.source === flowUri && l.predicate === "ad4m://hasTransition"
