@@ -55,9 +55,12 @@ function predIndexKey(predicate: string, linkHash: string): string {
 // ---------------------------------------------------------------------------
 
 export function hashLink(link: LinkExpression): string {
+    // Normalize predicate to null when missing/undefined — must match the
+    // server's canonicalLinkPayload (link-server/src/types.ts) exactly so
+    // client-side hashes equal server-side hashes for the same link.
     const content = JSON.stringify({
         source: link.data.source,
-        predicate: link.data.predicate,
+        predicate: link.data.predicate ?? null,
         target: link.data.target,
         author: link.author,
         timestamp: link.timestamp,

@@ -145,10 +145,8 @@ const language = defineLanguage({
         });
 
         wsClient = new WsClient({
-            getUrl: async () => {
-                const token = await auth.getValidToken();
-                return api.wsUrl(config, token);
-            },
+            getUrl: async () => api.wsUrl(config),
+            getToken: () => auth.getValidToken(),
             handlers: {
                 onDiff(msg) {
                     syncModule.applyInboundWireDiff(msg.payload, msg.sequence, msg.revision);

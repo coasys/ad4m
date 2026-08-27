@@ -8,6 +8,7 @@ import {
   createSignedLink,
   createTestAgent,
   getJson,
+  openAuthenticatedWs,
   openWs,
   postJson,
   startTestServer,
@@ -35,19 +36,47 @@ function closeAll(...sockets: WebSocket[]): void {
   }
 }
 
-test("ws upgrade is rejected without a valid token", async () => {
+test("ws auth: sending an invalid token as the first message closes the socket with auth-error", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
-    const socket = openWs(server.wsUrl, roomId, "not-a-real-token");
-    const statusCode = await new Promise<number>((resolve, reject) => {
-      socket.once("unexpected-response", (_req, res) => resolve(res.statusCode));
-      socket.once("open", () => reject(new Error("socket should not have opened")));
-      socket.once("error", () => {
-        /* some ws versions also raise error after unexpected-response */
-      });
+    // Create the room first so the roomId exists.
+    const admin = await createTestAgent();
+    await authenticateAgent(server.url, roomId, admin);
+
+    const socket = openWs(server.wsUrl, roomId);
+    await waitForOpen(socket);
+    const collector = collectMessages(socket);
+    socket.send(JSON.stringify({ type: "auth", token: "not-a-real-token" }));
+
+    const closeCode = await new Promise<number>((resolve) => {
+      socket.on("close", (code) => resolve(code));
     });
-    assert.equal(statusCode, 401);
+    assert.equal(closeCode, 4004);
+    const authErr = collector.messages.find((m) => m.type === "auth-error");
+    assert.ok(authErr, "should receive an auth-error message");
   });
+});
+
+test("ws auth: no auth message within timeout closes the socket", async () => {
+  const server = await startTestServer({ wsOptions: { authTimeoutMs: 200 } });
+  try {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    await authenticateAgent(server.url, roomId, admin);
+
+    const socket = openWs(server.wsUrl, roomId);
+    await waitForOpen(socket);
+    const collector = collectMessages(socket);
+
+    const closeCode = await new Promise<number>((resolve) => {
+      socket.on("close", (code) => resolve(code));
+    });
+    assert.equal(closeCode, 4001);
+    const authErr = collector.messages.find((m) => m.type === "auth-error");
+    assert.ok(authErr, "should receive auth-error with timeout reason");
+  } finally {
+    await server.close();
+  }
 });
 
 test("on connect, agent receives an online-agents snapshot; a second connect triggers peer-joined", async () => {
@@ -60,16 +89,10 @@ test("on connect, agent receives an online-agents snapshot; a second connect tri
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
-    // Attach the collector before awaiting "open": the server sends
-    // online-agents synchronously as part of completing the upgrade, and it
-    // can otherwise arrive before a listener attached after "open" resolves.
-    const wsA = openWs(server.wsUrl, roomId, tokenA);
+    const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
     const collectorA = collectMessages(wsA);
-    await waitForOpen(wsA);
-    await collectorA.waitForType("online-agents");
 
-    const wsB = openWs(server.wsUrl, roomId, tokenB);
-    await waitForOpen(wsB);
+    const wsB = await openAuthenticatedWs(server.wsUrl, roomId, tokenB);
 
     const joinedMsg = await collectorA.waitForType("peer-joined");
     assert.equal(joinedMsg.did, agentB.did);
@@ -87,9 +110,8 @@ test("committing a diff over HTTP broadcasts it to other WS-connected agents, ex
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
-    const wsA = openWs(server.wsUrl, roomId, tokenA);
-    const wsB = openWs(server.wsUrl, roomId, tokenB);
-    await Promise.all([waitForOpen(wsA), waitForOpen(wsB)]);
+    const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
+    const wsB = await openAuthenticatedWs(server.wsUrl, roomId, tokenB);
     const collectorA = collectMessages(wsA);
     const collectorB = collectMessages(wsB);
 
@@ -127,10 +149,9 @@ test("telepresence-signal routes only to the target DID's sockets", async () => 
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
     const tokenC = await authenticateAgent(server.url, roomId, agentC);
 
-    const wsA = openWs(server.wsUrl, roomId, tokenA);
-    const wsB = openWs(server.wsUrl, roomId, tokenB);
-    const wsC = openWs(server.wsUrl, roomId, tokenC);
-    await Promise.all([waitForOpen(wsA), waitForOpen(wsB), waitForOpen(wsC)]);
+    const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
+    const wsB = await openAuthenticatedWs(server.wsUrl, roomId, tokenB);
+    const wsC = await openAuthenticatedWs(server.wsUrl, roomId, tokenC);
     const collectorB = collectMessages(wsB);
     const collectorC = collectMessages(wsC);
 
@@ -158,10 +179,9 @@ test("telepresence-broadcast fans out to all other connected agents", async () =
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
     const tokenC = await authenticateAgent(server.url, roomId, agentC);
 
-    const wsA = openWs(server.wsUrl, roomId, tokenA);
-    const wsB = openWs(server.wsUrl, roomId, tokenB);
-    const wsC = openWs(server.wsUrl, roomId, tokenC);
-    await Promise.all([waitForOpen(wsA), waitForOpen(wsB), waitForOpen(wsC)]);
+    const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
+    const wsB = await openAuthenticatedWs(server.wsUrl, roomId, tokenB);
+    const wsC = await openAuthenticatedWs(server.wsUrl, roomId, tokenC);
     const collectorB = collectMessages(wsB);
     const collectorC = collectMessages(wsC);
 
@@ -176,7 +196,7 @@ test("telepresence-broadcast fans out to all other connected agents", async () =
   });
 });
 
-test("set-online-status updates status and is visible via HTTP peers + pushed online-agents", async () => {
+test("set-online-status broadcasts a status-changed delta (not the full roster)", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const agentA = await createTestAgent();
@@ -185,22 +205,15 @@ test("set-online-status updates status and is visible via HTTP peers + pushed on
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
-    const wsA = openWs(server.wsUrl, roomId, tokenA);
-    const wsB = openWs(server.wsUrl, roomId, tokenB);
-    await Promise.all([waitForOpen(wsA), waitForOpen(wsB)]);
+    const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
+    const wsB = await openAuthenticatedWs(server.wsUrl, roomId, tokenB);
     const collectorB = collectMessages(wsB);
 
     wsA.send(JSON.stringify({ type: "set-online-status", status: { mood: "focused" } }));
 
-    await waitFor(() =>
-      collectorB.messages.some(
-        (m) =>
-          m.type === "online-agents" &&
-          (m.agents as { did: string; status?: unknown }[]).some(
-            (a) => a.did === agentA.did && (a.status as { mood?: string })?.mood === "focused"
-          )
-      )
-    );
+    const statusMsg = await collectorB.waitForType("status-changed");
+    assert.equal(statusMsg.did, agentA.did);
+    assert.deepEqual(statusMsg.status, { mood: "focused" });
 
     const peersRes = await getJson<{ peers: string[] }>(`${server.url}/rooms/${roomId}/peers`, tokenB);
     assert.ok(peersRes.body.peers.includes(agentA.did));
@@ -223,9 +236,8 @@ test("disconnect marks an agent offline (peer-left) only after the grace period 
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
-    const wsA = openWs(server.wsUrl, roomId, tokenA);
-    const wsB = openWs(server.wsUrl, roomId, tokenB);
-    await Promise.all([waitForOpen(wsA), waitForOpen(wsB)]);
+    const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
+    const wsB = await openAuthenticatedWs(server.wsUrl, roomId, tokenB);
     const collectorB = collectMessages(wsB);
 
     wsA.close();
@@ -256,16 +268,14 @@ test("reconnecting within the grace period does not trigger peer-left", async ()
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
     const tokenB = await authenticateAgent(server.url, roomId, agentB);
 
-    const wsA1 = openWs(server.wsUrl, roomId, tokenA);
-    const wsB = openWs(server.wsUrl, roomId, tokenB);
-    await Promise.all([waitForOpen(wsA1), waitForOpen(wsB)]);
+    const wsA1 = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
+    const wsB = await openAuthenticatedWs(server.wsUrl, roomId, tokenB);
     const collectorB = collectMessages(wsB);
 
     wsA1.close();
     // Reconnect well within the 300ms grace period.
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const wsA2 = openWs(server.wsUrl, roomId, tokenA);
-    await waitForOpen(wsA2);
+    const wsA2 = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
 
     // Give the grace timer time to have fired if it were going to.
     await new Promise((resolve) => setTimeout(resolve, 500));
@@ -275,5 +285,120 @@ test("reconnecting within the grace period does not trigger peer-left", async ()
     assert.ok(peersRes.body.peers.includes(agentA.did));
 
     closeAll(wsA2, wsB);
+  });
+});
+
+test("ws rate limiting: excess messages are silently dropped", async () => {
+  const server = await startTestServer({
+    wsOptions: { wsMessageLimit: 3, wsMessageWindowMs: 5000 },
+  });
+  try {
+    const roomId = randomUUID();
+    const agentA = await createTestAgent();
+    const agentB = await createTestAgent();
+    const tokenA = await authenticateAgent(server.url, roomId, agentA);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: agentB.did }, tokenA);
+    const tokenB = await authenticateAgent(server.url, roomId, agentB);
+
+    const wsA = await openAuthenticatedWs(server.wsUrl, roomId, tokenA);
+    const wsB = await openAuthenticatedWs(server.wsUrl, roomId, tokenB);
+    const collectorB = collectMessages(wsB);
+
+    // Send 6 broadcasts — only 3 should get through.
+    for (let i = 0; i < 6; i++) {
+      wsA.send(JSON.stringify({ type: "telepresence-broadcast", payload: { n: i } }));
+    }
+
+    // Wait a bit for all to arrive, then count.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const broadcasts = collectorB.messages.filter((m) => m.type === "telepresence-broadcast");
+    assert.equal(broadcasts.length, 3, "only 3 of 6 messages should pass the rate limiter");
+
+    closeAll(wsA, wsB);
+  } finally {
+    await server.close();
+  }
+});
+
+test("commit rejects links missing required structural fields", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    // Missing data
+    const res1 = await postJson(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [{ author: agent.did, timestamp: new Date().toISOString() }], removals: [] },
+      token
+    );
+    assert.equal(res1.status, 400);
+
+    // Missing timestamp
+    const res2 = await postJson(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [{ author: agent.did, data: { source: "a", target: "b" } }], removals: [] },
+      token
+    );
+    assert.equal(res2.status, 400);
+
+    // Non-object data
+    const res3 = await postJson(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [{ author: agent.did, timestamp: new Date().toISOString(), data: "not-an-object" }], removals: [] },
+      token
+    );
+    assert.equal(res3.status, 400);
+  });
+});
+
+test("session sweep removes expired sessions from the database", async () => {
+  const server = await startTestServer({
+    jwtExpirySeconds: 1, // 1s expiry
+    sessionSweepIntervalMs: 100, // sweep every 100ms for test speed
+  });
+  try {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    await authenticateAgent(server.url, roomId, agent);
+
+    // Confirm there are sessions
+    const before = server.built.db.raw
+      .prepare("SELECT COUNT(*) as c FROM sessions")
+      .get() as { c: number };
+    assert.ok(before.c > 0, "session should exist after auth");
+
+    // Wait for JWT to expire + sweep to fire
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+
+    const after = server.built.db.raw
+      .prepare("SELECT COUNT(*) as c FROM sessions")
+      .get() as { c: number };
+    assert.equal(after.c, 0, "expired sessions should have been swept");
+  } finally {
+    await server.close();
+  }
+});
+
+test("render response includes sequence number", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const link = await createSignedLink(agent, { source: "a", predicate: "p", target: "b" });
+    await postJson(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [link], removals: [] },
+      token
+    );
+
+    const res = await getJson<{ links: unknown[]; revision: string; sequence: number }>(
+      `${server.url}/rooms/${roomId}/render`,
+      token
+    );
+    assert.equal(res.status, 200);
+    assert.equal(typeof res.body.sequence, "number");
+    assert.ok(res.body.sequence > 0, "sequence should be positive after a commit");
   });
 });

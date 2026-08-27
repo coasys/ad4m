@@ -140,6 +140,7 @@ export interface SyncResponse {
 export interface RenderResponse {
     links: WireLinkExpression[];
     revision: string;
+    sequence: number;
 }
 
 export interface PeersResponse {
@@ -171,9 +172,12 @@ export type ServerWsMessage =
     | { type: "telepresence-broadcast"; fromDid: DID; payload: unknown }
     | { type: "online-agents"; agents: OnlineAgent[] }
     | { type: "peer-joined"; did: DID }
-    | { type: "peer-left"; did: DID };
+    | { type: "peer-left"; did: DID }
+    | { type: "status-changed"; did: DID; status: unknown }
+    | { type: "auth-error"; error: string };
 
 export type ClientWsMessage =
+    | { type: "auth"; token: string }
     | { type: "telepresence-signal"; toDid: DID; payload: unknown }
     | { type: "telepresence-broadcast"; payload: unknown }
     | { type: "set-online-status"; status: unknown };

@@ -62,7 +62,8 @@ Control the server through environment variables or CLI flags:
 | `PORT` | `--port` | `3456` | Listen port |
 | `DATA_DIR` | `--data` | `./data` | Storage directory (SQLite database + server identity) |
 | `AUTO_ADMIT` | `--auto-admit` | `false` | Admit every agent automatically when they authenticate |
-| `SKIP_LINK_VERIFICATION` | — | `false` | Skip link signature checks (testing only — never use in production) |
+| `MAX_DIFFS_PER_ROOM` | `--max-diffs` | `10000` | Maximum diff entries retained per room (older entries pruned) |
+| `BODY_LIMIT` | `--body-limit` | `10485760` | Maximum HTTP request body size in bytes (10 MiB) |
 
 ### Rooms
 
@@ -155,13 +156,13 @@ POST /rooms/:roomId/reconcile  (peer servers only, signature-authenticated)
 GET  /rooms/:roomId/keys       -> { encryptedKey, version } | 404
 POST /rooms/:roomId/keys/rotate (admin only) -> { version, recipients }
 GET  /server/identity          -> { publicKey }
-GET  /rooms/:roomId/ws?token=<jwt>  (WebSocket upgrade)
+GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be {type:"auth",token:"<jwt>"})
 ```
 
 ### WebSocket messages
 
-Server -> client: `diff`, `telepresence-signal`, `telepresence-broadcast`, `online-agents`, `peer-joined`, `peer-left`.
-Client -> server: `telepresence-signal { toDid, payload }`, `telepresence-broadcast { payload }`, `set-online-status { status }`.
+Server -> client: `diff`, `telepresence-signal`, `telepresence-broadcast`, `online-agents`, `peer-joined`, `peer-left`, `status-changed`, `auth-error`.
+Client -> server: `auth { token }` (first message only), `telepresence-signal { toDid, payload }`, `telepresence-broadcast { payload }`, `set-online-status { status }`.
 
 ### Rate limits
 
@@ -177,3 +178,19 @@ npm run dev       # tsx src/index.ts, no build step
 ```
 
 Tests boot a real server per test (random port, temp SQLite file) and drive it over real HTTP/WebSocket — there are no mocks of the server itself.
+
+## Known limitations
+
+### E2E encryption — future requirements
+
+The current E2E implementation protects link data at rest and in transit, but
+does not yet cover:
+
+- **Admin succession / key revocation:** if the room admin's key gets
+  compromised, no mechanism exists to rotate admin authority or revoke a
+  leaked agent key retroactively. A compromised admin can seal new room keys
+  for arbitrary recipients. Future work: admin transfer endpoint, key
+  revocation list, and forward-secrecy ratchet for room keys.
+- **Perfect forward secrecy:** room keys are long-lived. Compromising a room
+  key exposes all past ciphertext sealed under it. A ratchet or epoch-based
+  key rotation would bound the exposure window.

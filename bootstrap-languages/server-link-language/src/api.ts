@@ -124,7 +124,11 @@ export async function fetchSync(config: RoomConfig, token: string, since: number
 
 export async function fetchRender(config: RoomConfig, token: string): Promise<RenderResponse> {
     const res = await request<Partial<RenderResponse>>(roomUrl(config, "/render"), "GET", jsonHeaders(token));
-    return { links: res.links ?? [], revision: res.revision ?? "" };
+    return {
+        links: res.links ?? [],
+        revision: res.revision ?? "",
+        sequence: typeof res.sequence === "number" ? res.sequence : 0,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -165,8 +169,14 @@ export async function fetchRoomKey(config: RoomConfig, token: string): Promise<K
 // WebSocket URL
 // ---------------------------------------------------------------------------
 
-export function wsUrl(config: RoomConfig, token: string): string {
+/**
+ * Returns the WebSocket endpoint URL for a room. The token is NOT
+ * included in the URL — auth happens via a first-message frame
+ * (`{type:"auth",token:"..."}`) sent immediately after the upgrade
+ * completes. This keeps JWTs out of access logs, CDN caches, and
+ * browser history.
+ */
+export function wsUrl(config: RoomConfig): string {
     const httpUrl = roomUrl(config, "/ws");
-    const wsBase = httpUrl.replace(/^http/, "ws"); // http(s):// -> ws(s)://
-    return `${wsBase}?token=${encodeURIComponent(token)}`;
+    return httpUrl.replace(/^http/, "ws"); // http(s):// -> ws(s)://
 }

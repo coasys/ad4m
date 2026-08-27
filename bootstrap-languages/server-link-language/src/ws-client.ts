@@ -1,8 +1,13 @@
 /**
  * WebSocket client for the link-server real-time channel
- * (`/rooms/:roomId/ws?token=<jwt>`), with auto-reconnect (exponential
- * backoff + jitter) and an outbound send queue that flushes on
- * (re)connect.
+ * (`/rooms/:roomId/ws`), with auto-reconnect (exponential backoff +
+ * jitter) and an outbound send queue that flushes once authenticated.
+ *
+ * Auth: first-message pattern — the upgrade happens without credentials,
+ * then the client sends `{type:"auth",token:"<jwt>"}` as its first
+ * frame. The server responds with either `online-agents` (success —
+ * authentication complete, connection live) or `auth-error` (failure —
+ * the client closes and re-enters the reconnect loop).
  *
  * Pure module: depends only on the WebSocketFactory singleton from
  * adapters.ts (a native `WebSocket` wrapper in production, a mock in
@@ -20,6 +25,7 @@ export interface WsClientHandlers {
     onOnlineAgents(msg: Extract<ServerWsMessage, { type: "online-agents" }>): void;
     onPeerJoined(msg: Extract<ServerWsMessage, { type: "peer-joined" }>): void;
     onPeerLeft(msg: Extract<ServerWsMessage, { type: "peer-left" }>): void;
+    onStatusChanged?(msg: Extract<ServerWsMessage, { type: "status-changed" }>): void;
     /** Called on every successful (re)connect — the natural point to kick
      * off an HTTP catch-up sync in case anything was missed while offline. */
     onOpen?(): void;
@@ -28,10 +34,12 @@ export interface WsClientHandlers {
 }
 
 export interface WsClientOptions {
-    /** Resolves to a fresh, fully-qualified ws(s):// URL (including a
-     * valid token). Called before every connection attempt, including
-     * reconnects, so it should refresh an expired token itself. */
+    /** Resolves to a ws(s):// URL (no token). Called before every
+     * connection attempt, including reconnects. */
     getUrl: () => Promise<string>;
+    /** Resolves to a fresh JWT for first-message auth. Called after
+     * the socket opens, before any application-level messages. */
+    getToken: () => Promise<string>;
     handlers: WsClientHandlers;
     minBackoffMs?: number;
     maxBackoffMs?: number;
@@ -48,6 +56,8 @@ export class WsClient {
 
     private conn: WSConnection | null = null;
     private connected = false;
+    /** True after the socket opens but before the server acknowledges auth. */
+    private authenticating = false;
     private closedByUser = true;
     private reconnectAttempt = 0;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -121,11 +131,18 @@ export class WsClient {
         const conn = this.factory.connect(url);
         this.conn = conn;
 
-        conn.onOpen(() => {
-            this.connected = true;
-            this.reconnectAttempt = 0;
-            this.flushQueue();
-            this.opts.handlers.onOpen?.();
+        conn.onOpen(async () => {
+            this.authenticating = true;
+            // Send auth as the first message — no application-level
+            // messages until the server acknowledges.
+            try {
+                const token = await this.opts.getToken();
+                if (this.closedByUser || this.conn !== conn) return;
+                conn.send(JSON.stringify({ type: "auth", token }));
+            } catch (err) {
+                console.error("[server-link-language] failed to get token for WS auth:", err);
+                conn.close(4010, "token error");
+            }
         });
 
         conn.onMessage((data) => this.handleMessage(data));
@@ -133,6 +150,7 @@ export class WsClient {
         conn.onClose(() => {
             const wasConnected = this.connected;
             this.connected = false;
+            this.authenticating = false;
             this.conn = null;
             if (wasConnected) this.opts.handlers.onClose?.();
             if (!this.closedByUser) this.scheduleReconnect();
@@ -149,6 +167,26 @@ export class WsClient {
             msg = JSON.parse(data) as ServerWsMessage;
         } catch (err) {
             console.error("[server-link-language] failed to parse websocket message:", err);
+            return;
+        }
+
+        // Handle auth-error: the server rejected our token.
+        if (msg.type === "auth-error") {
+            console.error("[server-link-language] WS auth rejected:", msg.error);
+            this.authenticating = false;
+            this.conn?.close(4004, "auth rejected");
+            return;
+        }
+
+        // The server sends `online-agents` immediately after successful auth.
+        // Use that as the authentication-complete signal.
+        if (this.authenticating && msg.type === "online-agents") {
+            this.authenticating = false;
+            this.connected = true;
+            this.reconnectAttempt = 0;
+            this.flushQueue();
+            this.opts.handlers.onOpen?.();
+            this.opts.handlers.onOnlineAgents(msg);
             return;
         }
 
@@ -170,6 +208,9 @@ export class WsClient {
                 break;
             case "peer-left":
                 this.opts.handlers.onPeerLeft(msg);
+                break;
+            case "status-changed":
+                this.opts.handlers.onStatusChanged?.(msg);
                 break;
             default:
                 console.warn(

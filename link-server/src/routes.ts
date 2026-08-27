@@ -188,16 +188,20 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const removals = Array.isArray(body?.removals) ? (body!.removals as LinkExpression[]) : [];
 
       for (const link of [...additions, ...removals]) {
-        if (!link || typeof link !== "object" || link.author !== claims.did) {
+        if (!link || typeof link !== "object") {
+          return reply.code(400).send({ error: "each link must be an object" });
+        }
+        if (link.author !== claims.did) {
           return reply
             .code(400)
             .send({ error: "every link's author must match the authenticated DID" });
         }
-        // Link data is opaque to the server — it stores and relays whatever
-        // shape the client sends (plaintext {source,predicate,target} or
-        // encrypted blobs). JWT auth (bound to the agent's DID) proves
-        // identity at the transport layer. Downstream consumers verify
-        // signatures and decrypt if they choose; the server does not.
+        if (typeof link.timestamp !== "string") {
+          return reply.code(400).send({ error: "each link must have a string timestamp" });
+        }
+        if (!link.data || typeof link.data !== "object") {
+          return reply.code(400).send({ error: "each link must have a data object" });
+        }
       }
 
       const { sequence, revision } = ctx.db.applyDiffAndAppend(
@@ -241,7 +245,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const claims = request.authClaims!;
       const links = ctx.db.getActiveLinks(claims.roomId);
       const revision = ctx.db.getRoomRevision(claims.roomId);
-      return reply.send({ links, revision });
+      const sequence = ctx.db.getMaxSequence(claims.roomId);
+      return reply.send({ links, revision, sequence });
     }
   );
 
@@ -372,7 +377,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     const body = request.body as Partial<ReconcileRequestBody> | null;
     if (
       !body ||
-      !Array.isArray(body.linkHashes) ||
+      typeof body.sinceSequence !== "number" ||
       typeof body.revision !== "string" ||
       typeof body.serverPublicKey !== "string" ||
       typeof body.serverSignature !== "string"

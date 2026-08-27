@@ -7,7 +7,7 @@ import { FederationManager } from "./federation.js";
 import { SlidingWindowLimiter } from "./rate-limit.js";
 import { registerRoutes, type RouteContext } from "./routes.js";
 import { TelepresenceManager } from "./telepresence.js";
-import { WsManager } from "./ws.js";
+import { WsManager, type WsManagerOptions } from "./ws.js";
 
 export interface ServerOptions {
   /** Directory the SQLite database lives in, or ":memory:" for an ephemeral in-memory DB (tests). */
@@ -43,6 +43,14 @@ export interface ServerOptions {
     roomJwt?: { limit: number; windowMs: number };
     commitJwt?: { limit: number; windowMs: number };
   };
+  /** Maximum diff entries retained per room. Older diffs get pruned. Default 10 000. */
+  maxDiffsPerRoom?: number;
+  /** Maximum HTTP request body size. Default "10mb". */
+  bodyLimit?: number;
+  /** How often expired sessions get swept from the DB (ms). Default 900 000 (15 min). */
+  sessionSweepIntervalMs?: number;
+  /** WebSocket rate-limit and auth-timeout overrides. */
+  wsOptions?: WsManagerOptions;
 }
 
 export interface BuiltServer {
@@ -61,10 +69,13 @@ export interface BuiltServer {
  */
 export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   const dbPath = opts.dataDir === ":memory:" ? ":memory:" : path.join(opts.dataDir, "data.sqlite");
-  const db = new LinkServerDB(dbPath);
+  const db = new LinkServerDB(dbPath, { maxDiffsPerRoom: opts.maxDiffsPerRoom });
   const identity = await ensureServerIdentity(db);
 
-  const app = Fastify({ logger: opts.logger ?? false });
+  const app = Fastify({
+    logger: opts.logger ?? false,
+    bodyLimit: opts.bodyLimit ?? 10 * 1024 * 1024, // 10 MiB
+  });
   await app.register(websocketPlugin, {
     options: {
       // Cap inbound WebSocket frames at 1 MiB — link diffs and telepresence
@@ -78,7 +89,7 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
   const auth = new AuthManager(db, { jwtExpirySeconds: opts.jwtExpirySeconds });
   const challenges = new ChallengeStore();
   const telepresence = new TelepresenceManager({ graceMs: opts.telepresenceGraceMs });
-  const ws = new WsManager(auth, telepresence);
+  const ws = new WsManager(auth, telepresence, opts.wsOptions);
   const federation = new FederationManager({
     db,
     identity,
@@ -113,7 +124,14 @@ export async function buildServer(opts: ServerOptions): Promise<BuiltServer> {
 
   federation.start();
 
+  // Periodic sweep of expired JWT sessions from the DB.
+  const sweepInterval = setInterval(() => {
+    db.sweepExpiredSessions();
+  }, opts.sessionSweepIntervalMs ?? 15 * 60 * 1000);
+  sweepInterval.unref();
+
   app.addHook("onClose", async () => {
+    clearInterval(sweepInterval);
     await federation.stop();
     challenges.close();
     telepresence.close();

@@ -1,7 +1,7 @@
 import type { OnlineAgent } from "./types.js";
 
 interface AgentEntry {
-  wsId: string;
+  wsIds: Set<string>;
   status?: unknown;
 }
 
@@ -43,7 +43,19 @@ export class TelepresenceManager {
       this.agents.set(roomId, room);
     }
     const existing = room.get(did);
-    room.set(did, { wsId, status: existing?.status });
+    if (existing) {
+      existing.wsIds.add(wsId);
+    } else {
+      room.set(did, { wsIds: new Set([wsId]), status: undefined });
+    }
+  }
+
+  /** Removes a single connection from an agent's tracked set. */
+  markConnectionClosed(roomId: string, did: string, wsId: string): void {
+    const entry = this.agents.get(roomId)?.get(did);
+    if (entry) {
+      entry.wsIds.delete(wsId);
+    }
   }
 
   cancelPendingOffline(roomId: string, did: string): void {

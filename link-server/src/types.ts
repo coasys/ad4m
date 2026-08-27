@@ -78,10 +78,13 @@ export type ServerWsMessage =
   | { type: "telepresence-broadcast"; fromDid: string; payload: unknown }
   | { type: "online-agents"; agents: OnlineAgent[] }
   | { type: "peer-joined"; did: string }
-  | { type: "peer-left"; did: string };
+  | { type: "peer-left"; did: string }
+  | { type: "status-changed"; did: string; status: unknown }
+  | { type: "auth-error"; error: string };
 
 /** Client -> server WebSocket messages. */
 export type ClientWsMessage =
+  | { type: "auth"; token: string }
   | { type: "telepresence-signal"; toDid: string; payload: unknown }
   | { type: "telepresence-broadcast"; payload: unknown }
   | { type: "set-online-status"; status: unknown };
@@ -120,15 +123,38 @@ export function linkHash(link: LinkExpression): string {
   return sha256Hex(canonicalLinkPayload(link));
 }
 
+/** Empty-room revision: 64 hex zeros (32 zero bytes). */
+export const EMPTY_REVISION = "0".repeat(64);
+
 /**
- * Content hash of a room's active link set: sha256 of the sorted,
- * comma-joined link hashes. NOT a sequence number — two rooms with the
- * same active links always converge to the same revision regardless of
- * the order links were added/removed in.
+ * XOR a revision with a link hash. XOR is commutative, associative,
+ * and self-inverse, so this gives O(1) incremental revision updates:
+ *   add link:    revision = xorHex(revision, linkHash)
+ *   remove link: revision = xorHex(revision, linkHash)  — XOR undoes itself
+ * Two rooms with the same active links always converge to the same
+ * revision regardless of the order links were added/removed in.
+ */
+export function xorHex(a: string, b: string): string {
+  const aBuf = Buffer.from(a, "hex");
+  const bBuf = Buffer.from(b, "hex");
+  const result = Buffer.alloc(32);
+  for (let i = 0; i < 32; i++) {
+    result[i] = aBuf[i] ^ bBuf[i];
+  }
+  return result.toString("hex");
+}
+
+/**
+ * Compute the XOR revision of a set of link hashes. Used by tests —
+ * the server maintains the revision incrementally via xorHex() in
+ * applyDiffAndAppend, never calling this at runtime.
  */
 export function computeRevision(linkHashes: string[]): string {
-  const sorted = [...linkHashes].sort();
-  return sha256Hex(sorted.join(","));
+  let rev = EMPTY_REVISION;
+  for (const hash of linkHashes) {
+    rev = xorHex(rev, hash);
+  }
+  return rev;
 }
 
 export interface RoomParams {
@@ -160,8 +186,8 @@ export interface FederateRequestBody {
 }
 
 export interface ReconcileRequestBody {
+  sinceSequence: number;
   revision: string;
-  linkHashes: string[];
   timestamp: string;
   serverPublicKey: string;
   serverSignature: string;
@@ -179,13 +205,18 @@ export interface ReconcileResponseBody {
  * Includes a timestamp (ISO-8601) for replay protection — receivers reject
  * payloads older than `FEDERATION_PAYLOAD_MAX_AGE_MS`.
  */
+/**
+ * Canonical payload signed by a server's identity key for federation calls.
+ * `body` is nested under its own key (not spread) so that body fields can
+ * never shadow the positional `kind`/`roomId`/`timestamp` keys.
+ */
 export function canonicalFederationPayload(
   kind: "federate" | "reconcile",
   roomId: string,
   body: Record<string, unknown>,
   timestamp?: string
 ): string {
-  return JSON.stringify({ kind, roomId, timestamp: timestamp ?? new Date().toISOString(), ...body });
+  return JSON.stringify({ kind, roomId, timestamp: timestamp ?? new Date().toISOString(), body });
 }
 
 /** Maximum age of a signed federation payload before it gets rejected (5 minutes). */

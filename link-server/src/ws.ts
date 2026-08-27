@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { WebSocket } from "ws";
 import type { AuthManager } from "./auth.js";
+import { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import type { ClientWsMessage, RoomParams, ServerWsMessage } from "./types.js";
 
@@ -10,6 +11,16 @@ interface Connection {
   did: string;
   roomId: string;
   socket: WebSocket;
+  limiter: SlidingWindowLimiter;
+}
+
+export interface WsManagerOptions {
+  /** Max inbound WS messages per connection per window. Default 100. */
+  wsMessageLimit?: number;
+  /** Sliding window size in ms for WS message rate limiting. Default 60 000. */
+  wsMessageWindowMs?: number;
+  /** Seconds to wait for the auth message before closing. Default 5. */
+  authTimeoutMs?: number;
 }
 
 /**
@@ -18,45 +29,87 @@ interface Connection {
  * (one-directional) — routes.ts and federation.ts call into this to push
  * server-originated events, but this module never imports them, so there's
  * no import cycle.
+ *
+ * Auth: first-message pattern — the WebSocket upgrade succeeds without
+ * credentials; the client must send `{type:"auth",token:"<jwt>"}` as its
+ * first message within `authTimeoutMs`. This keeps JWTs out of query
+ * parameters (which appear in access logs, CDN caches, and browser history).
  */
 export class WsManager {
   private auth: AuthManager;
   private telepresence: TelepresenceManager;
+  private wsMessageLimit: number;
+  private wsMessageWindowMs: number;
+  private authTimeoutMs: number;
   // roomId -> did -> connections for that agent (multiple devices allowed)
   private rooms = new Map<string, Map<string, Set<Connection>>>();
   private byId = new Map<string, Connection>();
 
-  constructor(auth: AuthManager, telepresence: TelepresenceManager) {
+  constructor(auth: AuthManager, telepresence: TelepresenceManager, opts?: WsManagerOptions) {
     this.auth = auth;
     this.telepresence = telepresence;
+    this.wsMessageLimit = opts?.wsMessageLimit ?? 100;
+    this.wsMessageWindowMs = opts?.wsMessageWindowMs ?? 60_000;
+    this.authTimeoutMs = opts?.authTimeoutMs ?? 5_000;
   }
 
   register(app: FastifyInstance): void {
     app.get(
       "/rooms/:roomId/ws",
-      {
-        websocket: true,
-        preValidation: async (request: FastifyRequest, reply) => {
-          const { roomId } = request.params as RoomParams;
-          const token = (request.query as Record<string, string | undefined>)?.token;
-          const result = await this.auth.authenticate(token, roomId);
-          if (!result.ok) {
-            reply.code(result.status).send({ error: result.error });
-            return;
-          }
-          request.authClaims = { did: result.did, roomId: result.roomId, token: result.token };
-        },
-      },
+      { websocket: true },
       (socket: WebSocket, request: FastifyRequest) => {
-        const claims = request.authClaims!;
-        this.handleConnection(socket, claims.roomId, claims.did);
+        const { roomId } = request.params as RoomParams;
+        this.handleUnauthenticated(socket, roomId);
       }
     );
   }
 
+  /** Accepts the raw socket and waits for an auth message before registering. */
+  private handleUnauthenticated(socket: WebSocket, roomId: string): void {
+    const timeout = setTimeout(() => {
+      this.sendRaw(socket, { type: "auth-error", error: "auth timeout" });
+      socket.close(4001, "auth timeout");
+    }, this.authTimeoutMs);
+
+    const onMessage = async (raw: Buffer | ArrayBuffer | Buffer[]) => {
+      clearTimeout(timeout);
+      socket.removeListener("message", onMessage);
+      let msg: ClientWsMessage;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        this.sendRaw(socket, { type: "auth-error", error: "malformed JSON" });
+        socket.close(4002, "malformed auth");
+        return;
+      }
+      if (!msg || typeof msg !== "object" || msg.type !== "auth" || typeof (msg as { token?: unknown }).token !== "string") {
+        this.sendRaw(socket, { type: "auth-error", error: "first message must be {type:'auth',token:'...'}" });
+        socket.close(4003, "expected auth message");
+        return;
+      }
+      const result = await this.auth.authenticate((msg as { token: string }).token, roomId);
+      if (!result.ok) {
+        this.sendRaw(socket, { type: "auth-error", error: result.error });
+        socket.close(4004, result.error);
+        return;
+      }
+      this.handleConnection(socket, roomId, result.did);
+    };
+
+    socket.on("message", onMessage);
+    socket.on("close", () => clearTimeout(timeout));
+  }
+
+  private sendRaw(socket: WebSocket, msg: ServerWsMessage): void {
+    if (socket.readyState === socket.OPEN) {
+      socket.send(JSON.stringify(msg));
+    }
+  }
+
   private handleConnection(socket: WebSocket, roomId: string, did: string): void {
     const id = randomUUID();
-    const conn: Connection = { id, did, roomId, socket };
+    const limiter = new SlidingWindowLimiter(this.wsMessageLimit, this.wsMessageWindowMs);
+    const conn: Connection = { id, did, roomId, socket, limiter };
     this.byId.set(id, conn);
 
     let room = this.rooms.get(roomId);
@@ -116,6 +169,10 @@ export class WsManager {
   }
 
   private handleMessage(conn: Connection, raw: Buffer | ArrayBuffer | Buffer[]): void {
+    if (!conn.limiter.check(conn.id).allowed) {
+      // Drop the message silently — the client can retry after the window slides.
+      return;
+    }
     let msg: ClientWsMessage;
     try {
       msg = JSON.parse(raw.toString());
@@ -141,8 +198,9 @@ export class WsManager {
       case "set-online-status": {
         this.telepresence.setStatus(conn.roomId, conn.did, msg.status);
         this.broadcast(conn.roomId, {
-          type: "online-agents",
-          agents: this.telepresence.getOnlineAgents(conn.roomId),
+          type: "status-changed",
+          did: conn.did,
+          status: msg.status,
         });
         break;
       }
@@ -161,6 +219,7 @@ export class WsManager {
 
   private handleClose(conn: Connection): void {
     this.byId.delete(conn.id);
+    this.telepresence.markConnectionClosed(conn.roomId, conn.did, conn.id);
     const room = this.rooms.get(conn.roomId);
     const didConns = room?.get(conn.did);
     if (!didConns) return;

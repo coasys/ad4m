@@ -407,13 +407,14 @@ export async function bootstrap(): Promise<void> {
     const { config, getToken } = deps();
     const token = await getToken();
 
+    // The render response now includes revision + sequence, so we avoid the
+    // extra fetchRevision round-trip that the old code made.
     const rendered = await api.fetchRender(config, token);
     const additions = rendered.links.map(fromWireLink);
     store.applyDiff({ additions, removals: [] });
 
-    const rev = await api.fetchRevision(config, token);
-    if (rev.revision) store.setRevision(rev.revision);
-    store.setSequence(rev.sequence);
+    if (rendered.revision) store.setRevision(rendered.revision);
+    if (typeof rendered.sequence === "number") store.setSequence(rendered.sequence);
 }
 
 // ---------------------------------------------------------------------------

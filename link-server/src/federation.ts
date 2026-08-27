@@ -4,7 +4,6 @@ import {
   canonicalFederationPayload,
   FEDERATION_PAYLOAD_MAX_AGE_MS,
   type FederateRequestBody,
-  type LinkExpression,
   type PerspectiveDiff,
   type ReconcileRequestBody,
   type ReconcileResponseBody,
@@ -251,21 +250,19 @@ export class FederationManager {
 
     const payload = canonicalFederationPayload("reconcile", roomId, {
       revision: body.revision,
-      linkHashes: body.linkHashes,
+      sinceSequence: body.sinceSequence,
     }, body.timestamp);
     const validSig = await this.verifyPeerSignature(body.serverPublicKey, payload, body.serverSignature);
     if (!validSig) return { ok: false, status: 403, error: "invalid server signature" };
 
-    const theirs = new Set(body.linkHashes);
-    const missing = this.db
-      .getActiveLinkRows(roomId)
-      .filter((row) => !theirs.has(row.link_hash))
-      .map((row) => JSON.parse(row.link_data) as LinkExpression);
+    // Return diffs the peer hasn't seen, using sequence-based fast-forward.
+    const rows = this.db.getDiffsSinceParsed(roomId, body.sinceSequence);
+    const diffs = rows.map((r) => r.diff);
 
     return {
       ok: true,
       response: {
-        diffs: missing.length > 0 ? [{ additions: missing, removals: [] }] : [],
+        diffs,
         revision: this.db.getRoomRevision(roomId),
         sequence: this.db.getMaxSequence(roomId),
       },
@@ -275,14 +272,14 @@ export class FederationManager {
   // ---- outbound: periodic anti-entropy reconciliation ----
 
   private async reconcileWithPeer(roomId: string, peerUrl: string): Promise<void> {
-    const linkHashes = this.db.getActiveHashes(roomId);
+    const sinceSequence = this.db.getPeerLastSequence(roomId, peerUrl);
     const revision = this.db.getRoomRevision(roomId);
     const timestamp = new Date().toISOString();
-    const payload = canonicalFederationPayload("reconcile", roomId, { revision, linkHashes }, timestamp);
+    const payload = canonicalFederationPayload("reconcile", roomId, { revision, sinceSequence }, timestamp);
     const serverSignature = await this.signPayload(payload);
     const body: ReconcileRequestBody = {
       revision,
-      linkHashes,
+      sinceSequence,
       timestamp,
       serverPublicKey: this.identity.publicKey,
       serverSignature,
@@ -308,6 +305,12 @@ export class FederationManager {
         `federation-reconcile:${peerUrl}`
       );
       this.ws.broadcast(roomId, { type: "diff", payload: diff, revision: newRevision, sequence });
+    }
+
+    // Track the peer's latest sequence so the next reconciliation starts
+    // from where this one left off (fast-forward).
+    if (response.sequence > sinceSequence) {
+      this.db.setPeerLastSequence(roomId, peerUrl, response.sequence);
     }
   }
 

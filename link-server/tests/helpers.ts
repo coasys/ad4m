@@ -162,8 +162,12 @@ export async function authenticateAgent(
   return step2.body.token;
 }
 
-export function openWs(wsUrl: string, roomId: string, token: string): WebSocket {
-  return new WebSocket(`${wsUrl}/rooms/${roomId}/ws?token=${encodeURIComponent(token)}`);
+/**
+ * Opens a WebSocket to the server without sending the auth message.
+ * Use `openAuthenticatedWs` for the full handshake.
+ */
+export function openWs(wsUrl: string, roomId: string): WebSocket {
+  return new WebSocket(`${wsUrl}/rooms/${roomId}/ws`);
 }
 
 export function waitForOpen(socket: WebSocket): Promise<void> {
@@ -171,6 +175,40 @@ export function waitForOpen(socket: WebSocket): Promise<void> {
     socket.once("open", () => resolve());
     socket.once("error", reject);
   });
+}
+
+/**
+ * Opens a WebSocket, completes first-message auth, and waits for the
+ * `online-agents` acknowledgement. Returns the connected + authenticated socket.
+ */
+export async function openAuthenticatedWs(wsUrl: string, roomId: string, token: string): Promise<WebSocket> {
+  const ws = openWs(wsUrl, roomId);
+  await waitForOpen(ws);
+  ws.send(JSON.stringify({ type: "auth", token }));
+  // Wait for the server to confirm auth with an online-agents message.
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("WS auth timed out")), 5000);
+    const onMsg = (raw: WebSocket.RawData) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === "online-agents") {
+          clearTimeout(timeout);
+          ws.removeListener("message", onMsg);
+          resolve();
+        } else if (msg.type === "auth-error") {
+          clearTimeout(timeout);
+          ws.removeListener("message", onMsg);
+          reject(new Error(`WS auth error: ${msg.error}`));
+        }
+      } catch { /* ignore parse errors */ }
+    };
+    ws.on("message", onMsg);
+    ws.once("close", () => {
+      clearTimeout(timeout);
+      reject(new Error("WS closed during auth"));
+    });
+  });
+  return ws;
 }
 
 export async function waitFor(

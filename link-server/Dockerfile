@@ -23,7 +23,7 @@ COPY --from=build /app/node_modules/ ./node_modules/
 COPY --from=build /app/dist/ ./dist/
 EXPOSE 3456
 VOLUME /data
-# PORT, DATA_DIR, AUTO_ADMIT, SKIP_LINK_VERIFICATION read from env vars
+# PORT, DATA_DIR, AUTO_ADMIT read from env vars
 # (see src/index.ts parseArgs). Defaults: port 3456, data ./data.
 ENV DATA_DIR=/data
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
