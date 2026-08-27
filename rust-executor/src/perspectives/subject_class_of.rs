@@ -1,4 +1,4 @@
-//! Resolve a URI to the subject class it is an instance of.
+//! Resolve a URI to the subject classes it is an instance of.
 //!
 //! The mirror of this — "is this URI an instance of class X" — has existed since
 //! the beginning as `isSubjectInstance`. The other direction had no answer at
@@ -18,18 +18,26 @@
 //!
 //! **It is not exclusive.** A subclass carries everything its parent requires,
 //! so an `ImagePost` conforms to `Post` as well — and to any unrelated class
-//! whose required set happens to be a subset. The answer is genuinely a set of
-//! candidates, and something has to choose. See [`most_specific`].
+//! whose required set happens to be a subset. Membership is therefore genuinely
+//! a *set*, and that set is what this module returns. Picking one member out of
+//! it is a policy, not a fact, so it lives in [`most_specific`] where a caller
+//! opts into it by name.
 //!
 //! # Strategy
 //!
-//! Flags first. A `@Flag` is a fixed `(predicate, value)` pair a class stamps on
-//! every instance, which is as close to a type tag as the model has — and the
-//! class families that matter in practice all declare one. All
-//! flags across all classes are fetched in a single query.
+//! Every class has to be tested against every URI — that is what returning the
+//! whole set means — so there is nothing to be gained by testing them one class
+//! at a time. Two queries fetch the entire batch's relevant triples up front,
+//! and the set containment runs in memory against shapes that are already
+//! cached:
 //!
-//! Conformance second, for classes with no flag, and only for the URIs the flag
-//! pass left unresolved.
+//! - flag predicates, with their objects, since a flag matches a fixed
+//!   `(predicate, value)` pair;
+//! - required-property predicates, without their objects, since only the
+//!   predicate's presence is checked and hauling literal bodies back for a
+//!   presence test wastes bandwidth on exactly the largest fields.
+//!
+//! Both are `VALUES`-bound to the URIs asked about, so neither scans the store.
 
 use deno_core::anyhow::Error;
 use serde_json::Value;
@@ -102,7 +110,7 @@ fn required_triples(shape: &ModelShape) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
-/// Choose between classes a URI structurally conforms to.
+/// Order the classes a URI belongs to, most specific first.
 ///
 /// **More required triples wins.** A subclass's required set is a superset of
 /// its parent's — it inherits every flag and required property and adds its own
@@ -112,26 +120,50 @@ fn required_triples(shape: &ModelShape) -> Vec<(String, Option<String>)> {
 ///
 /// Ties break alphabetically. Two genuinely different classes with identical
 /// required sets are indistinguishable *by definition of how membership works
-/// here*, so any choice is arbitrary; the point of sorting is that every peer
+/// here*, so any tie-break is arbitrary; the point of sorting is that every peer
 /// makes the same arbitrary choice rather than returning whatever the hash map
 /// iterated first.
-fn most_specific(candidates: &mut Vec<(String, usize)>) -> Option<String> {
-    candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    candidates.first().map(|(name, _)| name.clone())
+///
+/// This is only an ordering. It ranks the members of a set without removing any
+/// of them — the caller decides whether the tail matters.
+fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
+    matches.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    matches.iter().map(|(name, _)| name.clone()).collect()
 }
 
-/// Resolve each URI to the name of the class it is an instance of.
+/// The single best class for a caller that can only act on one.
+///
+/// Some callers genuinely need one answer — hydrating a URI against a shape, for
+/// instance, can only use one shape. This is the policy those callers should
+/// share, so that "which one did we pick" is a named, greppable decision rather
+/// than an inline `[0]` repeated at every call site with its own justification.
+///
+/// It is the *first* member under [`order_by_specificity`], which is the order
+/// [`subject_class_of`] already returns. Callers that can handle the whole set
+/// should use the whole set: a URI conforming to two unrelated classes is a real
+/// situation, and this function's answer to it is arbitrary by construction.
+pub fn most_specific(classes: &[String]) -> Option<&str> {
+    classes.first().map(String::as_str)
+}
+
+/// Resolve each URI to every subject class it is an instance of, most specific
+/// first.
+///
+/// Membership is structural and therefore not exclusive: an instance conforms to
+/// its parent classes, and to any unrelated class whose required set happens to
+/// be a subset of what it carries. All of them are returned. Use
+/// [`most_specific`] to collapse the list where a caller can only act on one.
 ///
 /// URIs that match no registered class are absent from the result rather than
-/// mapped to a placeholder — "not a subject instance" and "an instance of
+/// mapped to an empty list — "not a subject instance" and "an instance of
 /// something unnameable" are different answers, and a caller can tell them apart
 /// by absence.
 pub fn subject_class_of(
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
-) -> Result<HashMap<String, String>, Error> {
-    let mut out: HashMap<String, String> = HashMap::new();
+) -> Result<HashMap<String, Vec<String>>, Error> {
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
     if uris.is_empty() {
         return Ok(out);
     }
@@ -152,7 +184,14 @@ pub fn subject_class_of(
     let mut shapes: Vec<(String, Vec<(String, Option<String>)>)> = Vec::new();
     for name in class_names {
         match resolver.get_shape(&name) {
-            Ok(shape) => shapes.push((name, required_triples(shape.as_ref()))),
+            Ok(shape) => {
+                let triples = required_triples(shape.as_ref());
+                // A class with no required triples at all matches literally
+                // every URI, which is not an answer — it is the absence of one.
+                if !triples.is_empty() {
+                    shapes.push((name, triples));
+                }
+            }
             // A class whose SHACL will not parse cannot classify anything; skip
             // it rather than failing the whole batch for the others.
             Err(e) => log::warn!("subjectClassOf: skipping class '{name}': {e}"),
@@ -162,110 +201,114 @@ pub fn subject_class_of(
         return Ok(out);
     }
 
-    // ---- pass 1: flags -----------------------------------------------------
-
-    let mut by_flag: HashMap<(String, String), Vec<(String, usize)>> = HashMap::new();
-    for (name, triples) in &shapes {
+    // Split the predicates by what each is used for: a flag has to match a
+    // specific object, a required property only has to be present.
+    let mut flag_preds: HashSet<&str> = HashSet::new();
+    let mut presence_preds: HashSet<&str> = HashSet::new();
+    for (_, triples) in &shapes {
         for (pred, value) in triples {
-            if let Some(v) = value {
-                by_flag
-                    .entry((pred.clone(), v.clone()))
-                    .or_default()
-                    .push((name.clone(), triples.len()));
-            }
+            match value {
+                Some(_) => flag_preds.insert(pred.as_str()),
+                None => presence_preds.insert(pred.as_str()),
+            };
         }
     }
 
-    let mut candidates: HashMap<String, Vec<(String, usize)>> = HashMap::new();
+    // What each URI actually carries, in the two shapes membership asks about.
+    let mut pairs: HashMap<String, HashSet<(String, String)>> = HashMap::new();
+    let mut present: HashMap<String, HashSet<String>> = HashMap::new();
 
-    if !by_flag.is_empty() {
-        let flag_preds: HashSet<&str> = by_flag.keys().map(|(p, _)| p.as_str()).collect();
-        let pred_values = flag_preds
-            .iter()
-            .map(|p| format!("<{p}>"))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let query = format!(
-            "SELECT ?s ?p ?o WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o . }}"
-        );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
-
+    if !flag_preds.is_empty() {
+        let rows = fetch(store, &values_clause, &flag_preds, true)?;
         for row in &rows {
             let (s, p, o) = match (row["s"].as_str(), row["p"].as_str(), row["o"].as_str()) {
                 (Some(s), Some(p), Some(o)) => (s, p, o),
                 _ => continue,
             };
-            if let Some(classes) = by_flag.get(&(p.to_string(), o.to_string())) {
-                candidates
-                    .entry(s.to_string())
-                    .or_default()
-                    .extend(classes.iter().cloned());
-            }
+            pairs
+                .entry(s.to_string())
+                .or_default()
+                .insert((p.to_string(), o.to_string()));
+            // A flag predicate can also be some other class's required
+            // property, so it counts as present too.
+            present
+                .entry(s.to_string())
+                .or_default()
+                .insert(p.to_string());
         }
     }
 
-    for (uri, mut cands) in candidates {
-        if let Some(best) = most_specific(&mut cands) {
-            out.insert(uri, best);
-        }
-    }
-
-    // ---- pass 2: conformance, for whatever the flags did not settle --------
-
-    let unresolved: Vec<&String> = valid
-        .iter()
-        .filter(|u| !out.contains_key(u.as_str()))
-        .copied()
-        .collect();
-    if unresolved.is_empty() {
-        return Ok(out);
-    }
-
-    let unresolved_values = unresolved
-        .iter()
-        .map(|u| format!("<{u}>"))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let mut fallback: HashMap<String, Vec<(String, usize)>> = HashMap::new();
-    for (name, triples) in &shapes {
-        // A class with no required triples at all matches literally every URI
-        // that has any link, which is not an answer — it is the absence of one.
-        if triples.is_empty() {
-            continue;
-        }
-        let patterns = triples
-            .iter()
-            .enumerate()
-            .map(|(i, (pred, value))| match value {
-                Some(v) => format!("    ?s <{pred}> <{v}> ."),
-                None => format!("    ?s <{pred}> ?_v{i} ."),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let query = format!(
-            "SELECT DISTINCT ?s WHERE {{ VALUES ?s {{ {unresolved_values} }}\n{patterns}\n}}"
-        );
-        let rows: Vec<Value> = serde_json::from_str(&store.query(&query)?)?;
+    if !presence_preds.is_empty() {
+        let rows = fetch(store, &values_clause, &presence_preds, false)?;
         for row in &rows {
-            if let Some(s) = row["s"].as_str() {
-                fallback
-                    .entry(s.to_string())
-                    .or_default()
-                    .push((name.clone(), triples.len()));
-            }
+            let (s, p) = match (row["s"].as_str(), row["p"].as_str()) {
+                (Some(s), Some(p)) => (s, p),
+                _ => continue,
+            };
+            present
+                .entry(s.to_string())
+                .or_default()
+                .insert(p.to_string());
         }
     }
 
-    for (uri, mut cands) in fallback {
-        if let Some(best) = most_specific(&mut cands) {
-            out.insert(uri, best);
+    // Set containment, in memory. Every class is tested against every URI —
+    // which is what returning the full set requires, and is also why there was
+    // nothing to gain from querying class by class.
+    for uri in &valid {
+        let uri = uri.as_str();
+        let uri_pairs = pairs.get(uri);
+        let uri_present = present.get(uri);
+
+        let mut matches: Vec<(String, usize)> = Vec::new();
+        for (name, triples) in &shapes {
+            let conforms = triples.iter().all(|(pred, value)| match value {
+                Some(v) => uri_pairs
+                    .map(|p| p.contains(&(pred.clone(), v.clone())))
+                    .unwrap_or(false),
+                None => uri_present.map(|p| p.contains(pred)).unwrap_or(false),
+            });
+            if conforms {
+                matches.push((name.clone(), triples.len()));
+            }
+        }
+
+        if !matches.is_empty() {
+            out.insert(uri.to_string(), order_by_specificity(&mut matches));
         }
     }
 
     Ok(out)
+}
+
+/// One `VALUES`-bound query for the whole batch over one set of predicates.
+///
+/// `with_object` selects the object as well, which flag matching needs and a
+/// presence test does not — a required property's value can be an arbitrarily
+/// long literal, and none of it is read.
+fn fetch(
+    store: &SparqlStore,
+    values_clause: &str,
+    preds: &HashSet<&str>,
+    with_object: bool,
+) -> Result<Vec<Value>, Error> {
+    let pred_values = preds
+        .iter()
+        .map(|p| format!("<{p}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let query = if with_object {
+        format!(
+            "SELECT DISTINCT ?s ?p ?o WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?o . }}"
+        )
+    } else {
+        format!(
+            "SELECT DISTINCT ?s ?p WHERE {{ VALUES ?s {{ {values_clause} }} VALUES ?p {{ {pred_values} }} ?s ?p ?_o . }}"
+        )
+    };
+
+    Ok(serde_json::from_str(&store.query(&query)?)?)
 }
 
 #[cfg(test)]
@@ -273,22 +316,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_most_specific_prefers_more_required_triples() {
+    fn test_order_puts_more_required_triples_first() {
         // A subclass inherits its parent's requirements and adds its own, so it
         // matches strictly more — which is how "more derived" is recovered
-        // without SHACL recording an inheritance graph.
+        // without SHACL recording an inheritance graph. Both are returned: the
+        // instance really is a Post as well.
         let mut c = vec![("Post".to_string(), 1), ("ImagePost".to_string(), 3)];
-        assert_eq!(most_specific(&mut c), Some("ImagePost".to_string()));
+        assert_eq!(
+            order_by_specificity(&mut c),
+            vec!["ImagePost".to_string(), "Post".to_string()]
+        );
     }
 
     #[test]
-    fn test_most_specific_tie_is_deterministic() {
-        // Indistinguishable by construction, so the choice is arbitrary — but it
-        // must be the *same* arbitrary choice on every peer, not hash order.
+    fn test_order_is_deterministic_on_ties() {
+        // Indistinguishable by construction, so the order is arbitrary — but it
+        // must be the *same* arbitrary order on every peer, not hash order.
         let mut a = vec![("Beta".to_string(), 2), ("Alpha".to_string(), 2)];
         let mut b = vec![("Alpha".to_string(), 2), ("Beta".to_string(), 2)];
-        assert_eq!(most_specific(&mut a), most_specific(&mut b));
-        assert_eq!(most_specific(&mut a), Some("Alpha".to_string()));
+        assert_eq!(order_by_specificity(&mut a), order_by_specificity(&mut b));
+        assert_eq!(
+            order_by_specificity(&mut a),
+            vec!["Alpha".to_string(), "Beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_most_specific_reads_the_head_of_the_ordering() {
+        let mut c = vec![("Post".to_string(), 1), ("ImagePost".to_string(), 3)];
+        let ordered = order_by_specificity(&mut c);
+        assert_eq!(most_specific(&ordered), Some("ImagePost"));
+        assert_eq!(most_specific(&[]), None);
     }
 
     #[test]

@@ -770,26 +770,34 @@ export class PerspectiveProxy {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson);
     }
 
-    /** Resolve each URI to the name of the subject class it is an instance of.
+    /** Resolve each URI to the names of every subject class it is an instance of.
      *
      * The counterpart of {@link isSubjectInstance}, which asks the same question
      * one class at a time. Without this, finding the class of an arbitrary URI
      * meant looping over every registered class — a round trip each — and doing
      * it again for every URI.
      *
-     * URIs that match no registered class are **absent from the result** rather
-     * than mapped to a placeholder: "not a subject instance" and "an instance of
-     * something this perspective cannot name" are different answers.
+     * Class membership in AD4M is structural — a URI belongs to a class when it
+     * carries that class's flags and required properties — so membership is **not
+     * exclusive**: an instance conforms to its parent classes, and to any
+     * unrelated class whose required set happens to be a subset of what it
+     * carries. Every match is returned.
      *
-     * Note that class membership in AD4M is structural — a URI belongs to a class
-     * when it carries that class's flags and required properties — so an instance
-     * conforms to its parent classes too. This returns the most specific match,
-     * meaning the class requiring the most triples; ties resolve alphabetically so
-     * that every peer answers identically.
+     * The list is ordered **most specific first**, meaning by the number of
+     * triples the class requires — a subclass requires everything its parent does
+     * and more — with ties broken alphabetically so that every peer answers
+     * identically. A caller that can only act on one class should take
+     * `classes[0]`, but that head is only a heuristic: it is arbitrary between two
+     * unrelated classes requiring the same number of triples, which is exactly
+     * the case the full list exists to expose.
+     *
+     * URIs that match no registered class are **absent from the result** rather
+     * than mapped to an empty list: "not a subject instance" and "an instance of
+     * something this perspective cannot name" are different answers.
      *
      * @param uris The expression URIs to classify.
      */
-    async subjectClassOf(uris: string[]): Promise<Record<string, string>> {
+    async subjectClassOf(uris: string[]): Promise<Record<string, string[]>> {
         if (uris.length === 0) return {};
         return await this.#client.subjectClassOf(this.#handle.uuid, uris);
     }

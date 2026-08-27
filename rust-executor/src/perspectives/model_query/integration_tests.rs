@@ -5384,8 +5384,8 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
     );
 }
 
-/// `subjectClassOf` classifies a batch of URIs, preferring the most specific
-/// class and falling back to conformance where a class has no flag.
+/// `subjectClassOf` classifies a batch of URIs, finding flagged and flagless
+/// classes alike.
 #[tokio::test]
 async fn test_subject_class_of_batch() {
     use crate::perspectives::subject_class_of::subject_class_of;
@@ -5393,8 +5393,8 @@ async fn test_subject_class_of_batch() {
     let store = SparqlStore::new(None).unwrap();
 
     // Register three classes. TextBlock and ImageBlock are flagged; Untagged
-    // has no flag, only a required property, so it can only be found by
-    // conformance.
+    // has no flag, only a required property, so nothing type-tag-like points at
+    // it and it can only be found structurally.
     for (uri, shape_uri) in [
         ("ns://models/TextBlock", "ns://models/TextBlockShape"),
         ("ns://models/ImageBlock", "ns://models/ImageBlockShape"),
@@ -5468,12 +5468,12 @@ async fn test_subject_class_of_batch() {
     ];
     let result = subject_class_of(&store, &resolver, &uris).unwrap();
 
-    assert_eq!(result.get("ns://a").map(String::as_str), Some("TextBlock"));
-    assert_eq!(result.get("ns://b").map(String::as_str), Some("ImageBlock"));
+    assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
+    assert_eq!(result.get("ns://b"), Some(&vec!["ImageBlock".to_string()]));
     assert_eq!(
-        result.get("ns://c").map(String::as_str),
-        Some("Untagged"),
-        "a flagless class is still reachable through the conformance pass",
+        result.get("ns://c"),
+        Some(&vec!["Untagged".to_string()]),
+        "a flagless class is still found, by its required properties alone",
     );
     assert!(
         !result.contains_key("ns://nothing"),
@@ -5481,9 +5481,53 @@ async fn test_subject_class_of_batch() {
     );
 }
 
-/// Structural membership is not exclusive, so the most specific class wins.
+/// A flag is not on its own proof of membership: a class is only matched when
+/// *every* triple it requires is present, which is what `isSubjectInstance`
+/// asks and therefore what this has to agree with.
 #[tokio::test]
-async fn test_subject_class_of_prefers_the_more_specific_class() {
+async fn test_subject_class_of_requires_every_triple_not_just_a_flag() {
+    use crate::perspectives::subject_class_of::subject_class_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "ns://models/TextBlock",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    // Carries the flag but not the required `text`, so it is not a TextBlock.
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+
+    let result = subject_class_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+
+    assert!(
+        !result.contains_key("ns://a"),
+        "the flag alone does not make it an instance",
+    );
+}
+
+/// Structural membership is not exclusive, so every class the URI conforms to
+/// is returned — ordered most specific first, but none of them dropped.
+#[tokio::test]
+async fn test_subject_class_of_returns_every_class_most_specific_first() {
     use crate::perspectives::subject_class_of::subject_class_of;
 
     let store = SparqlStore::new(None).unwrap();
@@ -5531,10 +5575,16 @@ async fn test_subject_class_of_prefers_the_more_specific_class() {
 
     let result = subject_class_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
 
+    let classes = result.get("ns://a").expect("ns://a is classified");
     assert_eq!(
-        result.get("ns://a").map(String::as_str),
+        classes,
+        &vec!["ImagePost".to_string(), "Post".to_string()],
+        "the instance is a Post as well as an ImagePost, and both are reported",
+    );
+    assert_eq!(
+        crate::perspectives::subject_class_of::most_specific(classes),
         Some("ImagePost"),
-        "the instance conforms to Post too, but the derived class is the answer",
+        "callers that can only act on one class get the derived one",
     );
 }
 
