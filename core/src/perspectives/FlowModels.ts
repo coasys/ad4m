@@ -95,13 +95,29 @@ export class FlowTransitionProposal extends Ad4mModel {
   // of the proposal's own links (all written together during create_subject).
 }
 
-// ── FlowInstance ────────────────────────────────────────────────────────────
+// ── FlowInstanceRecord ──────────────────────────────────────────────────────
 // On-graph node minted by the engine when a flow is started on a specific
 // base expression. Its URI is the value that `FlowTransitionProposal.flowInstance`
 // references. Mirrors `rust-executor/src/perspectives/hardwired_sdna/flow_instance.json`.
+//
+// Design authority: `docs/flow-interpretation-hints-design.md` §4.3.
+//
+// This class is the raw on-graph record (@Model over the SDNA shape). The
+// object-oriented handle callers work with is `FlowInstance` in
+// `./FlowInstance.ts` — it wraps `FlowInstanceRecord + SHACLFlow definition`
+// and exposes `currentState`, `availableTransitions`, `proposals`, etc.
+// Renamed from `FlowInstance` → `FlowInstanceRecord` on 2026-08-27 per
+// Nico's PR #929 review R2 (the `FlowInstance` name is reserved for the
+// wrapper the design has always specified in §4.3).
+//
+// The SDNA name (`@Model({ name: "FlowInstance" })`) stays unchanged — that
+// keys the on-graph class, not the TS export. Renaming the TS class only
+// changes the JS import surface; the graph shape is identical, and Rust
+// hardwired_sdna/flow_instance.json + all the parity tests still lock down
+// the same `ad4m://FlowInstance` target class.
 
 @Model({ name: "FlowInstance" })
-export class FlowInstance extends Ad4mModel {
+export class FlowInstanceRecord extends Ad4mModel {
   /**
    * Name of the `SHACLFlow` this instance runs. First-declared property so
    * `buildSHACL` derives the shape namespace from its `through` prefix —

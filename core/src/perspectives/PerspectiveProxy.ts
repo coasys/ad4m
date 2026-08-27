@@ -16,7 +16,8 @@ import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
-import { FlowInstance, FlowTransitionProposal } from "./FlowModels";
+import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
+import { FlowInstance } from "./FlowInstance";
 import { Ad4mModel } from "../model/Ad4mModel";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
@@ -1142,21 +1143,24 @@ export class PerspectiveProxy {
     /**
      * v5-shaped flow instantiation (design doc §4.3). Mints a `FlowInstance`
      * node on the graph tied to `baseExpression`, seeded at the flow's first
-     * declared state. Idempotently registers the hardwired `FlowInstance` and
+     * declared state, and returns the object-oriented {@link FlowInstance}
+     * wrapper. Idempotently registers the hardwired `FlowInstanceRecord` +
      * `FlowTransitionProposal` @Model classes on first call — the on-graph
      * shape matches the Rust-side hardwired SDNA (parity-locked in
      * `flow-instance.test.ts` / `flow-transition-proposal.test.ts`).
      *
-     * The engine that fires transitions post-consensus (§7 / PR-sequence item
-     * 3) reads the returned instance's `currentState`; UIs subscribe via the
-     * `FlowInstance` wrapper class (§4.3, wrapper-side lands in the following
-     * slice).
+     * The returned wrapper carries the parsed `SHACLFlow` alongside the
+     * on-graph record, so `currentState` / `availableTransitions` /
+     * `proposals` accessors work without further round-trips. The consensus
+     * engine (slice 10.6) will read the record's `currentState` when it
+     * fires transitions; UIs subscribe via the wrapper's forthcoming
+     * subscription hooks (§4.3, land with slice 10.6).
      *
      * @param flowName - Name of a `SHACLFlow` already registered on the perspective
      * @param baseExpression - URI of the subject expression the flow runs on
      * @throws When the flow is unknown or has zero declared states (use the
-     *   zero-state action-flow path — coming with §6.3 fireAction — for that shape).
-     * @returns The freshly-minted `FlowInstance` (hydrated).
+     *   zero-state action-flow path — coming with §6.3 `fireAction` — for that shape).
+     * @returns The freshly-minted {@link FlowInstance} wrapper.
      */
     async startFlowInstance(flowName: string, baseExpression: string): Promise<FlowInstance> {
         const flow = await this.getFlow(flowName);
@@ -1167,52 +1171,81 @@ export class PerspectiveProxy {
         // Register the hardwired runtime classes if this is the first flow
         // instance on the perspective. registerAll is a single batched RPC and
         // no-ops when both classes are already present.
-        await Ad4mModel.registerAll(this, [FlowInstance, FlowTransitionProposal]);
-        // Property keys must be the FlowInstance @Model field names — `subject`
-        // (not `baseExpression`, which collides with Ad4mModel's synthetic
-        // hydration field and would be silently shadowed on read). No
-        // explicit start-time field: Ad4mModel synthesises `createdAt` on
+        await Ad4mModel.registerAll(this, [FlowInstanceRecord, FlowTransitionProposal]);
+        // Property keys must be the FlowInstanceRecord @Model field names —
+        // `subject` (not `baseExpression`, which collides with Ad4mModel's
+        // synthetic hydration field and would be silently shadowed on read).
+        // No explicit start-time field: Ad4mModel synthesises `createdAt` on
         // hydration from the earliest link timestamp on the instance's URI.
-        const instance = await FlowInstance.create(this, {
+        const record = await FlowInstanceRecord.create(this, {
             flow: flowName,
             subject: baseExpression,
             currentState: flow.states[0].name,
         });
-        return instance;
+        return FlowInstance.wrap(this, flow, record);
     }
 
     /**
-     * Returns all live `FlowInstance` records on this perspective (v5, design
-     * doc §4.3). Idempotently registers the hardwired `FlowInstance` +
-     * `FlowTransitionProposal` @Model classes on first call — so callers can
-     * ask for instances before any {@link startFlowInstance} has ever run
-     * without hitting a "class not registered" hydration error.
+     * Returns all live {@link FlowInstance} wrappers on this perspective (v5,
+     * design doc §4.3). Idempotently registers the hardwired
+     * `FlowInstanceRecord` + `FlowTransitionProposal` @Model classes on first
+     * call — so callers can ask for instances before any
+     * {@link startFlowInstance} has ever run without hitting a
+     * "class not registered" hydration error.
      *
      * Optional `flowName` narrows by flow-name discriminator (single SHACL
      * `where`-filter round-trip; no client-side filtering). Omitting the arg
      * returns instances across all flows in the perspective.
      *
-     * Feeds §5 Model C: the channel-scoped extraction pass calls this to
-     * gather active flow context (currentState per instance) for the LLM
-     * prompt, and UIs use it to render active-flow indicators.
+     * Records whose `flow` value has no matching `SHACLFlow` on the
+     * perspective (e.g. the flow was unregistered) are silently skipped —
+     * the wrapper can't answer `currentState` / `availableTransitions`
+     * without the shape, and callers routinely iterate the returned array
+     * without null-checks.
+     *
+     * Feeds §5 Model C: the channel-scoped extraction pass uses the
+     * underlying record shape via the Rust `load_flow_instances` primitive;
+     * this proxy method is for UIs and clients working in TypeScript.
      *
      * @param flowName - Optional flow-name filter
-     * @returns Hydrated `FlowInstance[]`, empty when none exist
+     * @returns `FlowInstance[]` wrappers, empty when none exist
      *
      * @example
      * ```typescript
      * const deliveries = await p.getFlowInstances("Delivery");
      * for (const inst of deliveries) {
-     *   console.log(`${inst.baseExpression} is in state ${inst.currentState}`);
+     *   console.log(`${inst.subject} is in state ${inst.currentStateName}`);
      * }
      * ```
      */
     async getFlowInstances(flowName?: string): Promise<FlowInstance[]> {
-        await Ad4mModel.registerAll(this, [FlowInstance, FlowTransitionProposal]);
-        if (flowName !== undefined) {
-            return FlowInstance.findAll(this, { where: { flow: flowName } });
+        await Ad4mModel.registerAll(this, [FlowInstanceRecord, FlowTransitionProposal]);
+        const records: FlowInstanceRecord[] =
+            flowName !== undefined
+                ? await FlowInstanceRecord.findAll(this, { where: { flow: flowName } })
+                : await FlowInstanceRecord.findAll(this);
+
+        // Pair each record with its parsed SHACLFlow. Cache lookups by
+        // flow-name so `getFlow` fires at most once per distinct flow —
+        // matters when a perspective has hundreds of instances against
+        // one shape.
+        const shapesByName = new Map<string, SHACLFlow>();
+        const wrappers: FlowInstance[] = [];
+        for (const record of records) {
+            let shape = shapesByName.get(record.flow);
+            if (!shape) {
+                const loaded = await this.getFlow(record.flow);
+                if (!loaded) {
+                    // Stale record — the flow it references was
+                    // unregistered. Skip rather than return a half-wrapper.
+                    continue;
+                }
+                shape = loaded;
+                shapesByName.set(record.flow, shape);
+            }
+            wrappers.push(FlowInstance.wrap(this, shape, record));
         }
-        return FlowInstance.findAll(this);
+        return wrappers;
     }
 
     /** Returns all expressions in the given state of given Social DNA flow */

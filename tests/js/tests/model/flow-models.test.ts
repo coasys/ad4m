@@ -28,7 +28,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ad4mClient, Link, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
-import { FlowInstance, FlowTransitionProposal } from "@coasys/ad4m";
+import { FlowInstance, FlowInstanceRecord, FlowTransitionProposal, FlowTransition } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
 import { startAgent } from "../../helpers/index.js";
 
@@ -212,7 +212,7 @@ describe("FlowTransitionProposal — @Model", function () {
   });
 });
 
-describe("FlowInstance — @Model", function () {
+describe("FlowInstanceRecord — @Model", function () {
   this.timeout(120_000);
 
   let ad4m: Ad4mClient;
@@ -237,14 +237,14 @@ describe("FlowInstance — @Model", function () {
   beforeEach(async () => {
     const handle = await ad4m.perspective.add("flow-models-instance-test");
     p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
-    await FlowInstance.register(p);
+    await FlowInstanceRecord.register(p);
   });
 
   afterEach(async () => {
     if (p) await ad4m.perspective.remove(p.uuid);
   });
 
-  it("FlowInstance.findAll() returns instances by flow-name discriminator", async () => {
+  it("FlowInstanceRecord.findAll() returns records by flow-name discriminator", async () => {
     // Simulate what the Rust flow engine writes when startFlow lands.
     const instance = "ad4m://flow/instance/inst-1";
     await p.add(new Link({
@@ -263,7 +263,7 @@ describe("FlowInstance — @Model", function () {
       target: "literal:string:Scoped",
     }));
 
-    const all = await FlowInstance.findAll(p);
+    const all = await FlowInstanceRecord.findAll(p);
     expect(all.length).to.equal(1);
     expect(all[0].flow).to.equal("Delivery");
     expect(all[0].subject).to.equal("ad4m://some-subject");
@@ -273,7 +273,7 @@ describe("FlowInstance — @Model", function () {
     expect(all[0].createdAt).to.be.a("number");
   });
 
-  it("FlowInstance @Model shape matches Rust flow_instance.json", () => {
+  it("FlowInstanceRecord @Model shape matches Rust flow_instance.json", () => {
     const SDNA_DIR = path.resolve(
       __dirname,
       "../../../../rust-executor/src/perspectives/hardwired_sdna",
@@ -284,7 +284,7 @@ describe("FlowInstance — @Model", function () {
       properties: Array<{ path: string; name: string }>;
     };
 
-    const { shape } = (FlowInstance as any).generateSHACL();
+    const { shape } = (FlowInstanceRecord as any).generateSHACL();
     const actual = new Map<string, string>(
       shape.properties.map((prop: any): [string, string] => [prop.path, prop.name]),
     );
@@ -363,22 +363,27 @@ describe("PerspectiveProxy.startFlowInstance — v5 API", function () {
     const after = new Date().toISOString();
 
     expect(instance).to.be.instanceOf(FlowInstance);
-    expect(instance.flow).to.equal("Delivery");
+    expect(instance.flowName).to.equal("Delivery");
     expect(instance.subject).to.equal("ad4m://task/1");
-    expect(instance.currentState).to.equal("Identified");
+    expect(instance.currentStateName).to.equal("Identified");
+    // `currentState` on the wrapper resolves to the `FlowState` object on
+    // the shape whose name matches `currentStateName` — verify the linkage.
+    expect(instance.currentState).to.equal(instance.shape.states[0]);
     // Start time = Ad4mModel's synthesised `createdAt` (earliest link
-    // timestamp on the instance URI, epoch millis after hydration).
+    // timestamp on the instance URI, epoch millis after hydration), surfaced
+    // via the wrapper's `startedAtMillis` accessor.
     const beforeMs = new Date(before).getTime();
     const afterMs = new Date(after).getTime();
-    expect(instance.createdAt >= beforeMs && instance.createdAt <= afterMs,
-      `createdAt ${instance.createdAt} must fall in [${beforeMs}, ${afterMs}]`).to.equal(true);
+    const startedAt = instance.startedAtMillis;
+    expect(startedAt !== undefined && startedAt >= beforeMs && startedAt <= afterMs,
+      `startedAtMillis ${startedAt} must fall in [${beforeMs}, ${afterMs}]`).to.equal(true);
 
     // Findable via the discriminator predicate — same lookup UIs will use.
-    const all = await FlowInstance.findAll(p);
+    const all = await p.getFlowInstances();
     expect(all.length).to.equal(1);
-    expect(all[0].flow).to.equal("Delivery");
+    expect(all[0].flowName).to.equal("Delivery");
     expect(all[0].subject).to.equal("ad4m://task/1");
-    expect(all[0].currentState).to.equal("Identified");
+    expect(all[0].currentStateName).to.equal("Identified");
   });
 
   it("supports multiple concurrent instances on distinct bases", async () => {
@@ -386,7 +391,7 @@ describe("PerspectiveProxy.startFlowInstance — v5 API", function () {
     await p.startFlowInstance("Delivery", "ad4m://task/a");
     await p.startFlowInstance("Delivery", "ad4m://task/b");
 
-    const all = await FlowInstance.findAll(p);
+    const all = await p.getFlowInstances();
     expect(all.length).to.equal(2);
     const bases = all.map((i) => i.subject).sort();
     expect(bases).to.deep.equal(["ad4m://task/a", "ad4m://task/b"]);
@@ -508,7 +513,7 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
     const all = await p.getFlowInstances();
     expect(all.length).to.equal(3);
     expect(all.every((i) => i instanceof FlowInstance)).to.equal(true);
-    const flows = all.map((i) => i.flow).sort();
+    const flows = all.map((i) => i.flowName).sort();
     expect(flows).to.deep.equal(["Deliberation", "Delivery", "Delivery"]);
   });
 
@@ -522,7 +527,7 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
 
     const deliveries = await p.getFlowInstances("Delivery");
     expect(deliveries.length).to.equal(2);
-    expect(deliveries.every((i) => i.flow === "Delivery")).to.equal(true);
+    expect(deliveries.every((i) => i.flowName === "Delivery")).to.equal(true);
     const bases = deliveries.map((i) => i.subject).sort();
     expect(bases).to.deep.equal(["ad4m://task/a", "ad4m://task/b"]);
 
@@ -534,21 +539,175 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
     expect(misses).to.deep.equal([]);
   });
 
-  it("returns fully hydrated instances (flow, subject, currentState, createdAt)", async () => {
+  it("returns fully hydrated wrappers (flowName, subject, currentStateName, startedAtMillis, shape)", async () => {
     await p.addFlow("Delivery", makeDeliveryFlow());
     const before = new Date().toISOString();
     await p.startFlowInstance("Delivery", "ad4m://task/hydrate");
     const after = new Date().toISOString();
 
     const [hydrated] = await p.getFlowInstances("Delivery");
-    expect(hydrated.flow).to.equal("Delivery");
+    expect(hydrated.flowName).to.equal("Delivery");
     expect(hydrated.subject).to.equal("ad4m://task/hydrate");
-    expect(hydrated.currentState).to.equal("Identified");
-    // Start time = Ad4mModel's synthesised `createdAt` (earliest link
-    // timestamp on the instance URI, epoch millis after hydration).
+    expect(hydrated.currentStateName).to.equal("Identified");
+    // Wrapper carries the parsed shape — verify it round-trips.
+    expect(hydrated.shape.name).to.equal("Delivery");
+    expect(hydrated.shape.states.length).to.equal(2);
+    // Start time = Ad4mModel's synthesised `createdAt` on the underlying
+    // record (earliest link timestamp on the instance URI, epoch millis
+    // after hydration), surfaced via the wrapper's `startedAtMillis`.
     const beforeMs = new Date(before).getTime();
     const afterMs = new Date(after).getTime();
-    expect(hydrated.createdAt >= beforeMs && hydrated.createdAt <= afterMs,
-      `createdAt ${hydrated.createdAt} must fall in [${beforeMs}, ${afterMs}]`).to.equal(true);
+    const startedAt = hydrated.startedAtMillis;
+    expect(startedAt !== undefined && startedAt >= beforeMs && startedAt <= afterMs,
+      `startedAtMillis ${startedAt} must fall in [${beforeMs}, ${afterMs}]`).to.equal(true);
+  });
+});
+
+// ── FlowInstance wrapper — OO API (design doc §4.3) ──────────────────────────
+// The wrapper carries a `FlowInstanceRecord` + `SHACLFlow` shape and exposes
+// the read + subscribe surface a UI or agent needs. Mutations + subscriptions
+// land with slice 10.6 (consensus engine); today they throw with a clear
+// "not yet implemented" so call-sites surface a typed error rather than a
+// silent no-op.
+
+describe("FlowInstance wrapper — read + stub API", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-instance-wrapper");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-instance-wrapper-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlowWithTransitions(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    flow.addState({
+      name: "Identified",
+      value: 0,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
+    });
+    flow.addState({
+      name: "InProgress",
+      value: 1,
+      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
+    });
+    flow.addState({
+      name: "Done",
+      value: 2,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Done" },
+    });
+    const t1: FlowTransition = {
+      fromState: "Identified",
+      toState: "InProgress",
+      actionName: "start",
+      actions: [],
+    };
+    const t2: FlowTransition = {
+      fromState: "InProgress",
+      toState: "Done",
+      actionName: "complete",
+      actions: [],
+    };
+    flow.addTransition(t1);
+    flow.addTransition(t2);
+    return flow;
+  }
+
+  it("currentState resolves to the FlowState object on the shape", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
+    const inst = await p.startFlowInstance("Delivery", "ad4m://task/currentstate");
+
+    const state = inst.currentState;
+    expect(state.name).to.equal("Identified");
+    // Object identity: same reference as the one on the shape.
+    expect(state).to.equal(inst.shape.states[0]);
+  });
+
+  it("availableTransitions filters shape.transitions by fromState", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
+    const inst = await p.startFlowInstance("Delivery", "ad4m://task/transitions");
+
+    // Fresh instance is in "Identified" → only the Identified→InProgress edge.
+    const outgoing = inst.availableTransitions;
+    expect(outgoing.length).to.equal(1);
+    expect(outgoing[0].fromState).to.equal("Identified");
+    expect(outgoing[0].toState).to.equal("InProgress");
+  });
+
+  it("availableTransitions is empty for a terminal state", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
+    const inst = await p.startFlowInstance("Delivery", "ad4m://task/terminal");
+
+    // Simulate consensus firing by mutating the underlying record directly —
+    // slice 10.6 wires this properly; today we exercise the wrapper's
+    // filter logic in isolation.
+    (inst.record as any).currentState = "Done";
+    expect(inst.availableTransitions).to.deep.equal([]);
+  });
+
+  it("proposals() returns an empty array when no transitions have been proposed", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
+    const inst = await p.startFlowInstance("Delivery", "ad4m://task/no-proposals");
+
+    const proposals = await inst.proposals();
+    expect(proposals).to.deep.equal([]);
+  });
+
+  it("mutation stubs throw a typed 'not yet implemented' error", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
+    const inst = await p.startFlowInstance("Delivery", "ad4m://task/stubs");
+
+    let caught: unknown = null;
+    try { await inst.proposeTransition("InProgress", []); } catch (e) { caught = e; }
+    expect(String(caught)).to.match(/not yet implemented/);
+
+    caught = null;
+    try { await inst.accept("ad4m://any"); } catch (e) { caught = e; }
+    expect(String(caught)).to.match(/not yet implemented/);
+
+    caught = null;
+    try { await inst.reject("ad4m://any"); } catch (e) { caught = e; }
+    expect(String(caught)).to.match(/not yet implemented/);
+
+    caught = null;
+    try { await inst.fireAction("Like"); } catch (e) { caught = e; }
+    expect(String(caught)).to.match(/not yet implemented/);
+
+    caught = null;
+    try { inst.onStateChange(() => {}); } catch (e) { caught = e; }
+    expect(String(caught)).to.match(/not yet implemented/);
+  });
+
+  it("wrapper carries the record — callers can reach in for anything unexposed", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
+    const inst = await p.startFlowInstance("Delivery", "ad4m://task/record-access");
+
+    expect(inst.record).to.be.instanceOf(FlowInstanceRecord);
+    expect(inst.record.flow).to.equal("Delivery");
+    expect(inst.record.subject).to.equal("ad4m://task/record-access");
+    expect(inst.record.currentState).to.equal("Identified");
   });
 });
