@@ -142,27 +142,11 @@ pub fn get_my_did() -> SocialContextResult<Option<String>> {
     }
 }
 
-// Holochain 0.7 semantics change:
-//   GetStrategy::Local now means "strict local databases only, no network
-//   call, no fallback" (see holochain_integrity_types::GetStrategy docs).
-//   Under 0.6, the default get path fell back to the network on a local
-//   cache miss; that fallback is gone in 0.7. For any lookup that resolves
-//   ANOTHER agent's DID <-> AgentPubKey link, we MUST use GetStrategy::Network
-//   (aka GetStrategy::default()), otherwise callers race the DHT gossip and
-//   see None for peers whose create_did_pub_key_link hasn't yet propagated
-//   to our local shard — which is exactly the failure surfaced by the
-//   multi-user tests:
-//     - `should return all DIDs in 'others()' for each user` (local-only
-//       lookup returns partial peer list),
-//     - `should route p2p signals correctly between users across nodes`
-//       (send_signal errors with "no AgentPubKey found for DID").
-//   get_my_did() below is left on Local because it looks up MY OWN cell's
-//   link, which is always locally authoritative.
 pub fn get_dids_agent_key(did: String) -> SocialContextResult<Option<AgentPubKey>> {
     let did_entry = Anchor(did);
     let did_entry_hash = hash_entry(EntryTypes::Anchor(did_entry.clone()))?;
     let query = LinkQuery::try_new(did_entry_hash, LinkTypes::DidLink)?;
-    let did_links = get_links(query, GetStrategy::Network)?;
+    let did_links = get_links(query, GetStrategy::Local)?;
     debug!(
         "PerspectiveDiffSync.get_dids_agent_key() did_links: {:?}",
         did_links
@@ -177,19 +161,15 @@ pub fn get_dids_agent_key(did: String) -> SocialContextResult<Option<AgentPubKey
 
 pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<String>> {
     let query = LinkQuery::try_new(agent, LinkTypes::DidLink)?;
-    // Peer lookup — must hit the network under HC 0.7 (see comment above).
-    let mut did_links = get_links(query, GetStrategy::Network)?;
+    let mut did_links = get_links(query, GetStrategy::Local)?;
     if did_links.len() > 0 {
-        // Follow-through `get` on the anchor entry: this is Network too,
-        // because the anchor entry itself is authored by the peer whose
-        // link we just resolved from the DHT.
         let did = get(
             did_links
                 .remove(0)
                 .target
                 .into_entry_hash()
                 .expect("Could not get entry_hash"),
-            GetOptions::network(),
+            GetOptions::local(),
         )?
         .ok_or(SocialContextError::InternalError(
             "Could not find did entry for given did entry reference",
@@ -208,10 +188,9 @@ pub fn get_agents_did_key(agent: AgentPubKey) -> SocialContextResult<Option<Stri
 /// Get ALL DIDs associated with an agent (for multi-user support)
 /// In multi-user scenarios, one Holochain agent can have multiple DIDs
 pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String>> {
-    // Peer lookup — must hit the network under HC 0.7 (see comment above).
     let did_links = get_links(
         LinkQuery::try_new(agent, LinkTypes::DidLink)?,
-        GetStrategy::Network,
+        GetStrategy::Local,
     )?;
 
     let mut dids = Vec::new();
@@ -221,9 +200,7 @@ pub fn get_agents_did_keys(agent: AgentPubKey) -> SocialContextResult<Vec<String
             continue;
         }
 
-        // Same rationale as get_agents_did_key(): the anchor entry lives on
-        // the DHT authored by a peer, so use network.
-        let did_result = get(entry_hash.unwrap(), GetOptions::network())?;
+        let did_result = get(entry_hash.unwrap(), GetOptions::local())?;
 
         if let Some(record) = did_result {
             if let Some(anchor) = record.entry().to_app_option::<Anchor>()? {

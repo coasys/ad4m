@@ -166,14 +166,7 @@ pub fn get_active_agent_anchor() -> Anchor {
 pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
     let query = LinkQuery::try_new(hash_entry(get_active_agent_anchor())?, LinkTypes::Index)?
         .tag_prefix(LinkTag::new("active_agent"));
-    // Holochain 0.7 dropped the network fallback from GetStrategy::Local
-    // (see telepresence::status for the full explanation). The active-agent
-    // list is a network-wide anchor written to by every joining peer;
-    // a fresh cell that has not yet fully gossiped will otherwise see an
-    // empty list, causing multi-user tests to fail with:
-    //   - `others()` returning too few DIDs,
-    //   - send_broadcast reaching nobody.
-    let recent_agents = get_links(query, GetStrategy::Network)?;
+    let recent_agents = get_links(query, GetStrategy::Local)?;
 
     let recent_agents = recent_agents
         .into_iter()
