@@ -206,6 +206,29 @@ export function openRoomKeyEnvelope(envelope: SealedRoomKeyEnvelope, recipientPr
 }
 
 // ---------------------------------------------------------------------------
+// Sealed envelope wire framing (base64 ↔ object)
+// ---------------------------------------------------------------------------
+
+/** Encodes a `SealedRoomKeyEnvelope` as a base64 string for transport. */
+export function encodeSealedEnvelope(envelope: SealedRoomKeyEnvelope): string {
+    return btoa(JSON.stringify(envelope));
+}
+
+/** Decodes a base64 string back into a `SealedRoomKeyEnvelope`, validating
+ * that all three required fields are present. */
+export function decodeSealedEnvelope(encoded: string): SealedRoomKeyEnvelope {
+    const json = JSON.parse(atob(encoded));
+    if (
+        typeof json.ephemeralPublicKey !== "string" ||
+        typeof json.nonce !== "string" ||
+        typeof json.ciphertext !== "string"
+    ) {
+        throw new Error("decodeSealedEnvelope: malformed envelope — missing required field(s)");
+    }
+    return json as SealedRoomKeyEnvelope;
+}
+
+// ---------------------------------------------------------------------------
 // Link expression encryption (room key, AES-256-GCM)
 // ---------------------------------------------------------------------------
 
