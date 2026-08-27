@@ -968,10 +968,35 @@ async fn subject_classes_of_handler(
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    perspective
-        .subject_classes_of(&uris)
-        .map(|map| serde_json::to_value(map).unwrap_or(Value::Null))
-        .map_err(|e| WsRpcError::internal(e.to_string()))
+    // Classification is synchronous SPARQL plus in-memory containment over every
+    // class × every URI, so it runs on a blocking thread with the same timeout as
+    // the other store-backed queries rather than holding a runtime worker.
+    let result = tokio::time::timeout(
+        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || perspective.subject_classes_of(&uris)),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok(map))) => {
+            serde_json::to_value(map).map_err(|e| WsRpcError::internal(e.to_string()))
+        }
+        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
+        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+        Err(_) => {
+            log::warn!(
+                "Subject classification timed out after {}s",
+                SPARQL_QUERY_TIMEOUT_SECS
+            );
+            Err(WsRpcError {
+                code: 408,
+                message: format!(
+                    "Subject classification timed out after {}s",
+                    SPARQL_QUERY_TIMEOUT_SECS
+                ),
+            })
+        }
+    }
 }
 
 async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
