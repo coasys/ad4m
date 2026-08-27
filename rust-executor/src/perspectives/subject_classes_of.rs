@@ -44,7 +44,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use super::model_query::types::{ModelShape, ShapeResolver};
-use super::model_query::utils::validate_iri;
+use super::model_query::utils::looks_like_absolute_iri;
 use super::sparql_store::SparqlStore;
 
 /// Every subject class registered in this perspective.
@@ -84,30 +84,40 @@ fn local_name(uri: &str) -> String {
     uri.to_string()
 }
 
-/// The triples an instance of this class must carry.
+/// The triples an instance of this class must carry, or `None` when the class
+/// cannot be tested at all.
 ///
 /// Flags contribute `(predicate, Some(value))`; required properties contribute
 /// `(predicate, None)` — the value is whatever the instance holds, so only the
 /// predicate's presence is checked. This mirrors what `isSubjectInstance` builds
 /// its `ASK` from, so the two agree on what membership means.
-fn required_triples(shape: &ModelShape) -> Vec<(String, Option<String>)> {
-    shape
-        .properties
-        .iter()
-        .filter(|p| !p.predicate.is_empty() && validate_iri(&p.predicate).is_ok())
-        .filter_map(|p| {
-            if p.is_flag {
-                p.initial_value
-                    .as_ref()
-                    .filter(|v| validate_iri(v).is_ok())
-                    .map(|v| (p.predicate.clone(), Some(v.clone())))
-            } else if p.is_required && p.getter.is_none() {
-                Some((p.predicate.clone(), None))
-            } else {
-                None
+///
+/// Every part of a required triple is emitted as an `<…>` IRIREF, where a
+/// relative reference does not merely fail to match — it fails to *parse*, and
+/// SPARQL rejects the whole query. A class carrying one is therefore dropped
+/// entirely rather than tested with the offending property quietly removed,
+/// which would only make the class easier to match than its definition says.
+fn required_triples(shape: &ModelShape) -> Option<Vec<(String, Option<String>)>> {
+    let mut triples = Vec::new();
+    for p in &shape.properties {
+        if p.is_flag {
+            // A flag with no fixed value pins nothing, so there is no triple to
+            // require — that is not a reason to reject the class.
+            let Some(value) = p.initial_value.as_ref() else {
+                continue;
+            };
+            if !looks_like_absolute_iri(&p.predicate) || !looks_like_absolute_iri(value) {
+                return None;
             }
-        })
-        .collect()
+            triples.push((p.predicate.clone(), Some(value.clone())));
+        } else if p.is_required && p.getter.is_none() {
+            if !looks_like_absolute_iri(&p.predicate) {
+                return None;
+            }
+            triples.push((p.predicate.clone(), None));
+        }
+    }
+    Some(triples)
 }
 
 /// Order the classes a URI belongs to, most specific first.
@@ -170,7 +180,12 @@ pub fn subject_classes_of(
         return Ok(out);
     }
 
-    let valid: Vec<&String> = uris.iter().filter(|u| validate_iri(u).is_ok()).collect();
+    // Only URIs that can be emitted as an `<…>` IRIREF survive. A relative
+    // reference in the VALUES clause is a parse error, not a non-match, so one
+    // unusable input would otherwise cost every other URI in the batch its
+    // answer. Dropping it here leaves it absent from the result, which is
+    // already what "nothing matched" looks like.
+    let valid: Vec<&String> = uris.iter().filter(|u| looks_like_absolute_iri(u)).collect();
     if valid.is_empty() {
         return Ok(out);
     }
@@ -186,14 +201,16 @@ pub fn subject_classes_of(
     let mut shapes: Vec<(String, Vec<(String, Option<String>)>)> = Vec::new();
     for name in class_names {
         match resolver.get_shape(&name) {
-            Ok(shape) => {
-                let triples = required_triples(shape.as_ref());
-                // A class with no required triples at all matches literally
-                // every URI, which is not an answer — it is the absence of one.
-                if !triples.is_empty() {
-                    shapes.push((name, triples));
-                }
-            }
+            // A class with no required triples at all matches literally every
+            // URI, which is not an answer — it is the absence of one.
+            Ok(shape) => match required_triples(shape.as_ref()) {
+                Some(triples) if !triples.is_empty() => shapes.push((name, triples)),
+                Some(_) => {}
+                None => log::warn!(
+                    "subjectClassesOf: skipping class '{name}': a required predicate or flag \
+                     value is not an absolute IRI"
+                ),
+            },
             // A class whose SHACL will not parse cannot classify anything; skip
             // it rather than failing the whole batch for the others.
             Err(e) => log::warn!("subjectClassesOf: skipping class '{name}': {e}"),

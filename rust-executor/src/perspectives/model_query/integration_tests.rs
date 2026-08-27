@@ -5481,6 +5481,121 @@ async fn test_subject_classes_of_batch() {
     );
 }
 
+/// A URI that cannot be emitted as an IRIREF costs only itself.
+///
+/// Relative references and empty strings are a SPARQL *parse* error inside a
+/// `VALUES` clause, not a non-match, so letting one through would fail the whole
+/// batch's query and every well-formed URI alongside it.
+#[tokio::test]
+async fn test_subject_classes_of_mixed_absolute_and_unusable_uris() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "ns://models/TextBlock",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://b", "ns://flag", "ns://text_block", "3"))
+        .unwrap();
+
+    let uris = vec![
+        "ns://a".to_string(),
+        "active".to_string(), // relative — no scheme
+        "".to_string(),       // empty
+        ":leading-colon".to_string(),
+        "ns://b".to_string(),
+    ];
+    let result = subject_classes_of(&store, &resolver, &uris).expect("the batch still resolves");
+
+    assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
+    assert_eq!(
+        result.get("ns://b"),
+        Some(&vec!["TextBlock".to_string()]),
+        "a well-formed URI keeps its answer despite unusable neighbours",
+    );
+    assert_eq!(
+        result.len(),
+        2,
+        "the unusable URIs are absent, not classified and not fatal",
+    );
+}
+
+/// A class whose SHACL names a relative predicate is skipped, not fatal.
+///
+/// The predicate would go into the same `VALUES` clause, so admitting it would
+/// break `subjectClassesOf` for every URI in the perspective, not just for
+/// instances of that class.
+#[tokio::test]
+async fn test_subject_classes_of_skips_class_with_unusable_predicate() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    for uri in ["ns://models/Broken", "ns://models/TextBlock"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "Broken",
+        parse_shape_from_json(
+            r#"{"className":"Broken","properties":{
+                 "title":{"predicate":"title","required":true}
+               },"relations":{}}"#,
+            "Broken",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "title", "literal:string:hi", "2"))
+        .unwrap();
+
+    let result =
+        subject_classes_of(&store, &resolver, &["ns://a".to_string()]).expect("the batch resolves");
+
+    assert_eq!(
+        result.get("ns://a"),
+        Some(&vec!["TextBlock".to_string()]),
+        "the sound class still answers; the broken one is dropped, not matched",
+    );
+}
+
 /// A flag is not on its own proof of membership: a class is only matched when
 /// *every* triple it requires is present, which is what `isSubjectInstance`
 /// asks and therefore what this has to agree with.
