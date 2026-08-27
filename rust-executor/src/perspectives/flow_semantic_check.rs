@@ -37,6 +37,8 @@
 
 #![allow(dead_code)]
 
+use anyhow::Result;
+
 use crate::perspectives::flow_context::FlowContext;
 use crate::perspectives::flow_evaluator::SatisfiedTransition;
 
@@ -189,6 +191,58 @@ fn strip_code_fence(input: &str) -> &str {
         Some(idx) => after_lang[..idx].trim_end(),
         None => after_lang,
     }
+}
+
+// --------------------------------------------------------------------------
+// Slice 10.5a2 — async layer over an LLM seam
+// --------------------------------------------------------------------------
+
+/// The LLM seam the semantic-check pass calls into. Kept as a trait so the
+/// call site can be exercised end-to-end with a canned-response stub — no
+/// real LLM, no network — in the same shape the auto-processor's harness
+/// uses ([`crate::ai_service::harness::CompletionSource`]).
+///
+/// The single real implementation delegates to `AIService::prompt` (slice
+/// 10.5b wires that in from the auto-processor context). This trait is
+/// intentionally narrower than `CompletionSource`: semantic check never
+/// needs tool-calling, streaming, or credit-gate composition.
+#[async_trait::async_trait]
+pub trait SemanticCheckLlm: Send + Sync {
+    /// Send a completion `prompt` to `model_id`, get raw text back.
+    /// Callers pass the output to [`parse_semantic_check_response`].
+    async fn confirm(&self, model_id: &str, prompt: &str) -> Result<String>;
+}
+
+/// Run the optional 2nd-pass semantic-check LLM confirmation for one
+/// [`SatisfiedTransition`].
+///
+/// Behaviour:
+///
+/// 1. If the transition carries no `semantic_check` hint,
+///    [`build_semantic_check_prompt`] returns `None` and we auto-pass —
+///    the deterministic guard from `flow_evaluator` is treated as
+///    sufficient. **No LLM call is made.**
+/// 2. Otherwise, call `llm.confirm(model_id, prompt)` and parse the raw
+///    response with [`parse_semantic_check_response`]. The verdict is
+///    returned verbatim; the fire/discard decision is
+///    [`should_fire_proposal`]'s responsibility at the call site so the
+///    caller can still surface `Fail` / `Ambiguous` in debug output.
+/// 3. LLM errors bubble up as `Err`. Slice 10.5b will map the `Err` case
+///    to "discard this transition and log a warning" so the extraction
+///    pass never breaks on a flow-layer LLM failure — but that mapping
+///    is a call-site concern, not this function's, to keep the async
+///    layer honest about I/O failures.
+pub async fn run_semantic_check(
+    llm: &dyn SemanticCheckLlm,
+    model_id: &str,
+    transition: &SatisfiedTransition,
+    flow_ctx: &FlowContext,
+) -> Result<SemanticCheckVerdict> {
+    let Some(prompt) = build_semantic_check_prompt(transition, flow_ctx) else {
+        return Ok(SemanticCheckVerdict::Pass);
+    };
+    let raw = llm.confirm(model_id, &prompt).await?;
+    Ok(parse_semantic_check_response(&raw))
 }
 
 #[cfg(test)]
@@ -379,5 +433,155 @@ mod tests {
             parse_semantic_check_response("(yes)"),
             SemanticCheckVerdict::Pass
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // Slice 10.5a2 — async layer tests
+    // ----------------------------------------------------------------------
+
+    use std::sync::Mutex;
+
+    /// Test-only stub. Returns a canned response and records every
+    /// (model_id, prompt) pair it was called with so tests can assert
+    /// both the auto-pass short-circuit ("was never called") and the
+    /// hint-present path ("was called with the expected prompt").
+    struct StubLlm {
+        response: Result<String>,
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl StubLlm {
+        fn new(response: &str) -> Self {
+            Self {
+                response: Ok(response.to_string()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn erroring() -> Self {
+            Self {
+                response: Err(anyhow::anyhow!("stub LLM failure")),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+
+        fn last_prompt(&self) -> Option<String> {
+            self.calls.lock().unwrap().last().map(|(_, p)| p.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SemanticCheckLlm for StubLlm {
+        async fn confirm(&self, model_id: &str, prompt: &str) -> Result<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((model_id.to_string(), prompt.to_string()));
+            match &self.response {
+                Ok(s) => Ok(s.clone()),
+                Err(e) => Err(anyhow::anyhow!("{e}")),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_auto_passes_when_no_hint_and_never_calls_llm() {
+        let llm = StubLlm::new("NO");
+        let t = transition(None);
+        let verdict = run_semantic_check(&llm, "any-model", &t, &ctx())
+            .await
+            .expect("no-hint path must not surface an error");
+        assert_eq!(verdict, SemanticCheckVerdict::Pass);
+        assert_eq!(
+            llm.call_count(),
+            0,
+            "auto-pass short-circuit must not invoke the LLM"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_returns_pass_on_yes_response() {
+        let llm = StubLlm::new("YES");
+        let t = transition(Some("Verify the two Perspectives actually oppose."));
+        let verdict = run_semantic_check(&llm, "small-verifier", &t, &ctx())
+            .await
+            .expect("stub does not error");
+        assert_eq!(verdict, SemanticCheckVerdict::Pass);
+        assert_eq!(llm.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_returns_fail_on_no_response() {
+        let llm = StubLlm::new("NO — the positions align.");
+        let t = transition(Some("Verify the two Perspectives actually oppose."));
+        let verdict = run_semantic_check(&llm, "small-verifier", &t, &ctx())
+            .await
+            .expect("stub does not error");
+        assert_eq!(verdict, SemanticCheckVerdict::Fail);
+    }
+
+    #[tokio::test]
+    async fn run_returns_ambiguous_on_off_vocab_response() {
+        let llm = StubLlm::new("UNCLEAR — need more evidence.");
+        let t = transition(Some("Verify the two Perspectives actually oppose."));
+        let verdict = run_semantic_check(&llm, "small-verifier", &t, &ctx())
+            .await
+            .expect("stub does not error");
+        assert_eq!(verdict, SemanticCheckVerdict::Ambiguous);
+    }
+
+    #[tokio::test]
+    async fn run_passes_built_prompt_and_model_id_through_to_llm() {
+        let llm = StubLlm::new("YES");
+        let t = transition(Some(
+            "Two participants must actually hold opposing positions on the same claim.",
+        ));
+        let _ = run_semantic_check(&llm, "gemma3:2b-check", &t, &ctx())
+            .await
+            .unwrap();
+        // Scope the lock: last_prompt() re-locks the same mutex, so
+        // hold `calls` only long enough to clone the one entry we need.
+        let (model, prompt) = {
+            let calls = llm.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            calls[0].clone()
+        };
+        assert_eq!(model, "gemma3:2b-check");
+        assert!(prompt.contains("## Flow: Deliberation"));
+        assert!(prompt.contains("Two participants must actually hold opposing positions"));
+        assert!(prompt.contains("FROM: proposal"));
+        assert!(prompt.contains("TO:   tension"));
+        // sanity: the last-prompt helper returns the same shape
+        assert_eq!(llm.last_prompt().as_deref(), Some(prompt.as_str()));
+    }
+
+    #[tokio::test]
+    async fn run_propagates_llm_error() {
+        let llm = StubLlm::erroring();
+        let t = transition(Some("Some hint."));
+        let err = run_semantic_check(&llm, "any-model", &t, &ctx())
+            .await
+            .expect_err("LLM error must bubble up so the caller can log + discard");
+        assert!(err.to_string().contains("stub LLM failure"));
+        // the call still happened — the hint path did not short-circuit
+        assert_eq!(llm.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_does_not_call_llm_when_hint_missing_even_if_llm_would_error() {
+        // Guard against a refactor that accidentally moves the hint check
+        // after the call: with no hint and an erroring stub, we must still
+        // return Pass without touching the LLM at all.
+        let llm = StubLlm::erroring();
+        let t = transition(None);
+        let verdict = run_semantic_check(&llm, "any-model", &t, &ctx())
+            .await
+            .expect("no-hint path must not touch the erroring LLM");
+        assert_eq!(verdict, SemanticCheckVerdict::Pass);
+        assert_eq!(llm.call_count(), 0);
     }
 }
