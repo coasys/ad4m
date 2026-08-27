@@ -464,7 +464,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -475,7 +475,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1394,7 +1394,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.11.0",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1414,7 +1414,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.11.0",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -1434,7 +1434,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.11.0",
+ "itertools 0.13.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -2394,7 +2394,7 @@ version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
- "unicode-width 0.1.14",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]
@@ -2446,7 +2446,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -2835,7 +2835,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "windows 0.62.2",
+ "windows 0.61.3",
 ]
 
 [[package]]
@@ -3928,7 +3928,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.3",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -5967,7 +5967,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6016,7 +6016,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -6738,7 +6738,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7086,7 +7086,7 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 [[package]]
 name = "fixt"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "holochain_serialized_bytes",
  "lazy_static",
@@ -7786,8 +7786,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -8465,7 +8465,7 @@ dependencies = [
 [[package]]
 name = "hdi"
 version = "0.8.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "getrandom 0.3.4",
  "hdk_derive",
@@ -8484,7 +8484,7 @@ dependencies = [
 [[package]]
 name = "hdk"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "getrandom 0.3.4",
  "hdi",
@@ -8501,7 +8501,7 @@ dependencies = [
 [[package]]
 name = "hdk_derive"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "darling 0.21.3",
  "heck 0.5.0",
@@ -8919,7 +8919,7 @@ dependencies = [
 [[package]]
 name = "holo_hash"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "base64 0.22.1",
  "blake2b_simd",
@@ -8945,7 +8945,7 @@ dependencies = [
 [[package]]
 name = "holochain"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9030,7 +9030,7 @@ dependencies = [
 [[package]]
 name = "holochain_cascade"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "async-trait",
  "fixt",
@@ -9055,7 +9055,7 @@ dependencies = [
 [[package]]
 name = "holochain_cli_bundle"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "anyhow",
  "clap 4.6.6",
@@ -9089,7 +9089,7 @@ dependencies = [
 [[package]]
 name = "holochain_conductor_api"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "derive_more 2.1.1",
  "holo_hash",
@@ -9120,7 +9120,7 @@ dependencies = [
 [[package]]
 name = "holochain_conductor_config"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "ansi_term",
  "anyhow",
@@ -9138,7 +9138,7 @@ dependencies = [
 [[package]]
 name = "holochain_data"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -9162,7 +9162,7 @@ dependencies = [
 [[package]]
 name = "holochain_integrity_types"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "derive_builder",
  "holo_hash",
@@ -9183,7 +9183,7 @@ dependencies = [
 [[package]]
 name = "holochain_keystore"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9214,7 +9214,7 @@ dependencies = [
 [[package]]
 name = "holochain_metrics"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "digest 0.10.7",
  "dirs 6.0.0",
@@ -9239,7 +9239,7 @@ dependencies = [
 [[package]]
 name = "holochain_nonce"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "getrandom 0.3.4",
  "holochain_secure_primitive",
@@ -9250,7 +9250,7 @@ dependencies = [
 [[package]]
 name = "holochain_p2p"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -9292,7 +9292,7 @@ dependencies = [
 [[package]]
 name = "holochain_secure_primitive"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "paste",
  "serde",
@@ -9330,7 +9330,7 @@ dependencies = [
 [[package]]
 name = "holochain_state"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "async-recursion",
  "base64 0.22.1",
@@ -9365,7 +9365,7 @@ dependencies = [
 [[package]]
 name = "holochain_state_types"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "holo_hash",
  "holochain_integrity_types",
@@ -9375,7 +9375,7 @@ dependencies = [
 [[package]]
 name = "holochain_test_wasm_common"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "hdk",
  "holochain_serialized_bytes",
@@ -9385,7 +9385,7 @@ dependencies = [
 [[package]]
 name = "holochain_timestamp"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "chrono",
  "serde",
@@ -9412,7 +9412,7 @@ dependencies = [
 [[package]]
 name = "holochain_trace"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "chrono",
  "derive_more 2.1.1",
@@ -9428,7 +9428,7 @@ dependencies = [
 [[package]]
 name = "holochain_types"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "anyhow",
  "backtrace",
@@ -9487,7 +9487,7 @@ dependencies = [
 [[package]]
 name = "holochain_util"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "backtrace",
  "cfg-if",
@@ -9504,7 +9504,7 @@ dependencies = [
 [[package]]
 name = "holochain_wasm_test_utils"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "holochain_types",
  "strum 0.27.2",
@@ -9560,7 +9560,7 @@ dependencies = [
 [[package]]
 name = "holochain_websocket"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9578,7 +9578,7 @@ dependencies = [
 [[package]]
 name = "holochain_zome_types"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "derive_builder",
  "derive_more 2.1.1",
@@ -9813,7 +9813,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "socket2 0.4.10",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -9888,7 +9888,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "system-configuration 0.7.0",
  "tokio",
  "tower-service",
@@ -9908,7 +9908,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
@@ -10673,7 +10673,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi 0.5.2",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -12869,7 +12869,7 @@ dependencies = [
 [[package]]
 name = "mr_bundle"
 version = "0.7.0"
-source = "git+https://github.com/coasys/holochain.git?branch=coasys-netdiag-remove-cells#d8f590149cc397f2c29cb64631e052f31add7526"
+source = "git+https://github.com/coasys/holochain.git?branch=0.7.0-space-override-coasys#678f683eae644d7f22bf72c8b2890f8b6066ac90"
 dependencies = [
  "bytes",
  "dunce",
@@ -12901,7 +12901,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.20",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -13572,7 +13572,7 @@ dependencies = [
  "pin-project-lite",
  "rustc-hash 2.1.3",
  "rustls 0.23.40",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
@@ -13617,7 +13617,7 @@ checksum = "02bba20e097a5a16cd0ad14ec882fae1e80a092a124e9422fc4dddd92e96a647"
 dependencies = [
  "cfg_aliases 0.2.2",
  "libc",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -13678,7 +13678,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -13843,7 +13843,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -14893,7 +14893,7 @@ version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6977c1d1827fcbf14480e768e4dede0b39c2961f6028497d012f9c04bcda91c6"
 dependencies = [
- "bindgen 0.71.1",
+ "bindgen 0.72.1",
  "cc",
 ]
 
@@ -16103,7 +16103,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.11.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -16116,7 +16116,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.11.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -16319,7 +16319,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.3",
  "rustls 0.23.40",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -16358,9 +16358,9 @@ dependencies = [
  "cfg_aliases 0.2.2",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -17695,7 +17695,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -17845,7 +17845,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs 1.0.9",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -18509,7 +18509,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b55fb86dfd3a2f5f76ea78310a88f96c4ea21a3031f8d212443d56123fd0521"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -19279,7 +19279,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -19794,7 +19794,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -21450,7 +21450,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -21523,7 +21523,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -22441,7 +22441,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.20",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -22637,7 +22637,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset 0.9.1",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -24057,7 +24057,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -24849,7 +24849,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -24893,8 +24893,8 @@ dependencies = [
  "log",
  "serde",
  "thiserror 2.0.20",
- "windows 0.62.2",
- "windows-core 0.62.2",
+ "windows 0.61.3",
+ "windows-core 0.61.2",
 ]
 
 [[package]]

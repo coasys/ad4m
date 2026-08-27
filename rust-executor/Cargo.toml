@@ -149,14 +149,9 @@ kitsune_p2p_types = { version = "0.5.0-dev.9" }
 # Features updated for 0.7.0 stable naming: sqlite-encrypted → encryption,
 # wasmer_sys → wasmer-sys-cranelift, transport-iroh dropped (not a feature
 # on 0.7.0 stable).
-# TEMPORARY (diagnostic-only, 2026-08-25): pointing at coasys-netdiag-remove-cells
-# branch which adds a WARN + backtrace log to Conductor::remove_cells so we
-# can pinpoint which caller is churning running_cells in the multi-user CI.
-# Revert to branch = "0.7.0-space-override-coasys" once the root cause is
-# identified and fixed.
-holochain = { version = "0.7.0", default-features = false, features = ["test_utils", "encryption", "schema", "wasmer-sys-cranelift"], git = "https://github.com/coasys/holochain.git", branch = "coasys-netdiag-remove-cells" }
-holochain_cli_bundle = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "coasys-netdiag-remove-cells" }
-holochain_types = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "coasys-netdiag-remove-cells" }
+holochain = { version = "0.7.0", default-features = false, features = ["test_utils", "encryption", "schema", "wasmer-sys-cranelift"], git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
+holochain_cli_bundle = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
+holochain_types = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
 # Bumped from 0.6.3 to 0.7.1 to match HC 0.7.0 stable (which pins lair 0.7.1).
 # Using upstream lair 0.7.1 directly — no fork needed anymore. The old
 # coasys/lair 0.7.1-coasys fork existed only to downgrade rusqlite to 0.34
