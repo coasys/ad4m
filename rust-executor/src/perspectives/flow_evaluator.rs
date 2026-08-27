@@ -474,6 +474,54 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 }
 
 // ============================================================================
+// Slice 10.4b — writer stage: SatisfiedTransition → on-graph proposal
+// ============================================================================
+
+/// Slice 10.4b — convenience over
+/// [`crate::perspectives::flow_classes::write_flow_transition_proposal`]
+/// for the engine-generated path.
+///
+/// Consumes a [`SatisfiedTransition`] (the deterministic
+/// requires-satisfied record produced by [`evaluate_flow_transitions`])
+/// and threads its fields into the primitive writer. Kept in the
+/// evaluator module — not `flow_classes` — so the classes layer stays a
+/// leaf: it doesn't need to know about `SatisfiedTransition` to mint
+/// proposals, and this wrapper is only compiled on the evaluator's dep
+/// path.
+///
+/// `proposal_id` / `proposed_at` / `batch_id` are caller-supplied to
+/// stay consistent with `mint_flow_instance` — the auto-processor
+/// call-site (slice 10.4c) will generate the id + timestamp and thread
+/// its own batch so the whole extraction pass commits atomically.
+///
+/// Returns the freshly-minted proposal URI.
+#[allow(clippy::too_many_arguments)]
+pub async fn write_engine_proposal(
+    perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
+    proposal_id: &str,
+    proposer_did: &str,
+    proposed_at: &str,
+    transition: &SatisfiedTransition,
+    batch_id: Option<String>,
+    context: &crate::agent::AgentContext,
+) -> anyhow::Result<String> {
+    crate::perspectives::flow_classes::write_flow_transition_proposal(
+        perspective,
+        proposal_id,
+        proposer_did,
+        proposed_at,
+        &transition.instance_uri,
+        &transition.from_state,
+        &transition.to_state,
+        &transition.evidence_ids,
+        &transition.evidence_hash,
+        batch_id,
+        context,
+    )
+    .await
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1566,5 +1614,216 @@ mod e2e_tests {
         // the stub tests above cover consensus override precedence.
         assert!(t.semantic_check.is_none());
         assert!(t.consensus_rule.is_none());
+    }
+
+    /// Slice 10.4b — write-side end-to-end. Re-uses the 10.4a3 fixture:
+    /// real perspective, Delivery flow with `requires: 1 × ns://Task`,
+    /// one active FlowInstance, one seeded Task ⇒ one
+    /// `SatisfiedTransition`. On top of that, this test calls
+    /// [`write_engine_proposal`] and asserts every declared
+    /// FlowTransitionProposal predicate landed on-graph with the
+    /// expected target.
+    ///
+    /// Assertions cover the two silent-failure modes the writer has to
+    /// rule out:
+    /// - **Wrong-key drop** — 2026-08-20 bug shape where a mismatched
+    ///   JSON key returns Ok without writing. The parity test in
+    ///   `flow_classes.rs` guards static shape; this test proves the
+    ///   dynamic write path is honest.
+    /// - **Collection under-write** — `create_subject` writing only the
+    ///   first collection element (last-one-wins on a `setSingleTarget`
+    ///   setter). The write path fans out subsequent elements through
+    ///   `update_subject`; this test seeds 2 Tasks to exercise
+    ///   fan-out and asserts both `flow/evidence` targets land.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn write_engine_proposal_lands_all_declared_predicates_e2e() {
+        use crate::types::LinkQuery;
+
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        // Seed the Delivery flow definition (v4 predicates + hand-added
+        // v5 requires link) exactly as the read-side test above.
+        let scoped_uri = "delivery://Delivery.scoped";
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        let requires_json = r#"[{"className":"ns://Task","count":{"min":1}}]"#;
+        perspective
+            .add_link(
+                Link {
+                    source: scoped_uri.to_string(),
+                    predicate: Some("ad4m://requires".to_string()),
+                    target: lit(requires_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(scoped.requires)");
+
+        let base_uri = "ad4m://task/onboarding";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-inst-writer",
+            "2026-08-27T00:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        // Seed TWO Tasks so the evidence collection has more than one
+        // element — proves the create_subject + update_subject fan-out
+        // (not a single-target overwrite) actually lands both.
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "ad4m://task/1",
+            "Onboard Ana",
+        )
+        .await;
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "ad4m://task/2",
+            "Onboard Bo",
+        )
+        .await;
+
+        let records = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances");
+        let flows_by_name = load_shacl_flows(&perspective)
+            .await
+            .expect("load_shacl_flows");
+        let satisfied = evaluate_flow_transitions(
+            &perspective,
+            &records,
+            &flows_by_name,
+            "did:key:acting",
+        )
+        .await;
+        assert_eq!(
+            satisfied.len(),
+            1,
+            "one active FlowInstance × one reachable next-state × requires met ⇒ 1"
+        );
+        let t = &satisfied[0];
+        assert_eq!(
+            t.evidence_ids.len(),
+            2,
+            "two seeded Tasks ⇒ two evidence entries, got {:?}",
+            t.evidence_ids
+        );
+
+        // Write the proposal via the convenience wrapper. Caller-supplied
+        // id + timestamp mirror the mint_flow_instance contract.
+        let proposer_did = "did:key:acting";
+        let proposed_at = "2026-08-27T00:05:00Z";
+        let proposal_uri = write_engine_proposal(
+            &mut perspective,
+            "e2e-prop-1",
+            proposer_did,
+            proposed_at,
+            t,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("write_engine_proposal");
+        assert_eq!(
+            proposal_uri, "ad4m://flow/proposal/e2e-prop-1",
+            "URI scheme mirrors flow_transition_proposal_uri",
+        );
+
+        // Query every outgoing link from the proposal URI and index by
+        // predicate. Every one of the seven declared SDNA properties
+        // must have at least one link landed.
+        let links = perspective
+            .get_links(&LinkQuery {
+                source: Some(proposal_uri.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links(proposal)");
+        let mut by_pred: HashMap<String, Vec<String>> = HashMap::new();
+        for l in &links {
+            if let Some(pred) = &l.data.predicate {
+                by_pred
+                    .entry(pred.clone())
+                    .or_default()
+                    .push(l.data.target.clone());
+            }
+        }
+
+        // URI-valued predicate: safe-IRI ⇒ stored raw, no literal wrap.
+        let inst_targets = by_pred
+            .get("ad4m://flow/instance")
+            .expect("proposal must carry flow/instance link");
+        assert!(
+            inst_targets.contains(&inst_uri),
+            "flow/instance target must be the minted instance URI, got {inst_targets:?}",
+        );
+
+        // Evidence: two safe-IRI targets ⇒ both stored raw, both must land.
+        let evidence_targets = by_pred
+            .get("ad4m://flow/evidence")
+            .expect("proposal must carry flow/evidence links");
+        for expected in ["ad4m://task/1", "ad4m://task/2"] {
+            assert!(
+                evidence_targets.iter().any(|t| t == expected),
+                "flow/evidence collection must include `{expected}`, got {evidence_targets:?} \
+                 — write_flow_transition_proposal's create_subject + update_subject fan-out \
+                 must land every element (regression guard for silent last-one-wins)",
+            );
+        }
+
+        // The proposer is a `did:key:…` URI. `looks_like_absolute_iri`
+        // accepts it (starts with ASCII letter, has a colon), so
+        // `resolve_property_value` stores it raw — not literal-wrapped.
+        // Guarding both branches of the writer's encoding here so a
+        // future is_safe_iri_target tweak that changes DID handling is
+        // caught by test rather than by a downstream DID-lookup failure.
+        let proposer_targets = by_pred
+            .get("ad4m://flow/proposer")
+            .expect("proposal must carry flow/proposer link");
+        assert!(
+            proposer_targets.iter().any(|t| t == proposer_did),
+            "flow/proposer target must be the raw DID URI, got {proposer_targets:?}",
+        );
+
+        // Non-IRI string predicates: `literal:string:` wrapped because
+        // they either start with a digit (timestamp), contain no `:`
+        // (state names / hex hash), or otherwise fail is_safe_iri_target.
+        // Assert the exact wire form so a future encoding change is
+        // caught here (and reviewers reading a proposal on-graph can
+        // tell at a glance which fields are typed literals).
+        for (pred, expected) in [
+            ("ad4m://flow/from_state", "identified"),
+            ("ad4m://flow/to_state", "scoped"),
+            ("ad4m://flow/evidence_hashes", t.evidence_hash.as_str()),
+            ("ad4m://flow/created_at", proposed_at),
+        ] {
+            let targets = by_pred
+                .get(pred)
+                .unwrap_or_else(|| panic!("proposal must carry {pred} link"));
+            let want = format!("literal:string:{}", urlencoding::encode(expected));
+            assert!(
+                targets.iter().any(|t| t == &want),
+                "{pred} target must be `{want}`, got {targets:?}",
+            );
+        }
     }
 }
