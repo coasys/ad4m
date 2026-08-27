@@ -140,9 +140,15 @@ webbrowser = "0.8.12"
 # holochain = { version = "0.5.2", features = ["test_utils", "default"] }
 # holochain_cli_bundle = { version = "0.5.2" }
 # holochain_types = { version = "0.5.2" }
-holochain_cli_run_local_services = { version = "0.5.0-dev.12" }
-kitsune_p2p_types = { version = "0.5.0-dev.9" }
 #kitsune2_api = "0.1.15"
+
+# `url2` is a small Url2 wrapper used for constructing HC network URLs. It
+# was previously reached transitively via `kitsune_p2p_types 0.5.0-dev.9`
+# (`kitsune_p2p_types::dependencies::url2::Url2`) — that pin was HC-0.5
+# vintage and, together with `holochain_cli_run_local_services 0.5.0-dev.12`,
+# dragged in a second `lair_keystore_api 0.5.3` plus ~30 pre-HC-0.7 crates.
+# Dropped in favour of the direct crate. Data's PR #907 review LOW item.
+url2 = "0.0.6"
 # Bumped to HC 0.7.0 stable (from 0.7.0-dev.16). Now compiles cleanly against
 # modern serde (1.0.228+) because deno_ast 0.53.3 (from coasys/deno v2.9.5)
 # pulls swc_common 14.0.4+ which was rewritten for the serde-core split.

@@ -20,13 +20,13 @@ use holochain::test_utils::itertools::Either;
 
 use holochain_types::dna::ValidatedDnaManifest;
 use holochain_types::websocket::AllowedOrigins;
-use kitsune_p2p_types::dependencies::url2::Url2;
 use log::{error, info};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::timeout;
+use url2::Url2;
 
 use tokio_stream::StreamExt;
 
@@ -1202,27 +1202,30 @@ impl HolochainService {
     }
 }
 
-pub async fn run_local_hc_services() -> Result<(), AnyError> {
-    let ops = holochain_cli_run_local_services::HcRunLocalServices::new(
-        None,
-        String::from("127.0.0.1"),
-        0,
-        false,
-        None,
-        String::from("127.0.0.1"),
-        0,
-        false,
-    );
-    ops.run().await;
-    Ok(())
-}
-
 /// Resolve the relay_url that HC 0.7's NetworkConfig requires.
 ///
 /// Precedence (matches pre-0.7 AD4M semantics):
 ///   1. `use_proxy=true` + non-empty `proxy_url` → use `proxy_url` as relay
 ///   2. explicit `relay_url` (from launcher config)          → use it
 ///   3. hard-coded default (public AD4M bootstrap relay)     → fallback
+///
+/// # Path suffix
+///
+/// `kitsune2-bootstrap-srv` (>=0.4.0) serves the iroh relay at the
+/// `/relay` path on the *same* port as the bootstrap endpoints — verified
+/// against `kitsune2_bootstrap_srv-0.5.0/src/http.rs:525` and
+/// `src/lib.rs`. iroh dials the WebSocket upgrade at that exact path, so
+/// the URL we hand to `NetworkConfig.relay_url` MUST include `/relay`.
+///
+/// Legacy launcher configs still carry `proxy_url` / `relay_url` values
+/// from the pre-0.7 days when the relay was hosted at the port root, so
+/// we defensively append `/relay` to any candidate that lacks it. If a
+/// self-hoster explicitly wants a different sub-path they can set it
+/// explicitly; leaving `/relay` absent produces silent 404s that only
+/// surface downstream as "cross-node discovery never completes", which
+/// is the exact multi-user failure mode we've been chasing on this PR.
+/// (Data's PR #907 review MED-2 — defaults disagreed; Nico confirmed
+/// the relay was folded into the same binary but is still at `/relay`.)
 ///
 /// CodeRabbit review PR #907 finding #4.
 fn resolve_relay_url(local_config: &LocalConductorConfig) -> String {
@@ -1233,7 +1236,23 @@ fn resolve_relay_url(local_config: &LocalConductorConfig) -> String {
     } else {
         "http://bootstrap.ad4m.dev:4433/relay".to_string()
     };
-    normalize_relay_scheme(&url)
+    let url = normalize_relay_scheme(&url);
+    ensure_relay_path(&url)
+}
+
+/// Ensure the resolved relay URL carries the `/relay` path suffix that
+/// `kitsune2-bootstrap-srv` expects. Pre-0.7 AD4M launcher configs
+/// carry base URLs without a path (the old proxy server was hosted at
+/// the port root); the new kitsune2 relay lives at `/relay` on the
+/// same port as the bootstrap endpoints. Trailing slashes on the base
+/// are tolerated.
+fn ensure_relay_path(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/relay") {
+        trimmed.to_string()
+    } else {
+        format!("{}/relay", trimmed)
+    }
 }
 
 /// Normalize a relay URL to the scheme iroh expects.

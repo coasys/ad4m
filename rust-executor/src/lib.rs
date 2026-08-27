@@ -44,7 +44,7 @@ use crate::{
     languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
-pub use holochain_service::run_local_hc_services;
+
 #[cfg(unix)]
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
 #[cfg(unix)]
