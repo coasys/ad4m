@@ -6,7 +6,6 @@ import type { FederateResult, FederationIdentity, FederationManager } from "./fe
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import {
-  isEncryptedLinkData,
   type FederateRequestBody,
   type LinkExpression,
   type ReconcileRequestBody,
@@ -183,7 +182,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const body = request.body as { additions?: unknown; removals?: unknown } | null;
       const additions = Array.isArray(body?.additions) ? (body!.additions as LinkExpression[]) : [];
       const removals = Array.isArray(body?.removals) ? (body!.removals as LinkExpression[]) : [];
-      const room = ctx.db.getRoom(claims.roomId)!;
 
       for (const link of [...additions, ...removals]) {
         if (!link || typeof link !== "object" || link.author !== claims.did) {
@@ -191,17 +189,11 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
             .code(400)
             .send({ error: "every link's author must match the authenticated DID" });
         }
-        // Link signatures travel as metadata — the server stores and relays
-        // them as-is. JWT auth (bound to the agent's DID) proves identity at
-        // the transport layer. Downstream consumers can verify signatures if
-        // they choose; the server does not need to.
-        const encrypted = isEncryptedLinkData(link.data);
-        if (room.e2e_enabled && !encrypted) {
-          return reply.code(400).send({ error: "room requires E2E-encrypted link data" });
-        }
-        if (!room.e2e_enabled && encrypted) {
-          return reply.code(400).send({ error: "room does not have E2E enabled" });
-        }
+        // Link data is opaque to the server — it stores and relays whatever
+        // shape the client sends (plaintext {source,predicate,target} or
+        // encrypted blobs). JWT auth (bound to the agent's DID) proves
+        // identity at the transport layer. Downstream consumers verify
+        // signatures and decrypt if they choose; the server does not.
       }
 
       const { sequence, revision } = ctx.db.applyDiffAndAppend(
@@ -345,8 +337,10 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
   );
 
   // ---- federation transport (server-to-server; authenticated by server signature, not JWT) ----
+  // Rate-limited by IP (same pool as auth) since these endpoints accept
+  // unauthenticated requests — the signature check happens inside the handler.
 
-  app.post("/rooms/:roomId/federate", async (request, reply) => {
+  app.post("/rooms/:roomId/federate", { preHandler: ipRateLimit(ctx.rateLimits.authIp) }, async (request, reply) => {
     const { roomId } = request.params as RoomParams;
     const body = request.body as Partial<FederateRequestBody> | null;
     if (
@@ -369,7 +363,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     return reply.send({ applied: result.applied, revision: result.revision, sequence: result.sequence });
   });
 
-  app.post("/rooms/:roomId/reconcile", async (request, reply) => {
+  app.post("/rooms/:roomId/reconcile", { preHandler: ipRateLimit(ctx.rateLimits.authIp) }, async (request, reply) => {
     const { roomId } = request.params as RoomParams;
     const body = request.body as Partial<ReconcileRequestBody> | null;
     if (

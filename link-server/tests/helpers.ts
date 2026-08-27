@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import * as ed from "@noble/ed25519";
 import WebSocket from "ws";
+import { edwardsToMontgomeryPriv, edwardsToMontgomeryPub } from "@noble/curves/ed25519";
 import { hashMessageForVerify, publicKeyToDid, signHex } from "../src/auth.js";
 import { buildServer, type ServerOptions } from "../src/server.js";
 import {
@@ -33,6 +34,20 @@ export async function signChallenge(agent: TestAgent, challenge: string): Promis
   // the raw message bytes. Match that convention so the server can verify.
   const hashed = hashMessageForVerify(challenge);
   return signHex(agent.privateKey, hashed);
+}
+
+/** Derives the X25519 public key from a test agent's Ed25519 public key
+ *  via the Edwards-to-Montgomery conversion. Used to register the agent's
+ *  E2E public key with the server during auth step 2. */
+export function testAgentX25519PublicKey(agent: TestAgent): string {
+  const x25519Pub = edwardsToMontgomeryPub(agent.publicKey);
+  return Buffer.from(x25519Pub).toString("hex");
+}
+
+/** Derives the X25519 private key from a test agent's Ed25519 private key.
+ *  Matches the public key registered by `testAgentX25519PublicKey`. */
+export function testAgentX25519PrivateKey(agent: TestAgent): Uint8Array {
+  return edwardsToMontgomeryPriv(agent.privateKey);
 }
 
 /** Builds a fully-signed LinkExpression as a real AD4M client would. */
@@ -136,9 +151,10 @@ export async function authenticateAgent(
     throw new Error(`challenge request failed: ${step1.status} ${JSON.stringify(step1.body)}`);
   }
   const signature = await signChallenge(agent, step1.body.challenge);
+  const x25519PublicKey = testAgentX25519PublicKey(agent);
   const step2 = await postJson<{ token?: string; error?: string }>(
     `${serverUrl}/rooms/${roomId}/auth`,
-    { did: agent.did, challenge: step1.body.challenge, signature }
+    { did: agent.did, challenge: step1.body.challenge, signature, x25519PublicKey }
   );
   if (step2.status !== 200 || !step2.body.token) {
     throw new Error(`auth verify failed: ${step2.status} ${JSON.stringify(step2.body)}`);

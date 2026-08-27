@@ -8,12 +8,11 @@ import {
   getJson,
   postJson,
   startTestServer,
+  testAgentX25519PrivateKey,
   type TestServerHandle,
 } from "./helpers.js";
 import {
-  decryptLinkData,
-  decryptRoomKeyForDid,
-  encryptLinkData,
+  decryptRoomKeyWithX25519,
   type EncryptedKeyPayload,
 } from "../src/encryption.js";
 import type { EncryptedLinkData, LinkExpression } from "../src/types.js";
@@ -58,8 +57,8 @@ test("rotate generates a room key sealed to every current ACL member", async () 
     assert.equal(adminKey.body.version, 1);
     assert.equal(memberKey.body.version, 1);
 
-    const adminRoomKey = decryptRoomKeyForDid(adminKey.body.encryptedKey, admin.privateKey);
-    const memberRoomKey = decryptRoomKeyForDid(memberKey.body.encryptedKey, member.privateKey);
+    const adminRoomKey = decryptRoomKeyWithX25519(adminKey.body.encryptedKey, testAgentX25519PrivateKey(admin));
+    const memberRoomKey = decryptRoomKeyWithX25519(memberKey.body.encryptedKey, testAgentX25519PrivateKey(member));
     assert.deepEqual(adminRoomKey, memberRoomKey, "both members recover the same underlying room key");
   });
 });
@@ -89,7 +88,7 @@ test("agent with no granted key yet gets 404 on GET /keys", async () => {
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
     const res = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/keys`, adminToken);
-    assert.equal(res.status, 404, "room isn't E2E-enabled yet, no key exists");
+    assert.equal(res.status, 404, "room has no key yet, no rotation has occurred");
   });
 });
 
@@ -118,21 +117,16 @@ test("member added after a rotation has no key until the next rotation", async (
   });
 });
 
-test("end to end: commit encrypted link data, sync/render return ciphertext, client decrypts locally", async () => {
+test("server stores link data opaquely — encrypted-shaped data round-trips unchanged", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, token);
-    const keyRes = await getJson<{ encryptedKey: EncryptedKeyPayload }>(
-      `${server.url}/rooms/${roomId}/keys`,
-      token
-    );
-    const roomKey = decryptRoomKeyForDid(keyRes.body.encryptedKey, agent.privateKey);
-
-    const plaintext = { source: "secret-a", predicate: "knows", target: "secret-b" };
-    const encryptedData = encryptLinkData(roomKey, plaintext);
+    // The server does not validate or transform the data field — it stores
+    // whatever shape the client sends. Verify that encrypted-shaped data
+    // round-trips through commit → render without alteration.
+    const encryptedData: EncryptedLinkData = { ciphertext: "deadbeef", nonce: "cafebabe" };
     const link = await createSignedLink(agent, encryptedData);
 
     const commitRes = await postJson<{ sequence: number; revision: string }>(
@@ -146,64 +140,18 @@ test("end to end: commit encrypted link data, sync/render return ciphertext, cli
     assert.equal(renderRes.status, 200);
     assert.equal(renderRes.body.links.length, 1);
     const storedData = renderRes.body.links[0].data as EncryptedLinkData;
-    assert.equal(typeof storedData.ciphertext, "string");
-    assert.notEqual(
-      JSON.stringify(storedData),
-      JSON.stringify(plaintext),
-      "server storage must not contain plaintext source/predicate/target"
-    );
-
-    const decrypted = decryptLinkData(roomKey, storedData);
-    assert.deepEqual(decrypted, plaintext);
+    assert.equal(storedData.ciphertext, "deadbeef");
+    assert.equal(storedData.nonce, "cafebabe");
   });
 });
 
-test("room requires E2E-encrypted data once enabled: plaintext commits are rejected", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, token);
-
-    const plainLink = await createSignedLink(agent, { source: "a", predicate: "rel", target: "b" });
-    const res = await postJson<{ error: string }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [plainLink], removals: [] },
-      token
-    );
-    assert.equal(res.status, 400);
-  });
-});
-
-test("room without E2E enabled rejects encrypted-shaped link data", async () => {
+test("removing an encrypted-shaped link works by resending the exact original LinkExpression", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
-    const fakeEncrypted = await createSignedLink(agent, { ciphertext: "aabb", nonce: "ccdd" });
-    const res = await postJson<{ error: string }>(
-      `${server.url}/rooms/${roomId}/commit`,
-      { additions: [fakeEncrypted], removals: [] },
-      token
-    );
-    assert.equal(res.status, 400);
-  });
-});
-
-test("removing an encrypted link works by resending the exact original LinkExpression", async () => {
-  await withServer(async (server) => {
-    const roomId = randomUUID();
-    const agent = await createTestAgent();
-    const token = await authenticateAgent(server.url, roomId, agent);
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, token);
-    const keyRes = await getJson<{ encryptedKey: EncryptedKeyPayload }>(
-      `${server.url}/rooms/${roomId}/keys`,
-      token
-    );
-    const roomKey = decryptRoomKeyForDid(keyRes.body.encryptedKey, agent.privateKey);
-
-    const encryptedData = encryptLinkData(roomKey, { source: "a", predicate: "rel", target: "b" });
+    const encryptedData: EncryptedLinkData = { ciphertext: "aabb", nonce: "ccdd" };
     const link = await createSignedLink(agent, encryptedData);
     await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [link], removals: [] }, token);
 

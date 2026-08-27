@@ -153,6 +153,7 @@ export interface FederateRequestBody {
   diff: PerspectiveDiff;
   sequence: number;
   revision: string;
+  timestamp: string;
   serverPublicKey: string;
   serverSignature: string;
   serverUrl?: string;
@@ -161,6 +162,7 @@ export interface FederateRequestBody {
 export interface ReconcileRequestBody {
   revision: string;
   linkHashes: string[];
+  timestamp: string;
   serverPublicKey: string;
   serverSignature: string;
   serverUrl?: string;
@@ -172,11 +174,19 @@ export interface ReconcileResponseBody {
   sequence: number;
 }
 
-/** Canonical payload signed by a server's identity key for federation calls. */
+/**
+ * Canonical payload signed by a server's identity key for federation calls.
+ * Includes a timestamp (ISO-8601) for replay protection — receivers reject
+ * payloads older than `FEDERATION_PAYLOAD_MAX_AGE_MS`.
+ */
 export function canonicalFederationPayload(
   kind: "federate" | "reconcile",
   roomId: string,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  timestamp?: string
 ): string {
-  return JSON.stringify({ kind, roomId, ...body });
+  return JSON.stringify({ kind, roomId, timestamp: timestamp ?? new Date().toISOString(), ...body });
 }
+
+/** Maximum age of a signed federation payload before it gets rejected (5 minutes). */
+export const FEDERATION_PAYLOAD_MAX_AGE_MS = 5 * 60 * 1000;

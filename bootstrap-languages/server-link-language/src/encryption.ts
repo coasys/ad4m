@@ -205,31 +205,6 @@ export function openRoomKeyEnvelope(envelope: SealedRoomKeyEnvelope, recipientPr
     return gcm(sealKey, nonce).decrypt(ciphertext);
 }
 
-/**
- * Wire framing for the `encryptedKey` string field returned by
- * `GET /rooms/:roomId/keys`: base64 of the JSON-serialized envelope. This
- * framing choice is this client's own convention (the endpoint's exact
- * byte format isn't pinned down elsewhere) — kept in one place so it's
- * easy to reconcile against the real server later.
- */
-export function encodeSealedEnvelope(envelope: SealedRoomKeyEnvelope): string {
-    return btoa(JSON.stringify(envelope));
-}
-
-export function decodeSealedEnvelope(encoded: string): SealedRoomKeyEnvelope {
-    const parsed = JSON.parse(atob(encoded)) as Partial<SealedRoomKeyEnvelope>;
-    if (!parsed.ephemeralPublicKey || !parsed.nonce || !parsed.ciphertext) {
-        throw new Error(
-            "decodeSealedEnvelope: malformed envelope (missing ephemeralPublicKey/nonce/ciphertext)",
-        );
-    }
-    return {
-        ephemeralPublicKey: parsed.ephemeralPublicKey,
-        nonce: parsed.nonce,
-        ciphertext: parsed.ciphertext,
-    };
-}
-
 // ---------------------------------------------------------------------------
 // Link expression encryption (room key, AES-256-GCM)
 // ---------------------------------------------------------------------------

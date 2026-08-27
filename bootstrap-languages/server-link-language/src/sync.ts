@@ -321,28 +321,23 @@ export function coalesceDiffs(queue: PerspectiveDiff[]): PerspectiveDiff[] {
 }
 
 function linkIdentity(link: LinkExpression): string {
-    // Canonical fields ONLY — matches link-server's canonicalLinkPayload
-    // for plaintext data (link-server/src/types.ts::canonicalLinkPayload:
-    // {source, predicate, target, author, timestamp}). We deliberately do
-    // NOT include proof.signature: two links with identical canonical
-    // fields but different signatures (e.g. re-signed after a key
-    // rotation) are the SAME link from the server's perspective, and
-    // treating them as different identities would let a remove(oldSig)
-    // + add(newSig) sequence merge into one segment → additions:[X],
-    // removals:[X] → server applies add-then-remove → X gone, contrary
-    // to the caller's intent.
-    //
-    // JSON.stringify is collision-resistant: separators and quotes in any
-    // string field are escaped rather than interpretable as boundaries, so
-    // (author: "a|b", timestamp: "t") and (author: "a", timestamp: "b|t")
-    // never produce the same key.
-    return JSON.stringify([
-        link.author,
-        link.timestamp,
-        link.data?.source ?? "",
-        link.data?.predicate ?? null,
-        link.data?.target ?? "",
-    ]);
+    // Must match the SAME canonical field set (and key order) as the
+    // server's canonicalLinkPayload (link-server/src/types.ts) so that two
+    // links the server considers identical also collapse here. We
+    // deliberately do NOT include proof.signature: two links with
+    // identical canonical fields but different signatures (e.g. re-signed
+    // after a key rotation) are the SAME link from the server's
+    // perspective, and treating them as different identities would let a
+    // remove(oldSig) + add(newSig) sequence merge into one segment →
+    // additions:[X], removals:[X] → server applies add-then-remove → X
+    // gone, contrary to the caller's intent.
+    return JSON.stringify({
+        source: link.data?.source ?? "",
+        predicate: link.data?.predicate ?? null,
+        target: link.data?.target ?? "",
+        author: link.author,
+        timestamp: link.timestamp,
+    });
 }
 
 /** Test/teardown hook: await any in-flight flush + drain everything still
@@ -358,13 +353,15 @@ function linkIdentity(link: LinkExpression): string {
  * serialisation invariant that other flushes rely on.
  */
 export async function drainCommitBatch(): Promise<void> {
-    const MAX_LAPS = 100;
+    // Cap at 10 laps (not 100) — each lap can trigger up to 3 retry POSTs
+    // per segment. 10 laps × 3 attempts = 30 POSTs max, which keeps the
+    // teardown/outage burst bounded while still giving a genuine queue a
+    // reasonable chance to flush.
+    const MAX_LAPS = 10;
     for (let lap = 0; lap < MAX_LAPS; lap++) {
         await _inflight;
         if (_pendingQueue.length === 0) return;
         if (!_flushScheduled) {
-            // Nudge the chain to pick up the residual queue without
-            // duplicating scheduling logic here.
             _flushScheduled = true;
             _inflight = _inflight
                 .then(() => flushBatch())
@@ -376,10 +373,13 @@ export async function drainCommitBatch(): Promise<void> {
                 });
         }
     }
-    console.error(
-        `[server-link-language] drainCommitBatch: bailed after ${MAX_LAPS} laps — ` +
-        `a caller is enqueuing commits faster than they can flush.`,
-    );
+    if (_pendingQueue.length > 0) {
+        console.warn(
+            `[server-link-language] drainCommitBatch: bailed after ${MAX_LAPS} laps with ` +
+            `${_pendingQueue.length} segment(s) still pending — they will flush on the next ` +
+            `enqueueCommitBatched call.`,
+        );
+    }
 }
 
 /** Test-only: clear all batch state without draining. Used by unit tests

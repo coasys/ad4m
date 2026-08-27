@@ -1,10 +1,8 @@
-import { createHash, hkdfSync, randomBytes as nodeRandomBytes } from "node:crypto";
+import { hkdfSync, randomBytes as nodeRandomBytes } from "node:crypto";
 import * as ed from "@noble/ed25519";
-import { x25519, edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from "@noble/curves/ed25519.js";
+import { x25519 } from "@noble/curves/ed25519.js";
 import { gcm } from "@noble/ciphers/aes.js";
-import { didToPublicKey } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
-import type { EncryptedLinkData, LinkData } from "./types.js";
 
 /**
  * E2E encryption for rooms.
@@ -60,24 +58,15 @@ export function generateRoomKey(): Uint8Array {
   return new Uint8Array(nodeRandomBytes(32));
 }
 
-/** Derives a member's X25519 public key from their `did:key` ed25519 identity. */
-export function x25519PublicKeyFromDid(did: string): Uint8Array {
-  return edwardsToMontgomeryPub(didToPublicKey(did));
-}
-
-/** Derives an X25519 private key from a raw ed25519 private key (seed). Used client-side. */
-export function x25519PrivateKeyFromEd25519(ed25519PrivateKey: Uint8Array): Uint8Array {
-  return edwardsToMontgomeryPriv(ed25519PrivateKey);
-}
-
 /**
  * Seals a room key to a recipient's X25519 public key via one-shot ECIES
  * (ephemeral X25519 + HKDF-SHA256 + AES-256-GCM).
  *
- * `recipientX25519Pub` should come from the ACL table's `x25519_public_key`
- * column (populated during DID auth when the language sends its derived
- * key). Falls back to `edwardsToMontgomeryPub(didToPublicKey(did))` for
- * clients that can do the standard Ed25519→X25519 scalar conversion.
+ * `recipientX25519Pub` comes from the ACL table's `x25519_public_key`
+ * column, populated during DID auth when the language sends its derived
+ * public key. The server never derives this value itself — clients use a
+ * signing-capability-based derivation that produces a different keypair
+ * than the textbook Ed25519→X25519 Montgomery conversion.
  */
 export function encryptRoomKeyForRecipient(
   roomKey: Uint8Array,
@@ -114,35 +103,6 @@ export function decryptRoomKeyWithX25519(
   return new Uint8Array(gcm(symKey, nonce).decrypt(ciphertext));
 }
 
-/**
- * Convenience wrapper: converts a raw Ed25519 private key to X25519 via
- * edwardsToMontgomeryPriv, then unseals. Used by tests and any client
- * that holds the raw Ed25519 key material (as opposed to sandboxed
- * clients that derive X25519 from a signing capability).
- */
-export function decryptRoomKeyForDid(
-  payload: EncryptedKeyPayload,
-  recipientEd25519PrivateKey: Uint8Array
-): Uint8Array {
-  const recipientX25519Priv = x25519PrivateKeyFromEd25519(recipientEd25519PrivateKey);
-  return decryptRoomKeyWithX25519(payload, recipientX25519Priv);
-}
-
-/** Encrypts a link's {source,predicate,target} with the room's AES-256-GCM key. */
-export function encryptLinkData(roomKey: Uint8Array, data: LinkData): EncryptedLinkData {
-  const nonce = new Uint8Array(nodeRandomBytes(12));
-  const plaintext = new TextEncoder().encode(JSON.stringify(data));
-  const ciphertext = gcm(roomKey, nonce).encrypt(plaintext);
-  return { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) };
-}
-
-/** Decrypts a link's data with the room's AES-256-GCM key. Used client-side (server never does this). */
-export function decryptLinkData(roomKey: Uint8Array, encrypted: EncryptedLinkData): LinkData {
-  const nonce = hexToBytes(encrypted.nonce);
-  const ciphertext = hexToBytes(encrypted.ciphertext);
-  const plaintext = gcm(roomKey, nonce).decrypt(ciphertext);
-  return JSON.parse(new TextDecoder().decode(plaintext)) as LinkData;
-}
 
 export interface RotateResult {
   version: number;
@@ -150,16 +110,18 @@ export interface RotateResult {
 }
 
 /**
- * Generates a fresh room key, seals it to every current ACL member, stores
- * the sealed copies, marks the room E2E-enabled, and discards the
- * plaintext key. This is both "enable E2E" (first call) and "rotate"
- * (subsequent calls) — a room becomes E2E-enabled the first time an admin
- * rotates its key.
+ * Generates a fresh room key, seals it to every current ACL member that
+ * has a registered X25519 public key, stores the sealed copies, marks the
+ * room E2E-enabled, and discards the plaintext key. This serves as both
+ * "enable E2E" (first call) and "rotate" (subsequent calls).
  *
- * For each member, uses their stored X25519 public key if available
- * (registered during DID auth by the server-link-language), otherwise
- * falls back to deriving it from their Ed25519 DID key via
- * edwardsToMontgomeryPub.
+ * Members whose X25519 public key has not yet been registered (i.e. they
+ * have not completed the DID auth challenge-response since E2E was set up)
+ * are skipped — they receive their sealed copy on the next rotation after
+ * they authenticate. The server does NOT fall back to deriving an X25519
+ * key from the DID's Ed25519 key, because the client derives its X25519
+ * keypair from a signing-capability seed (not Ed25519→X25519 conversion),
+ * and using the wrong public key would produce an unopenable envelope.
  *
  * Members added to the ACL *after* a rotation cannot decrypt history until
  * the next rotation — the server does not retain plaintext keys to reseal
@@ -171,12 +133,13 @@ export function rotateRoomKey(db: LinkServerDB, roomId: string): RotateResult {
   const version = db.getLatestKeyVersion(roomId) + 1;
   const recipients: string[] = [];
   for (const row of aclRows) {
-    let recipientPub: Uint8Array;
-    if (row.x25519_public_key) {
-      recipientPub = hexToBytes(row.x25519_public_key);
-    } else {
-      recipientPub = x25519PublicKeyFromDid(row.did);
+    if (!row.x25519_public_key) {
+      // Skip — this member has not yet registered their X25519 key via
+      // the auth challenge-response. They will receive a sealed copy on
+      // the next rotation after they authenticate.
+      continue;
     }
+    const recipientPub = hexToBytes(row.x25519_public_key);
     const encrypted = encryptRoomKeyForRecipient(roomKey, recipientPub);
     db.addRoomKey(roomId, row.did, version, JSON.stringify(encrypted));
     recipients.push(row.did);

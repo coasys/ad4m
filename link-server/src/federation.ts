@@ -2,6 +2,7 @@ import { signHex, verifyHex } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
 import {
   canonicalFederationPayload,
+  FEDERATION_PAYLOAD_MAX_AGE_MS,
   type FederateRequestBody,
   type LinkExpression,
   type PerspectiveDiff,
@@ -56,7 +57,7 @@ export type FederateResult =
 
 export type ReconcileResult =
   | { ok: true; response: ReconcileResponseBody }
-  | { ok: false; status: 404 | 403; error: string };
+  | { ok: false; status: 400 | 404 | 403; error: string };
 
 export class FederationManager {
   private db: LinkServerDB;
@@ -126,14 +127,38 @@ export class FederationManager {
       const byUrl = this.db.findFederationPeerByUrl(roomId, serverUrl);
       if (byUrl) {
         if (!byUrl.peer_public_key) {
-          // First signed contact from a peer we added before it was reachable: pin its key now.
-          this.db.setFederationPeerPublicKey(roomId, serverUrl, serverPublicKey);
-          return true;
+          // Peer was added by URL before its identity could be fetched.
+          // Attempt to fetch the identity now — only pin the key if the
+          // live fetch confirms it matches what the caller claims. This
+          // closes the TOFU race where an attacker reaching the endpoint
+          // before the real peer could pin a rogue key.
+          try {
+            const res = await this.fetchImpl(`${serverUrl}/server/identity`);
+            if (res.ok) {
+              const body = (await res.json()) as { publicKey?: string };
+              if (body.publicKey === serverPublicKey) {
+                this.db.setFederationPeerPublicKey(roomId, serverUrl, serverPublicKey);
+                return true;
+              }
+            }
+          } catch {
+            // Peer still unreachable — reject until admin re-adds or peer comes online.
+          }
+          return false;
         }
         if (byUrl.peer_public_key === serverPublicKey) return true;
       }
     }
     return false;
+  }
+
+  /** Rejects payloads whose timestamp falls outside the allowed window. */
+  private isPayloadFresh(timestamp: string | undefined): boolean {
+    if (!timestamp) return false;
+    const payloadTime = new Date(timestamp).getTime();
+    if (!Number.isFinite(payloadTime)) return false;
+    const age = Math.abs(Date.now() - payloadTime);
+    return age <= FEDERATION_PAYLOAD_MAX_AGE_MS;
   }
 
   // ---- outbound: forward a locally-committed diff ----
@@ -147,12 +172,14 @@ export class FederationManager {
   ): Promise<void> {
     const peers = this.db.getFederationPeers(roomId);
     if (peers.length === 0) return;
-    const payload = canonicalFederationPayload("federate", roomId, { diff, sequence, revision });
+    const timestamp = new Date().toISOString();
+    const payload = canonicalFederationPayload("federate", roomId, { diff, sequence, revision }, timestamp);
     const serverSignature = await this.signPayload(payload);
     const body: FederateRequestBody = {
       diff,
       sequence,
       revision,
+      timestamp,
       serverPublicKey: this.identity.publicKey,
       serverSignature,
       serverUrl: this.selfUrl,
@@ -174,6 +201,10 @@ export class FederationManager {
     const room = this.db.getRoom(roomId);
     if (!room) return { ok: false, status: 404, error: "room not found" };
 
+    if (!this.isPayloadFresh(body.timestamp)) {
+      return { ok: false, status: 400, error: "stale or missing timestamp" };
+    }
+
     const trusted = await this.resolvePeerTrust(roomId, body.serverPublicKey, body.serverUrl);
     if (!trusted) return { ok: false, status: 403, error: "unknown federation peer" };
 
@@ -181,7 +212,7 @@ export class FederationManager {
       diff: body.diff,
       sequence: body.sequence,
       revision: body.revision,
-    });
+    }, body.timestamp);
     const validSig = await this.verifyPeerSignature(body.serverPublicKey, payload, body.serverSignature);
     if (!validSig) return { ok: false, status: 403, error: "invalid server signature" };
 
@@ -203,13 +234,17 @@ export class FederationManager {
     const room = this.db.getRoom(roomId);
     if (!room) return { ok: false, status: 404, error: "room not found" };
 
+    if (!this.isPayloadFresh(body.timestamp)) {
+      return { ok: false, status: 400, error: "stale or missing timestamp" };
+    }
+
     const trusted = await this.resolvePeerTrust(roomId, body.serverPublicKey, body.serverUrl);
     if (!trusted) return { ok: false, status: 403, error: "unknown federation peer" };
 
     const payload = canonicalFederationPayload("reconcile", roomId, {
       revision: body.revision,
       linkHashes: body.linkHashes,
-    });
+    }, body.timestamp);
     const validSig = await this.verifyPeerSignature(body.serverPublicKey, payload, body.serverSignature);
     if (!validSig) return { ok: false, status: 403, error: "invalid server signature" };
 
@@ -234,11 +269,13 @@ export class FederationManager {
   private async reconcileWithPeer(roomId: string, peerUrl: string): Promise<void> {
     const linkHashes = this.db.getActiveHashes(roomId);
     const revision = this.db.getRoomRevision(roomId);
-    const payload = canonicalFederationPayload("reconcile", roomId, { revision, linkHashes });
+    const timestamp = new Date().toISOString();
+    const payload = canonicalFederationPayload("reconcile", roomId, { revision, linkHashes }, timestamp);
     const serverSignature = await this.signPayload(payload);
     const body: ReconcileRequestBody = {
       revision,
       linkHashes,
+      timestamp,
       serverPublicKey: this.identity.publicKey,
       serverSignature,
       serverUrl: this.selfUrl,

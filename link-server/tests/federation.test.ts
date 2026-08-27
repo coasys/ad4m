@@ -98,7 +98,8 @@ test("federate is rejected from a server that was never added as a peer", async 
     const diff = { additions: [], removals: [] };
     const sequence = 1;
     const revision = "deadbeef";
-    const payload = canonicalFederationPayload("federate", roomId, { diff, sequence, revision });
+    const timestamp = new Date().toISOString();
+    const payload = canonicalFederationPayload("federate", roomId, { diff, sequence, revision }, timestamp);
     const serverSignature = await signHex(
       Buffer.from(serverB.built.identity.privateKey, "hex"),
       payload
@@ -108,6 +109,7 @@ test("federate is rejected from a server that was never added as a peer", async 
       diff,
       sequence,
       revision,
+      timestamp,
       serverPublicKey: serverB.built.identity.publicKey,
       serverSignature,
     });
@@ -127,6 +129,7 @@ test("federate with a forged signature from a known peer is rejected", async () 
       diff,
       sequence: 1,
       revision: "deadbeef",
+      timestamp: new Date().toISOString(),
       serverPublicKey: serverB.built.identity.publicKey,
       serverSignature: "00".repeat(64), // garbage
     });
@@ -150,13 +153,15 @@ test("federate accepts a diff with a tampered link signature (server relays sign
     // Tamper with the author after signing -- signature no longer matches.
     const tampered = { ...link, author: impostor.did };
     const diff = { additions: [tampered], removals: [] };
-    const payload = canonicalFederationPayload("federate", roomId, { diff, sequence: 1, revision: "x" });
+    const timestamp = new Date().toISOString();
+    const payload = canonicalFederationPayload("federate", roomId, { diff, sequence: 1, revision: "x" }, timestamp);
     const serverSignature = await signHex(Buffer.from(serverB.built.identity.privateKey, "hex"), payload);
 
     const res = await postJson<{ error: string }>(`${serverA.url}/rooms/${roomId}/federate`, {
       diff,
       sequence: 1,
       revision: "x",
+      timestamp,
       serverPublicKey: serverB.built.identity.publicKey,
       serverSignature,
       serverUrl: serverB.url,
@@ -196,7 +201,7 @@ test("reconciliation pulls diffs committed before peering was established", asyn
   }
 });
 
-test("peer public key is pinned on first signed contact if it wasn't captured at add-time", async () => {
+test("peer public key is pinned on first verified contact if it wasn't captured at add-time", async () => {
   const serverA = await startTestServer();
   const serverB = await startTestServer();
   try {
@@ -211,34 +216,42 @@ test("peer public key is pinned on first signed contact if it wasn't captured at
     const diff = { additions: [], removals: [] };
     const sequence = 1;
     const revision = "deadbeef";
-    const payload = canonicalFederationPayload("federate", roomId, { diff, sequence, revision });
+    const timestamp = new Date().toISOString();
+    // The server now fetches ${serverUrl}/server/identity to verify the
+    // claimed key matches before pinning, instead of blindly trusting the
+    // first contact. Since serverB runs, the fetch succeeds and the key
+    // gets verified + pinned.
+    const payload = canonicalFederationPayload("federate", roomId, { diff, sequence, revision }, timestamp);
     const serverSignature = await signHex(Buffer.from(serverB.built.identity.privateKey, "hex"), payload);
 
     const first = await postJson<{ applied: number }>(`${serverA.url}/rooms/${roomId}/federate`, {
       diff,
       sequence,
       revision,
+      timestamp,
       serverPublicKey: serverB.built.identity.publicKey,
       serverSignature,
       serverUrl: serverB.url,
     });
-    assert.equal(first.status, 200, "first contact pins the key and succeeds");
+    assert.equal(first.status, 200, "first contact verifies + pins the key and succeeds");
 
     // A forged signature from an *unrelated* key claiming the same peerUrl
     // must now be rejected, proving the key really was pinned (not just
     // trusted-by-URL forever).
     const rogueEd = ed.utils.randomPrivateKey();
     const roguePub = ed.etc.bytesToHex(await ed.getPublicKeyAsync(rogueEd));
+    const timestamp2 = new Date().toISOString();
     const roguePayload = canonicalFederationPayload("federate", roomId, {
       diff,
       sequence: 2,
       revision: "cafebabe",
-    });
+    }, timestamp2);
     const rogueSig = await signHex(rogueEd, roguePayload);
     const second = await postJson<{ error: string }>(`${serverA.url}/rooms/${roomId}/federate`, {
       diff,
       sequence: 2,
       revision: "cafebabe",
+      timestamp: timestamp2,
       serverPublicKey: roguePub,
       serverSignature: rogueSig,
       serverUrl: serverB.url,

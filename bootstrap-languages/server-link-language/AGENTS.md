@@ -60,14 +60,16 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 
 ## Non-obvious conventions
 
-- **Adapter/singleton pattern everywhwere.** Every module that needs I/O
+- **Adapter/singleton pattern everywhere.** Every module that needs I/O
   (`api.ts`, `sync.ts`, `store.ts`, `ws-client.ts`) pulls its dependency
   from a swappable module-level singleton in `src/adapters.ts`
   (`initTransport`/`getTransport`, etc.), never imports `ad4m:host`
   directly. This is what makes every module under `tests/` runnable in
-  plain Node with mocks. `src/adapters-deno.ts` is the only file allowed to
-  import `@coasys/ad4m-ldk`, and only `index.ts` is allowed to import
-  `adapters-deno.ts`.
+  plain Node with mocks. **Import rules:** `src/adapters-deno.ts` is the only
+  file allowed to import runtime-specific APIs (`ad4m:host`, Deno globals).
+  Only `index.ts` is allowed to import `adapters-deno.ts`. Pure library
+  imports (`@noble/curves`, `@noble/ciphers`, `@noble/hashes`) are fine
+  anywhere — they contain no runtime coupling.
 - **`applyInboundWireDiff` (src/sync.ts) is the only place that calls
   `emitDiff`.** The AD4M executor discards `perspectiveSyncSync()`'s return
   value — `emitPerspectiveDiff` is the only thing that makes an inbound
@@ -114,24 +116,13 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   rotation flow would need to detect a version bump (e.g. periodic
   `/keys` re-fetch, or a dedicated WS push message not in the current
   server API) and re-key in place.
-- **E2E encryption has 5 confirmed incompatibilities with the server.**
-  Plaintext mode works end-to-end (verified by smoke test). E2E needs
-  reconciliation before production use:
-  1. Encrypted link format: server expects `data: { ciphertext, nonce }`,
-     client sends `encrypted: hex(nonce || ciphertext)`.
-  2. KDF: server uses `SHA-256(shared)`, client uses
-     `HKDF-SHA256(shared, salt, info, 32)`.
-  3. Key envelope: server returns parsed JSON object, client expects
-     base64-encoded string.
-  4. X25519 derivation: server derives from DID public key
-     (`edwardsToMontgomeryPub`), client derives from
-     `sha256(sign("adam-server-link-language:x25519-seed:v1"))` —
-     different keypairs entirely.
-  5. Key response format: server sends `encryptedKey: object`,
-     client expects `encryptedKey: string`.
-  Fixes localize to `src/api.ts` (response shaping) and
-  `src/encryption.ts` (envelope framing) — core sync logic stays
-  unchanged.
+- **E2E encryption incompatibilities have been resolved.** The server now
+  treats link data as opaque (no E2E validation at commit time), uses HKDF-SHA256
+  for key sealing (matching the client's KDF), returns the `encryptedKey`
+  envelope as a typed `SealedRoomKeyEnvelope` object (matching the client's
+  `KeysResponse` type), and accepts client-registered X25519 public keys
+  during auth rather than deriving from DID keys. The client receives and
+  opens the sealed envelope directly without base64 decoding.
 - **`peers.remote()` and E2E setup are not covered by the automated test
   suite directly** (only indirectly, through `api.ts`/`encryption.ts` unit
   tests) — there's no `index.ts`-level integration test because `index.ts`

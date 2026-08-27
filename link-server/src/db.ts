@@ -3,7 +3,6 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import {
   computeRevision,
-  isEncryptedLinkData,
   linkHash,
   type LinkExpression,
   type PerspectiveDiff,
@@ -28,7 +27,6 @@ CREATE TABLE IF NOT EXISTS links (
   room_id TEXT,
   link_hash TEXT,
   link_data TEXT,
-  encrypted INTEGER DEFAULT 0,
   sequence INTEGER,
   PRIMARY KEY (room_id, link_hash)
 );
@@ -88,7 +86,6 @@ export interface LinkRow {
   room_id: string;
   link_hash: string;
   link_data: string;
-  encrypted: number;
   sequence: number;
 }
 
@@ -169,8 +166,8 @@ export class LinkServerDB {
       getX25519: this.raw.prepare("SELECT x25519_public_key FROM acl WHERE room_id = ? AND did = ?"),
 
       insertLink: this.raw.prepare(
-        `INSERT OR IGNORE INTO links (room_id, link_hash, link_data, encrypted, sequence)
-         VALUES (?, ?, ?, ?, ?)`
+        `INSERT OR IGNORE INTO links (room_id, link_hash, link_data, sequence)
+         VALUES (?, ?, ?, ?)`
       ),
       removeLink: this.raw.prepare("DELETE FROM links WHERE room_id = ? AND link_hash = ?"),
       hasLink: this.raw.prepare("SELECT 1 FROM links WHERE room_id = ? AND link_hash = ?"),
@@ -297,10 +294,9 @@ export class LinkServerDB {
     roomId: string,
     linkHash: string,
     linkData: string,
-    encrypted: boolean,
     sequence: number
   ): void {
-    this.stmts.insertLink.run(roomId, linkHash, linkData, encrypted ? 1 : 0, sequence);
+    this.stmts.insertLink.run(roomId, linkHash, linkData, sequence);
   }
 
   removeLink(roomId: string, linkHash: string): void {
@@ -379,13 +375,7 @@ export class LinkServerDB {
       const sequence = this.getNextSequence(roomId);
       for (const link of diff.additions) {
         const hash = linkHash(link);
-        this.insertLink(
-          roomId,
-          hash,
-          JSON.stringify(link),
-          isEncryptedLinkData(link.data),
-          sequence
-        );
+        this.insertLink(roomId, hash, JSON.stringify(link), sequence);
       }
       for (const link of diff.removals) {
         const hash = linkHash(link);

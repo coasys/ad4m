@@ -23,7 +23,7 @@ Composition root is `src/server.ts` (`buildServer(opts)`), wired in this depende
 types.ts        shared types + pure hash/canonicalization helpers, no deps
 db.ts           better-sqlite3 wrapper, schema, all queries incl. applyDiffAndAppend (the OR-Set merge transaction)
 auth.ts         did:key <-> raw ed25519 pubkey (base58btc hand-rolled, no bs58 dep), sign/verify, challenge store, JWT session manager
-encryption.ts   E2E: ed25519->X25519 conversion, ECIES-style room-key sealing, AES-256-GCM link data
+encryption.ts   E2E key distribution: ECIES-style room-key sealing (X25519 ECDH + HKDF-SHA256 + AES-256-GCM), X25519 unseal for tests
 rate-limit.ts   sliding-window limiter, fully standalone
 telepresence.ts online/offline + grace-period timers; DOES NOT import ws.ts (returns state, caller broadcasts) to avoid a cycle
 federation.ts   server-to-server diff relay + reconciliation; imports ws.ts to push received diffs to local clients
@@ -53,17 +53,25 @@ index.ts        CLI arg parsing, calls buildServer + app.listen
 
 The spec text was internally ambiguous — the endpoint table calls it "authenticated DIDs for this room" while the telepresence section ties `/peers` to the online-agent list. This implementation returns **currently-online agents** (from `telepresence.getOnlineAgents`), matching the more detailed telepresence section. The full ACL member list (online or not) is `GET /rooms/:roomId/acl`.
 
-### E2E encryption trust model
+### E2E encryption trust model — opaque link data
 
-There's no dedicated "enable E2E" endpoint in the spec. **The first call to `POST /rooms/:roomId/keys/rotate` both enables E2E and generates key version 1**; every subsequent call rotates to a new version. The server generates the AES-256-GCM room key, seals a copy to every *current* ACL member's derived X25519 pubkey (ephemeral-X25519 ECDH + SHA-256 KDF + AES-GCM, see `encryption.ts`), stores only the sealed copies, and never persists the plaintext key. Consequence: a DID added to the ACL *after* a rotation has no key until the *next* rotation (`GET /keys` 404s until then) — the server cannot re-seal a key it no longer holds in memory, which is the honest tradeoff of not retaining plaintext at rest.
+**The server treats link data as opaque.** It never parses, validates, or decrypts the `data` field of committed links — encrypted rooms and plaintext rooms follow the same commit path. The server's role in E2E is limited to key distribution: it generates room keys, seals them per-member, and serves the sealed copies. All encryption/decryption of actual link content happens client-side (in the server-link-language).
+
+There's no dedicated "enable E2E" endpoint. **The first call to `POST /rooms/:roomId/keys/rotate` both enables E2E and generates key version 1**; every subsequent call rotates to a new version. The server generates the AES-256-GCM room key, seals a copy to every *current* ACL member's registered X25519 public key (ephemeral-X25519 ECDH + HKDF-SHA256 + AES-GCM, see `encryption.ts`), stores only the sealed copies, and never persists the plaintext key. Members whose X25519 key has not yet been registered (they haven't completed auth since E2E was set up) get skipped — they receive their sealed copy on the next rotation after they authenticate. A DID added to the ACL *after* a rotation has no key until the *next* rotation (`GET /keys` 404s until then) — the server cannot re-seal a key it no longer holds in memory, which is the honest tradeoff of not retaining plaintext at rest.
+
+**X25519 key derivation**: clients derive their X25519 keypair from their Ed25519 *signing capability* (sha256(sign(FIXED_MESSAGE))), NOT from direct Ed25519→X25519 Montgomery conversion, because the Deno sandbox never exposes the raw Ed25519 private key. The public key is sent during the DID auth challenge-response (step 2, `x25519PublicKey` field) and stored in the `acl` table's `x25519_public_key` column. The server never derives X25519 keys from DIDs.
 
 ### Federation trust model
 
-Peers are per-room, keyed by URL (`federation_peers` table, extended with a `peer_public_key` column beyond the spec's base schema). Trust for an inbound `/federate` or `/reconcile` call requires a valid ed25519 signature from a `serverPublicKey` that's either:
-1. already pinned for that room (`peer_public_key` matches), or
-2. pinned on first signed contact if the peer was added by URL before its identity could be fetched (e.g. it was offline at `POST .../federation` time) — the payload's `serverUrl` field supports this fallback.
+Peers are per-room, keyed by URL (`federation_peers` table, extended with a `peer_public_key` column beyond the spec's base schema). Trust for an inbound `/federate` or `/reconcile` call requires:
+1. **Freshness**: a `timestamp` field within 5 minutes of the receiver's clock (`FEDERATION_PAYLOAD_MAX_AGE_MS`). Missing or stale timestamps return 400. This prevents replay attacks from captured federation payloads.
+2. **Peer identity**: a valid ed25519 signature from a `serverPublicKey` that's either:
+   - already pinned for that room (`peer_public_key` matches), or
+   - verified on first contact by fetching `${serverUrl}/server/identity` — if the live identity matches the claimed key, the key gets pinned. This closes the TOFU race where an attacker could pin a rogue key before the real peer came online.
 
-Every individual link inside a federated diff is still independently verified against its own author's signature (`verifyLinkExpression`) — a peer server vouches for *relaying* agent-signed content, it can't forge it.
+Link signatures inside a federated diff travel as metadata — the server stores and relays them as-is without per-link verification. Downstream consumers can verify if they choose.
+
+**WebSocket keepalive**: connections use a 30-second ping/pong heartbeat. Sockets that miss a pong get terminated. This prevents stale connections from accumulating on the server.
 
 **Anti-loop policy**: this server only forwards diffs it originated locally (via `POST /commit`). Diffs learned via `/federate` or `/reconcile` are applied and pushed to local WebSocket clients but never re-forwarded onward. That keeps the topology to pairwise peers instead of a gossip mesh and avoids needing per-diff provenance tracking to prevent forwarding loops. If you need transitive federation (A-B-C without a direct B-C peering), that's a deliberate gap, not an oversight.
 

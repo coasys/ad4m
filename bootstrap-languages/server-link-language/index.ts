@@ -21,7 +21,7 @@ import * as auth from "./src/auth.js";
 import * as syncModule from "./src/sync.js";
 import * as telepresenceModule from "./src/telepresence.js";
 import { WsClient } from "./src/ws-client.js";
-import { decodeSealedEnvelope, deriveX25519KeyPair, openRoomKeyEnvelope } from "./src/encryption.js";
+import { deriveX25519KeyPair, openRoomKeyEnvelope } from "./src/encryption.js";
 
 import {
     initAdapters,
@@ -87,9 +87,8 @@ async function setupRoomKey(): Promise<void> {
             roomKey = null;
             return;
         }
-        const envelope = decodeSealedEnvelope(keysRes.encryptedKey);
         const { privateKey } = deriveX25519KeyPair((payload) => getAgent().signStringHex(payload));
-        roomKey = openRoomKeyEnvelope(envelope, privateKey);
+        roomKey = openRoomKeyEnvelope(keysRes.encryptedKey, privateKey);
         roomKeyStatus = "ready";
         console.log(`[server-link-language] E2E room key acquired (version ${keysRes.version})`);
     } catch (err) {

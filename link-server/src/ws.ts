@@ -84,10 +84,32 @@ export class WsManager {
       agents: this.telepresence.getOnlineAgents(roomId),
     });
 
+    // Ping/pong keepalive: detect half-open TCP connections that the OS
+    // hasn't noticed yet (NAT rebind, mobile network switch, etc.). The
+    // `ws` library responds to ping frames with pong automatically on the
+    // client side; we just need to send pings and kill the socket if no
+    // pong comes back within one interval.
+    let alive = true;
+    socket.on("pong", () => { alive = true; });
+    const pingTimer = setInterval(() => {
+      if (!alive) {
+        // No pong since last ping — connection is dead.
+        clearInterval(pingTimer);
+        socket.terminate();
+        return;
+      }
+      alive = false;
+      socket.ping();
+    }, 30_000);
+    pingTimer.unref();
+
     socket.on("message", (raw: Buffer | ArrayBuffer | Buffer[]) => {
       this.handleMessage(conn, raw);
     });
-    socket.on("close", () => this.handleClose(conn));
+    socket.on("close", () => {
+      clearInterval(pingTimer);
+      this.handleClose(conn);
+    });
     socket.on("error", () => {
       // 'close' fires after 'error' for ws sockets; cleanup happens there.
     });
