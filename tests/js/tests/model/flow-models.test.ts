@@ -539,6 +539,51 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
     expect(misses).to.deep.equal([]);
   });
 
+  // Review criterion 3 (2026-08-27): "Flows can be listed on user requests.
+  // Give the address to search on." — the UI or agent hands us a URI and
+  // wants every flow running on that expression, regardless of which flow.
+  it("narrows by subject URI when { subject } is supplied", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    await p.addFlow("Deliberation", makeDeliberationFlow());
+
+    await p.startFlowInstance("Delivery", "ad4m://task/target");
+    await p.startFlowInstance("Deliberation", "ad4m://task/target");
+    await p.startFlowInstance("Delivery", "ad4m://task/other");
+
+    const onTarget = await p.getFlowInstances({ subject: "ad4m://task/target" });
+    expect(onTarget.length).to.equal(2);
+    const flows = onTarget.map((i) => i.flowName).sort();
+    expect(flows).to.deep.equal(["Deliberation", "Delivery"]);
+    expect(onTarget.every((i) => i.subject === "ad4m://task/target")).to.equal(true);
+
+    const missSubject = await p.getFlowInstances({ subject: "ad4m://task/absent" });
+    expect(missSubject).to.deep.equal([]);
+  });
+
+  it("combines flowName + subject filters into a single AND-joined query", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    await p.addFlow("Deliberation", makeDeliberationFlow());
+
+    await p.startFlowInstance("Delivery", "ad4m://task/shared");
+    await p.startFlowInstance("Deliberation", "ad4m://task/shared");
+    await p.startFlowInstance("Delivery", "ad4m://task/other");
+
+    const deliveriesOnShared = await p.getFlowInstances({
+      flowName: "Delivery",
+      subject: "ad4m://task/shared",
+    });
+    expect(deliveriesOnShared.length).to.equal(1);
+    expect(deliveriesOnShared[0].flowName).to.equal("Delivery");
+    expect(deliveriesOnShared[0].subject).to.equal("ad4m://task/shared");
+
+    // Both filters must match — Deliberation on a distinct subject returns none.
+    const misses = await p.getFlowInstances({
+      flowName: "Deliberation",
+      subject: "ad4m://task/other",
+    });
+    expect(misses).to.deep.equal([]);
+  });
+
   it("returns fully hydrated wrappers (flowName, subject, currentStateName, startedAtMillis, shape)", async () => {
     await p.addFlow("Delivery", makeDeliveryFlow());
     const before = new Date().toISOString();

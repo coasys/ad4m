@@ -1193,9 +1193,18 @@ export class PerspectiveProxy {
      * {@link startFlowInstance} has ever run without hitting a
      * "class not registered" hydration error.
      *
-     * Optional `flowName` narrows by flow-name discriminator (single SHACL
-     * `where`-filter round-trip; no client-side filtering). Omitting the arg
-     * returns instances across all flows in the perspective.
+     * Filter surface (all optional, all combinable):
+     * - **`flowName`** — narrows by flow-name discriminator (e.g. "Delivery")
+     * - **`subject`** — narrows by base-expression URI, i.e. "give me every
+     *   flow running on THIS expression" (closes review criterion 3 —
+     *   listing instances by address a UI is looking at)
+     *
+     * Both filters translate to a single SHACL `where`-filter round-trip
+     * (no client-side filtering); combining them AND-joins server-side.
+     *
+     * Legacy string-arg shape (`getFlowInstances("Delivery")`) is preserved
+     * as shorthand for `{ flowName: "Delivery" }` — existing callers keep
+     * working verbatim.
      *
      * Records whose `flow` value has no matching `SHACLFlow` on the
      * perspective (e.g. the flow was unregistered) are silently skipped —
@@ -1207,22 +1216,46 @@ export class PerspectiveProxy {
      * underlying record shape via the Rust `load_flow_instances` primitive;
      * this proxy method is for UIs and clients working in TypeScript.
      *
-     * @param flowName - Optional flow-name filter
+     * @param filter - Optional filter (flow-name string OR object with
+     *   `flowName` and/or `subject`)
      * @returns `FlowInstance[]` wrappers, empty when none exist
      *
      * @example
      * ```typescript
+     * // All flows on the perspective
+     * const all = await p.getFlowInstances();
+     *
+     * // Legacy shorthand — every Delivery instance
      * const deliveries = await p.getFlowInstances("Delivery");
-     * for (const inst of deliveries) {
-     *   console.log(`${inst.subject} is in state ${inst.currentStateName}`);
-     * }
+     *
+     * // v5: every flow running on a specific expression
+     * const onThisTask = await p.getFlowInstances({ subject: "ad4m://task/1" });
+     *
+     * // v5: combined — Delivery flows on a specific expression
+     * const deliveriesOnTask = await p.getFlowInstances({
+     *   flowName: "Delivery",
+     *   subject: "ad4m://task/1",
+     * });
      * ```
      */
-    async getFlowInstances(flowName?: string): Promise<FlowInstance[]> {
+    async getFlowInstances(
+        filter?: string | { flowName?: string; subject?: string },
+    ): Promise<FlowInstance[]> {
         await Ad4mModel.registerAll(this, [FlowInstanceRecord, FlowTransitionProposal]);
+
+        // Normalize both call shapes into one { flowName?, subject? } bag.
+        const { flowName, subject } =
+            typeof filter === "string"
+                ? { flowName: filter, subject: undefined }
+                : { flowName: filter?.flowName, subject: filter?.subject };
+
+        const where: Record<string, string> = {};
+        if (flowName !== undefined) where.flow = flowName;
+        if (subject !== undefined) where.subject = subject;
+
         const records: FlowInstanceRecord[] =
-            flowName !== undefined
-                ? await FlowInstanceRecord.findAll(this, { where: { flow: flowName } })
+            Object.keys(where).length > 0
+                ? await FlowInstanceRecord.findAll(this, { where })
                 : await FlowInstanceRecord.findAll(this);
 
         // Pair each record with its parsed SHACLFlow. Cache lookups by
