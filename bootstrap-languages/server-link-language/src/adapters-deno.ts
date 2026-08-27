@@ -45,17 +45,34 @@ export class DenoTransport implements Transport {
                 JSON.stringify(headers),
                 body,
             );
+            // host.js httpFetchImpl returns a plain STRING (the response
+            // body text) on success — not the {status, body} object the
+            // ALDK type declaration promises. It throws for non-ok HTTP
+            // status codes. Handle the actual runtime shape.
+            if (typeof res === "string") {
+                return { status: 200, headers: {}, body: res };
+            }
             return {
                 status: res.status,
                 headers: {},
                 body: res.body || "",
             };
         } catch (err: unknown) {
-            // Network-level failure (DNS, connection refused). httpFetch only
-            // throws for these now — HTTP error codes arrive as { status, body }.
+            // httpFetchImpl throws for BOTH network errors AND non-ok HTTP
+            // status. For HTTP errors the message format is:
+            //   "http_fetch METHOD URL -> STATUS: body"
+            // Parse the status code out so callers can distinguish 404
+            // (no such resource) from 500 (server error) from 0 (network).
             const errMsg = err instanceof Error ? err.message : String(err);
-            console.error(`[transport] httpFetch network error: ${errMsg}`);
-            return { status: 0, headers: {}, body: errMsg };
+            const statusMatch = errMsg.match(/-> (\d+):/);
+            const status = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+            // Extract the response body (everything after "-> NNN: ").
+            const bodyIdx = statusMatch ? errMsg.indexOf(": ", errMsg.indexOf("-> ")) + 2 : -1;
+            const responseBody = bodyIdx > 1 ? errMsg.substring(bodyIdx) : errMsg;
+            if (status === 0) {
+                console.error(`[transport] httpFetch network error: ${errMsg}`);
+            }
+            return { status, headers: {}, body: responseBody };
         }
     }
 }

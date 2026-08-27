@@ -99,6 +99,18 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   running) and calls `resetAdapters()` / `auth.resetAuth()` for hygiene,
   but a fresh instance would start clean regardless.
 
+## Gotchas
+
+- **`httpFetch` (host.js) returns a plain string, not `{status, body}`.**
+  The ALDK type declaration says `httpFetch` returns
+  `Promise<{status: number, body: string}>`, but the actual host.js
+  implementation returns just the response body text on success, and throws
+  for non-ok HTTP status. `DenoTransport.fetch()` handles both shapes:
+  string return → wrap as `{status: 200, body: text}`, throw → parse the
+  HTTP status from the error message format `"http_fetch METHOD URL -> STATUS: body"`.
+  If you change the fetch adapter, preserve this handling — dropping it
+  silently loses every response body.
+
 ## Known limitations / follow-ups
 
 - **Durable outbox is limited to in-memory retry.** `enqueueCommitBatched`
