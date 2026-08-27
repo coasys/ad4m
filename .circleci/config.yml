@@ -56,9 +56,14 @@ commands:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
           command: |
             # CI_ARTIFACT_DIR: env-driven so the shared self-hosted runner
-            # can be re-imaged / re-owned without editing this file.
-            # Default is the historical hard-coded path used by the marvin runner.
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/home/marvin/ci-artifacts}"
+            # can be re-imaged / re-owned without editing this file. Default
+            # is a system-level path that does not couple this config to any
+            # particular user account on the runner host. The runner must
+            # `mkdir -p /var/lib/ci-artifacts && chown <ci-user> /var/lib/ci-artifacts`
+            # once at install time. Long-term this should move to GitLab CI
+            # (Nico's 2026-08-27 review); the /var/lib default is the short-term
+            # de-marvin-ification step.
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             mkdir -p target/release
             # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
             rm -f target/release/ad4m target/release/ad4m-executor
@@ -108,7 +113,7 @@ jobs:
       - run:
           name: Clean up stale local artifact stashes (older than 1 day)
           command: |
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/home/marvin/ci-artifacts}"
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
       - run:
           # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
@@ -152,7 +157,7 @@ jobs:
       - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/home/marvin/ci-artifacts}"
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             mkdir -p "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
             cp target/release/ad4m target/release/ad4m-executor "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
       - run:
@@ -249,7 +254,7 @@ jobs:
       - run:
           name: Restore binaries from local stash
           command: |
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/home/marvin/ci-artifacts}"
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             mkdir -p target/release
             cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m" target/release/ad4m
             cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m-executor" target/release/ad4m-executor
