@@ -1330,3 +1330,241 @@ mod tests {
         assert_eq!(out[0].consensus_rule.as_ref().unwrap().n, 2);
     }
 }
+
+// ============================================================================
+// Slice 10.4a3 — live-perspective integration test
+// ============================================================================
+//
+// The stub-perspective tests above pin every failure mode inside the
+// composer (unknown flow, guardless state, empty requires, unsatisfied
+// cardinality, `or` composition, per-state consensus override, query
+// error) but they route around the real `PerspectiveInstance::model_query`
+// implementation. What they *cannot* prove is that the
+// `ModelQuery → ModelQueryInput` translation `build_query_input_for_requires`
+// emits is a shape the real SPARQL/SDNA-backed `model_query` actually
+// accepts. This module closes that gap with one end-to-end pass against
+// a genuine perspective (real store, real Prolog, real `add_sdna`, real
+// `create_subject`, real `model_query`).
+//
+// Complements the 10.3d test in `flow_context.rs`:
+//   - 10.3d: read-side integration — definitions + minted instance
+//            → `FlowContext[]` + rendered prompt block.
+//   - 10.4a3 (this): write-side integration — same substrate → committed
+//            evidence flowing back through `model_query` → the
+//            deterministic `SatisfiedTransition[]` that slice 10.4b will
+//            turn into on-graph `FlowTransitionProposal` writes.
+//
+// No LLM is spun up.
+#[cfg(test)]
+mod e2e_tests {
+    use super::*;
+    use crate::perspectives::flow_classes::mint_flow_instance;
+    use crate::perspectives::flow_context::{load_flow_instances, load_shacl_flows};
+    use crate::perspectives::interpretation_test_support::{
+        seed_instance, setup_perspective_no_llm, TASK_SDNA,
+    };
+    use crate::perspectives::shacl_parser::parse_flow_to_links;
+    use crate::types::{Link, LinkStatus};
+
+    /// URL-encoded string-literal target, matching the wire shape the
+    /// slice 10.3a reader decodes.
+    fn lit(s: &str) -> String {
+        format!("literal:string:{}", urlencoding::encode(s))
+    }
+
+    /// Minimal two-state Delivery flow: `identified → scoped`. The
+    /// `requires` guard on `scoped` (at least one `ns://Task`) is
+    /// appended as a v5 link *after* `parse_flow_to_links` emits the
+    /// v4 predicates — same seeding pattern as the 10.3d e2e test.
+    fn delivery_flow_json() -> String {
+        serde_json::json!({
+            "name": "Delivery",
+            "namespace": "delivery://",
+            "start_action": [],
+            "states": [
+                {
+                    "name": "identified",
+                    "value": 0.0,
+                    "state_check": {
+                        "source": null,
+                        "predicate": "delivery://state",
+                        "target": "delivery://identified"
+                    }
+                },
+                {
+                    "name": "scoped",
+                    "value": 0.5,
+                    "state_check": {
+                        "source": null,
+                        "predicate": "delivery://state",
+                        "target": "delivery://scoped"
+                    }
+                }
+            ],
+            "transitions": [
+                {
+                    "action_name": "Scope",
+                    "from_state": "identified",
+                    "to_state": "scoped",
+                    "actions": []
+                }
+            ],
+        })
+        .to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn evaluate_flow_transitions_wires_definition_and_evidence_e2e() {
+        // 1) Real perspective, no LLM, `ns://Task` registered via
+        //    `add_sdna` — this is the same path the interpretation
+        //    pipeline uses, so `model_query("ns://Task", ...)` will
+        //    resolve against the real SPARQL store.
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        // 2) Seed the Delivery flow definition. The v4 predicates
+        //    (type / flowName / hasState / hasTransition / …) go
+        //    through the writer; the one v5 predicate we need — the
+        //    `requires` link on the `scoped` state — is added by hand
+        //    because `parse_flow_to_links` does not yet emit v5. The
+        //    reader (slice 10.3a) already walks the v5 shape, and the
+        //    evaluator needs to consume it today; this test pins that
+        //    contract until the writer catches up.
+        let scoped_uri = "delivery://Delivery.scoped";
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        // Cardinality `{ min: 1 }` is deliberate — proves the guard
+        // has genuinely got teeth (0 = unmet, 1 = met) rather than
+        // trivially satisfied by unset-count-defaults.
+        let requires_json = r#"[{"className":"ns://Task","count":{"min":1}}]"#;
+        perspective
+            .add_link(
+                Link {
+                    source: scoped_uri.to_string(),
+                    predicate: Some("ad4m://requires".to_string()),
+                    target: lit(requires_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(scoped.requires)");
+
+        // 3) Mint a FlowInstance in `identified` on a base URI. Same
+        //    call site the auto-processor / Model C write-side will
+        //    use.
+        let base_uri = "ad4m://task/onboarding";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-inst-1",
+            "2026-08-26T21:30:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        // 4) Load records + catalogue exactly as `run.rs` will after
+        //    slice 10.4b. Same shape 10.3d exercised on the read side,
+        //    but this time both are fed into the *write*-side gate.
+        let records = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances");
+        assert_eq!(records.len(), 1, "one active FlowInstance ⇒ one record");
+        let flows_by_name = load_shacl_flows(&perspective)
+            .await
+            .expect("load_shacl_flows");
+        assert_eq!(
+            flows_by_name.len(),
+            1,
+            "one Delivery definition ⇒ one catalogue entry"
+        );
+        // Reader guarantee: the hand-seeded v5 `requires` link must
+        // survive the round-trip back into a `ModelQuery[]` — otherwise
+        // the evaluator would see `None` and silent-skip regardless of
+        // the graph state, which would make the negative path below a
+        // false positive.
+        let scoped = flows_by_name
+            .get("Delivery")
+            .expect("Delivery in catalogue")
+            .states
+            .iter()
+            .find(|s| s.name == "scoped")
+            .expect("scoped state parsed");
+        let reqs = scoped
+            .requires
+            .as_deref()
+            .expect("scoped.requires decoded from v5 link");
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].class_name, "ns://Task");
+
+        // 5) Negative pass: no Task in the graph ⇒ requires unmet ⇒
+        //    zero satisfied transitions. Proves the "unmet" branch is
+        //    reached through the real SPARQL/SDNA stack, not just the
+        //    stub.
+        let before =
+            evaluate_flow_transitions(&perspective, &records, &flows_by_name, "did:key:acting")
+                .await;
+        assert!(
+            before.is_empty(),
+            "no Task instances ⇒ requires unmet ⇒ 0 satisfied, got {before:?}"
+        );
+
+        // 6) Seed a real Task via the same `create_subject` path the
+        //    interpretation pipeline uses. This is what makes the
+        //    positive assertion below a genuine end-to-end proof: the
+        //    evidence has to come out of the store the evaluator
+        //    queries, not out of a canned stub response.
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "ad4m://task/1",
+            "Onboard Ana",
+        )
+        .await;
+
+        // 7) Positive pass: one FlowInstance × one reachable next-state
+        //    × requires met ⇒ exactly one SatisfiedTransition.
+        let after =
+            evaluate_flow_transitions(&perspective, &records, &flows_by_name, "did:key:acting")
+                .await;
+        assert_eq!(
+            after.len(),
+            1,
+            "requires met ⇒ 1 satisfied transition, got {after:?}"
+        );
+        let t = &after[0];
+        assert_eq!(t.flow_name, "Delivery");
+        assert_eq!(t.instance_uri, inst_uri);
+        assert_eq!(t.subject, base_uri);
+        assert_eq!(t.from_state, "identified");
+        assert_eq!(t.to_state, "scoped");
+        assert!(
+            t.evidence_ids.contains(&"ad4m://task/1".to_string()),
+            "evidence_ids must include the seeded Task URI, got {:?}",
+            t.evidence_ids
+        );
+        assert_eq!(
+            t.evidence_hash,
+            evidence_hash(&["ns://Task".to_string()], &t.evidence_ids),
+            "evidence_hash must be a deterministic seal over (class_names, evidence_ids)"
+        );
+        // Flow definition carries no per-state semanticCheck and no
+        // consensus rule (flow-level or per-state) — both must fall
+        // through unset. Slice 10.5 exercises the semanticCheck path;
+        // the stub tests above cover consensus override precedence.
+        assert!(t.semantic_check.is_none());
+        assert!(t.consensus_rule.is_none());
+    }
+}
