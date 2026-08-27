@@ -90,16 +90,9 @@ export class FlowTransitionProposal extends Ad4mModel {
   @Optional({ through: "ad4m://flow/rationale" })
   rationale?: string;
 
-  /**
-   * RFC3339 timestamp when the proposal was written.
-   * Named `proposedAt` (not `createdAt`) because `Ad4mModel` reserves
-   * `createdAt` / `updatedAt` / `baseExpression` as synthetic hydration
-   * fields — a subclass property with those names is silently overwritten
-   * by the earliest / latest link timestamp on hydration, and the TS-side
-   * `jsonToModelInstance` converts any `createdAt` value to epoch millis.
-   */
-  @Property({ through: "ad4m://flow/created_at", required: true })
-  proposedAt: string = "";
+  // "When was this proposal written?" is answered by `Ad4mModel`'s built-in
+  // `createdAt`, synthesized on hydration from the earliest link timestamp
+  // of the proposal's own links (all written together during create_subject).
 }
 
 // ── FlowInstance ────────────────────────────────────────────────────────────
@@ -134,14 +127,7 @@ export class FlowInstance extends Ad4mModel {
   @Property({ through: "ad4m://flow/current_state", required: true })
   currentState: string = "";
 
-  /**
-   * RFC3339 timestamp when the flow was started on this base.
-   * Named `startedAt` (not `createdAt`) because `Ad4mModel` reserves
-   * `createdAt` / `updatedAt` as synthetic hydration fields — a subclass
-   * property with those names is silently overwritten by the earliest /
-   * latest link timestamp, and the TS-side `jsonToModelInstance` converts
-   * any `createdAt` value to epoch millis.
-   */
-  @Property({ through: "ad4m://flow/created_at", required: true })
-  startedAt: string = "";
+  // "When was this flow started?" is answered by `Ad4mModel`'s built-in
+  // `createdAt`, synthesized on hydration from the earliest link timestamp
+  // of the instance's own links (all written together during `mint_flow_instance`).
 }

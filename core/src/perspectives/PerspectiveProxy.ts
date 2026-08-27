@@ -1169,14 +1169,14 @@ export class PerspectiveProxy {
         // no-ops when both classes are already present.
         await Ad4mModel.registerAll(this, [FlowInstance, FlowTransitionProposal]);
         // Property keys must be the FlowInstance @Model field names — `subject`
-        // / `startedAt` (not `baseExpression` / `createdAt`, which collide with
-        // Ad4mModel synthetic hydration fields and would be silently shadowed
-        // on read).
+        // (not `baseExpression`, which collides with Ad4mModel's synthetic
+        // hydration field and would be silently shadowed on read). No
+        // explicit start-time field: Ad4mModel synthesises `createdAt` on
+        // hydration from the earliest link timestamp on the instance's URI.
         const instance = await FlowInstance.create(this, {
             flow: flowName,
             subject: baseExpression,
             currentState: flow.states[0].name,
-            startedAt: new Date().toISOString(),
         });
         return instance;
     }

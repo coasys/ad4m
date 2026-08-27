@@ -316,10 +316,12 @@ pub struct FlowInstanceRecord {
     pub subject: String,
     /// Current state name (matches a `FlowState.name` on the flow).
     pub current_state: String,
-    /// ISO-8601 timestamp the instance was minted at. `None` when the
-    /// scalar wasn't set on-graph — rare but not fatal; the extraction
-    /// pass renders "start time unknown" rather than skipping the record.
-    pub started_at: Option<String>,
+    /// ISO-8601 timestamp the instance was minted at. Sourced from
+    /// `Ad4mModel`'s synthesised `createdAt` (earliest link timestamp on
+    /// the instance's URI). `None` when hydration didn't produce a
+    /// timestamp — rare, but the extraction pass renders "start time
+    /// unknown" rather than skipping the record.
+    pub created_at: Option<String>,
 }
 
 /// Parse one hydrated `FlowInstance` JSON object (as returned by
@@ -336,8 +338,11 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
     let flow_name = v.get("flow").and_then(|x| x.as_str())?.to_string();
     let subject = v.get("subject").and_then(|x| x.as_str())?.to_string();
     let current_state = v.get("currentState").and_then(|x| x.as_str())?.to_string();
-    let started_at = v
-        .get("startedAt")
+    // Ad4mModel synthesises `createdAt` from the earliest link timestamp
+    // on hydration (`rust-executor/src/perspectives/model_query/hydration.rs`).
+    // When present it's an RFC3339 string; we keep it opaque here.
+    let created_at = v
+        .get("createdAt")
         .and_then(|x| x.as_str())
         .map(str::to_string);
     Some(FlowInstanceRecord {
@@ -345,7 +350,7 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
         instance_uri,
         subject,
         current_state,
-        started_at,
+        created_at,
     })
 }
 
@@ -1037,7 +1042,9 @@ mod tests {
             "flow": "Delivery",
             "subject": "ad4m://task/foo",
             "currentState": "scoped",
-            "startedAt": "2026-08-26T09:00:00Z",
+            // `createdAt` is Ad4mModel's synthesised earliest-link
+            // timestamp — the value the record now sources from.
+            "createdAt": "2026-08-26T09:00:00Z",
             "author": "did:key:z6Mk…",
             "timestamp": "2026-08-26T09:00:00.001Z"
         });
@@ -1046,7 +1053,7 @@ mod tests {
         assert_eq!(r.flow_name, "Delivery");
         assert_eq!(r.subject, "ad4m://task/foo");
         assert_eq!(r.current_state, "scoped");
-        assert_eq!(r.started_at.as_deref(), Some("2026-08-26T09:00:00Z"));
+        assert_eq!(r.created_at.as_deref(), Some("2026-08-26T09:00:00Z"));
     }
 
     #[test]
@@ -1061,15 +1068,15 @@ mod tests {
             "flow": "Deliberation",
             "subject": "ad4m://proposal/bar",
             "currentState": "perspectives",
-            "startedAt": "2026-08-26T10:00:00Z",
-            "createdAt": 1787751652750_u64,
-            "updatedAt": 1787751652751_u64,
+            "createdAt": "2026-08-26T10:00:00Z",
+            "updatedAt": "2026-08-26T10:00:00.001Z",
             "author": "did:key:zzzz",
             "some_future_property_the_llm_added": "hello",
         });
         let r = parse_flow_instance_from_hydrated(&v).expect("required scalars present");
         assert_eq!(r.flow_name, "Deliberation");
         assert_eq!(r.current_state, "perspectives");
+        assert_eq!(r.created_at.as_deref(), Some("2026-08-26T10:00:00Z"));
     }
 
     #[test]
@@ -1086,9 +1093,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_flow_instance_missing_started_at_still_parses() {
-        // startedAt is optional — the record still parses; the extraction
-        // pass renders "start time unknown" rather than skipping.
+    fn parse_flow_instance_missing_created_at_still_parses() {
+        // `createdAt` (synthesised on hydration) is optional in the
+        // record — the extraction pass renders "start time unknown"
+        // rather than skipping when a hydration path elides it.
         let v = serde_json::json!({
             "id": "ad4m://flow/instance/no-ts",
             "flow": "Delivery",
@@ -1096,7 +1104,7 @@ mod tests {
             "currentState": "identified",
         });
         let r = parse_flow_instance_from_hydrated(&v).expect("required scalars present");
-        assert!(r.started_at.is_none());
+        assert!(r.created_at.is_none());
     }
 
     #[test]
@@ -1121,7 +1129,7 @@ mod tests {
             instance_uri: uri.to_string(),
             subject: subject.to_string(),
             current_state: state.to_string(),
-            started_at: Some("2026-08-26T09:00:00Z".to_string()),
+            created_at: Some("2026-08-26T09:00:00Z".to_string()),
         }
     }
 
@@ -1581,7 +1589,6 @@ mod e2e_tests {
             base_uri,
             "identified",
             "e2e-inst-1",
-            "2026-08-26T21:30:00Z",
             None,
             &ctx,
         )

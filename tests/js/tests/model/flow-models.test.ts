@@ -95,11 +95,6 @@ describe("FlowTransitionProposal — @Model", function () {
       predicate: "ad4m://flow/evidence_hashes",
       target: "literal:string:{}",
     }));
-    await p.add(new Link({
-      source: proposal,
-      predicate: "ad4m://flow/created_at",
-      target: "literal:string:2026-08-26T09:00:00Z",
-    }));
 
     const proposals = await FlowTransitionProposal.findAll(p);
     expect(proposals).to.have.lengthOf(1);
@@ -108,7 +103,9 @@ describe("FlowTransitionProposal — @Model", function () {
     expect(proposals[0].toState).to.equal("tensionIdentified");
     expect(proposals[0].proposer).to.equal("did:example:alice");
     expect(proposals[0].evidenceHashes).to.equal("{}");
-    expect(proposals[0].proposedAt).to.equal("2026-08-26T09:00:00Z");
+    // "When was this proposed?" is answered by Ad4mModel's built-in
+    // `createdAt`, synthesised on hydration from the earliest link
+    // timestamp — verified in the FlowInstance suite below.
   });
 
   it("FlowTransitionProposal round-trip: evidence + optional runUri/rationale hydrate", async () => {
@@ -265,18 +262,15 @@ describe("FlowInstance — @Model", function () {
       predicate: "ad4m://flow/current_state",
       target: "literal:string:Scoped",
     }));
-    await p.add(new Link({
-      source: instance,
-      predicate: "ad4m://flow/created_at",
-      target: "literal:string:2026-08-26T09%3A45%3A00Z",
-    }));
 
     const all = await FlowInstance.findAll(p);
     expect(all.length).to.equal(1);
     expect(all[0].flow).to.equal("Delivery");
     expect(all[0].subject).to.equal("ad4m://some-subject");
     expect(all[0].currentState).to.equal("Scoped");
-    expect(all[0].startedAt).to.equal("2026-08-26T09:45:00Z");
+    // `createdAt` is Ad4mModel's synthesised earliest-link timestamp
+    // (ms since epoch after hydration); presence is enough for parity.
+    expect(all[0].createdAt).to.be.a("number");
   });
 
   it("FlowInstance @Model shape matches Rust flow_instance.json", () => {
@@ -372,8 +366,12 @@ describe("PerspectiveProxy.startFlowInstance — v5 API", function () {
     expect(instance.flow).to.equal("Delivery");
     expect(instance.subject).to.equal("ad4m://task/1");
     expect(instance.currentState).to.equal("Identified");
-    expect(instance.startedAt >= before && instance.startedAt <= after,
-      `startedAt ${instance.startedAt} must fall in [${before}, ${after}]`).to.equal(true);
+    // Start time = Ad4mModel's synthesised `createdAt` (earliest link
+    // timestamp on the instance URI, epoch millis after hydration).
+    const beforeMs = new Date(before).getTime();
+    const afterMs = new Date(after).getTime();
+    expect(instance.createdAt >= beforeMs && instance.createdAt <= afterMs,
+      `createdAt ${instance.createdAt} must fall in [${beforeMs}, ${afterMs}]`).to.equal(true);
 
     // Findable via the discriminator predicate — same lookup UIs will use.
     const all = await FlowInstance.findAll(p);
@@ -536,7 +534,7 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
     expect(misses).to.deep.equal([]);
   });
 
-  it("returns fully hydrated instances (flow, subject, currentState, startedAt)", async () => {
+  it("returns fully hydrated instances (flow, subject, currentState, createdAt)", async () => {
     await p.addFlow("Delivery", makeDeliveryFlow());
     const before = new Date().toISOString();
     await p.startFlowInstance("Delivery", "ad4m://task/hydrate");
@@ -546,7 +544,11 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
     expect(hydrated.flow).to.equal("Delivery");
     expect(hydrated.subject).to.equal("ad4m://task/hydrate");
     expect(hydrated.currentState).to.equal("Identified");
-    expect(hydrated.startedAt >= before && hydrated.startedAt <= after,
-      `startedAt ${hydrated.startedAt} must fall in [${before}, ${after}]`).to.equal(true);
+    // Start time = Ad4mModel's synthesised `createdAt` (earliest link
+    // timestamp on the instance URI, epoch millis after hydration).
+    const beforeMs = new Date(before).getTime();
+    const afterMs = new Date(after).getTime();
+    expect(hydrated.createdAt >= beforeMs && hydrated.createdAt <= afterMs,
+      `createdAt ${hydrated.createdAt} must fall in [${beforeMs}, ${afterMs}]`).to.equal(true);
   });
 });
