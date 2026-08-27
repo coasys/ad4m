@@ -729,6 +729,23 @@ pub struct AddAutoProcessorRequest {
     pub emit_debug_events: Option<bool>,
 }
 
+/// Stop a neighbourhood auto-processor by deleting its config instance.
+///
+/// The counterpart to [`AddAutoProcessorRequest`]. A processor's registration is a subject instance
+/// in the shared graph, which the watch loop re-reads on every tick, so removing that instance is
+/// what stops it — and stops it for the neighbourhood, since the config is `Shared` state rather
+/// than one peer's local record of it.
+///
+/// Server-side deserialization only, matching [`AddAutoProcessorRequest`]: the TypeScript client
+/// passes `uuid` separately and names only the processor.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveAutoProcessorRequest {
+    pub uuid: String,
+    /// The `processorId` the processor was registered under.
+    pub processor_id: String,
+}
+
 /// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —
 /// resolve an LLM interpretation overlay's suggestion(s) on a base. `property`
 /// scopes to one predicate; omit it to accept/reject the whole base.
