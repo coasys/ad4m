@@ -48,21 +48,7 @@ export async function runHcLocalServices(): Promise<{proxyUrl: string | null, bo
     const localBin = path.join(repoRoot, ".hc-toolchain", "bin", "kitsune2-bootstrap-srv");
     const bootstrapBin = fs.existsSync(localBin) ? localBin : "kitsune2-bootstrap-srv";
     console.log(`runHcLocalServices: using ${bootstrapBin}`);
-    // NET-DIAG: run bootstrap-srv with verbose logging so we can see the
-    // access log (which executor connects, when, which space, what auth).
-    // KITSUNE2_BOOTSTRAP_SRV_LOG is the underlying tracing filter env var;
-    // RUST_BACKTRACE gives us a real trace if it panics.
-    // spawn() (not exec()): exec wraps the binary in `sh -c`, so kill()
-    // only reaches the shell and the actual bootstrap-srv is orphaned,
-    // accumulating stray servers on the shared CI runner.
-    let servicesProcess = spawn(bootstrapBin, [], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-            ...process.env,
-            KITSUNE2_BOOTSTRAP_SRV_LOG: "kitsune2=debug,kitsune2_bootstrap_srv=trace",
-            RUST_BACKTRACE: "1",
-        },
-    });
+    let servicesProcess = exec(bootstrapBin);
 
     let proxyUrl: string | null = null;
     let bootstrapUrl: string | null = null;

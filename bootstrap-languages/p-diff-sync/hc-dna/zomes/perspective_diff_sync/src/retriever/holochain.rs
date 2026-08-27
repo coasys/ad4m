@@ -175,17 +175,6 @@ pub fn get_active_agents() -> SocialContextResult<Vec<AgentPubKey>> {
     //   - send_broadcast reaching nobody.
     let recent_agents = get_links(query, GetStrategy::Network)?;
 
-    // NET-DIAG: log raw link count BEFORE mapping so we can distinguish
-    // "DHT gossip has not reached us" (0 links) from "we know about peers
-    // but the mapping is broken" (>0 links, empty pubkeys). This is the
-    // exact call that `get_others()` in status.rs uses to feed the JS
-    // `otherAgents()` list — which is what the failing multi-user tests
-    // poll on for 50 * 2s = 100 seconds.
-    debug!(
-        "NET-DIAG get_active_agents(): raw link count = {}",
-        recent_agents.len()
-    );
-
     let recent_agents = recent_agents
         .into_iter()
         .map(|val| {
