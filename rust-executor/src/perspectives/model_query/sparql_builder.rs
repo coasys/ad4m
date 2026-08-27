@@ -699,20 +699,38 @@ fn compile_leaf_condition(
         return finish(out);
     }
 
-    // Relation-based where
+    // Relation-based where.
+    //
+    // Every relation is `is_collection` regardless of cardinality — `load_shape`
+    // marks them so the pipeline hydrates them all as arrays, and
+    // `is_scalar_relation` is what unwraps a `@HasOne` afterwards. So this
+    // branch is "the property is a link", not "the property is many-valued", and
+    // a quantifier over a to-one relation lands here like any other.
     if let Some(prop) = shape
         .properties
         .iter()
         .find(|p| &p.name == prop_name && p.is_collection)
     {
+        // Validated once for the whole branch rather than per arm: every arm
+        // emits it into a triple pattern, and two of them used to trust it while
+        // the property branch below checked. Declining is the sound failure —
+        // the condition falls to the post-hydration filter instead of reaching
+        // the store as malformed SPARQL. Empty counts as unemittable for the
+        // same reason it does in the property branch: a getter-backed relation
+        // has no predicate, and `<>` is a relative IRI that matches nothing
+        // while reporting the clause pushed.
+        if prop.predicate.is_empty() {
+            return None;
+        }
+        let safe_pred = validate_iri(&prop.predicate).ok()?;
         let direction = prop.direction.as_deref().unwrap_or("forward");
         match condition {
             WhereCondition::String(val) => {
                 if validate_iri(val).is_ok() {
                     if direction == "reverse" {
-                        out.push(format!("    <{val}> <{}> ?source .", prop.predicate));
+                        out.push(format!("    <{val}> <{safe_pred}> ?source ."));
                     } else {
-                        out.push(format!("    ?source <{}> <{val}> .", prop.predicate));
+                        out.push(format!("    ?source <{safe_pred}> <{val}> ."));
                     }
                 } else {
                     let safe_name = format!(
@@ -722,14 +740,12 @@ fn compile_leaf_condition(
                     let escaped = escape_sparql_string(val);
                     if direction == "reverse" {
                         out.push(format!(
-                                    "    ?_rv_{safe_name} <{}> ?source . FILTER(STR(?_rv_{safe_name}) = \"{escaped}\")",
-                                    prop.predicate
-                                ));
+                            "    ?_rv_{safe_name} <{safe_pred}> ?source . FILTER(STR(?_rv_{safe_name}) = \"{escaped}\")"
+                        ));
                     } else {
                         out.push(format!(
-                                    "    ?source <{}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) = \"{escaped}\")",
-                                    prop.predicate
-                                ));
+                            "    ?source <{safe_pred}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) = \"{escaped}\")"
+                        ));
                     }
                 }
             }
@@ -747,14 +763,12 @@ fn compile_leaf_condition(
                         .join(" ");
                     if direction == "reverse" {
                         out.push(format!(
-                                    "    VALUES ?_rv_{safe_name} {{ {iris} }}\n    ?_rv_{safe_name} <{}> ?source .",
-                                    prop.predicate
-                                ));
+                            "    VALUES ?_rv_{safe_name} {{ {iris} }}\n    ?_rv_{safe_name} <{safe_pred}> ?source ."
+                        ));
                     } else {
                         out.push(format!(
-                                    "    VALUES ?_ft_{safe_name} {{ {iris} }}\n    ?source <{}> ?_ft_{safe_name} .",
-                                    prop.predicate
-                                ));
+                            "    VALUES ?_ft_{safe_name} {{ {iris} }}\n    ?source <{safe_pred}> ?_ft_{safe_name} ."
+                        ));
                     }
                 } else {
                     let str_list = vals
@@ -764,18 +778,23 @@ fn compile_leaf_condition(
                         .join(", ");
                     if direction == "reverse" {
                         out.push(format!(
-                                    "    ?_rv_{safe_name} <{}> ?source . FILTER(STR(?_rv_{safe_name}) IN ({str_list}))",
-                                    prop.predicate
-                                ));
+                            "    ?_rv_{safe_name} <{safe_pred}> ?source . FILTER(STR(?_rv_{safe_name}) IN ({str_list}))"
+                        ));
                     } else {
                         out.push(format!(
-                                    "    ?source <{}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) IN ({str_list}))",
-                                    prop.predicate
-                                ));
+                            "    ?source <{safe_pred}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) IN ({str_list}))"
+                        ));
                     }
                 }
             }
             WhereCondition::Ops(ops) if ops.some.is_some() || ops.none.is_some() => {
+                // Every decline below ends the same way for the caller: the
+                // clause is incomplete, the post-hydration filter rejects every
+                // row, and the query returns nothing. That is the sound answer
+                // but an opaque one, so each reason says itself here — once per
+                // compile, where the reason is known, rather than once per row
+                // in `matches_ops`, where it is not.
+                //
                 // A quantifier compiles to an EXISTS group and nothing else, so
                 // any operator sitting beside it would be dropped on the way
                 // out — and the post-hydration layer, which fails closed on a
@@ -788,6 +807,12 @@ fn compile_leaf_condition(
                     || ops.gt.is_some()
                     || ops.gte.is_some()
                 {
+                    log::warn!(
+                        "where: `{prop_name}` combines a relation quantifier with another \
+                         operator. A quantifier compiles to an EXISTS group that carries \
+                         nothing else, so the pair cannot be answered together. The query \
+                         will return no rows."
+                    );
                     return None;
                 }
                 let (inner, negate) = match (&ops.some, &ops.none) {
@@ -795,10 +820,16 @@ fn compile_leaf_condition(
                     (None, Some(inner)) => (inner, true),
                     // Both at once has no single sensible reading, and
                     // guessing one would be worse than declining.
-                    _ => return None,
+                    _ => {
+                        log::warn!(
+                            "where: `{prop_name}` sets both `some` and `none`, which has no \
+                             single reading. The query will return no rows."
+                        );
+                        return None;
+                    }
                 };
                 let quantified = compile_relation_quantifier(
-                    shape, prop, prop_name, inner, negate, resolver, leaf_id,
+                    shape, prop, safe_pred, inner, negate, resolver, leaf_id,
                 )?;
                 out.push(quantified);
             }
@@ -1571,13 +1602,14 @@ fn rebase_pattern(pattern: &str, namespace: &str, target_var: &str) -> String {
 fn compile_relation_quantifier(
     shape: &ModelShape,
     prop: &super::types::ShapeProperty,
-    prop_name: &str,
+    safe_pred: &str,
     inner: &BTreeMap<String, WhereCondition>,
     negate: bool,
     resolver: Option<&dyn ShapeResolver>,
     leaf_id: usize,
 ) -> Option<String> {
-    let safe_pred = validate_iri(&prop.predicate).ok()?;
+    // The caller found `prop` *by* this name, so the two cannot disagree.
+    let prop_name = prop.name.as_str();
     // The leaf id keeps two quantifiers on the same relation apart. Each
     // `FILTER EXISTS` is already its own group, so this is belt-and-braces — but
     // it costs nothing and removes a case anyone would have to reason about.
@@ -1597,6 +1629,12 @@ fn compile_relation_quantifier(
 
     let mut body = vec![link];
 
+    // `include_relations` is the shape's own record of every link-typed property
+    // and the class it points at, written by `load_shape` from the SHACL — it is
+    // not the query's `include` map, and nothing here depends on the caller
+    // having asked to hydrate this relation. A relation is missing from it only
+    // when the SDNA declares no target class at all, which is also the case
+    // where there is no class to conform against.
     let target_class = shape
         .include_relations
         .iter()
@@ -1604,7 +1642,17 @@ fn compile_relation_quantifier(
         .map(|r| r.target_class_name.as_str())
         .filter(|n| !n.is_empty());
     let target_shape = match (target_class, resolver) {
-        (Some(class), Some(r)) => r.get_shape(class).ok(),
+        (Some(class), Some(r)) => match r.get_shape(class) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::warn!(
+                    "where: relation `{prop_name}` names target class `{class}`, which the \
+                     shape resolver could not load ({e}). A quantifier over it cannot be \
+                     compiled."
+                );
+                None
+            }
+        },
         _ => None,
     };
 
@@ -1627,10 +1675,23 @@ fn compile_relation_quantifier(
     if !inner.is_empty() {
         // The nested clause names properties of the *target* class, so it can
         // only be compiled with that class's shape in hand.
-        let target_shape = target_shape.as_ref()?;
+        let Some(target_shape) = target_shape.as_ref() else {
+            log::warn!(
+                "where: a nested clause on relation `{prop_name}` needs the target class's \
+                 shape, and none is available — the relation declares no target class, or \
+                 the query was compiled without a shape resolver. The query will return no \
+                 rows."
+            );
+            return None;
+        };
 
         let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver);
         if !compiled.complete || compiled.patterns.is_empty() {
+            log::warn!(
+                "where: the nested clause on relation `{prop_name}` could not be compiled to \
+                 SPARQL in full. A partial EXISTS would match rows the clause rejects, so it \
+                 is declined outright and the query will return no rows."
+            );
             return None;
         }
         body.extend(rebase_into_subquery(
@@ -1652,7 +1713,7 @@ fn compile_relation_quantifier(
 mod relation_quantifier_tests {
     use super::*;
     use crate::perspectives::model_query::test_helpers::{
-        flag, prop, relation, shape, StaticShapeResolver,
+        flag, prop, relation, scalar_relation, shape, StaticShapeResolver,
     };
     use crate::perspectives::model_query::types::{ShapeRelation, WhereOps};
 
@@ -2007,6 +2068,80 @@ mod relation_quantifier_tests {
             rebased[0],
             "    FILTER(STR(?_q0ft_x) = \"a\\\"?source\") ?_q0t <we://p> ?_q0r ."
         );
+    }
+
+    #[test]
+    fn a_to_one_relation_takes_a_quantifier_too() {
+        // `{ author: { none: {} } }` on a `@HasOne` — "has nobody assigned" — is
+        // the same question as `{ comments: { none: {} } }` on a `@HasMany`, and
+        // is answered in the same place. `load_shape` marks every relation
+        // `is_collection` whatever its cardinality (the pipeline hydrates them
+        // all as arrays and `is_scalar_relation` unwraps the to-one ones
+        // afterwards), so nothing routes this to the property arm, which would
+        // produce no filter and leave the fail-closed post-hydration path to
+        // return zero rows with no diagnostic.
+        let mut s = post_shape();
+        s.properties.push(scalar_relation("author", "we://author"));
+        s.include_relations.push(ShapeRelation {
+            name: "author".to_string(),
+            predicate: "we://author".to_string(),
+            direction: "forward".to_string(),
+            kind: "hasOne".to_string(),
+            max_count: Some(1),
+            target_class_name: "Agent".to_string(),
+            target_class_uri: String::new(),
+        });
+
+        let clause = wc(vec![("author", ops_with(None, Some(vec![])))]);
+        let compiled = compile_where_clause(&clause, &s, None);
+
+        assert!(compiled.complete, "cardinality does not gate a quantifier");
+        let sparql = compiled.patterns.join("\n");
+        assert!(sparql.contains("FILTER NOT EXISTS"), "{sparql}");
+        assert!(sparql.contains("?source <we://author>"), "{sparql}");
+    }
+
+    #[test]
+    fn a_getter_backed_relation_declines_rather_than_emitting_an_empty_iri() {
+        // The same hole `test_getter_property_condition_is_not_pushable` closed
+        // on the property branch: a getter-backed relation carries no predicate,
+        // and `<>` parses as a relative IRI, so the clause reported itself
+        // pushed and matched nothing.
+        let mut s = post_shape();
+        let mut rel = relation("computed", "");
+        rel.getter = Some("SELECT ?target WHERE { <Base> ?p ?target }".to_string());
+        s.properties.push(rel);
+
+        let clause = wc(vec![(
+            "computed",
+            WhereCondition::String("anything".to_string()),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, None);
+        assert!(compiled.patterns.is_empty(), "nothing can be emitted");
+        assert!(
+            !compiled.complete,
+            "so it must reach the post-hydration filter rather than be dropped"
+        );
+    }
+
+    #[test]
+    fn a_relation_with_an_unemittable_predicate_declines() {
+        // Every arm of the relation branch drops the predicate into a triple
+        // pattern, so it is validated once for the branch. Declining sends the
+        // condition to the post-hydration filter; emitting would send malformed
+        // SPARQL to the store.
+        let mut s = post_shape();
+        s.properties.push(relation("tags", "we://tags?<broken>"));
+
+        let clause = wc(vec![(
+            "tags",
+            WhereCondition::String("not-an-iri".to_string()),
+        )]);
+
+        let compiled = compile_where_clause(&clause, &s, None);
+        assert!(!compiled.complete);
+        assert!(compiled.patterns.is_empty());
     }
 
     #[test]
