@@ -317,11 +317,7 @@ describe("sync: bootstrap", () => {
 
         transport.route(
             (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [linkA, linkB], revision: "rev-snap" }) }),
-        );
-        transport.route(
-            (url, method) => method === "GET" && url.endsWith("/revision"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ revision: "rev-snap", sequence: 7 }) }),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [linkA, linkB], revision: "rev-snap", sequence: 7 }) }),
         );
 
         await syncModule.bootstrap();
