@@ -101,15 +101,13 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 
 ## Gotchas
 
-- **`httpFetch` (host.js) returns a plain string, not `{status, body}`.**
-  The ALDK type declaration says `httpFetch` returns
-  `Promise<{status: number, body: string}>`, but the actual host.js
-  implementation returns just the response body text on success, and throws
-  for non-ok HTTP status. `DenoTransport.fetch()` handles both shapes:
-  string return → wrap as `{status: 200, body: text}`, throw → parse the
-  HTTP status from the error message format `"http_fetch METHOD URL -> STATUS: body"`.
-  If you change the fetch adapter, preserve this handling — dropping it
-  silently loses every response body.
+- **`httpFetch` return shape varies by executor version.**
+  Executor builds before `2b65ebbf0` return a plain string on success
+  and throw `"http_fetch METHOD URL -> STATUS: body"` for non-ok HTTP.
+  Current dev (`2b65ebbf0`+) returns `{ status, body }` for all
+  responses. `DenoTransport.fetch()` handles both shapes — do not
+  remove the `typeof res === "string"` guard until the old executor
+  version falls out of deployment.
 
 ## Known limitations / follow-ups
 

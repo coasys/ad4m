@@ -45,10 +45,9 @@ export class DenoTransport implements Transport {
                 JSON.stringify(headers),
                 body,
             );
-            // host.js httpFetchImpl returns a plain STRING (the response
-            // body text) on success — not the {status, body} object the
-            // ALDK type declaration promises. It throws for non-ok HTTP
-            // status codes. Handle the actual runtime shape.
+            // Executor versions before the 2b65ebbf0 fix return a plain
+            // string (response body) on success and throw for non-ok HTTP.
+            // Current dev returns { status, body }. Handle both.
             if (typeof res === "string") {
                 return { status: 200, headers: {}, body: res };
             }
@@ -58,15 +57,13 @@ export class DenoTransport implements Transport {
                 body: res.body || "",
             };
         } catch (err: unknown) {
-            // httpFetchImpl throws for BOTH network errors AND non-ok HTTP
-            // status. For HTTP errors the message format is:
+            // Old executors throw for non-ok HTTP status with the format:
             //   "http_fetch METHOD URL -> STATUS: body"
-            // Parse the status code out so callers can distinguish 404
-            // (no such resource) from 500 (server error) from 0 (network).
+            // Current dev returns { status, body } for all responses, so
+            // only genuine network errors (DNS, connection refused) land here.
             const errMsg = err instanceof Error ? err.message : String(err);
             const statusMatch = errMsg.match(/-> (\d+):/);
             const status = statusMatch ? parseInt(statusMatch[1], 10) : 0;
-            // Extract the response body (everything after "-> NNN: ").
             const bodyIdx = statusMatch ? errMsg.indexOf(": ", errMsg.indexOf("-> ")) + 2 : -1;
             const responseBody = bodyIdx > 1 ? errMsg.substring(bodyIdx) : errMsg;
             if (status === 0) {
