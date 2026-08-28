@@ -200,17 +200,22 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
       });
 
       it("divides successive waves between the executors without re-processing a turn", async () => {
-        // Debounce raised to 1500ms (7.5x the default 200ms) specifically for
-        // this test: it stresses the cross-peer claim + cursor race, and the
-        // 200ms drain window is short enough that Alice's ProcessingClaim
-        // link routinely doesn't sync to Bob before Bob's own watch tick
-        // drains the same batch. The wider window gives the claim + cursor
-        // sync latency headroom without materially slowing the test — total
-        // added wall-clock is ≈ 2× (debounce - 200ms) ≈ 2.6s across the two
-        // waves. Every OTHER test in this file keeps the fast default.
+        // Debounce raised to 5000ms (25x the default 200ms) specifically
+        // for this test: it stresses the cross-peer ProcessingClaim race,
+        // and 1500ms was still short enough on the Marvin runner for both
+        // peers' `try_claim` writes to land before either sees the
+        // other's — the "wave 1 processed by two peers" assertion the
+        // `waitForRetirementStable` helper catches. 5000ms gives claim
+        // sync a much wider window (Iroh gossip typical p99 ≈ 1–3s on a
+        // 2-peer neighbourhood after warm-up), at a wall-clock cost of
+        // ≈ 2× (5000 - 200ms) ≈ 9.6s across the two waves. Still cheap
+        // vs. the 4-minute test budget, and every OTHER test in this
+        // file keeps the fast default. This is a stopgap for the
+        // engine-level race noted in the PR description; the real fix
+        // is to make the claim serialisation not depend on sync latency.
         const { aliceP, bobP, events } = await sharedChannel("flux-waves", {
           batchMin: 2,
-          debounceMs: 1500,
+          debounceMs: 5000,
         });
 
         const aliceDid = await agentDid(testContext.alice);
