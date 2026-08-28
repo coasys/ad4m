@@ -106,9 +106,11 @@ pub struct Ad4mConfig {
     /// Peer SFU nodes in the cascade cluster, each `did=host:port`.
     /// Empty list = standalone SFU.
     pub sfu_cascade_peers: Option<Vec<String>>,
-    /// IP address the SFU media server binds to (e.g. `192.168.1.2`).
+    /// IP address the SFU media server binds to (e.g. `203.0.113.5`).
     /// str0m rejects `0.0.0.0` as a candidate, so this must be a real
-    /// interface IP.  Defaults to `127.0.0.1` (loopback, local-only).
+    /// interface IP.  When unset, the executor auto-detects the
+    /// machine's outbound IP — on a public server this resolves to
+    /// the correct address automatically.
     pub sfu_bind_addr: Option<String>,
 }
 

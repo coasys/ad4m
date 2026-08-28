@@ -439,14 +439,16 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         if let Some(ref addr) = config.sfu_bind_addr {
             match format!("{}:0", addr).parse() {
                 Ok(sa) => {
-                    info!("SFU media bind address override: {}", addr);
+                    info!("SFU bind address override: {}", addr);
                     sfu_config.bind_addr = sa;
                 }
                 Err(e) => warn!(
-                    "SFU bind address `{}` parse error: {} — using default",
+                    "SFU bind address `{}` parse error: {} — using auto-detected default",
                     addr, e
                 ),
             }
+        } else {
+            info!("SFU bind address auto-detected: {}", sfu_config.bind_addr.ip());
         }
         match crate::sfu::SfuService::start(sfu_config, gossip).await {
             Ok(svc) => info!("SFU service ready on UDP {}", svc.local_addr()),

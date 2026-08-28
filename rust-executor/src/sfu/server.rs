@@ -197,33 +197,25 @@ pub enum SfuCommand {
 /// Configuration for the SFU server.
 #[derive(Debug, Clone)]
 pub struct SfuServerConfig {
-    /// Address to bind the UDP socket to. Use 0.0.0.0:0 for auto-assignment.
+    /// Address to bind the UDP socket on.  The IP becomes the ICE host
+    /// candidate in every SDP answer, so it must equal the address
+    /// remote clients can reach.
+    ///
+    /// When no explicit `sfu_bind_addr` override exists, the default
+    /// auto-detects the machine's outbound IP via
+    /// [`detect_outbound_ip`](super::detect_outbound_ip).  On a server
+    /// with a public IP this resolves to that IP automatically; on a
+    /// local-only machine it falls back to `127.0.0.1`.
+    ///
+    /// Port `:0` lets the OS pick a free UDP port.
     pub bind_addr: SocketAddr,
-    /// STUN server URLs for ICE candidates.
-    pub stun_servers: Vec<String>,
-    /// TURN server URLs for ICE relay candidates.
-    pub turn_servers: Vec<TurnServer>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TurnServer {
-    pub url: String,
-    pub username: String,
-    pub credential: String,
 }
 
 impl Default for SfuServerConfig {
     fn default() -> Self {
+        let ip = super::detect_outbound_ip();
         Self {
-            // Bind to loopback so str0m accepts the bound socket address
-            // as a `Candidate::host` (str0m rejects 0.0.0.0 with "invalid
-            // ip 0.0.0.0" — it can't be used as a candidate IP).
-            // Production deployments should override this with the
-            // executor's public/LAN IP; the wind tunnel + local-dev case
-            // wants 127.0.0.1.
-            bind_addr: "127.0.0.1:0".parse().unwrap(),
-            stun_servers: vec!["stun:stun.l.google.com:19302".to_string()],
-            turn_servers: vec![],
+            bind_addr: SocketAddr::new(ip, 0),
         }
     }
 }
