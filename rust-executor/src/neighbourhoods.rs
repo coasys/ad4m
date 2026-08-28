@@ -83,7 +83,16 @@ pub async fn install_neighbourhood_with_context(
 
     // Check if neighbourhood already exists
     for p in perspectives.iter() {
-        let mut handle = p.persisted.lock().await.clone();
+        // Check `shared_url` while still holding the lock, and only clone
+        // the (potentially large) handle when the URL actually matches —
+        // avoids cloning every perspective's handle on every iteration.
+        let mut handle = {
+            let guard = p.persisted.lock().await;
+            if guard.shared_url != Some(url.clone()) {
+                continue;
+            }
+            guard.clone()
+        };
         if handle.shared_url == Some(url.clone()) {
             // Neighbourhood exists - add this user as owner if it's a user context
             log::info!(

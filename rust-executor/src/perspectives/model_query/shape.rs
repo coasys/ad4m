@@ -136,6 +136,14 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let mut properties: Vec<ShapeProperty> = Vec::new();
     let mut include_relations: Vec<ShapeRelation> = Vec::new();
 
+    // The constructor actions are identical for every property on this
+    // shape, so resolve them once here rather than once per property
+    // inside the loop below (previously 2 SPARQL queries per property —
+    // one to re-resolve `shape_uri` from `target_class`, one for the
+    // constructor itself — now 1 query total per `load_shape` call, using
+    // the `shape_uri` already resolved above).
+    let constructor_actions = resolve_constructor_actions(store, &shape_uri).unwrap_or_default();
+
     for prop_uri in &prop_order {
         let rows = match grouped.get(prop_uri) {
             Some(r) => r,
@@ -239,7 +247,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let initial_value = if is_flag {
             has_value.clone()
         } else {
-            initial_value_from_constructor(store, &target_class, &path)
+            initial_value_from_constructor(&constructor_actions, &path)
         };
 
         // Suppress writable-derived metadata: when explicitly false the
@@ -343,32 +351,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     })
 }
 
-/// Recover an initial value for a non-flag property by inspecting the
-/// constructor actions encoded as `ad4m://constructor` literal JSON on
-/// the shape.  Returns the `target` of any `addLink` action whose
-/// `predicate` matches `predicate`.
-fn initial_value_from_constructor(
-    store: &SparqlStore,
-    target_class: &str,
-    predicate: &str,
-) -> Option<String> {
-    // The constructor link is anchored to the shape URI, not the target
-    // class.  Resolve the shape URI from the target class so we can
-    // query for its constructor.
-    let safe_tc = escape_sparql_string(target_class);
-    let shape_query = format!(
-        r#"
-        SELECT ?shapeUri WHERE {{
-            <{safe_tc}> <ad4m://shape> ?shapeUri .
-        }}
-        LIMIT 1
-        "#
-    );
-    let shape_result_json = store.query(&shape_query).ok()?;
-    let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
-    let shape_uri = shape_rows.first()?["shapeUri"].as_str()?.to_string();
-
-    let safe_shape = escape_sparql_string(&shape_uri);
+/// Resolve the constructor actions array for a shape, given its already-known
+/// `shape_uri` (callers already have this from [`load_shape`] — no need to
+/// re-derive it from `target_class`).  Runs a single SPARQL query.  Callers
+/// should invoke this once per shape and reuse the result across all
+/// properties, rather than once per property.
+fn resolve_constructor_actions(store: &SparqlStore, shape_uri: &str) -> Option<Vec<Value>> {
+    let safe_shape = escape_sparql_string(shape_uri);
     let ctor_query = format!(
         r#"
         SELECT ?ctor WHERE {{
@@ -383,8 +372,18 @@ fn initial_value_from_constructor(
 
     let ctor_json = decode_literal_string_target(&ctor_literal);
     let actions: Value = serde_json::from_str(&ctor_json).ok()?;
-    let arr = actions.as_array()?;
-    for action in arr {
+    actions.as_array().cloned()
+}
+
+/// Recover an initial value for a non-flag property by inspecting the
+/// constructor actions (pre-resolved once per shape via
+/// [`resolve_constructor_actions`]).  Returns the `target` of any `addLink`
+/// action whose `predicate` matches `predicate`.
+fn initial_value_from_constructor(
+    constructor_actions: &[Value],
+    predicate: &str,
+) -> Option<String> {
+    for action in constructor_actions {
         let action_name = action["action"].as_str().unwrap_or("");
         let pred = action["predicate"].as_str().unwrap_or("");
         if action_name == "addLink" && pred == predicate {

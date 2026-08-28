@@ -131,7 +131,7 @@ pub(super) async fn resolve_projections(
                 reifier_patterns = reifier_patterns,
             );
 
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_async(&sparql).await?;
             let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
             let mut count_map: HashMap<String, u64> = HashMap::new();
@@ -175,7 +175,7 @@ pub(super) async fn resolve_projections(
                 order_clause = order_clause,
             );
 
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_async(&sparql).await?;
             let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
             // Collapse duplicate targets per parent.

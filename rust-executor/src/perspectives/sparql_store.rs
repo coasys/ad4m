@@ -1076,7 +1076,10 @@ impl SparqlStore {
         let results = self
             .sparql_evaluator()
             .parse_query(query_string)
-            .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?
+            .map_err(|e| anyhow!(
+                "Query is not valid read-only SPARQL (only SELECT/ASK/CONSTRUCT/DESCRIBE allowed): {}",
+                e
+            ))?
             .on_store(&self.store)
             .execute()
             .map_err(|e| {

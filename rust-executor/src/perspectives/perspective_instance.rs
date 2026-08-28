@@ -42,7 +42,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use urlencoding;
@@ -65,7 +65,6 @@ static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
 static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 60; // 1 minute in seconds (was 5 min)
-static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 /// How long `model_query` will poll a shared perspective for a
 /// class's SHACL to arrive over p-diff-sync before erroring — see
 /// `PerspectiveInstance::get_shape_or_wait`. Deliberately shorter
@@ -396,6 +395,9 @@ struct SubscribedQuery {
 /// A batch with its creation timestamp, for timeout-based cleanup.
 struct TimestampedBatch {
     diff: PerspectiveDiff,
+    /// Update pairs (old_link, new_link) tracked separately so commit_batch
+    /// can emit PERSPECTIVE_LINK_UPDATED_TOPIC instead of only add+remove.
+    updates: Vec<(LinkExpression, LinkExpression)>,
     created_at: Instant,
 }
 
@@ -476,7 +478,6 @@ pub struct PerspectiveInstance {
     pub uuid: String,
 
     pub created_from_join: bool,
-    pub is_fast_polling: bool,
     pub retries: u32,
 
     is_teardown: Arc<AtomicBool>,
@@ -485,9 +486,12 @@ pub struct PerspectiveInstance {
     link_language: Arc<RwLock<Option<Language>>>,
     trigger_notification_check: Arc<AtomicBool>,
     trigger_prolog_subscription_check: Arc<AtomicBool>,
+    /// Wakes `pending_diffs_loop` when a new diff gets stored.
+    pending_diffs_notify: Arc<Notify>,
+    /// Wakes `subscribed_queries_loop` when a subscription check fires.
+    subscription_notify: Arc<Notify>,
     /// Predicates of links changed since last subscription check.
     changed_predicates: Arc<Mutex<ChangedPredicates>>,
-    commit_debounce_timer: Arc<Mutex<Option<tokio::time::Instant>>>,
     immediate_commits_remaining: Arc<Mutex<usize>>,
     subscribed_queries: Arc<Mutex<HashMap<String, SubscribedQuery>>>,
     batch_store: Arc<RwLock<HashMap<String, TimestampedBatch>>>,
@@ -539,7 +543,6 @@ impl PerspectiveInstance {
             uuid: handle.uuid.clone(),
 
             created_from_join: created_from_join.unwrap_or(false),
-            is_fast_polling: false,
             retries: 0,
             is_teardown: Arc::new(AtomicBool::new(false)),
             sdna_change_mutex: Arc::new(Mutex::new(())),
@@ -547,8 +550,9 @@ impl PerspectiveInstance {
             link_language: Arc::new(RwLock::new(None)),
             trigger_notification_check: Arc::new(AtomicBool::new(false)),
             trigger_prolog_subscription_check: Arc::new(AtomicBool::new(false)),
+            pending_diffs_notify: Arc::new(Notify::new()),
+            subscription_notify: Arc::new(Notify::new()),
             changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
-            commit_debounce_timer: Arc::new(Mutex::new(None)),
             immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
             subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
             batch_store: Arc::new(RwLock::new(HashMap::new())),
@@ -783,6 +787,10 @@ impl PerspectiveInstance {
 
     pub async fn teardown_background_tasks(&self) {
         self.is_teardown.store(true, Ordering::Release);
+        // Wake both background loops so they observe is_teardown and exit
+        // promptly instead of blocking on their next notified().await.
+        self.pending_diffs_notify.notify_one();
+        self.subscription_notify.notify_one();
     }
 
     /// Return diagnostic stats for this perspective's memory-relevant data structures.
@@ -1062,56 +1070,108 @@ impl PerspectiveInstance {
 
     async fn pending_diffs_loop(&self) {
         let uuid = self.uuid.clone();
-        let mut interval = time::interval(Duration::from_millis(100));
-        let mut last_diff_time = None;
+
+        // Drain any pending diffs that were persisted before this startup.
+        // Without this, rows from a prior run sit in the DB until the next
+        // write triggers a notification.
+        {
+            let (_, ids) = Ad4mDb::with_global_instance(|db| {
+                db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
+            })
+            .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+            if !ids.is_empty() {
+                log::info!(
+                    "Found {} persisted pending diffs at startup — scheduling drain",
+                    ids.len()
+                );
+                self.pending_diffs_notify.notify_one();
+            }
+        }
 
         while !self.is_teardown.load(Ordering::Acquire) {
-            interval.tick().await;
+            // Sleep until a pending diff gets stored — zero CPU while idle.
+            self.pending_diffs_notify.notified().await;
 
-            if self.has_link_language().await {
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+
+            if !self.has_link_language().await {
+                // Link language not ready yet — re-trigger so the notification
+                // is not lost. The loop will re-check after a short delay.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                self.pending_diffs_notify.notify_one();
+                continue;
+            }
+
+            // A diff just arrived — enter the debounce/batch window.
+            let burst_start = tokio::time::Instant::now();
+
+            loop {
+                if self.is_teardown.load(Ordering::Acquire) {
+                    return;
+                }
+
                 let (_, ids) = Ad4mDb::with_global_instance(|db| {
                     db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
                 })
                 .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
                 if ids.is_empty() {
-                    continue;
+                    break;
                 }
 
-                if last_diff_time.is_none() {
-                    // First diff in a burst - start timer
-                    last_diff_time = Some(tokio::time::Instant::now());
+                // Hard time cap — commit if burst has lasted MAX_PENDING_SECONDS.
+                if burst_start.elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
+                    if self.commit_pending_diffs().await.is_ok() {
+                        log::info!(
+                            "Committed diffs after reaching {}s maximum wait time",
+                            MAX_PENDING_SECONDS
+                        );
+                    } else {
+                        // Retry after a bounded delay instead of returning to
+                        // the unbounded outer wait.
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        self.pending_diffs_notify.notify_one();
+                    }
+                    break;
                 }
 
-                // Commit if either:
-                // 1. It's been MAX_PENDING_SECONDS since first diff in burst (don't collect longer than MAX_PENDING_SECONDS)
-                if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
+                // Batch size cap
+                if ids.len() >= MAX_PENDING_DIFFS_COUNT {
                     if self.commit_pending_diffs().await.is_ok() {
-                        last_diff_time = None;
-                        log::info!("Committed diffs after reaching 10s maximum wait time");
+                        log::info!(
+                            "Committed diffs after collecting {}",
+                            MAX_PENDING_DIFFS_COUNT
+                        );
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        self.pending_diffs_notify.notify_one();
                     }
-                // 2. It's been > 1s since last new diff (burst is over)
-                } else if !self.has_new_diffs_in_last_second().await {
-                    if self.commit_pending_diffs().await.is_ok() {
-                        last_diff_time = None;
-                        log::info!("Committed diffs after 1s of inactivity");
-                    }
-                // 3. We have collected more than 100 diffs
-                } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
-                    && self.commit_pending_diffs().await.is_ok()
+                    break;
+                }
+
+                // Wait for more diffs within a 1s inactivity window.
+                match tokio::time::timeout(
+                    Duration::from_secs(1),
+                    self.pending_diffs_notify.notified(),
+                )
+                .await
                 {
-                    last_diff_time = None;
-                    log::info!("Committed diffs after collecting 100");
+                    Ok(_) => continue, // More diffs arrived — loop back and re-evaluate
+                    Err(_) => {
+                        // 1s of inactivity — burst over, commit what we have.
+                        if self.commit_pending_diffs().await.is_ok() {
+                            log::info!("Committed diffs after 1s of inactivity");
+                        } else {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            self.pending_diffs_notify.notify_one();
+                        }
+                        break;
+                    }
                 }
             }
         }
-    }
-
-    async fn has_new_diffs_in_last_second(&self) -> bool {
-        let timer = self.commit_debounce_timer.lock().await;
-        timer
-            .map(|instant| instant.elapsed() < tokio::time::Duration::from_secs(1))
-            .unwrap_or(false)
     }
 
     async fn has_link_language(&self) -> bool {
@@ -1449,9 +1509,8 @@ impl PerspectiveInstance {
         if !ok {
             // Store diff in DB
             Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
-            // Update or start timer
-            let mut timer = self.commit_debounce_timer.lock().await;
-            *timer = Some(tokio::time::Instant::now());
+            // Wake the pending-diffs loop so it picks up the new diff immediately.
+            self.pending_diffs_notify.notify_one();
         }
 
         Ok(())
@@ -1473,6 +1532,8 @@ impl PerspectiveInstance {
                 Ad4mDb::with_global_instance(|db|
                     db.add_pending_diff(&handle_clone.uuid, &diff_clone)
                 ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
+                // Wake the pending-diffs loop so it retries promptly.
+                self_clone.pending_diffs_notify.notify_one();
             }
         });
     }
@@ -1545,7 +1606,7 @@ impl PerspectiveInstance {
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
-        self.pubsub_publish_diff(decorated_diff).await;
+        self.pubsub_publish_diff(&decorated_diff).await;
 
         Ok(())
     }
@@ -1652,7 +1713,7 @@ impl PerspectiveInstance {
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
 
-                self.pubsub_publish_diff(decorated_diff.clone()).await;
+                self.pubsub_publish_diff(&decorated_diff).await;
 
                 if status == LinkStatus::Shared {
                     self.spawn_commit_and_handle_error(&diff);
@@ -1665,7 +1726,7 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
+    async fn pubsub_publish_diff(&self, decorated_diff: &DecoratedPerspectiveDiff) {
         // Get handle without holding lock during pubsub operations
         let handle = {
             let persisted_guard = self.persisted.lock().await;
@@ -1757,27 +1818,29 @@ impl PerspectiveInstance {
                 .ok_or(anyhow!("Batch not found"))?;
             let diff = &mut batch.diff;
 
-            let mut link_expr = link_expression.clone();
+            // `link_expression` isn't needed again in this branch — move instead of clone.
+            let mut link_expr = link_expression;
             link_expr.status = Some(status.clone());
             diff.additions.push(link_expr.clone());
 
-            return Ok(DecoratedLinkExpression::from((
-                link_expr.clone(),
-                status.clone(),
-            )));
+            // Last use of `link_expr` — move instead of clone.
+            return Ok(DecoratedLinkExpression::from((link_expr, status.clone())));
         }
 
         // Store link in SPARQL store
         let diff = PerspectiveDiff::from_additions(vec![link_expression.clone()]);
+        // Last use of `link_expression` — move instead of clone.
         let decorated_link_expression =
-            DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
+            DecoratedLinkExpression::from((link_expression, status.clone()));
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_perspective_diff).await?;
 
-        // Update both Prolog engines: subscription (immediate) + query (lazy)
+        // Update both Prolog engines: subscription (immediate) + query (lazy).
+        // Clone required here — spawn_prolog_facts_update needs an owned,
+        // 'static value for its spawned task.
         self.update_prolog_engines(decorated_perspective_diff.clone())
             .await;
 
@@ -1785,7 +1848,7 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&diff);
         }
 
-        self.pubsub_publish_diff(decorated_perspective_diff).await;
+        self.pubsub_publish_diff(&decorated_perspective_diff).await;
         Ok(decorated_link_expression)
     }
 
@@ -1839,7 +1902,7 @@ impl PerspectiveInstance {
             self.persist_link_diff(&decorated_perspective_diff).await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
-            self.pubsub_publish_diff(decorated_perspective_diff).await;
+            self.pubsub_publish_diff(&decorated_perspective_diff).await;
 
             if status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&perspective_diff);
@@ -1910,7 +1973,7 @@ impl PerspectiveInstance {
         self.persist_link_diff(&decorated_diff).await?;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
-        self.pubsub_publish_diff(decorated_diff.clone()).await;
+        self.pubsub_publish_diff(&decorated_diff).await;
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&diff);
@@ -1998,6 +2061,10 @@ impl PerspectiveInstance {
             let mut new_link_expr = new_link_expression.clone();
             new_link_expr.status = Some(link_status.clone());
             diff.additions.push(new_link_expr.clone());
+            // Track update pair so commit_batch can emit UPDATED events
+            batch
+                .updates
+                .push((old_link.clone(), new_link_expr.clone()));
 
             Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
         } else {
@@ -2137,7 +2204,7 @@ impl PerspectiveInstance {
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
-            self.pubsub_publish_diff(decorated_diff).await;
+            self.pubsub_publish_diff(&decorated_diff).await;
 
             // Only commit shared links by filtering decorated_links
             let shared_links: Vec<LinkExpression> = decorated_links
@@ -3494,6 +3561,7 @@ impl PerspectiveInstance {
                 self_clone
                     .trigger_prolog_subscription_check
                     .store(true, Ordering::Release);
+                self_clone.subscription_notify.notify_one();
 
                 // NOTE: pubsub_publish_diff is NOT called here.
                 // The synchronous caller (add_link_expression / link_mutations /
@@ -3630,6 +3698,7 @@ impl PerspectiveInstance {
                 self_clone
                     .trigger_prolog_subscription_check
                     .store(true, Ordering::Release);
+                self_clone.subscription_notify.notify_one();
             }
 
             //log::info!("🔧 PROLOG UPDATE: Total prolog update task took {:?}", spawn_start.elapsed());
@@ -5401,9 +5470,6 @@ impl PerspectiveInstance {
         // Note: the subscription loop must run even when Prolog is disabled,
         // because SPARQL subscriptions don't use Prolog at all.
 
-        let mut log_counter = 0;
-        const LOG_INTERVAL: u32 = 300; // Log every ~60 seconds (300 * 200ms)
-
         // Debounce window for batching rapid link changes into a single
         // subscription dispatch. A single Ad4mModel.save() can produce
         // multiple link inserts (one per property/flag); without a wide
@@ -5417,13 +5483,24 @@ impl PerspectiveInstance {
         // the multi-link-per-save and the rapid-saves-in-a-row cases.
         const BATCH_WINDOW_MS: u64 = 250;
 
-        while !self.is_teardown.load(Ordering::Acquire) {
-            // Check trigger without holding lock during the operation
-            let should_check = self
-                .trigger_prolog_subscription_check
-                .load(Ordering::Acquire);
+        // Periodic cleanup interval — replaces the old counter-based approach.
+        const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
-            if should_check {
+        let mut last_cleanup = Instant::now();
+
+        while !self.is_teardown.load(Ordering::Acquire) {
+            // Wait for either a subscription trigger or the cleanup interval.
+            // Zero CPU while idle — no 200ms polling.
+            let triggered =
+                tokio::time::timeout(CLEANUP_INTERVAL, self.subscription_notify.notified())
+                    .await
+                    .is_ok();
+
+            if self.is_teardown.load(Ordering::Acquire) {
+                return;
+            }
+
+            if triggered {
                 // Batch debounce: wait a short window for more changes to accumulate
                 sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
 
@@ -5444,11 +5521,9 @@ impl PerspectiveInstance {
                 self.check_subscribed_queries(changed_preds).await;
             }
 
-            // Periodic subscription logging and proactive timeout cleanup
-            log_counter += 1;
-            if log_counter >= LOG_INTERVAL {
-                log_counter = 0;
-                // Get perspective_uuid FIRST before acquiring subscribed_queries lock to avoid deadlock
+            // Periodic subscription cleanup and logging (~every 60s)
+            if last_cleanup.elapsed() >= CLEANUP_INTERVAL {
+                last_cleanup = Instant::now();
                 let perspective_uuid = self.uuid.clone();
                 let mut queries = self.subscribed_queries.lock().await;
 
@@ -5475,8 +5550,6 @@ impl PerspectiveInstance {
                         removed_queries.len(),
                         perspective_uuid
                     );
-                    // Notify prolog service for each removed subscription,
-                    // mirroring the flow in check_subscribed_queries().
                     for query in &removed_queries {
                         if let Err(e) = get_prolog_service()
                             .await
@@ -5510,8 +5583,6 @@ impl PerspectiveInstance {
                     }
                 }
             }
-
-            sleep(Duration::from_millis(QUERY_SUBSCRIPTION_CHECK_INTERVAL)).await;
         }
     }
 
@@ -5869,6 +5940,7 @@ impl PerspectiveInstance {
                     additions: Vec::new(),
                     removals: Vec::new(),
                 },
+                updates: Vec::new(),
                 created_at: now,
             },
         );
@@ -5894,12 +5966,13 @@ impl PerspectiveInstance {
         //log::info!("🔄 BATCH COMMIT: Starting batch commit for batch_uuid: {}", batch_uuid);
         //let batch_retrieval_start = std::time::Instant::now();
 
-        // Get the diff without holding lock during the entire operation
-        let diff = {
+        // Get the diff and tracked update pairs without holding lock during
+        // the entire operation
+        let (diff, update_pairs) = {
             let mut batch_store = self.batch_store.write().await;
 
             match batch_store.remove(&batch_uuid) {
-                Some(batch) => batch.diff,
+                Some(batch) => (batch.diff, batch.updates),
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
@@ -5992,7 +6065,7 @@ impl PerspectiveInstance {
             // Update Prolog: subscription engine (immediate) + query engine (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
 
-            // Publish PERSPECTIVE_LINK_ADDED/REMOVED/UPDATED to WS subscribers.
+            // Publish PERSPECTIVE_LINK_ADDED/REMOVED to WS subscribers.
             // The single-mutation paths (add_link / link_mutations /
             // diff_from_link_language) publish their diff synchronously before
             // spawning the prolog update, and spawn_prolog_facts_update
@@ -6000,7 +6073,57 @@ impl PerspectiveInstance {
             // paths. commit_batch never went through that publish step, so
             // batched diffs were never reaching WS subscribers — that's what
             // this call restores.
-            self.pubsub_publish_diff(combined_diff.clone()).await;
+            self.pubsub_publish_diff(&combined_diff).await;
+
+            // Emit PERSPECTIVE_LINK_UPDATED for tracked update pairs so WS
+            // subscribers see update events instead of only add+remove.
+            if !update_pairs.is_empty() {
+                let handle = self.persisted.lock().await.clone();
+                let pubsub = get_global_pubsub().await;
+                let owners_list = handle.owners.as_ref().filter(|o| !o.is_empty());
+
+                for (old_link, new_link) in &update_pairs {
+                    let decorated_old = DecoratedLinkExpression::from((
+                        old_link.clone(),
+                        old_link.status.clone().unwrap_or(LinkStatus::Shared),
+                    ));
+                    let decorated_new = DecoratedLinkExpression::from((
+                        new_link.clone(),
+                        new_link.status.clone().unwrap_or(LinkStatus::Shared),
+                    ));
+
+                    if let Some(owners) = owners_list {
+                        for owner in owners {
+                            let _ = pubsub
+                                .publish(
+                                    &PERSPECTIVE_LINK_UPDATED_TOPIC,
+                                    &serde_json::to_string(&PerspectiveLinkUpdatedWithOwner {
+                                        perspective_uuid: handle.uuid.clone(),
+                                        old_link: decorated_old.clone(),
+                                        new_link: decorated_new.clone(),
+                                        owner: owner.clone(),
+                                    })
+                                    .unwrap(),
+                                )
+                                .await;
+                        }
+                    } else {
+                        let main_agent_did = crate::agent::did();
+                        let _ = pubsub
+                            .publish(
+                                &PERSPECTIVE_LINK_UPDATED_TOPIC,
+                                &serde_json::to_string(&PerspectiveLinkUpdatedWithOwner {
+                                    perspective_uuid: handle.uuid.clone(),
+                                    old_link: decorated_old.clone(),
+                                    new_link: decorated_new.clone(),
+                                    owner: main_agent_did,
+                                })
+                                .unwrap(),
+                            )
+                            .await;
+                    }
+                }
+            }
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
