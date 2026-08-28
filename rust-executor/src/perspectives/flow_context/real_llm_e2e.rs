@@ -48,12 +48,7 @@ use crate::perspectives::interpretation_test_support::{
 };
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::shacl_parser::parse_flow_to_links;
-use crate::types::{Link, LinkStatus};
-
-/// URL-encoded string literal target for hand-appended v5 flow predicates.
-fn lit(s: &str) -> String {
-    format!("literal:string:{}", urlencoding::encode(s))
-}
+use crate::types::LinkStatus;
 
 /// Delivery-flow JSON matching what `SHACLFlow.toJSON()` emits and what
 /// `parse_flow_to_links` deserializes back. State names + hints are the
@@ -103,52 +98,26 @@ fn delivery_flow_json() -> String {
     .to_string()
 }
 
-/// Seed the perspective with the Delivery flow (writer for v4 + hand-added v5
-/// predicates), then mint a running `FlowInstance` on `base_uri`. Returns the
-/// URI of the minted instance so the caller can key follow-up assertions.
+/// Seed the perspective with the Delivery flow, then mint a running
+/// `FlowInstance` on `base_uri`. Returns the URI of the minted instance
+/// so the caller can key follow-up assertions. `parse_flow_to_links`
+/// emits every declared field (interpretationHint at flow + state scope,
+/// inputTypes, outputTypes, requires, semanticCheck, consensusRule,
+/// creationHint, context), so the fixture is a single JSON blob
+/// round-tripped through the writer — no hand-appended predicate
+/// scaffolding.
 async fn seed_delivery_flow_and_instance(
     perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     ctx: &crate::agent::AgentContext,
     base_uri: &str,
 ) -> String {
-    let flow_uri = "delivery://DeliveryFlow";
-    let identified_uri = "delivery://Delivery.identified";
-    let scoped_uri = "delivery://Delivery.scoped";
     let flow_links = parse_flow_to_links(&delivery_flow_json(), "Delivery")
         .expect("parse_flow_to_links(Delivery)");
     for link in flow_links {
         perspective
             .add_link(link, LinkStatus::Local, None, ctx)
             .await
-            .expect("add_link(flow definition v4)");
-    }
-    let v5_links = vec![
-        Link {
-            source: flow_uri.to_string(),
-            predicate: Some("ad4m://interpretationHint".to_string()),
-            target: lit("A team-scale unit of work moving from identification to done."),
-        },
-        Link {
-            source: flow_uri.to_string(),
-            predicate: Some("ad4m://inputTypes".to_string()),
-            target: lit("[\"ns://Task\"]"),
-        },
-        Link {
-            source: identified_uri.to_string(),
-            predicate: Some("ad4m://interpretationHint".to_string()),
-            target: lit("The team has named a piece of work but has not yet scoped it."),
-        },
-        Link {
-            source: scoped_uri.to_string(),
-            predicate: Some("ad4m://interpretationHint".to_string()),
-            target: lit("The team has agreed what the work is and can begin execution."),
-        },
-    ];
-    for link in v5_links {
-        perspective
-            .add_link(link, LinkStatus::Local, None, ctx)
-            .await
-            .expect("add_link(flow definition v5)");
+            .expect("add_link(flow definition)");
     }
 
     mint_flow_instance(

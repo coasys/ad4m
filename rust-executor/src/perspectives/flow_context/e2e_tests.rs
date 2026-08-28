@@ -40,13 +40,7 @@ use crate::perspectives::interpretation::{
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::shacl_parser::parse_flow_to_links;
-use crate::types::{Link, LinkStatus};
-
-/// URL-encoded string literal target, matching the wire shape
-/// `parse_flow_from_links` decodes.
-fn lit(s: &str) -> String {
-    format!("literal:string:{}", urlencoding::encode(s))
-}
+use crate::types::LinkStatus;
 
 /// Delivery flow JSON matching what `SHACLFlow.toJSON()` emits on the TS
 /// side (and what `parse_flow_to_links` deserializes into a `SHACLFlow`).
@@ -104,56 +98,20 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //     model_query resolution).
     let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
 
-    // 2) Seed the Delivery flow *definition* the way any producer
-    //    would. The writer half `parse_flow_to_links` covers the v4
-    //    predicates (type / flowName / hasState / stateName /
-    //    stateValue / stateCheck / hasTransition / actionName /
-    //    fromState / toState); the v5 predicates (`interpretationHint`
-    //    at flow + state scope, `inputTypes`) are appended by hand
-    //    below. This is deliberate — the writer will grow v5 emission
-    //    later as part of the round-trip mirror-symmetry work, but
-    //    the reader shipped in slice 10.3a already knows how to walk
-    //    the v5 shape and Model C needs to consume it *today*. The
-    //    test asserting the reader picks these up is what pins that
-    //    guarantee down.
-    let flow_uri = "delivery://DeliveryFlow";
-    let identified_uri = "delivery://Delivery.identified";
-    let scoped_uri = "delivery://Delivery.scoped";
+    // 2) Seed the Delivery flow *definition* the way any producer would.
+    //    `parse_flow_to_links` now emits every field the reader consumes
+    //    (`interpretationHint` at flow + state scope, `inputTypes`,
+    //    `outputTypes`, `requires`, `semanticCheck`, `consensusRule`,
+    //    `creationHint`, `context`), so the fixture is a single JSON blob
+    //    round-tripped through the writer — no hand-appended predicate
+    //    scaffolding.
     let flow_links = parse_flow_to_links(&delivery_flow_json(), "Delivery")
         .expect("parse_flow_to_links(Delivery)");
     for link in flow_links {
         perspective
             .add_link(link, LinkStatus::Local, None, &ctx)
             .await
-            .expect("add_link(flow definition v4)");
-    }
-    let v5_links = vec![
-        Link {
-            source: flow_uri.to_string(),
-            predicate: Some("ad4m://interpretationHint".to_string()),
-            target: lit("A team-scale unit of work moving from identification to done."),
-        },
-        Link {
-            source: flow_uri.to_string(),
-            predicate: Some("ad4m://inputTypes".to_string()),
-            target: lit("[\"ad4m://Task\"]"),
-        },
-        Link {
-            source: identified_uri.to_string(),
-            predicate: Some("ad4m://interpretationHint".to_string()),
-            target: lit("The team has named a piece of work but has not yet scoped it."),
-        },
-        Link {
-            source: scoped_uri.to_string(),
-            predicate: Some("ad4m://interpretationHint".to_string()),
-            target: lit("The team has agreed on what the work is and can begin execution."),
-        },
-    ];
-    for link in v5_links {
-        perspective
-            .add_link(link, LinkStatus::Local, None, &ctx)
-            .await
-            .expect("add_link(flow definition v5)");
+            .expect("add_link(flow definition)");
     }
 
     // 3) Mint a FlowInstance on the base URI the extraction pass

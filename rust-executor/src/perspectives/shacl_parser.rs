@@ -365,6 +365,80 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
         target: format!("literal:string:{}", urlencoding::encode(flow_name)),
     });
 
+    // Flow-level `interpretationHint` — English frame the LLM sees at the
+    // top of the "Active flows" prompt block. Empty-string is treated as
+    // unset (mirrors the TS writer: emitting a meaningless empty predicate
+    // would round-trip as a real value that consumers then have to filter).
+    if let Some(hint) = flow
+        .interpretation_hint
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        links.push(Link {
+            source: flow_uri.clone(),
+            predicate: Some("ad4m://interpretationHint".to_string()),
+            target: format!("literal:string:{}", urlencoding::encode(hint)),
+        });
+    }
+
+    // Typed I/O — only serialised when non-empty (empty ≡ unset for
+    // round-trip fidelity; matches the TS writer).
+    if !flow.input_types.is_empty() {
+        let json = serde_json::to_string(&flow.input_types)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize inputTypes: {}", e))?;
+        links.push(Link {
+            source: flow_uri.clone(),
+            predicate: Some("ad4m://inputTypes".to_string()),
+            target: format!("literal:string:{}", urlencoding::encode(&json)),
+        });
+    }
+    if !flow.output_types.is_empty() {
+        let json = serde_json::to_string(&flow.output_types)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize outputTypes: {}", e))?;
+        links.push(Link {
+            source: flow_uri.clone(),
+            predicate: Some("ad4m://outputTypes".to_string()),
+            target: format!("literal:string:{}", urlencoding::encode(&json)),
+        });
+    }
+
+    // Flow-level `creationHint` — the "when to spawn this flow" English
+    // hint the interpretation engine reads to decide whether a base
+    // expression warrants a new FlowInstance.
+    if let Some(hint) = flow.creation_hint.as_deref().filter(|s| !s.is_empty()) {
+        links.push(Link {
+            source: flow_uri.clone(),
+            predicate: Some("ad4m://creationHint".to_string()),
+            target: format!("literal:string:{}", urlencoding::encode(hint)),
+        });
+    }
+
+    // Flow-level `context` — background ModelQueries the LLM sees in the
+    // prompt but that do NOT count toward `requires` guards on states.
+    // Single JSON literal (matches the reader / TS writer).
+    if let Some(ctx) = flow.context.as_ref().filter(|c| !c.is_empty()) {
+        let json = serde_json::to_string(ctx)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize context: {}", e))?;
+        links.push(Link {
+            source: flow_uri.clone(),
+            predicate: Some("ad4m://context".to_string()),
+            target: format!("literal:string:{}", urlencoding::encode(&json)),
+        });
+    }
+
+    // Flow-level `consensusRule` — default for state transitions when a
+    // FlowState omits its own rule; also the terminal-firing rule for
+    // zero-state flows.
+    if let Some(rule) = flow.consensus_rule.as_ref() {
+        let json = serde_json::to_string(rule)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize consensusRule: {}", e))?;
+        links.push(Link {
+            source: flow_uri.clone(),
+            predicate: Some("ad4m://consensusRule".to_string()),
+            target: format!("literal:string:{}", urlencoding::encode(&json)),
+        });
+    }
+
     // Start action
     if !flow.start_action.is_empty() {
         let actions_json = serde_json::to_string(&flow.start_action)
@@ -416,6 +490,58 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
             predicate: Some("ad4m://stateCheck".to_string()),
             target: format!("literal:string:{}", urlencoding::encode(&check_json)),
         });
+
+        // Per-state `interpretationHint` — the English hint the LLM sees
+        // for each reachable next-state in the active-flow prompt block.
+        // Empty-string treated as unset (round-trip parity with TS).
+        if let Some(hint) = state
+            .interpretation_hint
+            .as_deref()
+            .filter(|s| !s.is_empty())
+        {
+            links.push(Link {
+                source: state_uri.clone(),
+                predicate: Some("ad4m://interpretationHint".to_string()),
+                target: format!("literal:string:{}", urlencoding::encode(hint)),
+            });
+        }
+
+        // Per-state `requires` guard — ModelQuery[] the state-transition
+        // engine evaluates against the graph after each extraction pass.
+        // Single JSON literal on `ad4m://requires`; consumers parse back
+        // (see [`decode_model_query_array`]).
+        if let Some(qs) = state.requires.as_ref().filter(|q| !q.is_empty()) {
+            let json = serde_json::to_string(qs)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize requires: {}", e))?;
+            links.push(Link {
+                source: state_uri.clone(),
+                predicate: Some("ad4m://requires".to_string()),
+                target: format!("literal:string:{}", urlencoding::encode(&json)),
+            });
+        }
+
+        // Per-state `semanticCheck` — English prompt for the second-pass
+        // LLM confirmation the engine runs after `requires` matches.
+        if let Some(check) = state.semantic_check.as_deref().filter(|s| !s.is_empty()) {
+            links.push(Link {
+                source: state_uri.clone(),
+                predicate: Some("ad4m://semanticCheck".to_string()),
+                target: format!("literal:string:{}", urlencoding::encode(check)),
+            });
+        }
+
+        // Per-state `consensusRule` — overrides the flow-level rule
+        // when set (e.g. a Resolution state that needs a quorum even
+        // though the flow default is 1 signer).
+        if let Some(rule) = state.consensus_rule.as_ref() {
+            let json = serde_json::to_string(rule)
+                .map_err(|e| anyhow::anyhow!("Failed to serialize state consensusRule: {}", e))?;
+            links.push(Link {
+                source: state_uri.clone(),
+                predicate: Some("ad4m://consensusRule".to_string()),
+                target: format!("literal:string:{}", urlencoding::encode(&json)),
+            });
+        }
     }
 
     // Transitions
