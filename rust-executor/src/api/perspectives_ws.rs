@@ -939,6 +939,66 @@ async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(Value::String(data))
 }
 
+async fn subject_classes_of_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    // A malformed element cannot be dropped here. The result map omits URIs that
+    // matched no class, so a silently discarded input would be indistinguishable
+    // from a URI that is simply not a subject instance — the caller would read a
+    // shape error as a legitimate answer. Absent (or null, which is how an
+    // undefined field arrives from JS) keeps the empty default; anything present
+    // has to be an array of strings.
+    let uris: Vec<String> = match params.get("uris") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+            WsRpcError::bad_request(format!(
+                "Invalid parameter 'uris': expected string[]: {}",
+                e
+            ))
+        })?,
+    };
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+
+    // Classification is synchronous SPARQL plus in-memory containment over every
+    // class × every URI, so it runs on a blocking thread with the same timeout as
+    // the other store-backed queries rather than holding a runtime worker.
+    let result = tokio::time::timeout(
+        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || perspective.subject_classes_of(&uris)),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok(map))) => {
+            serde_json::to_value(map).map_err(|e| WsRpcError::internal(e.to_string()))
+        }
+        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
+        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+        Err(_) => {
+            log::warn!(
+                "Subject classification timed out after {}s",
+                SPARQL_QUERY_TIMEOUT_SECS
+            );
+            Err(WsRpcError {
+                code: 408,
+                message: format!(
+                    "Subject classification timed out after {}s",
+                    SPARQL_QUERY_TIMEOUT_SECS
+                ),
+            })
+        }
+    }
+}
+
 async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -1851,6 +1911,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.keepAliveSparql", keep_alive_query);
     map.register("perspective.disposeSparql", dispose_query);
     map.register("perspective.modelQuery", model_query_handler);
+    map.register("perspective.subjectClassesOf", subject_classes_of_handler);
     map.register("perspective.modelSubscribe", model_subscribe_handler);
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
     map.register("perspective.runInterpretation", run_interpretation_handler);

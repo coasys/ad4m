@@ -5384,6 +5384,325 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
     );
 }
 
+/// `subjectClassesOf` classifies a batch of URIs, finding flagged and flagless
+/// classes alike.
+#[tokio::test]
+async fn test_subject_classes_of_batch() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+
+    // Register three classes. TextBlock and ImageBlock are flagged; Untagged
+    // has no flag, only a required property, so nothing type-tag-like points at
+    // it and it can only be found structurally.
+    for (uri, shape_uri) in [
+        ("ns://models/TextBlock", "ns://models/TextBlockShape"),
+        ("ns://models/ImageBlock", "ns://models/ImageBlockShape"),
+        ("ns://models/Untagged", "ns://models/UntaggedShape"),
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+        store
+            .add_link(&make_link(uri, "ad4m://shape", shape_uri, "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImageBlock",
+        parse_shape_from_json(
+            r#"{"className":"ImageBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://image_block"}
+               },"relations":{}}"#,
+            "ImageBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Untagged",
+        parse_shape_from_json(
+            r#"{"className":"Untagged","properties":{
+                 "serial":{"predicate":"ns://serial","required":true}
+               },"relations":{}}"#,
+            "Untagged",
+        )
+        .unwrap(),
+    );
+
+    // Instances.
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://b", "ns://flag", "ns://image_block", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "ns://c",
+            "ns://serial",
+            "literal:string:xyz",
+            "4",
+        ))
+        .unwrap();
+
+    let uris = vec![
+        "ns://a".to_string(),
+        "ns://b".to_string(),
+        "ns://c".to_string(),
+        "ns://nothing".to_string(),
+    ];
+    let result = subject_classes_of(&store, &resolver, &uris).unwrap();
+
+    assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
+    assert_eq!(result.get("ns://b"), Some(&vec!["ImageBlock".to_string()]));
+    assert_eq!(
+        result.get("ns://c"),
+        Some(&vec!["Untagged".to_string()]),
+        "a flagless class is still found, by its required properties alone",
+    );
+    assert!(
+        !result.contains_key("ns://nothing"),
+        "a URI matching no class is absent, not mapped to a placeholder",
+    );
+}
+
+/// A URI that cannot be emitted as an IRIREF costs only itself.
+///
+/// Relative references and empty strings are a SPARQL *parse* error inside a
+/// `VALUES` clause, not a non-match, so letting one through would fail the whole
+/// batch's query and every well-formed URI alongside it.
+#[tokio::test]
+async fn test_subject_classes_of_mixed_absolute_and_unusable_uris() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "ns://models/TextBlock",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://b", "ns://flag", "ns://text_block", "3"))
+        .unwrap();
+
+    let uris = vec![
+        "ns://a".to_string(),
+        "active".to_string(), // relative — no scheme
+        "".to_string(),       // empty
+        ":leading-colon".to_string(),
+        "ns://b".to_string(),
+    ];
+    let result = subject_classes_of(&store, &resolver, &uris).expect("the batch still resolves");
+
+    assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
+    assert_eq!(
+        result.get("ns://b"),
+        Some(&vec!["TextBlock".to_string()]),
+        "a well-formed URI keeps its answer despite unusable neighbours",
+    );
+    assert_eq!(
+        result.len(),
+        2,
+        "the unusable URIs are absent, not classified and not fatal",
+    );
+}
+
+/// A class whose SHACL names a relative predicate is skipped, not fatal.
+///
+/// The predicate would go into the same `VALUES` clause, so admitting it would
+/// break `subjectClassesOf` for every URI in the perspective, not just for
+/// instances of that class.
+#[tokio::test]
+async fn test_subject_classes_of_skips_class_with_unusable_predicate() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    for uri in ["ns://models/Broken", "ns://models/TextBlock"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "Broken",
+        parse_shape_from_json(
+            r#"{"className":"Broken","properties":{
+                 "title":{"predicate":"title","required":true}
+               },"relations":{}}"#,
+            "Broken",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "title", "literal:string:hi", "2"))
+        .unwrap();
+
+    let result =
+        subject_classes_of(&store, &resolver, &["ns://a".to_string()]).expect("the batch resolves");
+
+    assert_eq!(
+        result.get("ns://a"),
+        Some(&vec!["TextBlock".to_string()]),
+        "the sound class still answers; the broken one is dropped, not matched",
+    );
+}
+
+/// A flag is not on its own proof of membership: a class is only matched when
+/// *every* triple it requires is present, which is what `isSubjectInstance`
+/// asks and therefore what this has to agree with.
+#[tokio::test]
+async fn test_subject_classes_of_requires_every_triple_not_just_a_flag() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "ns://models/TextBlock",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    // Carries the flag but not the required `text`, so it is not a TextBlock.
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+
+    assert!(
+        !result.contains_key("ns://a"),
+        "the flag alone does not make it an instance",
+    );
+}
+
+/// Structural membership is not exclusive, so every class the URI conforms to
+/// is returned — ordered most specific first, but none of them dropped.
+#[tokio::test]
+async fn test_subject_classes_of_returns_every_class_most_specific_first() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    for uri in ["ns://models/Post", "ns://models/ImagePost"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    // Post requires only the base flag; ImagePost requires that *and* more,
+    // which is what every subclass looks like.
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "kind":{"predicate":"ns://kind","required":true,"flag":true,"initial":"ns://node"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImagePost",
+        parse_shape_from_json(
+            r#"{"className":"ImagePost","properties":{
+                 "kind":{"predicate":"ns://kind","required":true,"flag":true,"initial":"ns://node"},
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "ImagePost",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://kind", "ns://node", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
+        .unwrap();
+
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+
+    let classes = result.get("ns://a").expect("ns://a is classified");
+    assert_eq!(
+        classes,
+        &vec!["ImagePost".to_string(), "Post".to_string()],
+        "the instance is a Post as well as an ImagePost, and both are reported",
+    );
+    assert_eq!(
+        classes.first().map(String::as_str),
+        Some("ImagePost"),
+        "callers that can only act on one class take the head and get the derived one",
+    );
+}
+
 /// A disjunction filters in SPARQL, and keeps its ordering and limit.
 ///
 /// Before the where clause was compiled as one tree, `OR` was skipped by the
