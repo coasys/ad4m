@@ -59,15 +59,15 @@ function fakeMediaStream(): MediaStream {
 
 function fakeApi() {
     return {
-        callJoin: jest.fn(),
-        callLeave: jest.fn(),
-        callSetQualityPreference: jest.fn(),
-        callAnswerServerOffer: jest.fn(),
-        subscribeCallRenegotiationOffer: jest.fn(),
-        subscribeMigrateEvent: jest.fn(),
-        addIceCandidate: jest.fn(),
-        sendData: jest.fn(),
-        subscribeDataChannel: jest.fn(),
+        sfuCallJoin: jest.fn(),
+        sfuCallLeave: jest.fn(),
+        sfuCallSetQualityPreference: jest.fn(),
+        sfuCallAnswerServerOffer: jest.fn(),
+        subscribeSfuCallRenegotiationOffer: jest.fn(),
+        subscribeSfuMigrateEvent: jest.fn(),
+        sfuAddIceCandidate: jest.fn(),
+        sfuSendData: jest.fn(),
+        subscribeSfuDataChannel: jest.fn(),
     }
 }
 
