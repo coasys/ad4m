@@ -11,14 +11,13 @@ import type {
     TrackMapEntry,
 } from "./SfuTypes";
 import type { SfuNeighbourhoodApi } from "./SfuManager";
-import type { SessionFactory } from "./SessionFactory";
-import { createSessionFactory } from "./SessionFactory";
+import { createSession, type Session, type SessionCreateOptions } from "./Session";
 
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
     #pID: string
     #agentDid: string
-    #sessionFactory: SessionFactory | null = null
+    #sessions: Session[] = []
 
     constructor(client: NeighbourhoodClient, pID: string, agentDid: string = "") {
         this.#client = client
@@ -92,13 +91,28 @@ export class NeighbourhoodProxy {
     // The session surface handles topology resolution, SDP negotiation,
     // cascade redirects, and failover internally.
 
-    /** Session factory for creating WebRTC media sessions in this neighbourhood. */
-    get session(): SessionFactory {
-        if (!this.#sessionFactory) {
-            const api = this.#buildSfuApi()
-            this.#sessionFactory = createSessionFactory(api, this.#agentDid, "")
-        }
-        return this.#sessionFactory
+    /** Active sessions in this neighbourhood. Destroyed sessions remove themselves. */
+    get sessions(): ReadonlyArray<Session> {
+        return this.#sessions
+    }
+
+    /** Create a WebRTC media session. Call session.join(localStream) to connect. */
+    createSession(roomName: string, options?: SessionCreateOptions): Session {
+        const session = createSession({
+            api: this.#buildSfuApi(),
+            roomId: roomName,
+            agentDid: this.#agentDid,
+            neighbourhoodUrl: options?.neighbourhoodUrl ?? "",
+            topology: options?.topology ?? "auto",
+        })
+        this.#sessions.push(session)
+        session.on("state-changed", (state: string) => {
+            if (state === "closed") {
+                const idx = this.#sessions.indexOf(session)
+                if (idx !== -1) this.#sessions.splice(idx, 1)
+            }
+        })
+        return session
     }
 
     #buildSfuApi(): SfuNeighbourhoodApi {

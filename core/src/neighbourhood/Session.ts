@@ -49,11 +49,6 @@ export interface Session {
     destroy(): Promise<void>
 }
 
-export interface SessionJoinOptions {
-    topology?: SessionTopology
-    neighbourhoodUrl?: string
-}
-
 export interface SessionCreateOptions {
     topology?: SessionTopology
     neighbourhoodUrl?: string
