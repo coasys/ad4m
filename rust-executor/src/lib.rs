@@ -44,7 +44,7 @@ use crate::{
     languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
-pub use holochain_service::run_local_hc_services;
+
 #[cfg(unix)]
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
 #[cfg(unix)]
@@ -179,6 +179,26 @@ async fn holochain_signal_receiver() {
                     }
                     Signal::System(_) => {
                         info!("Received system signal");
+                    }
+                    // HC 0.7.0 added Signal::AppDirect (direct peer-to-peer
+                    // signal that bypasses the DHT). AD4M's per-language
+                    // signal routing goes through Signal::App only; direct
+                    // signals are logged and ignored here — individual
+                    // languages that want direct-signal support can wire it
+                    // in later via a dedicated handler.
+                    //
+                    // Matched explicitly rather than falling through the
+                    // wildcard so any *future* Signal variant surfaces as a
+                    // real unhandled-variant log line instead of being silently
+                    // rebranded as an AppDirect. (Data's PR #907 review MED-4.)
+                    Signal::AppDirect { .. } => {
+                        log::debug!(
+                            "Received Signal::AppDirect (HC 0.7 direct peer signal; \
+                             not routed to per-language handlers)"
+                        );
+                    }
+                    _ => {
+                        log::debug!("Received unhandled Holochain signal variant: {:?}", signal);
                     }
                 }
             } else {
@@ -421,7 +441,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         static V8_FLAGS_INIT: Once = Once::new();
         V8_FLAGS_INIT.call_once(|| {
             deno_core::v8::V8::set_flags_from_string("--max-opt=0");
-            deno_core::JsRuntime::init_platform(None, false);
+            // deno v2.9: init_platform signature changed — was (Option, bool),
+            // now takes only Option<v8::SharedRef<v8::Platform>>. The second
+            // `bool` argument (`predictable`) was removed.
+            deno_core::JsRuntime::init_platform(None);
         });
     }
 
