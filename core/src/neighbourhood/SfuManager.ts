@@ -26,26 +26,26 @@ import type {
 /** Minimal interface for the neighbourhood client methods the SFU
  *  manager calls.  NeighbourhoodClient satisfies this directly. */
 export interface SfuNeighbourhoodApi {
-    sfuCallJoin(
+    callJoin(
         neighbourhoodUrl: string,
         roomName: string,
         sdpOffer: string,
     ): Promise<CallSessionInfo>
-    sfuCallLeave(
+    callLeave(
         neighbourhoodUrl: string,
         roomName: string,
     ): Promise<boolean>
-    sfuCallSetQualityPreference(
+    callSetQualityPreference(
         neighbourhoodUrl: string,
         roomName: string,
         preference: SfuQualityPreference,
     ): Promise<boolean>
-    sfuCallAnswerServerOffer(
+    callAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
         sdpAnswer: string,
     ): Promise<boolean>
-    subscribeSfuCallRenegotiationOffer(
+    subscribeCallRenegotiationOffer(
         targetDid: string,
         callback: (event: {
             targetDid: string
@@ -55,7 +55,7 @@ export interface SfuNeighbourhoodApi {
             trackMapping?: TrackMapEntry[]
         }) => void,
     ): () => void
-    subscribeSfuMigrateEvent(
+    subscribeMigrateEvent(
         targetDid: string,
         callback: (event: {
             targetDid: string
@@ -64,19 +64,19 @@ export interface SfuNeighbourhoodApi {
             migrateToDid: string
         }) => void,
     ): () => void
-    sfuAddIceCandidate(
+    addIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
         candidate: string,
     ): Promise<boolean>
-    sfuSendData(
+    sendData(
         neighbourhoodUrl: string,
         roomName: string,
         channelLabel: string,
         data: string,
         binary?: boolean,
     ): Promise<boolean>
-    subscribeSfuDataChannel(
+    subscribeDataChannel(
         callback: (message: SfuDataMessage) => void,
     ): () => void
 }
@@ -455,7 +455,7 @@ export class SfuManager {
         pc.onicecandidate = (event) => {
             if (!event.candidate) return
             if (joinComplete) {
-                this.neighbourhood.sfuAddIceCandidate(
+                this.neighbourhood.addIceCandidate(
                     this.neighbourhoodUrl,
                     this.roomId,
                     event.candidate.candidate,
@@ -476,7 +476,7 @@ export class SfuManager {
 
         const sdpOffer = JSON.stringify(pc.localDescription)
         const session: CallSessionInfo =
-            await this.neighbourhood.sfuCallJoin(
+            await this.neighbourhood.callJoin(
                 this.neighbourhoodUrl,
                 this.roomId,
                 sdpOffer,
@@ -510,7 +510,7 @@ export class SfuManager {
         // Flush buffered trickle ICE candidates
         joinComplete = true
         for (const candidate of pendingCandidates) {
-            this.neighbourhood.sfuAddIceCandidate(
+            this.neighbourhood.addIceCandidate(
                 this.neighbourhoodUrl,
                 this.roomId,
                 candidate,
@@ -524,7 +524,7 @@ export class SfuManager {
 
         // Subscribe to server-initiated renegotiation offers
         this.renegotiationUnsubscribe =
-            this.neighbourhood.subscribeSfuCallRenegotiationOffer(
+            this.neighbourhood.subscribeCallRenegotiationOffer(
                 this.agentDid,
                 async (event) => {
                     if (event.neighbourhoodUrl !== this.neighbourhoodUrl)
@@ -557,7 +557,7 @@ export class SfuManager {
                         const answerJson = JSON.stringify(
                             currentPc.localDescription,
                         )
-                        await this.neighbourhood.sfuCallAnswerServerOffer(
+                        await this.neighbourhood.callAnswerServerOffer(
                             this.neighbourhoodUrl,
                             event.roomName,
                             answerJson,
@@ -574,7 +574,7 @@ export class SfuManager {
         // (overloaded) node and rejoin on a less-loaded peer.
         // Same flow as cascade failover: leave → set target → rejoin.
         this.migrateUnsubscribe =
-            this.neighbourhood.subscribeSfuMigrateEvent(
+            this.neighbourhood.subscribeMigrateEvent(
                 this.agentDid,
                 async (event) => {
                     if (event.neighbourhoodUrl !== this.neighbourhoodUrl)
@@ -604,7 +604,7 @@ export class SfuManager {
                         this.state.peerConnection = null
                     }
                     try {
-                        await this.neighbourhood.sfuCallLeave(
+                        await this.neighbourhood.callLeave(
                             this.neighbourhoodUrl,
                             this.roomId,
                         )
@@ -670,7 +670,7 @@ export class SfuManager {
             this.state.peerConnection = null
         }
         try {
-            await this.neighbourhood.sfuCallLeave(
+            await this.neighbourhood.callLeave(
                 this.neighbourhoodUrl,
                 this.roomId,
             )
@@ -698,7 +698,7 @@ export class SfuManager {
             return
         }
         try {
-            await this.neighbourhood.sfuCallSetQualityPreference(
+            await this.neighbourhood.callSetQualityPreference(
                 this.neighbourhoodUrl,
                 this.roomId,
                 preference,
@@ -734,7 +734,7 @@ export class SfuManager {
             return
         }
         try {
-            await this.neighbourhood.sfuSendData(
+            await this.neighbourhood.sendData(
                 this.neighbourhoodUrl,
                 this.roomId,
                 channelLabel,
@@ -764,7 +764,7 @@ export class SfuManager {
             }
         }
         this.dataChannelUnsubscribe =
-            this.neighbourhood.subscribeSfuDataChannel(callback)
+            this.neighbourhood.subscribeDataChannel(callback)
         return () => {
             if (this.dataChannelUnsubscribe) {
                 try {
