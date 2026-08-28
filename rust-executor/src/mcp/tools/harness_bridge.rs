@@ -139,16 +139,28 @@ impl Ad4mMcpHandler {
 /// while the harness wants a plain `Value` (so it can be passed straight
 /// into an OpenAI `tools[]` entry via `to_openai_tool_entry`). One clone;
 /// tool metadata is small (10s to low-100s of bytes).
+///
+/// `side_effect` is looked up in [`side_effects::side_effect_of`] — the
+/// canonical table of static `#[tool]` methods → side-effect
+/// classification. Unknown names default to
+/// [`crate::ai_service::harness::provider::SideEffect::Read`]; the
+/// compile-time parity test in `side_effects` ensures every registered
+/// static tool has an entry so a new `#[tool]` method added without a
+/// matching row fails CI. Dynamic per-class tools (which don't come
+/// through this path) declare their own side-effect at generation site.
 fn rmcp_tool_to_schema(tool: &rmcp::model::Tool) -> ToolSchema {
     let parameters = Value::Object((*tool.input_schema).clone());
+    let name = tool.name.to_string();
+    let side_effect = crate::mcp::tools::side_effects::side_effect_of(&name);
     ToolSchema {
-        name: tool.name.to_string(),
+        name,
         description: tool
             .description
             .as_ref()
             .map(|d| d.to_string())
             .unwrap_or_default(),
         parameters,
+        side_effect,
     }
 }
 

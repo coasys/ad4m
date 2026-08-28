@@ -342,6 +342,11 @@ roles:
                     RoleSettings::Provisioned {
                         membrane_proof: Some(membrane_proof),
                         modifiers: None,
+                        // HC 0.7.0 added init_properties: opaque app-defined
+                        // bytes made available to the cell during init().
+                        // Unyt doesn't use this facility — None means "no
+                        // extra bytes at init".
+                        init_properties: None,
                     },
                 );
                 Some(settings)
@@ -389,6 +394,10 @@ roles:
         network_seed: None,
         roles_settings,
         ignore_genesis_failure: false,
+        // HC 0.7.0 added restore_from_dht: when true, suppresses genesis and
+        // rebuilds the source chain from the DHT (requires agent_key: Some).
+        // Fresh Unyt install — we want normal genesis.
+        restore_from_dht: false,
     };
 
     match hc.install_app(payload).await {

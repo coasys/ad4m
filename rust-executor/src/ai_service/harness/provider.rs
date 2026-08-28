@@ -13,35 +13,110 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-/// LLM-facing description of one tool. The three fields map 1-to-1 onto the
-/// OpenAI `tools[]` request array (function.name / function.description /
-/// function.parameters). No wrapper: the harness passes this straight into
-/// `chat_gpt_lib_rs` / kalosm and the LLM sees exactly what's here.
+/// Declared side-effect of a tool. Rendered onto every [`ToolSchema`] at
+/// construction time — the interpretation-pass read-only cut checks this
+/// field rather than inferring from the tool name.
+///
+/// Rationale (James Weir's PR #911 review, 2026-08-25 issue-comment):
+///
+/// > The security boundary of the whole design inferred from a verb match
+/// > on tool names… The structural fix is the version where a newly added
+/// > tool can't silently land on the wrong side. What's new is that the
+/// > discussion so far has only covered false negatives — writers slipping
+/// > through the cut. False positives are equally silent and already
+/// > present: a class named `Signal` produces `signal_query` / `signal_get`
+/// > / `signal_list`, all of which classify as writes, because `signal` is
+/// > the leading token and it's in `WRITE_VERBS`.
+///
+/// The old `is_read_only(&t)` shipped a verb-token classifier
+/// (`WRITE_VERBS`) that resolved collisions between the verb vocabulary
+/// and consumer class names by accident in both directions. Declaring
+/// side-effect at the point a tool is *emitted* — either the static
+/// `#[tool]` method's entry in the side-effect table or the dynamic
+/// generator that mints CRUD tools per class — makes new tools born with
+/// the correct classification instead of retroactively pattern-matched.
+///
+/// Default is [`SideEffect::Read`]: safer default (reads never mutate).
+/// The compile-time parity assertion in
+/// `mcp::tools::harness_bridge::side_effects` ensures every static tool
+/// name has an explicit entry, so a new `#[tool]` method added without a
+/// matching table row fails the test — the default never masks silent
+/// drift on the write side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideEffect {
+    /// Read-only tool — safe for a class-scoped interpretation pass to
+    /// call at will. `query_*`, `get_*`, `list_*`, `find_*`, `search_*`,
+    /// class introspection, model reads.
+    Read,
+    /// Write / mutation / side-effect creator. Blocked from the harness
+    /// read-only cut; only the propose-* wrappers can enqueue mutations,
+    /// which then drain through `apply_with_overlay`.
+    Write,
+}
+
+impl Default for SideEffect {
+    fn default() -> Self {
+        Self::Read
+    }
+}
+
+/// LLM-facing description of one tool. The three schema fields map 1-to-1
+/// onto the OpenAI `tools[]` request array (function.name /
+/// function.description / function.parameters). No wrapper: the harness
+/// passes this straight into `chat_gpt_lib_rs` / kalosm and the LLM sees
+/// exactly what's here.
 ///
 /// `parameters` is a JSON Schema fragment describing the argument object.
 /// Zero-arg tools use `{"type":"object","properties":{},"required":[]}` —
 /// don't drop the object wrapper (OpenAI + kalosm both reject bare types).
+///
+/// `side_effect` is NOT sent to the LLM. It's an internal classification
+/// consumed by [`is_read_only`] (which drives the harness's read-only cut)
+/// and any future capability-gating layer. Default is
+/// [`SideEffect::Read`]; every construction site should be explicit — the
+/// harness_bridge side-effect table enforces this for static tools.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSchema {
     pub name: String,
     pub description: String,
     pub parameters: Value,
+    pub side_effect: SideEffect,
 }
 
 impl ToolSchema {
-    /// Cheap constructor for zero-arg tools — the empty-object schema is
-    /// verbose enough that inlining it everywhere hurts readability.
+    /// Cheap constructor for zero-arg READ tools — the empty-object schema
+    /// is verbose enough that inlining it everywhere hurts readability.
+    /// Read is the safer default and the shape most zero-arg tools take
+    /// (`list_perspectives`, `get_models`, ...). Use
+    /// [`ToolSchema::zero_arg_write`] for mutators.
     pub fn zero_arg(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             description: description.into(),
             parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+            side_effect: SideEffect::Read,
+        }
+    }
+
+    /// Zero-arg WRITE tool — companion to [`ToolSchema::zero_arg`]. Kept as
+    /// a distinct constructor so a test author can't accidentally emit a
+    /// write with the default classification.
+    #[allow(dead_code)]
+    pub fn zero_arg_write(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            description: description.into(),
+            parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+            side_effect: SideEffect::Write,
         }
     }
 
     /// Render as an OpenAI `tools[]` entry (the `{type:"function", function:{...}}`
     /// wrapper the /v1/chat/completions endpoint expects). Kept here rather
     /// than in the harness loop so both consumers agree on the wire shape.
+    ///
+    /// `side_effect` is deliberately omitted from the OpenAI payload — it's
+    /// an internal capability marker, not something the LLM needs to see.
     pub fn to_openai_tool_entry(&self) -> Value {
         json!({
             "type": "function",
@@ -221,112 +296,20 @@ fn merge_bound_into_args(args: &mut Value, bindings: &std::collections::BTreeMap
     }
 }
 
-/// Convenience predicate: drop any tool whose name starts with a write-adjacent
-/// verb. This is the interpretation-pass read-only cut (v2 §Q5) — the harness
-/// wraps `Ad4mToolProvider` in `FilteredProvider::new(_, is_read_only)` before
-/// handing it to a pass. Kept as a free function so it can be composed.
+/// The interpretation-pass read-only cut (v2 §Q5) — the harness wraps
+/// `Ad4mToolProvider` in `FilteredProvider::new(_, is_read_only)` before
+/// handing it to a pass.
 ///
-/// The list is deliberately conservative — a tool whose *effect* is a write
-/// but whose name doesn't match one of these prefixes will slip through. Add
-/// to it as the MCP surface grows write-adjacent verbs; test
-/// `readonly_filter_excludes_add_delete_set` pins the current expected
-/// behaviour.
+/// Reads [`ToolSchema::side_effect`] directly. Prior implementations
+/// inferred read-vs-write from a verb-token scan of `name`, which was
+/// symmetric-fragile: writers slipped through when the verb list missed
+/// something (`_add_<coll>` vs `_add_to_<coll>`, plugged in `436477457`),
+/// and reads got misclassified when a user class name collided with the
+/// verb vocabulary (`Signal` class → `signal_query` classified as write,
+/// James Weir 2026-08-25 review). Structural declaration at emission
+/// site fixes both directions.
 pub fn is_read_only(t: &ToolSchema) -> bool {
-    // Write-adjacent verb tokens: if ANY `_`-separated token in the tool name
-    // matches one of these, the tool is treated as a writer. Token-based
-    // (not substring/prefix) so namespaced tools like
-    // `neighbourhood_publish_from_perspective` are caught even though
-    // `publish` isn't at position 0. Audited against every `async fn` in
-    // rust-executor/src/mcp/tools/*.rs on 2026-08-24 (Lal's PR #911 review):
-    //   add / remove / delete / create / update / set — CRUD verbs, both
-    //     static (add_link, delete_subject) and dynamic per-class
-    //     (`<class>_add_<coll>`, `<class>_set_<prop>`, ...).
-    //   publish / join / leave — neighbourhood mutations.
-    //   send / signal — inter-agent side-effects.
-    //   revoke / grant — capability rotation.
-    //   install / uninstall / clone — language lifecycle.
-    //   signup / login / logout — auth writes.
-    //   generate / mint — mint new artifacts.
-    //   store / save — persist to state.
-    //   request — creates a pending request record.
-    //   start / run — flow lifecycle mutations (`flow_start_*`, `flow_run_action`).
-    //
-    // The earlier prefix/suffix/infix approach (`_add_to_`, `_remove_from_`)
-    // was a copy-paste mismatch against dynamic.rs's real emissions
-    // (`_add_<coll>`, `_remove_<coll>`) so every collection mutator silently
-    // leaked through the read-only cut (Lal's 2026-08-24 review,
-    // provider.rs:240). Token-based fixes it structurally.
-    const WRITE_VERBS: &[&str] = &[
-        // CRUD
-        "add",
-        "remove",
-        "delete",
-        "create",
-        "update",
-        "set",
-        // neighbourhood + p2p mutations
-        "publish",
-        "join",
-        "leave",
-        "send",
-        "signal",
-        // auth + capabilities
-        "revoke",
-        "grant",
-        "signup",
-        "login",
-        "logout",
-        // language lifecycle
-        "install",
-        "uninstall",
-        "clone",
-        // mint / persist
-        "generate",
-        "mint",
-        "store",
-        "save",
-        // side-effect creators
-        "request",
-        // flow lifecycle
-        "start",
-        "run",
-    ];
-
-    // Some read tools legitimately contain a write verb as part of their
-    // subject (`request_type`, `run_id`, ...) but at the CORE the tool is
-    // a read. Guard: if the leading token itself starts a well-known read
-    // verb, trust it. This is the tie-breaker; token match still wins if
-    // it's on a subsequent segment (`neighbourhood_publish_*`).
-    const READ_LEADERS: &[&str] = &["list", "get", "query", "read", "find", "search"];
-
-    let tokens: Vec<&str> = t.name.split('_').collect();
-    if tokens.is_empty() {
-        return true;
-    }
-    let leader = tokens[0].to_lowercase();
-    let leader_is_read = READ_LEADERS.iter().any(|r| leader == *r);
-
-    let mut writer_hit = None;
-    for (i, tok) in tokens.iter().enumerate() {
-        let low = tok.to_lowercase();
-        if WRITE_VERBS.iter().any(|v| low == *v) {
-            writer_hit = Some(i);
-            break;
-        }
-    }
-
-    match (writer_hit, leader_is_read) {
-        // No write token found → read.
-        (None, _) => true,
-        // Write token IS the leader → definitely a writer.
-        (Some(0), _) => false,
-        // Write token is downstream AND leader is a read verb (`get`, `list`,
-        // ...) → tool is a read (e.g. `get_publish_config` if such existed).
-        // Downstream writers with a non-read leader are writers
-        // (`neighbourhood_publish_from_perspective`).
-        (Some(_), true) => true,
-        (Some(_), false) => false,
-    }
+    t.side_effect == SideEffect::Read
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────
@@ -382,12 +365,13 @@ mod tests {
                     "properties": {"source": {"type": "string"}},
                     "required": ["source"],
                 }),
+                side_effect: SideEffect::Read,
             },
-            ToolSchema::zero_arg("add_link", "Add a link to a perspective"),
-            ToolSchema::zero_arg("Task_create", "Create a Task instance"),
-            ToolSchema::zero_arg("Task_delete", "Delete a Task instance"),
-            ToolSchema::zero_arg("Task_set_title", "Set the title of a Task"),
-            ToolSchema::zero_arg("Task_add_to_tags", "Add tag to Task's tags"),
+            ToolSchema::zero_arg_write("add_link", "Add a link to a perspective"),
+            ToolSchema::zero_arg_write("Task_create", "Create a Task instance"),
+            ToolSchema::zero_arg_write("Task_delete", "Delete a Task instance"),
+            ToolSchema::zero_arg_write("Task_set_title", "Set the title of a Task"),
+            ToolSchema::zero_arg_write("Task_add_to_tags", "Add tag to Task's tags"),
             ToolSchema::zero_arg("Channel_children_via_messages", "Read"),
         ]
     }
@@ -398,6 +382,7 @@ mod tests {
             name: "hello".into(),
             description: "say hi".into(),
             parameters: json!({"type":"object","properties":{"x":{"type":"string"}},"required":["x"]}),
+            side_effect: SideEffect::Read,
         };
         let e = t.to_openai_tool_entry();
         assert_eq!(e["type"], "function");
@@ -452,60 +437,96 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readonly_filter_excludes_add_delete_set_verbs() {
+    async fn is_read_only_reads_declared_side_effect_field() {
+        // Reads survive; writes drop. Uses the sample_tools fixture where
+        // side_effect is declared explicitly on each entry — the classifier
+        // no longer infers from the name.
         let all = sample_tools();
         let kept: Vec<_> = all
             .iter()
             .filter(|t| is_read_only(t))
             .map(|t| t.name.clone())
             .collect();
-        // Reads survive.
         assert!(kept.contains(&"list_perspectives".to_string()));
         assert!(kept.contains(&"query_links".to_string()));
         assert!(kept.contains(&"Channel_children_via_messages".to_string()));
-        // Writes drop.
-        assert!(!kept.contains(&"add_link".to_string()), "add_ prefix");
-        // AD4M dynamic `<class>_create` — the CI regression that motivated this
-        // test case. When `_create` was neither a suffix nor an infix in the
-        // filter, `extintention_create` slipped through, defeating the
-        // propose-writes decorator and bouncing gemma3:12b on `perspective_uuid`.
-        assert!(!kept.contains(&"Task_create".to_string()), "_create suffix");
-        assert!(!kept.contains(&"Task_delete".to_string()), "_delete suffix");
-        assert!(!kept.contains(&"Task_set_title".to_string()), "_set_ infix");
-        // Real dynamic emissions (see mcp/tools/dynamic.rs make_collection_add_
-        // /make_collection_remove_tool): `<class>_add_<coll>` and
-        // `<class>_remove_<coll>` — NOT the `_add_to_`/`_remove_from_` variants
-        // the earlier filter had. Regression against Lal's 2026-08-24 review.
+        assert!(!kept.contains(&"add_link".to_string()));
+        assert!(!kept.contains(&"Task_create".to_string()));
+        assert!(!kept.contains(&"Task_delete".to_string()));
+        assert!(!kept.contains(&"Task_set_title".to_string()));
+        assert!(!kept.contains(&"Task_add_to_tags".to_string()));
+    }
+
+    #[tokio::test]
+    async fn is_read_only_ignores_verb_collisions_in_class_names() {
+        // James Weir's 2026-08-25 PR #911 review — the false-positive case
+        // the pre-structural verb-token classifier silently mangled.
+        //
+        // A user perspective declaring a `Signal` subject class produces
+        // dynamic tools `signal_query` / `signal_get` / `signal_list`. Under
+        // the pre-#911 shape, `signal` was in `WRITE_VERBS` (it captures
+        // `send_signal` / `signal_broadcast` mutators on the MCP side), so
+        // the FIRST token match classified `signal_query` as a write. The
+        // harness's read-only cut then hid every Signal-class read from
+        // the LLM. Silent — the pass just couldn't see that class.
+        //
+        // Structural declaration fixes it: dynamic per-class generators
+        // emit `signal_query` with `side_effect: Read`, and the collision
+        // between the user class name and the verb vocabulary stops mattering.
+        let signal_query = ToolSchema {
+            name: "signal_query".into(),
+            description: "Query Signal instances (user-defined class)".into(),
+            parameters: json!({"type":"object","properties":{},"required":[]}),
+            side_effect: SideEffect::Read,
+        };
         assert!(
-            !kept.contains(&"Task_add_tags".to_string()),
-            "_add_ infix (real dynamic collection-adder shape)"
+            is_read_only(&signal_query),
+            "signal_query on a user Signal class must survive the read-only cut"
         );
-        assert!(
-            !kept.contains(&"Task_remove_tags".to_string()),
-            "_remove_ infix (real dynamic collection-remover shape)"
-        );
-        // Additional write-adjacent static verbs the MCP surface exposes
-        // (audited by grep'ing async fn under rust-executor/src/mcp/tools/*.rs
-        // 2026-08-24). If any of these leak into a read-only interpretation
-        // pass, the LLM could publish neighbourhoods / send signals / rotate
-        // capability tokens as a side-effect of a "read" turn.
-        for write_tool in [
-            "neighbourhood_publish_from_perspective",
-            "neighbourhood_join_from_url",
-            "clone_link_language",
-            "signup",
-            "login_email",
-            "generate_jwt",
-            "revoke_capability", // hypothetical; guard against future adds
-            "flow_start_task",
-            "flow_run_action",
-        ] {
-            let t = ToolSchema::zero_arg(write_tool, "");
+
+        // Symmetric case: a user class named `Update` or `Add` shouldn't
+        // fail the read cut for its query tools either.
+        for user_class in ["update", "add", "remove", "delete", "create", "set"] {
+            let read_tool = ToolSchema {
+                name: format!("{user_class}_query"),
+                description: "".into(),
+                parameters: json!({"type":"object","properties":{},"required":[]}),
+                side_effect: SideEffect::Read,
+            };
             assert!(
-                !is_read_only(&t),
-                "write-adjacent static tool `{write_tool}` must not pass is_read_only"
+                is_read_only(&read_tool),
+                "read tool named `{user_class}_query` must survive the read-only cut"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn is_read_only_does_not_infer_from_name() {
+        // Fabricate a maximally suspicious name that would fail every
+        // verb-inference heuristic — declaring it Read must still pass.
+        // Symmetric: a benign-looking `get_stuff` tool declared Write is
+        // still a write.
+        let unusual_read = ToolSchema {
+            name: "add_create_delete_publish_signal_grant".into(),
+            description: "".into(),
+            parameters: json!({"type":"object","properties":{},"required":[]}),
+            side_effect: SideEffect::Read,
+        };
+        assert!(
+            is_read_only(&unusual_read),
+            "declaration wins over any name-shape inference"
+        );
+
+        let sneaky_write = ToolSchema {
+            name: "get_stuff".into(),
+            description: "".into(),
+            parameters: json!({"type":"object","properties":{},"required":[]}),
+            side_effect: SideEffect::Write,
+        };
+        assert!(
+            !is_read_only(&sneaky_write),
+            "a Write-declared tool must never pass the read-only cut, regardless of name"
+        );
     }
 
     #[tokio::test]
@@ -550,6 +571,7 @@ mod tests {
                 },
                 "required": ["perspective_id"],
             }),
+            side_effect: SideEffect::Read,
         }
     }
 
@@ -641,7 +663,7 @@ mod tests {
         // see the perspective-clean schema.
         let inner = Arc::new(MockProvider::new(vec![
             schema_with_perspective_id(),
-            ToolSchema::zero_arg("add_link", "write verb"),
+            ToolSchema::zero_arg_write("add_link", "write verb"),
         ]));
         let bound: Arc<dyn ToolProvider> = Arc::new(BoundArgsProvider::new(
             inner.clone(),

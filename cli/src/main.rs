@@ -191,7 +191,6 @@ enum Domain {
         #[arg(long)]
         sfu_bind_addr: Option<String>,
     },
-    RunLocalHcServices {},
     Eve {
         #[command(subcommand)]
         command: EveCommands,
@@ -328,11 +327,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    if let Domain::RunLocalHcServices {} = args.domain {
-        rust_executor::run_local_hc_services().await?;
-        return Ok(());
-    }
-
     if let Domain::Eve { command } = args.domain {
         eve::run(command).await?;
         return Ok(());
@@ -388,7 +382,6 @@ async fn main() -> Result<()> {
             sfu_cascade_peers: _,
             sfu_bind_addr: _,
         } => unreachable!(),
-        Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),
     }
 

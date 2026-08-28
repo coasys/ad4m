@@ -5,6 +5,16 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ## unreleased
 
+### Changed
+- **Runtime bump — Deno 2.3.1 → 2.9.5, Holochain 0.7.0-dev.16 → 0.7.0 (stable)** [#907](https://github.com/coasys/ad4m/pull/907)
+  - Deno / deno_core / rusty_v8 updated to Deno 2.9.5 (op2 v2.9 macro syntax, JsErrorClass manual impl, ModuleLoader 3-arg signature, JsRuntime::init_platform(None), v8::scope! pattern).
+  - Rust toolchain 1.92 → 1.96.1.
+  - Holochain updated to 0.7.0 stable; SQL stack updated in lockstep (rusqlite 0.34 → 0.40, libsqlite3-sys 0.35 → 0.38, sqlx patched for the same). Coasys forks re-tagged: rusty_v8 v150.4.0-coasys, deno v2.9.5-coasys-4, holochain 0.7.0-space-override-coasys, lair 0.7.1-coasys-rusqlite-0.40.
+  - HC 0.7 dropped `signal_url` from `NetworkConfig` and `SpaceNetworkOverride` — the signal-server concept was folded into `bootstrap_url` + `relay_url` via iroh. AD4M now resolves a single `relay_url` (precedence: `use_proxy`+`proxy_url` → explicit `relay_url` → default) and normalises `ws://`/`wss://` → `http://`/`https://` before handing it to iroh. Existing `UNYT_SIGNAL_URL` is intentionally ignored (legacy WS signaller; not part of the 0.7 topology).
+  - **Behaviour change for self-hosters:** the previously-supported `conductor_config.yaml` load-from-disk branch in `HolochainService::new` was removed together with the HC 0.6→0.7 yaml migration shim. Nothing in AD4M's own code has ever written this file, and the load branch silently overrode launcher/CLI flags whenever one was present; both facts made it a hazardous escape hatch. The conductor config is now always constructed in code from `LocalConductorConfig`. If you were hand-authoring a `conductor_config.yaml` under `conductor_path`, port those settings to launcher flags / `LocalConductorConfig` before upgrading.
+  - `install_app` now waits for a two-stage network-readiness gate before returning: per-cell `await_cell_network_join_complete` (fork's built-in event-driven method), then per-DNA `await_initial_peer_discovery` (new — polls `ConductorNetworkState::is_bootstrap_complete`, ~11s cap). Prevents the follow-up `add_agent_infos` burst from running against an empty peer store, which otherwise manifests as "cross-node discovery never completes" on multi-user tests. `APP_INSTALL_TIMEOUT_DURATION` bumped 20s → 45s to accommodate the added wait.
+  - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
+
 ### Fixed
 - Multi-user agent publishing after language controller refactor [#711](https://github.com/coasys/ad4m/pull/711)
 - Broadcast signal for managed user [#722](https://github.com/coasys/ad4m/pull/722)

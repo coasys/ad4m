@@ -758,6 +758,12 @@ fn propose_create_schema(c: &ClassProposeShape) -> ToolSchema {
         // drops the alias family entirely. Semantic is unchanged: the
         // result is still staged in the pass buffer and applied through
         // the overlay's human-divergence gate at pass end.
+        //
+        // `SideEffect::Write` — propose_* wrappers stage mutations into
+        // the InterpretationRun's overlay. The overlay's `apply_with_overlay`
+        // gate is what protects human edits; the tool is unambiguously a
+        // writer from the harness's classification perspective.
+        side_effect: crate::ai_service::harness::provider::SideEffect::Write,
         name: format!("{}_create", c.class_name.to_lowercase()),
         description: format!(
             "Create a new {class} instance. The creation is staged in the \
@@ -894,6 +900,10 @@ fn propose_link_child_schema(c: &ClassProposeShape) -> ToolSchema {
     };
 
     ToolSchema {
+        // `SideEffect::Write` — see companion note on the `_create` schema
+        // above. Both propose_* tools stage buffered mutations that drain
+        // through the overlay gate at pass end.
+        side_effect: crate::ai_service::harness::provider::SideEffect::Write,
         name: format!("{}_propose_link_child", class_lower),
         description: format!(
             "Attach an existing {class} to a related instance via one of its declared relations. Buffered until the pass completes.\n\

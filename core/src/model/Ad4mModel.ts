@@ -1401,14 +1401,37 @@ export class Ad4mModel {
           // Handle all arrays as relations, including empty ones (which clears the relation)
           await this.setRelationValues(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
-          if (setProperties) {
-            // Check if this is a relation property (has relation metadata)
-            const relationMeta = this.getRelationOptions(key);
-            if (relationMeta) {
-              // Skip - it's a relation, not a regular property
-              continue;
-            }
+          // A scalar handed to a relation field is a single-member relation.
+          //
+          // This used to `continue` — "Skip, it's a relation, not a regular
+          // property" — so `Model.create(p, { source: 'uri://x' })` typechecked,
+          // ran, resolved, and wrote no link. The record was created with the
+          // relation empty and nothing anywhere said so, which surfaces later as
+          // a *reader* complaining about a malformed instance: a Relationship
+          // with no endpoints, a Placement pointing at nothing. Both look like
+          // rendering bugs from the outside, because the record exists and the
+          // thing that should reference it does not.
+          //
+          // The array form is the documented path and stays correct; the problem
+          // is that the scalar form is plausible, typechecks against a field
+          // declared `string`, and fails silently. Coercing matches what a caller
+          // reaching for it meant. A value `setRelationValues` cannot use now
+          // fails there, loudly, instead of vanishing here.
+          //
+          // Deliberately outside the `setProperties` gate, mirroring the array
+          // branch above. `create` passes `setProperties: false` when the class
+          // has a constructor, because `create_subject` writes the values map —
+          // but a relation carries `ad4m://adder`, not `ad4m://setter`, so
+          // `create_subject` drops it (see the warning added in 3ee2b5bc6).
+          // Relations have to be written here in both cases or they are lost by
+          // both paths at once.
+          const relationMeta = this.getRelationOptions(key);
+          if (relationMeta) {
+            await this.setRelationValues(key, [value], batchId);
+            continue;
+          }
 
+          if (setProperties) {
             // Skip flag properties — they are immutable after creation
             const propMeta = this.getPropertyMetadata(key);
             if (propMeta?.flag) {

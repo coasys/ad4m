@@ -159,25 +159,65 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
             .properties
             .iter()
             .any(|p| p.name == name && p.datatype.is_some());
-        let arr: Vec<Value> = values
-            .iter()
-            .map(|&(target, _)| {
-                if decode_literals && target.starts_with("literal:") {
-                    parse_literal_value(target)
-                } else {
-                    Value::String(target.to_string())
-                }
-            })
-            .collect();
+        let decode = |target: &str| -> Value {
+            if decode_literals && target.starts_with("literal:") {
+                parse_literal_value(target)
+            } else {
+                Value::String(target.to_string())
+            }
+        };
+
         let is_scalar = shape
             .properties
             .iter()
             .any(|p| p.name == name && p.is_scalar_relation);
+
         if is_scalar {
-            if let Some(first) = arr.into_iter().next() {
-                obj.insert(name.to_string(), first);
+            // A scalar relation (`@HasOne` / `@BelongsToOne`) resolves
+            // last-write-wins, exactly as a scalar property does above.
+            //
+            // It previously took the *earliest* link — the collection was sorted
+            // ascending and the first entry won — so re-pointing a to-one relation
+            // without first removing the old link kept serving the original target
+            // forever, while a scalar property on the same instance updated
+            // normally. Today `collectionSetter` deletes before adding, which
+            // leaves one link and hides this; concurrent writes from two peers do
+            // not, and neither will the incremental diff that replaces it.
+            //
+            // Strict `>` means the first of several links sharing a timestamp
+            // wins, matching the scalar-property branch rather than diverging
+            // from it on ties.
+            let mut winner: Option<(&str, &str)> = None;
+            for &(target, ts) in &values {
+                if winner.map_or(true, |(_, best_ts)| ts > best_ts) {
+                    winner = Some((target, ts));
+                }
+            }
+            if let Some((target, _)) = winner {
+                obj.insert(name.to_string(), decode(target));
             }
         } else {
+            // Collapse duplicate targets.
+            //
+            // A link is stored as a direct triple plus a reifier keyed on
+            // `sha256(source, predicate, target, timestamp)`, so two links
+            // carrying the same triple at different timestamps — two peers
+            // asserting the same membership, or a re-add racing a remote write —
+            // share one triple but produce two reifiers. The instance query joins
+            // through the reifier to recover author and timestamp, so it returns a
+            // row per reifier and the target lands here twice.
+            //
+            // `$count` projections already answer `COUNT(DISTINCT ?t)`, so leaving
+            // this undeduplicated made a count disagree with the list it counts
+            // within a single query.
+            //
+            // `values` is sorted ascending, so retaining the first sighting of each
+            // target keeps its earliest timestamp — the same instant `createdAt`
+            // and the append-by-timestamp fallback ordering already use.
+            let mut seen = std::collections::HashSet::new();
+            values.retain(|&(target, _)| seen.insert(target));
+
+            let arr: Vec<Value> = values.iter().map(|&(target, _)| decode(target)).collect();
             obj.insert(name.to_string(), Value::Array(arr));
         }
     }
@@ -498,6 +538,213 @@ mod tests {
             vec!["turn-hex-1".to_string(), "turn-hex-2".to_string()],
             "wire-form `literal:string:<hex>` HasMany targets must be decoded to plain values",
         );
+    }
+
+    // ---- duplicate collapsing --------------------------------------------
+    //
+    // A link is a direct triple plus a reifier keyed on
+    // `sha256(source, predicate, target, timestamp)`. Two peers asserting the
+    // same membership share the triple but mint two reifiers, and the instance
+    // query joins through the reifier to recover author/timestamp — so the same
+    // target arrives twice. These fixtures reproduce that by repeating a
+    // `(predicate, target)` pair at two timestamps.
+
+    #[test]
+    fn test_hydrate_collection_collapses_duplicate_targets() {
+        let s = shape("Post", vec![relation("signals", "we://signal")]);
+        let inst = inst_links_at(
+            "we://post/1",
+            vec![
+                ("we://signal", "we://signal/a", "2026-01-01T00:00:00.000Z"),
+                // Same triple, asserted again by a peer a second later.
+                ("we://signal", "we://signal/a", "2026-01-01T00:00:01.000Z"),
+                ("we://signal", "we://signal/b", "2026-01-01T00:00:02.000Z"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        let signals: Vec<&str> = result["signals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+
+        // Two links, one membership. `$count` already answered 1 here via
+        // COUNT(DISTINCT ?t), so an undeduplicated list disagreed with the
+        // count of the same relation inside one query.
+        assert_eq!(
+            signals,
+            vec!["we://signal/a", "we://signal/b"],
+            "a target asserted by two peers must appear once",
+        );
+    }
+
+    #[test]
+    fn test_hydrate_collection_dedup_keeps_earliest_position() {
+        // The duplicate is the *earliest* link for `a`, so collapsing on first
+        // sighting has to keep `a` ahead of `b` — not move it to where its
+        // second assertion landed. Ordering is by earliest timestamp, the same
+        // instant `createdAt` and the append-by-timestamp fallback use.
+        let s = shape("Post", vec![relation("children", "we://children")]);
+        let inst = inst_links_at(
+            "we://post/1",
+            vec![
+                ("we://children", "we://block/a", "2026-01-01T00:00:00.000Z"),
+                ("we://children", "we://block/b", "2026-01-01T00:00:01.000Z"),
+                ("we://children", "we://block/a", "2026-01-01T00:00:09.000Z"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        let children: Vec<&str> = result["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+
+        assert_eq!(children, vec!["we://block/a", "we://block/b"]);
+    }
+
+    #[test]
+    fn test_hydrate_collection_dedup_survives_literal_decoding() {
+        // Decoding happens after collapsing, so a duplicated literal target
+        // must collapse on its wire form and still decode once.
+        let s = shape(
+            "Run",
+            vec![relation_with_datatype(
+                "sources",
+                "ad4m://interp/sources",
+                "xsd://string",
+            )],
+        );
+        let inst = inst_links_at(
+            "ad4m://interp/run/1",
+            vec![
+                (
+                    "ad4m://interp/sources",
+                    "literal:string:turn-1",
+                    "2026-01-01T00:00:00.000Z",
+                ),
+                (
+                    "ad4m://interp/sources",
+                    "literal:string:turn-1",
+                    "2026-01-01T00:00:01.000Z",
+                ),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        assert_eq!(
+            result["sources"].as_array().unwrap().len(),
+            1,
+            "duplicate literal targets collapse before decoding",
+        );
+        assert_eq!(result["sources"][0].as_str().unwrap(), "turn-1");
+    }
+
+    // ---- scalar relations resolve last-write-wins -------------------------
+
+    #[test]
+    fn test_hydrate_scalar_relation_last_write_wins() {
+        // Re-pointing a `@HasOne` without removing the old link previously kept
+        // serving the *original* target forever, because the collection was
+        // sorted ascending and the first entry won — while a scalar property on
+        // the same instance updated normally.
+        let s = shape("Space", vec![scalar_relation("location", "we://location")]);
+        let inst = inst_links_at(
+            "we://space/1",
+            vec![
+                ("we://location", "we://loc/old", "2026-01-01T00:00:00.000Z"),
+                ("we://location", "we://loc/new", "2026-01-01T00:00:05.000Z"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        assert_eq!(
+            result["location"].as_str().unwrap(),
+            "we://loc/new",
+            "a to-one relation must resolve to its latest link, as a scalar property does",
+        );
+    }
+
+    #[test]
+    fn test_hydrate_scalar_relation_lww_regardless_of_link_order() {
+        // The winner is decided by timestamp, not by the order rows happened to
+        // arrive from the store.
+        let s = shape("Space", vec![scalar_relation("location", "we://location")]);
+        let inst = inst_links_at(
+            "we://space/1",
+            vec![
+                ("we://location", "we://loc/new", "2026-01-01T00:00:05.000Z"),
+                ("we://location", "we://loc/old", "2026-01-01T00:00:00.000Z"),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        assert_eq!(result["location"].as_str().unwrap(), "we://loc/new");
+    }
+
+    #[test]
+    fn test_hydrate_scalar_relation_tie_matches_scalar_property() {
+        // Two links sharing a timestamp: the scalar-property branch keeps the
+        // first seen (its comparison is strict `>`), and the relation branch
+        // must not diverge from it on ties.
+        let s = shape(
+            "Space",
+            vec![
+                scalar_relation("location", "we://location"),
+                prop("name", "we://name"),
+            ],
+        );
+        let inst = inst_links_at(
+            "we://space/1",
+            vec![
+                (
+                    "we://location",
+                    "we://loc/first",
+                    "2026-01-01T00:00:00.000Z",
+                ),
+                (
+                    "we://location",
+                    "we://loc/second",
+                    "2026-01-01T00:00:00.000Z",
+                ),
+                (
+                    "we://name",
+                    "literal:string:first",
+                    "2026-01-01T00:00:00.000Z",
+                ),
+                (
+                    "we://name",
+                    "literal:string:second",
+                    "2026-01-01T00:00:00.000Z",
+                ),
+            ],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        assert_eq!(result["location"].as_str().unwrap(), "we://loc/first");
+        assert_eq!(
+            result["name"].as_str().unwrap(),
+            "first",
+            "the relation branch must tiebreak the same way the property branch does",
+        );
+    }
+
+    #[test]
+    fn test_hydrate_scalar_relation_absent_stays_absent() {
+        // No link at all must leave the key off entirely rather than writing
+        // null — callers distinguish "unset" from "explicitly nothing".
+        let s = shape("Space", vec![scalar_relation("location", "we://location")]);
+        let inst = inst_links_at(
+            "we://space/1",
+            vec![("we://other", "we://x", "2026-01-01T00:00:00.000Z")],
+        );
+
+        let result = hydrate_one(&s, &inst).unwrap();
+        assert!(result.get("location").is_none());
     }
 
     #[test]
