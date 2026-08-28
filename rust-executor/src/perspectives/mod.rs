@@ -15,6 +15,7 @@ pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
 pub mod sparql_store;
+pub mod subject_classes_of;
 pub mod utils;
 use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,

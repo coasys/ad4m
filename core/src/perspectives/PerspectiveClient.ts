@@ -185,6 +185,12 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
+    async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
+        return await this.#apiClient.call<Record<string, string[]>>(
+            'perspective.subjectClassesOf', { uuid, uris }
+        )
+    }
+
     async evaluateGetters(
         uuid: string,
         className: string,
