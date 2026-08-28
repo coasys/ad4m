@@ -92,6 +92,7 @@ export interface SfuRoomInfo {
 
 export interface SfuParticipantInfo {
     agentDid: string
+    stream: MediaStream
     hasAudio: boolean
     hasVideo: boolean
     isActiveSpeaker: boolean

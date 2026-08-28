@@ -395,6 +395,32 @@ export class MeshManager {
         return result
     }
 
+    // ── Track replacement ────────────────────────────────────────────
+
+    /**
+     * Replace the outbound track of a given kind on every peer connection.
+     *
+     * Uses `RTCRtpSender.replaceTrack` — no renegotiation required.
+     * Pass `null` to stop sending that kind.
+     */
+    async replaceTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
+        await Promise.all(
+            [...this.slots.values()].map(async (slot) => {
+                const sender = slot.pc.getSenders().find(
+                    (s) => s.track?.kind === kind
+                        || (!s.track && slot.pc.getTransceivers().find(
+                            (t) => t.sender === s && t.receiver?.track?.kind === kind,
+                        )),
+                )
+                if (sender) {
+                    await sender.replaceTrack(track)
+                } else if (track) {
+                    slot.pc.addTrack(track)
+                }
+            }),
+        )
+    }
+
     // ── Data channel ────────────────────────────────────────────────
 
     /**

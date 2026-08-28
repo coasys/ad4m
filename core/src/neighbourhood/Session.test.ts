@@ -19,6 +19,7 @@ const mockSfuManagerInstance = {
     destroy: jest.fn().mockResolvedValue(undefined),
     getParticipants: jest.fn().mockReturnValue([]),
     setQualityPreference: jest.fn().mockResolvedValue(undefined),
+    replaceTrack: jest.fn().mockResolvedValue(undefined),
     sendData: jest.fn().mockResolvedValue(undefined),
     subscribeDataChannel: jest.fn().mockReturnValue(() => {}),
 }
@@ -34,6 +35,7 @@ const mockMeshManagerInstance = {
     destroy: jest.fn().mockResolvedValue(undefined),
     getParticipants: jest.fn().mockReturnValue([]),
     setRoster: jest.fn(),
+    replaceTrack: jest.fn().mockResolvedValue(undefined),
     sendData: jest.fn(),
     subscribeDataChannel: jest.fn().mockReturnValue(() => {}),
 }
@@ -289,9 +291,10 @@ describe("mesh path", () => {
         expect(mockMeshManagerInstance.setRoster).toHaveBeenCalledWith(["did:bob"])
     })
 
-    it("delegates participants to mesh manager", async () => {
+    it("delegates participants to mesh manager (includes stream)", async () => {
+        const bobStream = fakeMediaStream()
         mockMeshManagerInstance.getParticipants.mockReturnValue([
-            { did: "did:bob", stream: {}, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+            { did: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
         ])
         const session = createSession(baseConfig({
             topology: "mesh",
@@ -300,8 +303,20 @@ describe("mesh path", () => {
         await session.join(fakeMediaStream())
 
         expect(session.participants).toEqual([
-            { agentDid: "did:bob", hasAudio: true, hasVideo: false, isActiveSpeaker: false },
+            { agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: false, isActiveSpeaker: false },
         ])
+    })
+
+    it("delegates replaceTrack to mesh manager", async () => {
+        const session = createSession(baseConfig({
+            topology: "mesh",
+            channel: fakeChannel(),
+        }))
+        await session.join(fakeMediaStream())
+
+        const fakeTrack = { kind: "audio" } as MediaStreamTrack
+        await session.replaceTrack("audio", fakeTrack)
+        expect(mockMeshManagerInstance.replaceTrack).toHaveBeenCalledWith("audio", fakeTrack)
     })
 
     it("setQualityPreference silently returns on mesh", async () => {
@@ -374,16 +389,25 @@ describe("SFU path", () => {
         expect(mockSfuManagerInstance.join).toHaveBeenCalledWith(stream)
     })
 
-    it("delegates participants to SFU manager", async () => {
+    it("delegates participants to SFU manager (includes stream)", async () => {
+        const bobStream = fakeMediaStream()
         mockSfuManagerInstance.getParticipants.mockReturnValue([
-            { did: "did:bob", stream: {}, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
+            { did: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
         ])
         const session = createSession(baseConfig({ topology: "sfu" }))
         await session.join(fakeMediaStream())
 
         expect(session.participants).toEqual([
-            { agentDid: "did:bob", hasAudio: true, hasVideo: true, isActiveSpeaker: true },
+            { agentDid: "did:bob", stream: bobStream, hasAudio: true, hasVideo: true, isActiveSpeaker: true },
         ])
+    })
+
+    it("delegates replaceTrack to SFU manager", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await session.join(fakeMediaStream())
+
+        await session.replaceTrack("video", null)
+        expect(mockSfuManagerInstance.replaceTrack).toHaveBeenCalledWith("video", null)
     })
 
     it("delegates setQualityPreference to SFU manager", async () => {
@@ -533,10 +557,15 @@ describe("participants when inactive", () => {
     })
 })
 
-describe("sendData and setQualityPreference when inactive", () => {
+describe("sendData, replaceTrack, and setQualityPreference when inactive", () => {
     it("sendData throws when not active (SFU)", async () => {
         const session = createSession(baseConfig({ topology: "sfu" }))
         await expect(session.sendData("x", "y")).rejects.toThrow(/not active/)
+    })
+
+    it("replaceTrack throws when not active", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        await expect(session.replaceTrack("audio", null)).rejects.toThrow(/not active/)
     })
 
     it("setQualityPreference throws when not active (SFU)", async () => {
