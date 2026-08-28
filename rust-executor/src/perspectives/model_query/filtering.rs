@@ -185,6 +185,25 @@ pub(super) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool
 /// does case-insensitive substring matching on strings and element-in-array
 /// matching on arrays.
 pub(super) fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
+    // Relation quantifiers are answerable only against the store — they ask
+    // about linked *records*, not about a value already on this instance — so
+    // they are compiled to `FILTER [NOT] EXISTS` and never evaluated here.
+    //
+    // Reaching this point means the compiler declined to push one down and the
+    // clause fell back to post-hydration filtering. Fail closed: ignoring the
+    // condition would return rows that do not satisfy the query, which is the
+    // failure mode this whole path exists to avoid.
+    //
+    // Deliberately silent. This runs once per hydrated instance, from the
+    // `retain` closure in `execute_model_query`, so a warning here is one line
+    // per row of a result set that is about to be emptied — and it could only
+    // ever say *that* a quantifier was declined, never why. The reasons are
+    // logged once, at each decline site in `compile_relation_quantifier` and
+    // its caller, where they are known.
+    if ops.some.is_some() || ops.none.is_some() {
+        return false;
+    }
+
     // NOT
     if let Some(ref not_val) = ops.not {
         match not_val {
