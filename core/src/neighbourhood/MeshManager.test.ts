@@ -158,7 +158,7 @@ function fakeMediaStream(): MediaStream {
     } as unknown as MediaStream
 }
 
-/** A stream with no tracks — for tests that exercise setOutboundTrack
+/** A stream with no tracks — for tests that exercise replaceTrack
  *  in isolation, without join() already having attached media. */
 function emptyMediaStream(): MediaStream {
     return {
@@ -470,8 +470,8 @@ describe("MeshManager", () => {
         const camera = { kind: "video" } as MediaStreamTrack
         const screen = { kind: "video" } as MediaStreamTrack
 
-        await alice.mesh.setOutboundTrack("video", camera)
-        await alice.mesh.setOutboundTrack("video", screen)
+        await alice.mesh.replaceTrack("video", camera)
+        await alice.mesh.replaceTrack("video", screen)
 
         expect(alice.connections[0].addedTracks).toEqual([])
         expect(alice.connections[0].getSenders().filter((s) => s.track).length).toBe(1)
@@ -487,9 +487,9 @@ describe("MeshManager", () => {
         const screen = { kind: "video" } as MediaStreamTrack
         const screenAgain = { kind: "video" } as MediaStreamTrack
 
-        await alice.mesh.setOutboundTrack("video", screen)
-        await alice.mesh.setOutboundTrack("video", null)
-        await alice.mesh.setOutboundTrack("video", screenAgain)
+        await alice.mesh.replaceTrack("video", screen)
+        await alice.mesh.replaceTrack("video", null)
+        await alice.mesh.replaceTrack("video", screenAgain)
 
         expect(alice.connections[0].addedTracks).toEqual([])
         expect(alice.connections[0].getSenders().filter((s) => s.track).length).toBe(1)
@@ -502,8 +502,8 @@ describe("MeshManager", () => {
         alice.mesh.setRoster(["did:alice", "did:bob"])
         await settle()
 
-        await alice.mesh.setOutboundTrack("video", { kind: "video" } as MediaStreamTrack)
-        await alice.mesh.setOutboundTrack("video", null)
+        await alice.mesh.replaceTrack("video", { kind: "video" } as MediaStreamTrack)
+        await alice.mesh.replaceTrack("video", null)
 
         expect(alice.connections[0].getSenders().every((s) => s.track === null)).toBe(true)
     })
@@ -514,7 +514,7 @@ describe("MeshManager", () => {
         alice.mesh.setRoster(["did:alice"])
 
         const track = { kind: "audio" } as MediaStreamTrack
-        await alice.mesh.setOutboundTrack("audio", track)
+        await alice.mesh.replaceTrack("audio", track)
 
         alice.mesh.setRoster(["did:alice", "did:bob"])
         await settle()
@@ -579,8 +579,8 @@ describe("MeshManager", () => {
 
         bob.mesh.setRoster(["did:alice", "did:bob"])
         for (let n = 0; n < 20; n++) {
-            await bob.mesh.setOutboundTrack("audio", { kind: "audio" } as MediaStreamTrack)
-            await bob.mesh.setOutboundTrack("audio", null)
+            await bob.mesh.replaceTrack("audio", { kind: "audio" } as MediaStreamTrack)
+            await bob.mesh.replaceTrack("audio", null)
         }
         await settle()
 
