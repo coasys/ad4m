@@ -981,6 +981,11 @@ use crate::ai_service::{AIService, PromptResult};
 
 /// Ensure the global wallet has a "main" keypair (decode_jwt signs and
 /// verifies with it) and return a user JWT whose `sub` is `email`.
+///
+/// Mints against the *current* global "main" key. Safe under the project's
+/// single-threaded test convention (`--test-threads=1`, see package.json);
+/// a parallel test rotating the key via `test_utils::setup_wallet()`
+/// between mint and decode would break verification.
 fn user_jwt_token(email: &str) -> String {
     use jsonwebtoken::{encode, EncodingKey, Header};
     let wallet = crate::wallet::Wallet::instance();
@@ -1019,23 +1024,51 @@ fn sample_prompt_result() -> PromptResult {
     }
 }
 
+/// Restores multi-user mode + host rates on drop, so a panicking
+/// assertion can't leak settings into the rest of the test binary (the
+/// global in-memory DB is shared across all tests).
+struct DbSettingsGuard {
+    prev_multi_user: bool,
+    prev_rates: Vec<(String, f64)>,
+}
+
+impl DbSettingsGuard {
+    fn set(multi_user: bool, rates: &[(String, f64)]) -> Self {
+        let prev_multi_user = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled().unwrap_or(false)
+        });
+        let prev_rates =
+            crate::db::Ad4mDb::with_global_instance(|db| db.get_host_rates().unwrap_or_default());
+        let _ = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(multi_user)?;
+            db.set_host_rates(rates)
+        });
+        Self {
+            prev_multi_user,
+            prev_rates,
+        }
+    }
+}
+
+impl Drop for DbSettingsGuard {
+    fn drop(&mut self) {
+        let _ = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(self.prev_multi_user)?;
+            db.set_host_rates(&self.prev_rates)
+        });
+    }
+}
+
 #[tokio::test]
 async fn stream_completion_bills_once_on_success() {
     init_test_db();
     test_seam::reset();
     test_seam::force_result(test_seam::ForcedResult::Success);
 
-    // bill_prompt_if_authed needs: multi-user mode on + a user JWT, and
-    // bill_ai_operation needs a priced model. Save/restore both because
-    // the global in-memory DB is shared across the test binary.
-    let prev_multi_user =
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-    let prev_rates =
-        crate::db::Ad4mDb::with_global_instance(|db| db.get_host_rates().unwrap_or_default());
-    crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true).unwrap());
-    crate::db::Ad4mDb::with_global_instance(|db| {
-        db.set_host_rates(&[("gpt-4".to_string(), 0.5)]).unwrap()
-    });
+    // bill_prompt_if_authed needs multi-user mode on + a user JWT, and
+    // bill_ai_operation needs a priced model. The guard restores both even
+    // if an assertion below panics.
+    let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
 
     let token = user_jwt_token("billing-user@ex.test");
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1063,10 +1096,6 @@ async fn stream_completion_bills_once_on_success() {
         Some("15 tokens (model: gpt-4)")
     );
 
-    crate::db::Ad4mDb::with_global_instance(|db| {
-        db.set_multi_user_enabled(prev_multi_user).unwrap()
-    });
-    crate::db::Ad4mDb::with_global_instance(|db| db.set_host_rates(&prev_rates).unwrap());
     test_seam::reset();
 }
 
@@ -1075,6 +1104,12 @@ async fn stream_error_does_not_bill() {
     init_test_db();
     test_seam::reset();
     test_seam::force_result(test_seam::ForcedResult::Success);
+
+    // Multi-user mode + a priced model are enabled on purpose: the only
+    // thing that must stop billing here is the Err gate. Without this, the
+    // skip would come from the missing user email and the test would pass
+    // even if error streams did bill.
+    let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
 
     // A valid user token is passed on purpose: the skip must come from
     // the Err gate, not from token absence (matches prompt_messages, which
