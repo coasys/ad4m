@@ -21,7 +21,7 @@
 //!
 //! End-to-end integration coverage lives in the sibling `e2e_tests`
 //! submodule (test-only). It seeds a real [`PerspectiveInstance`] with
-//! writer-emitted v4 flow links + hand-added v5 links, mints a
+//! writer-emitted flow links, mints a
 //! [`FlowInstance`](crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS)
 //! runtime record, and walks the whole `gather_active_flow_contexts →
 //! build_interpretation_input` chain without an LLM. That test is the

@@ -139,7 +139,7 @@ pub struct LinkPattern {
     pub target: String,
 }
 
-/// A per-property condition for a `ModelQuery` — the shape the v5 flow
+/// A per-property condition for a `ModelQuery` — the shape the flow
 /// engine evaluates against a class instance's decoded value. Mirrors
 /// `PropertyCondition` in `core/src/shacl/SHACLFlow.ts`.
 ///
@@ -233,9 +233,10 @@ pub struct FlowState {
     pub name: String,
     /// Numeric state value for ordering (e.g., 0, 0.5, 1)
     pub value: f64,
-    /// Link pattern that indicates this state (legacy v4 field, still
-    /// carried for backwards compat while v1 flows in production migrate
-    /// to `requires`).
+    /// Link pattern that indicates this state — the pre-`requires`
+    /// membership check the state-transition engine falls back on when
+    /// `requires` is unset. Still carried on the state shape because
+    /// existing flows in production continue to rely on it.
     pub state_check: LinkPattern,
     /// English description of what puts a flow instance IN this state.
     /// Read by the extraction pass to steer the LLM's state-transition
@@ -609,8 +610,8 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
 // ---------------------------------------------------------------------------
 // Reverse of parse_flow_to_links — read flow definitions off the graph.
 // Mirrors the canonical TS `SHACLFlow.fromLinks` in core/src/shacl/SHACLFlow.ts
-// including all v5 predicates. Consumed by Model C (`load_shacl_flows` →
-// `build_flow_contexts` → prompt block) so the extraction pass can see what
+// including every declared predicate. Consumed by Model C (`load_shacl_flows`
+// → `build_flow_contexts` → prompt block) so the extraction pass can see what
 // flows are declared on the perspective without a JS/GraphQL round-trip.
 // ---------------------------------------------------------------------------
 
@@ -686,7 +687,7 @@ fn decode_string_array(target: &str) -> Option<Vec<String>> {
 /// Reverse of `parse_flow_to_links` — reconstruct a [`SHACLFlow`] from
 /// its RDF representation. Mirrors the canonical TS
 /// `SHACLFlow.fromLinks` in `core/src/shacl/SHACLFlow.ts`, including
-/// every v5 predicate (`interpretationHint`, `requires`,
+/// every declared predicate (`interpretationHint`, `requires`,
 /// `semanticCheck`, `consensusRule` at both flow and state scope, plus
 /// `inputTypes`, `outputTypes`, `creationHint`, `context` on the flow).
 ///
@@ -765,9 +766,10 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
         }
     }
 
-    // Start action — v4 field, always emitted as a single JSON literal
-    // when non-empty. Absent-link and empty-array wire shapes both
-    // read as `start_action = vec![]`.
+    // Start action — the legacy setter list that runs when a flow is
+    // started on an expression. Emitted as a single JSON literal when
+    // non-empty. Absent-link and empty-array wire shapes both read as
+    // `start_action = vec![]`.
     if let Some(link) = find_link(links, flow_uri, "ad4m://startAction") {
         if let Some(actions) = decode_json_literal::<Vec<AD4MAction>>(&link.target) {
             flow.start_action = actions;
@@ -1548,16 +1550,16 @@ mod tests {
         );
     }
 
-    /// Load-bearing sanity check for slice-10.0: the v5 fields the TS
-    /// side ships (`interpretationHint`, `requires`, `semanticCheck`,
-    /// `consensusRule`, `inputTypes`, `outputTypes`, `creationHint`,
-    /// `context`) deserialise cleanly from the same JSON shape
-    /// `toJSON()` on `core/src/shacl/SHACLFlow.ts` emits. This is the
-    /// wire-format contract between the TS designer surface and the
-    /// Rust flow engine — a drift here breaks slice 10.1's context
-    /// gathering silently.
+    /// The full field set the TS side ships (`interpretationHint`,
+    /// `requires`, `semanticCheck`, `consensusRule`, `inputTypes`,
+    /// `outputTypes`, `creationHint`, `context`) deserialises cleanly
+    /// from the same JSON shape `toJSON()` on
+    /// `core/src/shacl/SHACLFlow.ts` emits. This is the wire-format
+    /// contract between the TS designer surface and the Rust flow
+    /// engine — a drift here breaks Model C's context gathering
+    /// silently.
     #[test]
-    fn test_parse_flow_with_v5_fields() {
+    fn test_parse_flow_full_field_set_deserialises() {
         let flow_json = r#"{
             "name": "Deliberation",
             "namespace": "ns://deliberation/",
@@ -1600,7 +1602,7 @@ mod tests {
         }"#;
 
         let flow: SHACLFlow =
-            serde_json::from_str(flow_json).expect("v5 fields deserialise cleanly");
+            serde_json::from_str(flow_json).expect("full field set deserialises cleanly");
 
         assert_eq!(
             flow.interpretation_hint.as_deref(),
@@ -1636,11 +1638,13 @@ mod tests {
         }
     }
 
-    /// The v4 shape (no v5 fields) still parses — `#[serde(default)]`
-    /// on every new field keeps back-compat. If this test breaks, an
-    /// upgrade path forgot to preserve the pre-v5 wire format.
+    /// A flow JSON that omits every optional field still parses —
+    /// `#[serde(default)]` on each optional field is what keeps this
+    /// green. If this test breaks, an optional field lost its default
+    /// annotation and any legacy JSON (or a hand-authored minimal flow)
+    /// now fails to deserialise.
     #[test]
-    fn test_parse_flow_v4_shape_still_works() {
+    fn test_parse_flow_omitting_optional_fields_still_works() {
         let flow_json = r#"{
             "name": "TODO",
             "namespace": "todo://",
@@ -1656,7 +1660,7 @@ mod tests {
         }"#;
 
         let flow: SHACLFlow = serde_json::from_str(flow_json)
-            .expect("v4 shape parses cleanly with default v5 fields");
+            .expect("minimal flow (no optional fields) parses cleanly");
         assert_eq!(flow.name, "TODO");
         assert!(flow.interpretation_hint.is_none());
         assert!(flow.input_types.is_empty());
@@ -1717,8 +1721,9 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // parse_flow_from_links — reverse-of-parse_flow_to_links (v4 shape) and
-    // round-trip against the canonical TS toLinks writer (v5 shape).
+    // parse_flow_from_links — reverse-of-parse_flow_to_links round-trips +
+    // full-shape read against hand-built links matching the canonical TS
+    // toLinks writer output.
     // ---------------------------------------------------------------------
 
     fn lit_str(s: &str) -> String {
@@ -1742,11 +1747,14 @@ mod tests {
         }
     }
 
-    /// End-to-end round-trip against `parse_flow_to_links`: everything
-    /// the writer emits must survive the reader unchanged. This is the
-    /// v4 shape only (all fields the current writer touches).
+    /// Round-trip on a MINIMAL flow (no optional fields set). Locks the
+    /// pair of edges the reader must handle when a producer only sets
+    /// `states` + `transitions` + `start_action` — every optional
+    /// predicate absent, all optional fields read back as `None` /
+    /// empty. Guards against a reader change that starts synthesising
+    /// values when a predicate is missing.
     #[test]
-    fn parse_flow_from_links_roundtrips_v4_writer_output() {
+    fn parse_flow_from_links_roundtrips_minimal_flow() {
         let flow_json = r#"{
             "name": "TODO",
             "namespace": "todo://",
@@ -1769,7 +1777,7 @@ mod tests {
             ]
         }"#;
 
-        let links = parse_flow_to_links(flow_json, "TODO").expect("v4 writer");
+        let links = parse_flow_to_links(flow_json, "TODO").expect("writer");
         let flow = parse_flow_from_links(&links, "todo://TODOFlow").expect("reader");
 
         assert_eq!(flow.name, "TODO");
@@ -1788,7 +1796,8 @@ mod tests {
         assert_eq!(flow.transitions[0].to_state, "done");
         assert_eq!(flow.transitions[0].actions.len(), 1);
 
-        // v5 fields never emitted by v4 writer → all unset / empty.
+        // Optional fields absent in the input JSON → the writer emits
+        // no predicate for them → the reader leaves them unset / empty.
         assert!(flow.interpretation_hint.is_none());
         assert!(flow.creation_hint.is_none());
         assert!(flow.consensus_rule.is_none());
@@ -1803,12 +1812,14 @@ mod tests {
         }
     }
 
-    /// Full v5-shape read — hand-built links matching what
-    /// `core/src/shacl/SHACLFlow.ts::toLinks()` emits. Catches drift
-    /// between the TS writer and the Rust reader (which are the two
-    /// halves Model C hangs on).
+    /// Full-shape read — hand-built links matching what
+    /// `core/src/shacl/SHACLFlow.ts::toLinks()` emits when every field
+    /// is set. Independent of the Rust writer (so a Rust-writer bug
+    /// can't mask a reader bug) — this is what catches drift between
+    /// the TS writer and the Rust reader, the two halves Model C hangs
+    /// on.
     #[test]
-    fn parse_flow_from_links_reads_v5_predicates() {
+    fn parse_flow_from_links_reads_all_predicates_from_hand_built_links() {
         let flow_uri = "coasys://DeliberationFlow";
         let state_uri = "coasys://Deliberation.Resolution";
         let transition_uri = "coasys://Deliberation.OverlapToResolution";
@@ -1956,6 +1967,117 @@ mod tests {
         assert_eq!(t.action_name, "Resolve");
         assert_eq!(t.from_state, "Overlap");
         assert_eq!(t.to_state, "Resolution");
+    }
+
+    /// Round-trip on a FULL flow (every optional field set). Closes
+    /// the writer→reader loop the previous "hand-built links" test
+    /// only proved one side of. If a new field lands on `SHACLFlow`
+    /// and the writer forgets to emit it (or emits it under the wrong
+    /// predicate URI), this test fails. Guard against the mismatch
+    /// PR #929 review R7 caught the previous time round.
+    #[test]
+    fn parse_flow_from_links_roundtrips_full_flow() {
+        let flow_json = r#"{
+            "name": "Deliberation",
+            "namespace": "coasys://",
+            "interpretationHint": "Guide the group toward overlap.",
+            "inputTypes": ["coasys://Proposal"],
+            "outputTypes": ["coasys://Resolution"],
+            "creationHint": "Fires when a controversial claim surfaces.",
+            "context": [{"className": "coasys://Proposal"}],
+            "consensusRule": {"n": 2},
+            "start_action": [],
+            "states": [
+                {
+                    "name": "Overlap",
+                    "value": 0.5,
+                    "state_check": {"predicate": "coasys://state", "target": "coasys://overlap"}
+                },
+                {
+                    "name": "Resolution",
+                    "value": 1.0,
+                    "state_check": {"predicate": "coasys://state", "target": "coasys://resolved"},
+                    "interpretationHint": "Participants agree.",
+                    "semanticCheck": "Evidence of convergence?",
+                    "consensusRule": {"n": 3, "fromRole": {"className": "coasys://Reviewer"}},
+                    "requires": [
+                        {"className": "coasys://Perspective", "count": {"min": 3}}
+                    ]
+                }
+            ],
+            "transitions": [
+                {
+                    "action_name": "Resolve",
+                    "from_state": "Overlap",
+                    "to_state": "Resolution",
+                    "actions": []
+                }
+            ]
+        }"#;
+
+        let links = parse_flow_to_links(flow_json, "Deliberation").expect("writer");
+        let flow = parse_flow_from_links(&links, "coasys://DeliberationFlow").expect("reader");
+
+        // Flow-scope round-trip
+        assert_eq!(
+            flow.interpretation_hint.as_deref(),
+            Some("Guide the group toward overlap.")
+        );
+        assert_eq!(flow.input_types, vec!["coasys://Proposal".to_string()]);
+        assert_eq!(flow.output_types, vec!["coasys://Resolution".to_string()]);
+        assert_eq!(
+            flow.creation_hint.as_deref(),
+            Some("Fires when a controversial claim surfaces.")
+        );
+        let ctx = flow.context.as_ref().expect("context round-trips");
+        assert_eq!(ctx.len(), 1);
+        assert_eq!(ctx[0].class_name, "coasys://Proposal");
+        let rule = flow
+            .consensus_rule
+            .as_ref()
+            .expect("flow consensusRule round-trips");
+        assert_eq!(rule.n, 2);
+
+        // State-scope round-trip on the Resolution state (Overlap
+        // deliberately keeps everything optional unset to prove the
+        // writer doesn't emit empty predicates when the source is None
+        // — a round-trip smell in that direction would break the
+        // "no-op is a no-op" invariant the empty-string guards protect).
+        let resolution = flow
+            .states
+            .iter()
+            .find(|s| s.name == "Resolution")
+            .expect("Resolution state");
+        assert_eq!(
+            resolution.interpretation_hint.as_deref(),
+            Some("Participants agree.")
+        );
+        assert_eq!(
+            resolution.semantic_check.as_deref(),
+            Some("Evidence of convergence?")
+        );
+        let state_rule = resolution
+            .consensus_rule
+            .as_ref()
+            .expect("state consensusRule round-trips");
+        assert_eq!(state_rule.n, 3);
+        assert!(state_rule.from_role.is_some());
+        let req = resolution.requires.as_ref().expect("requires round-trips");
+        assert_eq!(req.len(), 1);
+        assert_eq!(req[0].class_name, "coasys://Perspective");
+        assert_eq!(req[0].count.as_ref().and_then(|c| c.min), Some(3));
+
+        // Overlap has no optional fields set — writer must not have
+        // conjured any state-scope predicates for it.
+        let overlap = flow
+            .states
+            .iter()
+            .find(|s| s.name == "Overlap")
+            .expect("Overlap state");
+        assert!(overlap.interpretation_hint.is_none());
+        assert!(overlap.semantic_check.is_none());
+        assert!(overlap.consensus_rule.is_none());
+        assert!(overlap.requires.is_none());
     }
 
     /// Bad-shape rejection: a `requires` payload whose entries fail

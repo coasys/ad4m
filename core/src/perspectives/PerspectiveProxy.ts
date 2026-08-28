@@ -1141,7 +1141,7 @@ export class PerspectiveProxy {
     }
 
     /**
-     * v5-shaped flow instantiation (design doc §4.3). Mints a `FlowInstance`
+     * Flow instantiation (design doc §4.3). Mints a `FlowInstance`
      * node on the graph tied to `baseExpression`, seeded at the flow's first
      * declared state, and returns the object-oriented {@link FlowInstance}
      * wrapper. Idempotently registers the hardwired `FlowInstanceRecord` +
@@ -1186,8 +1186,8 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Returns all live {@link FlowInstance} wrappers on this perspective (v5,
-     * design doc §4.3). Idempotently registers the hardwired
+     * Returns all live {@link FlowInstance} wrappers on this perspective
+     * (design doc §4.3). Idempotently registers the hardwired
      * `FlowInstanceRecord` + `FlowTransitionProposal` @Model classes on first
      * call — so callers can ask for instances before any
      * {@link startFlowInstance} has ever run without hitting a
@@ -1225,13 +1225,13 @@ export class PerspectiveProxy {
      * // All flows on the perspective
      * const all = await p.getFlowInstances();
      *
-     * // Legacy shorthand — every Delivery instance
+     * // String shorthand — every Delivery instance
      * const deliveries = await p.getFlowInstances("Delivery");
      *
-     * // v5: every flow running on a specific expression
+     * // Every flow running on a specific expression
      * const onThisTask = await p.getFlowInstances({ subject: "ad4m://task/1" });
      *
-     * // v5: combined — Delivery flows on a specific expression
+     * // Combined — Delivery flows on a specific expression
      * const deliveriesOnTask = await p.getFlowInstances({
      *   flowName: "Delivery",
      *   subject: "ad4m://task/1",

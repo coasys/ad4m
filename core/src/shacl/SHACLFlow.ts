@@ -330,7 +330,7 @@ export class SHACLFlow {
   /**
    * Subject-class URIs the flow accepts as its base expression.
    *
-   * Design doc §4.1 (v4 addition): a flow's *typed input*. When an
+   * Design doc §4.1: a flow's *typed input*. When an
    * expression whose class matches any URI in this array enters scope,
    * the flow-spawn engine considers it a candidate base. Superseded
    * the older link-level `flowable: LinkPattern` primitive — model-level
@@ -344,7 +344,7 @@ export class SHACLFlow {
    * Subject-class URIs the flow must produce (linked to the base) for a
    * run to count as complete.
    *
-   * Design doc §4.1 (v4 addition): a flow's *typed output*. Two jobs:
+   * Design doc §4.1: a flow's *typed output*. Two jobs:
    * (a) documentation for stateful flows — records what a completed run
    * leaves in the graph; (b) **terminal condition** for zero-state flows —
    * a flow with no `FlowState`s completes when at least one instance of
@@ -389,7 +389,7 @@ export class SHACLFlow {
    *    moment `outputTypes` are satisfied. E.g. a Like flow declares
    *    `{ n: 1 }` and completes on the first author.
    *
-   * Design doc §4.1 (v4): terminal condition for stateless flows.
+   * Design doc §4.1: terminal condition for stateless flows.
    * Unset = engine default of `{ n: 1 }` applies at both layers.
    */
   public consensusRule?: ConsensusRule;

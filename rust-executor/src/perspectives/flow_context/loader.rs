@@ -625,7 +625,7 @@ mod tests {
                 ]
             }}"#
         );
-        parse_flow_to_links(&flow_json, name).expect("writer builds v4 flow links")
+        parse_flow_to_links(&flow_json, name).expect("writer builds flow links")
     }
 
     #[test]
