@@ -12,6 +12,7 @@ import type {
 } from "./SfuTypes";
 import type { SfuNeighbourhoodApi } from "./SfuManager";
 import { createSession, type Session, type SessionCreateOptions } from "./Session";
+import { createTelepresenceChannel } from "./MeshManager";
 
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
@@ -98,12 +99,19 @@ export class NeighbourhoodProxy {
 
     /** Create a WebRTC media session. Call session.join(localStream) to connect. */
     createSession(roomName: string, options?: SessionCreateOptions): Session {
+        const proxy = this
         const session = createSession({
             api: this.#buildSfuApi(),
             roomId: roomName,
             agentDid: this.#agentDid,
             neighbourhoodUrl: options?.neighbourhoodUrl ?? "",
             topology: options?.topology ?? "auto",
+            // Mesh needs a signalling channel and presence callbacks.
+            // SFU ignores these — they remain unused when the resolved
+            // topology selects the SFU path.
+            channel: createTelepresenceChannel(proxy, proxy.#agentDid),
+            setOnlineStatus: (status) => proxy.setOnlineStatusU(status),
+            onlineAgents: () => proxy.onlineAgents(),
         })
         this.#sessions.push(session)
         session.on("state-changed", (state: string) => {

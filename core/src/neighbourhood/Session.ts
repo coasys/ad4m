@@ -1,4 +1,6 @@
 import { SfuManager, SfuNeighbourhoodApi } from "./SfuManager"
+import { MeshManager, type SignallingChannel } from "./MeshManager"
+import type { OnlineAgent } from "../language/Language"
 import type {
     SfuConfig,
     SfuDataMessage,
@@ -62,13 +64,38 @@ interface SessionImplConfig {
     topology: SessionTopology
     sfuConfig?: SfuConfig
     iceServers?: IceServer[]
+    /** Signalling channel for mesh topology — required when topology resolves to mesh. */
+    channel?: SignallingChannel
+    /** Publish call-presence via telepresence.  The session broadcasts
+     *  membership so other agents' roster polls can discover it. */
+    setOnlineStatus?: (status: { links: { source: string; predicate: string; target: string }[] }) => Promise<boolean>
+    /** Poll for agents currently online in the neighbourhood.  The
+     *  session reconciles the result against its mesh connections. */
+    onlineAgents?: () => Promise<OnlineAgent[]>
 }
 
+/**
+ * Call-presence predicate.  When the session joins, it publishes an
+ * online-status link with this predicate and the room id as target.
+ * Other agents polling `onlineAgents()` use this to discover the
+ * roster without a join message.
+ */
+const CALL_PRESENCE_PREDICATE = "ad4m://session/in-call"
+
+/** How often (ms) the mesh session polls `onlineAgents` for roster changes. */
+const ROSTER_POLL_INTERVAL_MS = 3_000
+
 export function createSession(config: SessionImplConfig): Session {
-    const { api, roomId, agentDid, neighbourhoodUrl, topology, sfuConfig, iceServers } = config
+    const {
+        api, roomId, agentDid, neighbourhoodUrl,
+        topology, sfuConfig, iceServers,
+        channel, setOnlineStatus, onlineAgents,
+    } = config
 
     let state: SessionState = "idle"
-    let manager: SfuManager | null = null
+    let sfuManager: SfuManager | null = null
+    let meshManager: MeshManager | null = null
+    let rosterInterval: ReturnType<typeof setInterval> | null = null
     const callbacks = new Map<SessionEvent, SessionEventCallback[]>()
     const trackListeners: ((stream: MediaStream, track: MediaStreamTrack) => void)[] = []
     const dataListeners: ((message: SfuDataMessage) => void)[] = []
@@ -92,60 +119,190 @@ export function createSession(config: SessionImplConfig): Session {
         return "sfu"
     }
 
+    // ── Mesh roster polling ─────────────────────────────────────────
+
+    /**
+     * Announce this agent's call membership via telepresence presence.
+     * Other agents' roster polls will pick this up.
+     */
+    async function announceCallPresence(): Promise<void> {
+        if (!setOnlineStatus) return
+        try {
+            await setOnlineStatus({
+                links: [{ source: agentDid, predicate: CALL_PRESENCE_PREDICATE, target: roomId }],
+            })
+        } catch (err) {
+            console.warn("session: call-presence announcement failed:", err)
+        }
+    }
+
+    /**
+     * Poll online agents and reconcile the mesh roster.
+     *
+     * Agents in the same call carry a link with predicate
+     * `CALL_PRESENCE_PREDICATE` and target matching the room id.
+     * The poll reads the full online-agents list, filters to those
+     * links, and passes the resulting DID set to `mesh.setRoster()`.
+     * That function opens connections to new arrivals and tears down
+     * connections to departed peers.
+     */
+    async function pollRoster(): Promise<void> {
+        if (!meshManager || !onlineAgents) return
+        try {
+            const agents = await onlineAgents()
+            const inCall: string[] = []
+            for (const agent of agents) {
+                if (agent.did === agentDid) continue
+                // Each agent's status carries a perspective with links.
+                // Check for the call-presence link matching this room.
+                const status = agent.status
+                if (status?.links) {
+                    for (const link of status.links) {
+                        const l = link.data ?? link
+                        if (l.predicate === CALL_PRESENCE_PREDICATE && l.target === roomId) {
+                            inCall.push(agent.did)
+                            break
+                        }
+                    }
+                }
+            }
+            meshManager.setRoster(inCall)
+        } catch (err) {
+            console.warn("session: roster poll failed:", err)
+        }
+    }
+
+    function startRosterPolling(): void {
+        // Immediate first poll, then periodic
+        void pollRoster()
+        rosterInterval = setInterval(() => void pollRoster(), ROSTER_POLL_INTERVAL_MS)
+    }
+
+    function stopRosterPolling(): void {
+        if (rosterInterval !== null) {
+            clearInterval(rosterInterval)
+            rosterInterval = null
+        }
+    }
+
+    // ── Mesh wiring helpers ─────────────────────────────────────────
+
+    function wireMeshEvents(mesh: MeshManager): void {
+        for (const event of ["participant-joined", "participant-left", "error"] as const) {
+            mesh.on(event, (...args: any[]) => emit(event, ...args))
+        }
+        mesh.on("stream-added", (stream: MediaStream, track: MediaStreamTrack) => {
+            emit("stream-added", stream, track)
+            for (const cb of trackListeners) cb(stream, track)
+        })
+        mesh.on("stream-removed", (stream: MediaStream, track: MediaStreamTrack) => {
+            emit("stream-removed", stream, track)
+        })
+    }
+
+    // ── SFU wiring helpers ──────────────────────────────────────────
+
+    function wireSfuEvents(sfu: SfuManager): void {
+        for (const event of ["topology-changed", "participant-joined", "participant-left", "active-speaker", "error"] as const) {
+            sfu.on(event, (...args: any[]) => emit(event, ...args))
+        }
+        sfu.on("stream-added", (stream: MediaStream, track: MediaStreamTrack) => {
+            emit("stream-added", stream, track)
+            for (const cb of trackListeners) cb(stream, track)
+        })
+        sfu.on("stream-removed", (stream: MediaStream, track: MediaStreamTrack) => {
+            emit("stream-removed", stream, track)
+        })
+    }
+
+    // ── Session object ──────────────────────────────────────────────
+
     const session: Session = {
         async join(localStream: MediaStream) {
             if (state === "closed") throw new Error("Session destroyed")
             if (state === "active" || state === "joining") throw new Error("Session already active")
 
             const topo = resolvedTopology()
-            if (topo === "mesh") {
-                throw new Error("Mesh transport not yet implemented — use topology 'sfu' or 'auto' with SFU-capable neighbourhood")
-            }
-
             setState("joining")
 
+            if (topo === "mesh") {
+                if (!channel) {
+                    throw new Error(
+                        "Mesh topology requires a signalling channel — " +
+                        "pass a channel via SessionImplConfig or use topology 'sfu'",
+                    )
+                }
+
+                const mesh = new MeshManager({
+                    channel,
+                    callId: roomId,
+                    selfId: agentDid,
+                })
+                meshManager = mesh
+                wireMeshEvents(mesh)
+
+                dataUnsubscribe = mesh.subscribeDataChannel((msg) => {
+                    for (const cb of dataListeners) cb(msg)
+                })
+
+                await mesh.join(localStream)
+
+                // Announce this agent's presence in the call, then
+                // start polling so the mesh reconciles connections
+                // against whoever else the roster contains.
+                await announceCallPresence()
+                startRosterPolling()
+
+                emit("topology-changed", "mesh")
+                setState("active")
+                return
+            }
+
+            // SFU path — unchanged
             const iceConfig = iceServers && iceServers.length > 0
                 ? { stun: iceServers.filter(s => s.urls.some(u => u.startsWith("stun:"))).flatMap(s => s.urls),
                     turn: iceServers.filter(s => s.urls.some(u => u.startsWith("turn:"))).map(s => ({ urls: s.urls.join(","), username: s.username || "", credential: s.credential || "" })) }
                 : undefined
 
-            manager = new SfuManager(api, roomId, agentDid, neighbourhoodUrl, iceConfig, sfuConfig)
+            sfuManager = new SfuManager(api, roomId, agentDid, neighbourhoodUrl, iceConfig, sfuConfig)
+            wireSfuEvents(sfuManager)
 
-            for (const event of ["topology-changed", "participant-joined", "participant-left", "active-speaker", "error"] as const) {
-                manager.on(event, (...args: any[]) => emit(event, ...args))
-            }
-            manager.on("stream-added", (stream: MediaStream, track: MediaStreamTrack) => {
-                emit("stream-added", stream, track)
-                for (const cb of trackListeners) cb(stream, track)
-            })
-            manager.on("stream-removed", (stream: MediaStream, track: MediaStreamTrack) => {
-                emit("stream-removed", stream, track)
-            })
-
-            dataUnsubscribe = manager.subscribeDataChannel((msg) => {
+            dataUnsubscribe = sfuManager.subscribeDataChannel((msg) => {
                 for (const cb of dataListeners) cb(msg)
             })
 
-            await manager.join(localStream)
+            await sfuManager.join(localStream)
             setState("active")
         },
 
         async leave() {
             if (state !== "active") return
             setState("leaving")
+            stopRosterPolling()
             if (dataUnsubscribe) { dataUnsubscribe(); dataUnsubscribe = null }
-            if (manager) { await manager.leave(); manager = null }
+            if (meshManager) { await meshManager.leave(); meshManager = null }
+            if (sfuManager) { await sfuManager.leave(); sfuManager = null }
             setState("idle")
         },
 
         get participants() {
-            if (!manager) return []
-            return manager.getParticipants().map(p => ({
-                agentDid: p.did,
-                hasAudio: p.hasAudio,
-                hasVideo: p.hasVideo,
-                isActiveSpeaker: p.isActiveSpeaker,
-            }))
+            if (meshManager) {
+                return meshManager.getParticipants().map(p => ({
+                    agentDid: p.did,
+                    hasAudio: p.hasAudio,
+                    hasVideo: p.hasVideo,
+                    isActiveSpeaker: p.isActiveSpeaker,
+                }))
+            }
+            if (sfuManager) {
+                return sfuManager.getParticipants().map(p => ({
+                    agentDid: p.did,
+                    hasAudio: p.hasAudio,
+                    hasVideo: p.hasVideo,
+                    isActiveSpeaker: p.isActiveSpeaker,
+                }))
+            }
+            return []
         },
 
         onTrack(cb) {
@@ -157,13 +314,20 @@ export function createSession(config: SessionImplConfig): Session {
         },
 
         async setQualityPreference(pref) {
-            if (!manager) throw new Error("Session not active")
-            await manager.setQualityPreference(pref)
+            // Mesh has no quality layers — simulcast only applies to SFU.
+            // Silently accept so callers need no topology check.
+            if (meshManager) return
+            if (!sfuManager) throw new Error("Session not active")
+            await sfuManager.setQualityPreference(pref)
         },
 
         async sendData(label, data, binary = false) {
-            if (!manager) throw new Error("Session not active")
-            await manager.sendData(label, data, binary)
+            if (meshManager) {
+                meshManager.sendData(label, data, binary)
+                return
+            }
+            if (!sfuManager) throw new Error("Session not active")
+            await sfuManager.sendData(label, data, binary)
         },
 
         onData(cb) {
@@ -193,7 +357,9 @@ export function createSession(config: SessionImplConfig): Session {
 
         async destroy() {
             if (state === "active" || state === "joining") await session.leave()
-            if (manager) { await manager.destroy(); manager = null }
+            stopRosterPolling()
+            if (meshManager) { await meshManager.destroy(); meshManager = null }
+            if (sfuManager) { await sfuManager.destroy(); sfuManager = null }
             callbacks.clear()
             trackListeners.length = 0
             dataListeners.length = 0
