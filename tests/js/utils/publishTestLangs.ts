@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
-import { baseUrl, sleep, startExecutor } from "./utils";
+import { baseUrl, sleep, startExecutor, runHcLocalServices } from "./utils";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -85,7 +85,23 @@ async function publish() {
 
     createTestingAgent();
 
-    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, apiPort, hcAdminPort, hcAppPort, true);
+    // Publishing setup runs a temporary LOCAL kitsune2-bootstrap-srv so the
+    // setup executor never talks to dev-test-bootstrap2 (super old). See
+    // Nico's 2026-08-26 voice note + utils.ts:startExecutor comment.
+    const localServices = await runHcLocalServices();
+    if (!localServices.bootstrapUrl || !localServices.proxyUrl) {
+        throw new Error("publishTestLangs: runHcLocalServices did not yield bootstrap/proxy URLs");
+    }
+    const executorProcess = await startExecutor(
+        appDataPath,
+        publishingBootstrapSeedPath,
+        apiPort, hcAdminPort, hcAppPort,
+        true,
+        undefined,
+        localServices.proxyUrl,
+        localServices.bootstrapUrl,
+    );
+    (executorProcess as any).__localServicesProcess = localServices.process;
 
     try {
         const ad4mClient = new Ad4mClient(baseUrl(apiPort));
