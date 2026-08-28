@@ -144,19 +144,19 @@ export class NeighbourhoodClient {
     // structured `CallSessionInfo` (SDP answer + optional cascade
     // redirect + stream mapping).
 
-    async startRoom(neighbourhoodUrl: string, roomName: string): Promise<SfuRoomInfo> {
+    async sfuStartRoom(neighbourhoodUrl: string, roomName: string): Promise<SfuRoomInfo> {
         return this.#apiClient.call<SfuRoomInfo>("sfu.startRoom", { neighbourhoodUrl, roomName })
     }
 
-    async stopRoom(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
+    async sfuStopRoom(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
         return this.#apiClient.call<boolean>("sfu.stopRoom", { neighbourhoodUrl, roomName })
     }
 
-    async listRooms(): Promise<SfuRoomInfo[]> {
+    async sfuListRooms(): Promise<SfuRoomInfo[]> {
         return this.#apiClient.call<SfuRoomInfo[]>("sfu.listRooms", {})
     }
 
-    async callJoin(
+    async sfuCallJoin(
         neighbourhoodUrl: string,
         roomName: string,
         sdpOffer: string,
@@ -168,11 +168,11 @@ export class NeighbourhoodClient {
         })
     }
 
-    async callLeave(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
+    async sfuCallLeave(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
         return this.#apiClient.call<boolean>("sfu.callLeave", { neighbourhoodUrl, roomName })
     }
 
-    async callSetQualityPreference(
+    async sfuCallSetQualityPreference(
         neighbourhoodUrl: string,
         roomName: string,
         preference: SfuQualityPreference,
@@ -184,7 +184,7 @@ export class NeighbourhoodClient {
         })
     }
 
-    async callAnswerServerOffer(
+    async sfuCallAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
         sdpAnswer: string,
@@ -196,21 +196,21 @@ export class NeighbourhoodClient {
         })
     }
 
-    async getConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
+    async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
         return this.#apiClient.call<SfuConfig>("sfu.getConfig", { neighbourhoodUrl })
     }
 
-    async setConfig(neighbourhoodUrl: string, config: SfuConfig): Promise<boolean> {
+    async sfuSetConfig(neighbourhoodUrl: string, config: SfuConfig): Promise<boolean> {
         return this.#apiClient.call<boolean>("sfu.setConfig", { neighbourhoodUrl, config })
     }
 
-    async peerForNeighbourhood(neighbourhoodUrl: string): Promise<string | null> {
+    async sfuPeerForNeighbourhood(neighbourhoodUrl: string): Promise<string | null> {
         return this.#apiClient.call<string | null>("sfu.sfuPeerForNeighbourhood", {
             neighbourhoodUrl,
         })
     }
 
-    async peersForNeighbourhood(neighbourhoodUrl: string): Promise<string[]> {
+    async sfuPeersForNeighbourhood(neighbourhoodUrl: string): Promise<string[]> {
         return this.#apiClient.call<string[]>("sfu.sfuPeersForNeighbourhood", { neighbourhoodUrl })
     }
 
@@ -224,7 +224,7 @@ export class NeighbourhoodClient {
      * complete (which can take up to 8 seconds on restrictive
      * networks).
      */
-    async addIceCandidate(
+    async sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
         candidate: string,
@@ -243,7 +243,7 @@ export class NeighbourhoodClient {
      * The server relays it to their matching data channel and
      * publishes it on the `sfu-data` events_ws topic.
      */
-    async sendData(
+    async sfuSendData(
         neighbourhoodUrl: string,
         roomName: string,
         channelLabel: string,
@@ -264,7 +264,7 @@ export class NeighbourhoodClient {
      * function.  Messages arrive for every participant in the room;
      * filter by `senderDid` if needed.
      */
-    subscribeDataChannel(
+    subscribeSfuDataChannel(
         callback: (message: SfuDataMessage) => void,
     ): () => void {
         return this.#apiClient.subscribe((data: any) => {
@@ -278,13 +278,13 @@ export class NeighbourhoodClient {
      * server publishes `sfu-call-renegotiation-offer` events on the
      * events_ws every time the relay's outbound track set changes for
      * `targetDid`.  Callers apply the offer to their `RTCPeerConnection`,
-     * generate an answer, and post it via `callAnswerServerOffer`.
+     * generate an answer, and post it via `sfuCallAnswerServerOffer`.
      *
      * The events_ws fanout already filters per-DID; this subscription
      * additionally double-filters on `targetDid` for safety.  Returns
      * an unsubscribe function.
      */
-    subscribeCallRenegotiationOffer(
+    subscribeSfuCallRenegotiationOffer(
         targetDid: string,
         callback: (payload: {
             targetDid: string
@@ -321,7 +321,7 @@ export class NeighbourhoodClient {
      * the cascade rebalancer decides a participant should move to a
      * less-loaded node.  Returns an unsubscribe function.
      */
-    subscribeMigrateEvent(
+    subscribeSfuMigrateEvent(
         targetDid: string,
         callback: (payload: {
             targetDid: string
@@ -356,7 +356,7 @@ export class NeighbourhoodClient {
      * plus the list of pipes.  Useful for diagnostics and wind-tunnel
      * assertions.
      */
-    async cascadeStatus(): Promise<{
+    async sfuCascadeStatus(): Promise<{
         establishedCount: number
         pipes: { roomId: string; remoteDid: string }[]
     }> {
@@ -367,7 +367,7 @@ export class NeighbourhoodClient {
      * Read-only: per-participant quality preferences the SFU event loop
      * currently holds.  Returns `[{participantId, preference}, ...]`.
      */
-    async qualityPreferences(): Promise<
+    async sfuQualityPreferences(): Promise<
         { participantId: string; preference: string }[]
     > {
         return this.#apiClient.call("sfu.qualityPreferences", {})
@@ -379,7 +379,7 @@ export class NeighbourhoodClient {
      * automatically; this RPC exists for test harnesses and bridge
      * deployments.
      */
-    async ensureMembership(
+    async sfuEnsureMembership(
         neighbourhoodUrl: string,
         did: string,
     ): Promise<boolean> {

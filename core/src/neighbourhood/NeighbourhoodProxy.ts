@@ -10,6 +10,7 @@ import type {
     SfuRoomInfo,
     TrackMapEntry,
 } from "./SfuTypes";
+import type { SfuNeighbourhoodApi } from "./SfuManager";
 import { createSession, type Session, type SessionCreateOptions } from "./Session";
 
 export class NeighbourhoodProxy {
@@ -98,7 +99,7 @@ export class NeighbourhoodProxy {
     /** Create a WebRTC media session. Call session.join(localStream) to connect. */
     createSession(roomName: string, options?: SessionCreateOptions): Session {
         const session = createSession({
-            api: this.#client,
+            api: this.#buildSfuApi(),
             roomId: roomName,
             agentDid: this.#agentDid,
             neighbourhoodUrl: options?.neighbourhoodUrl ?? "",
@@ -114,38 +115,54 @@ export class NeighbourhoodProxy {
         return session
     }
 
+    #buildSfuApi(): SfuNeighbourhoodApi {
+        const client = this.#client
+        return {
+            callJoin: (url, room, offer) => client.sfuCallJoin(url, room, offer),
+            callLeave: (url, room) => client.sfuCallLeave(url, room),
+            callSetQualityPreference: (url, room, pref) => client.sfuCallSetQualityPreference(url, room, pref),
+            callAnswerServerOffer: (url, room, answer) => client.sfuCallAnswerServerOffer(url, room, answer),
+            subscribeCallRenegotiationOffer: (did, cb) => client.subscribeSfuCallRenegotiationOffer(did, cb),
+            subscribeMigrateEvent: (did, cb) => client.subscribeSfuMigrateEvent(did, cb),
+            addIceCandidate: (url, room, candidate) => client.sfuAddIceCandidate(url, room, candidate),
+            sendData: (url, room, label, data, binary) => client.sfuSendData(url, room, label, data, binary),
+            subscribeDataChannel: (cb) => client.subscribeSfuDataChannel(cb),
+        }
+    }
+
     // ── SFU (Selective Forwarding Unit) ─────────────────────────────────
     //
-    // Thin pass-through to NeighbourhoodClient.  Each method takes the
-    // neighbourhood URL explicitly — the proxy is per-perspective, not
-    // per-neighbourhood, and the URL is owned by the consumer.
+    // Thin pass-through to `NeighbourhoodClient.sfu*`.  Each method takes
+    // the neighbourhood URL explicitly — the proxy is per-perspective,
+    // not per-neighbourhood, and the URL is owned by the consumer (Flux's
+    // call context, the WE UI, etc).
 
     async sfuConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
-        return await this.#client.getConfig(neighbourhoodUrl)
+        return await this.#client.sfuGetConfig(neighbourhoodUrl)
     }
 
     async setSfuConfig(neighbourhoodUrl: string, config: SfuConfig): Promise<boolean> {
-        return await this.#client.setConfig(neighbourhoodUrl, config)
+        return await this.#client.sfuSetConfig(neighbourhoodUrl, config)
     }
 
     async sfuPeer(neighbourhoodUrl: string): Promise<string | null> {
-        return await this.#client.peerForNeighbourhood(neighbourhoodUrl)
+        return await this.#client.sfuPeerForNeighbourhood(neighbourhoodUrl)
     }
 
     async sfuPeers(neighbourhoodUrl: string): Promise<string[]> {
-        return await this.#client.peersForNeighbourhood(neighbourhoodUrl)
+        return await this.#client.sfuPeersForNeighbourhood(neighbourhoodUrl)
     }
 
     async sfuStartRoom(neighbourhoodUrl: string, roomName: string): Promise<SfuRoomInfo> {
-        return await this.#client.startRoom(neighbourhoodUrl, roomName)
+        return await this.#client.sfuStartRoom(neighbourhoodUrl, roomName)
     }
 
     async sfuStopRoom(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
-        return await this.#client.stopRoom(neighbourhoodUrl, roomName)
+        return await this.#client.sfuStopRoom(neighbourhoodUrl, roomName)
     }
 
     async sfuListRooms(): Promise<SfuRoomInfo[]> {
-        return await this.#client.listRooms()
+        return await this.#client.sfuListRooms()
     }
 
     async callJoin(
@@ -153,11 +170,11 @@ export class NeighbourhoodProxy {
         roomName: string,
         sdpOffer: string,
     ): Promise<CallSessionInfo> {
-        return await this.#client.callJoin(neighbourhoodUrl, roomName, sdpOffer)
+        return await this.#client.sfuCallJoin(neighbourhoodUrl, roomName, sdpOffer)
     }
 
     async callLeave(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
-        return await this.#client.callLeave(neighbourhoodUrl, roomName)
+        return await this.#client.sfuCallLeave(neighbourhoodUrl, roomName)
     }
 
     async callSetQualityPreference(
@@ -165,7 +182,7 @@ export class NeighbourhoodProxy {
         roomName: string,
         preference: SfuQualityPreference,
     ): Promise<boolean> {
-        return await this.#client.callSetQualityPreference(
+        return await this.#client.sfuCallSetQualityPreference(
             neighbourhoodUrl,
             roomName,
             preference,
@@ -177,12 +194,14 @@ export class NeighbourhoodProxy {
         roomName: string,
         sdpAnswer: string,
     ): Promise<boolean> {
-        return await this.#client.callAnswerServerOffer(neighbourhoodUrl, roomName, sdpAnswer)
+        return await this.#client.sfuCallAnswerServerOffer(neighbourhoodUrl, roomName, sdpAnswer)
     }
 
     /**
      * Subscribe to server-pushed renegotiation offers for `targetDid`.
-     * Returns an unsubscribe function.
+     * Returns an unsubscribe function.  See
+     * `NeighbourhoodClient.subscribeSfuCallRenegotiationOffer` for the
+     * underlying mechanism.
      */
     subscribeCallRenegotiationOffer(
         targetDid: string,
@@ -194,7 +213,7 @@ export class NeighbourhoodProxy {
             trackMapping?: TrackMapEntry[]
         }) => void,
     ): () => void {
-        return this.#client.subscribeCallRenegotiationOffer(targetDid, callback)
+        return this.#client.subscribeSfuCallRenegotiationOffer(targetDid, callback)
     }
 
     /**
@@ -210,20 +229,20 @@ export class NeighbourhoodProxy {
             migrateToDid: string
         }) => void,
     ): () => void {
-        return this.#client.subscribeMigrateEvent(targetDid, callback)
+        return this.#client.subscribeSfuMigrateEvent(targetDid, callback)
     }
 
-    // ── Trickle ICE ─────────────────────────────────────────────────────
+    // ── SFU trickle ICE ─────────────────────────────────────────────────
 
     async addIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
         candidate: string,
     ): Promise<boolean> {
-        return await this.#client.addIceCandidate(neighbourhoodUrl, roomName, candidate)
+        return await this.#client.sfuAddIceCandidate(neighbourhoodUrl, roomName, candidate)
     }
 
-    // ── Data channel relay ────────────────────────────────────────────
+    // ── SFU data channel relay ────────────────────────────────────────
 
     async sendData(
         neighbourhoodUrl: string,
@@ -232,7 +251,7 @@ export class NeighbourhoodProxy {
         data: string,
         binary: boolean = false,
     ): Promise<boolean> {
-        return await this.#client.sendData(
+        return await this.#client.sfuSendData(
             neighbourhoodUrl,
             roomName,
             channelLabel,
@@ -244,28 +263,28 @@ export class NeighbourhoodProxy {
     subscribeDataChannel(
         callback: (message: SfuDataMessage) => void,
     ): () => void {
-        return this.#client.subscribeDataChannel(callback)
+        return this.#client.subscribeSfuDataChannel(callback)
     }
 
-    // ── Diagnostic / test-harness ─────────────────────────────────────
+    // ── SFU diagnostic / test-harness ──────────────────────────────────
 
-    async cascadeStatus(): Promise<{
+    async sfuCascadeStatus(): Promise<{
         establishedCount: number
         pipes: { roomId: string; remoteDid: string }[]
     }> {
-        return await this.#client.cascadeStatus()
+        return await this.#client.sfuCascadeStatus()
     }
 
-    async qualityPreferences(): Promise<
+    async sfuQualityPreferences(): Promise<
         { participantId: string; preference: string }[]
     > {
-        return await this.#client.qualityPreferences()
+        return await this.#client.sfuQualityPreferences()
     }
 
-    async ensureMembership(
+    async sfuEnsureMembership(
         neighbourhoodUrl: string,
         did: string,
     ): Promise<boolean> {
-        return await this.#client.ensureMembership(neighbourhoodUrl, did)
+        return await this.#client.sfuEnsureMembership(neighbourhoodUrl, did)
     }
 }
