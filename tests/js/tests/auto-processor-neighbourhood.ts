@@ -200,22 +200,19 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
       });
 
       it("divides successive waves between the executors without re-processing a turn", async () => {
-        // Debounce raised to 5000ms (25x the default 200ms) specifically
-        // for this test: it stresses the cross-peer ProcessingClaim race,
-        // and 1500ms was still short enough on the Marvin runner for both
-        // peers' `try_claim` writes to land before either sees the
-        // other's — the "wave 1 processed by two peers" assertion the
-        // `waitForRetirementStable` helper catches. 5000ms gives claim
-        // sync a much wider window (Iroh gossip typical p99 ≈ 1–3s on a
-        // 2-peer neighbourhood after warm-up), at a wall-clock cost of
-        // ≈ 2× (5000 - 200ms) ≈ 9.6s across the two waves. Still cheap
-        // vs. the 4-minute test budget, and every OTHER test in this
-        // file keeps the fast default. This is a stopgap for the
-        // engine-level race noted in the PR description; the real fix
-        // is to make the claim serialisation not depend on sync latency.
+        // Debounce left at the default 200ms — matches the sibling
+        // "processes a shared channel exactly once (claim coordinates)"
+        // test which asserts the same claim-race invariant on the same
+        // sharedChannel warm-up and passes reliably. Higher debounce
+        // (previously 1500 → 5000ms) *worsened* the race: both peers
+        // batch the wave for the full debounce window, then both wake
+        // near-simultaneously and race the ProcessingClaim write before
+        // either has seen the other's link. At 200ms Alice's local
+        // watcher fires on her own writes almost immediately, claims
+        // first, and Bob's later gather (post-Iroh-gossip arrival of
+        // Alice's msgs) also sees Alice's claim link and stands down.
         const { aliceP, bobP, events } = await sharedChannel("flux-waves", {
           batchMin: 2,
-          debounceMs: 5000,
         });
 
         const aliceDid = await agentDid(testContext.alice);
