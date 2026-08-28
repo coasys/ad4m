@@ -11,7 +11,7 @@ import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlayInfo, RawScope } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -275,11 +275,72 @@ export class PerspectiveClient {
         classes?: string[],
         existingScope?: RawScope,
         mintScope?: RawScope,
+        observe?: RunInterpretationObserveOptions,
     ): Promise<string[]> {
         const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<string[]>(
             'perspective.runInterpretation',
-            { uuid, transcript, basePrefix, classes, existingScope, mintScope },
+            {
+                uuid, transcript, basePrefix, classes, existingScope, mintScope,
+                // Spread rather than always-present, so a client talking to a pre-#903
+                // executor sends exactly the params it sent before. `serde` would ignore
+                // the extra keys anyway; keeping the wire identical means a bug report
+                // from an older node cannot be about these.
+                ...(observe ? {
+                    observationId: observe.observationId,
+                    emitDebugEvents: observe.emitDebugEvents ?? false,
+                } : {}),
+            },
+            RUN_INTERPRETATION_TIMEOUT_MS,
+        )
+    }
+
+    /**
+     * Tool-calling counterpart to {@link runInterpretation}. The LLM sees a
+     * live per-class tool surface (`{Class}_query`, `{Class}_propose_create`,
+     * `{Class}_propose_link_child`, …) and drives the extraction via tool
+     * calls; buffered proposals drain through the same overlay gate the
+     * single-shot path uses.
+     *
+     * `maxToolCalls` bounds the loop and MUST be > 0 — zero would collapse
+     * the harness to a no-op final-answer step; use {@link runInterpretation}
+     * for the classic single-shot path.
+     *
+     * Same 20-minute RPC timeout as the single-shot path — an LLM loop
+     * that calls several tools can legitimately take longer than one plain
+     * generation.
+     */
+    async runInterpretationWithHarness(
+        uuid: string,
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        maxToolCalls: number,
+        classes?: string[],
+        modelOverride?: string,
+        existingScope?: RawScope,
+        // Optional live-debug event surface — same shape/semantics as the
+        // single-shot `runInterpretation`. `observationId` names the
+        // `processor_id` + `batch_key` on emitted `ToolCall` / `ToolResult`
+        // events so a subscribed UI can correlate them to this pass.
+        // `emitDebugEvents` is a dead-letter without an observationId
+        // (nothing to key against); the server gates on both.
+        observationId?: string,
+        emitDebugEvents?: boolean,
+    ): Promise<string[]> {
+        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
+        return this.#apiClient.call<string[]>(
+            'perspective.runInterpretationWithHarness',
+            {
+                uuid,
+                transcript,
+                basePrefix,
+                maxToolCalls,
+                classes,
+                modelOverride,
+                existingScope,
+                observationId,
+                emitDebugEvents,
+            },
             RUN_INTERPRETATION_TIMEOUT_MS,
         )
     }
@@ -295,6 +356,13 @@ export class PerspectiveClient {
     async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
         return this.#apiClient.call<string>(
             'perspective.addAutoProcessor', { uuid, ...config },
+        )
+    }
+
+    /** Delete an auto-processor's config. `false` when there was none to delete. */
+    async removeAutoProcessor(uuid: string, processorId: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.removeAutoProcessor', { uuid, processorId },
         )
     }
 
@@ -336,6 +404,31 @@ export class PerspectiveClient {
             (data) => {
                 if (data.type === 'auto-processor-event' && data.perspectiveUuid === uuid) {
                     cb(data as unknown as AutoProcessorEvent)
+                }
+            }
+        )
+        let existing = this.#linkUnsubscribers.get(uuid as string) || []
+        existing.push(unsub)
+        this.#linkUnsubscribers.set(uuid as string, existing)
+        await this.#apiClient.waitForSubscription()
+    }
+
+    /**
+     * Subscribe to neighbourhood-state events on a perspective. `cb` fires
+     * when THIS executor claims / finishes / abandons a batch for any
+     * processor on `uuid` — perspective-scoped observability so a UI can
+     * render "someone is auto-processing this" without receiving the batch
+     * payload or LLM I/O. Registered on the per-uuid `#linkUnsubscribers`
+     * map so `PerspectiveProxy.dispose()` sweeps it up.
+     */
+    async addAutoProcessorNeighbourhoodStateListener(
+        uuid: String,
+        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
+    ): Promise<void> {
+        const unsub = this.#apiClient.subscribe(
+            (data) => {
+                if (data.type === 'auto-processor-neighbourhood-state' && data.perspectiveUuid === uuid) {
+                    cb(data as unknown as AutoProcessorNeighbourhoodStateEvent)
                 }
             }
         )

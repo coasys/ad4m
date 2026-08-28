@@ -1479,8 +1479,10 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
+        emit_debug_events: false,
     };
-    write_processor(&mut perspective, &cfg, &ctx)
+    write_processor(&mut perspective, &cfg, Some(false), &ctx)
         .await
         .expect("write_processor");
 
@@ -1677,6 +1679,8 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
+        emit_debug_events: false,
     };
     let task_cfg = AutoProcessorConfig {
         processor_id: "pc-task-proc".into(),
@@ -1692,12 +1696,14 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
+        emit_debug_events: false,
     };
 
-    write_processor(&mut perspective, &intent_cfg, &ctx)
+    write_processor(&mut perspective, &intent_cfg, Some(false), &ctx)
         .await
         .expect("write intent");
-    write_processor(&mut perspective, &task_cfg, &ctx)
+    write_processor(&mut perspective, &task_cfg, Some(false), &ctx)
         .await
         .expect("write task");
 
@@ -1935,8 +1941,10 @@ async fn auto_processor_high_level_signal_driven_pass() {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
+            emit_debug_events: false,
         };
-        write_processor(&mut perspective, &cfg, &ctx)
+        write_processor(&mut perspective, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -2113,8 +2121,10 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
+            emit_debug_events: false,
         };
-        write_processor(&mut perspective, &cfg, &ctx_main)
+        write_processor(&mut perspective, &cfg, Some(false), &ctx_main)
             .await
             .expect("write_processor");
 
@@ -2256,6 +2266,8 @@ async fn auto_processor_election_only_online_participants_process() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
+        emit_debug_events: false,
     };
 
     // Case 1 — a batch authored by carol (offline) then bob (online), in that

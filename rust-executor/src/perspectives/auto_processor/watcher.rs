@@ -18,17 +18,20 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    run_interpretation_with_strategy_and_model, DedupStrategy, InterpretationRunCursor,
-    TranscriptTurn,
+    run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
+    DedupStrategy, InterpretationRunCursor, TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkStatus};
 
-use super::claim::{try_claim, ClaimOutcome};
+use super::claim::{batch_key, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
-use super::events::{emit, AutoProcessorEvent, AutoProcessorStep};
+use super::events::{
+    emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
+    AutoProcessorStep, NeighbourhoodPhase,
+};
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -474,12 +477,22 @@ pub async fn run_one_pass(
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
     let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
+    /*
+       Derived once, up here, rather than at the claim below where it used to be.
+
+       Every signal this pass emits carries it, including the ones emitted *before* a claim is
+       attempted (`BatchReady`, `NotCandidate`, `AwaitingAuthor`, `BackedOff`). Computing it at
+       the claim would have left exactly the stand-down signals — the ones a consumer most wants
+       to attribute to a batch — as the only ones it could not join to a row.
+    */
+    let batch_key_hex = batch_key(&item_ids);
     macro_rules! signal {
         ($step:expr) => {
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
-                    .with_items(&item_ids),
+                    .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex),
             )
             .await
         };
@@ -488,6 +501,7 @@ pub async fn run_one_pass(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
                     .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex)
                     .with_detail($d),
             )
             .await
@@ -497,6 +511,7 @@ pub async fn run_one_pass(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
                     .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex)
                     .with_bases($b),
             )
             .await
@@ -594,6 +609,19 @@ pub async fn run_one_pass(
         return Ok(PassOutcome::BackedOff { holder });
     }
     signal!(AutoProcessorStep::Claimed);
+    // Neighbourhood-state (Nico 2026-08-19): a small perspective-scoped
+    // event so a UI can render "someone is auto-processing here". Distinct
+    // from `AutoProcessorStep::Claimed` above (which is DID-scoped and
+    // carries the batch payload) — this one is delivered to every reader
+    // of the perspective, and carries only the claimant + batch key.
+    emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+        &uuid,
+        &cfg.processor_id,
+        &me,
+        &batch_key_hex,
+        NeighbourhoodPhase::Claimed,
+    ))
+    .await;
 
     // 2. Resolve shapes.
     let store = &*perspective.sparql_store;
@@ -616,6 +644,18 @@ pub async fn run_one_pass(
             AutoProcessorStep::ShapesMissing,
             detail = missing.join(", ")
         );
+        // Close the neighbourhood-state Claimed row: this pass claimed the
+        // batch but is walking away without processing it. Without this,
+        // an observer's UI would keep showing "in progress" for a batch
+        // that will only clear when the claim TTL-expires.
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::ShapesMissing { missing });
     }
 
@@ -627,6 +667,14 @@ pub async fn run_one_pass(
             cfg.processor_id
         );
         signal!(AutoProcessorStep::EmptyTranscript);
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::EmptyTranscript);
     }
     let transcript: Vec<TranscriptTurn> = turns.iter().map(|t| t.as_transcript()).collect();
@@ -660,25 +708,97 @@ pub async fn run_one_pass(
         HashSet::new()
     };
 
-    let bases = run_interpretation_with_strategy_and_model(
-        perspective,
-        &shapes,
-        &transcript,
-        &base_prefix,
-        context,
-        &dedup,
-        None,
-        // Existing-instance scope: constrains dedup to a subtree when the
-        // processor config specifies one, e.g. "existing Task instances that
-        // live under project X." `None` keeps the whole-perspective existing
-        // set — the pre-scope-config behaviour.
-        cfg.existing_scope.as_ref(),
-        Some(&InterpretationRunCursor {
-            processor: super::config::processor_node(&cfg.processor_id),
-            sources: item_ids.clone(),
-        }),
-    )
-    .await?;
+    let cursor = InterpretationRunCursor {
+        processor: super::config::processor_node(&cfg.processor_id),
+        sources: item_ids.clone(),
+    };
+    // Build the emit context once so both fork branches can share it.
+    // `cfg.emit_debug_events == true` enables the mid-pass `LlmRequestSent`
+    // / `LlmResponseReceived` events (dev PR #903) — for the classic path
+    // via `run_interpretation_with_strategy_and_model`, for the harness
+    // path we pass this into `run_with_tools` for per-tool-call events
+    // in a follow-up commit on this branch (Nico 2026-08-25).
+    let emit_ctx = cfg
+        .emit_debug_events
+        .then(|| super::events::InterpretationEmitContext {
+            perspective_uuid: uuid.clone(),
+            processor_id: cfg.processor_id.clone(),
+            agent_did: me.clone(),
+            item_ids: item_ids.clone(),
+            batch_key: batch_key_hex.clone(),
+        });
+
+    // Fork: harness-dispatched pass when the operator opted in via
+    // `AutoProcessorConfig.max_tool_calls > 0`; otherwise the classic
+    // single-shot LLM+parse+plan pipeline. The two paths converge on the
+    // same overlay-writing gate (`apply_with_overlay`), so downstream
+    // provenance + processed signalling is identical.
+    //
+    // Debug carriage differs by path today:
+    // * classic → `InterpretationOutcome { bases, debug }` — `debug`
+    //   carries the raw prompt/response for persistence on the
+    //   InterpretationRun node.
+    // * harness → `Vec<String>` bases only. The harness path emits
+    //   per-tool-call events via its own logging surface (see harness/mod.rs
+    //   `harness: round=` prints); persisting the full transcript on
+    //   InterpretationRun is a follow-up (there's no single prompt/response
+    //   to snapshot — it's a multi-turn loop).
+    let (bases, debug) = match cfg.max_tool_calls {
+        Some(n) if n > 0 => {
+            let bases = run_interpretation_with_harness_and_model(
+                perspective,
+                &shapes,
+                &transcript,
+                &base_prefix,
+                context,
+                None,
+                cfg.existing_scope.as_ref(),
+                Some(&cursor),
+                n,
+                // Auto-processor is an internal caller — no per-pass user
+                // token to bill. MCP admin credential (if configured) is
+                // read from env inside the harness path.
+                None,
+                // `emit_debug_events` gates the same event stream the
+                // classic path uses; `None` when disabled means the
+                // per-tool-call events also stay silent.
+                emit_ctx.as_ref(),
+                // Dedup on drain: the auto-processor runs indefinitely, so
+                // re-proposed instances must collapse to updates (not
+                // unbounded duplicate creates). James Weir PR #911 review.
+                true,
+                // No per-pass credit gate on the auto-processor path:
+                // the watcher runs as an internal service (no user
+                // session to bill against) and each completion still
+                // fire-and-forgets bill_prompt_if_authed via AIService.
+                None,
+            )
+            .await?;
+            (bases, None)
+        }
+        _ => {
+            let outcome = run_interpretation_with_strategy_and_model(
+                perspective,
+                &shapes,
+                &transcript,
+                &base_prefix,
+                context,
+                &dedup,
+                None,
+                // Existing-instance scope: constrains dedup to a subtree
+                // when the processor config specifies one, e.g. "existing
+                // Task instances that live under project X." `None` keeps
+                // the whole-perspective existing set — the pre-scope-config
+                // behaviour.
+                cfg.existing_scope.as_ref(),
+                Some(&cursor),
+                cfg.emit_debug_events,
+                emit_ctx.as_ref(),
+            )
+            .await?;
+            (outcome.bases, outcome.debug)
+        }
+    };
 
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the
@@ -702,7 +822,31 @@ pub async fn run_one_pass(
         )
         .await?;
     }
-    signal!(AutoProcessorStep::Processed, bases = &bases);
+    // Emit the `Processed` event. Carries the final `bases` list — the
+    // LLM prompt + response now travel via the mid-pass `LlmRequestSent`
+    // and `LlmResponseReceived` events (Nico 2026-08-20), so a subscribing
+    // UI can render "waiting on LLM" between them instead of only seeing
+    // one lump payload here at the end. `_debug` is intentionally not
+    // attached to `Processed` any more — the persistent `InterpretationRun`
+    // (`debug_prompt` / `debug_response`) is the post-hoc lookup channel.
+    let _ = debug; // consumed by the interpretation engine → InterpretationRun
+    let ev = AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::Processed)
+        .with_agent_did(&me)
+        .with_items(&item_ids)
+        .with_batch_key(&batch_key_hex)
+        .with_bases(&bases);
+    emit(ev).await;
+    // Neighbourhood-state: pass complete on this executor. Consumers use
+    // this to close out the `Claimed` row they showed for the same
+    // `batch_key`.
+    emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+        &uuid,
+        &cfg.processor_id,
+        &me,
+        &batch_key_hex,
+        NeighbourhoodPhase::Finished,
+    ))
+    .await;
 
     Ok(PassOutcome::Won { bases })
 }
@@ -790,6 +934,8 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
+            emit_debug_events: false,
         }
     }
 

@@ -16,7 +16,7 @@ import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, InterpretationOverlayInfo } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -561,8 +561,74 @@ export class PerspectiveProxy {
      * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
      * @param classes local names of the subject classes to extract into; omit for all
      */
-    async runInterpretation(transcript: TranscriptTurn[], basePrefix: string, classes?: string[]): Promise<string[]> {
-        return await this.#client.runInterpretation(this.#handle.uuid, transcript, basePrefix, classes)
+    async runInterpretation(
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        classes?: string[],
+        options?: {
+            existingScope?: RawScope,
+            mintScope?: RawScope,
+            /** Report progress while the pass runs — see {@link RunInterpretationObserveOptions}. */
+            observe?: RunInterpretationObserveOptions,
+        },
+    ): Promise<string[]> {
+        // Grouped into an options bag rather than continuing the client's positional list.
+        // The scopes were already unreachable from here for that reason, and a fourth, fifth and
+        // sixth positional parameter would have made `undefined, undefined, { … }` the normal way
+        // to ask for the only one of them most callers want.
+        return await this.#client.runInterpretation(
+            this.#handle.uuid,
+            transcript,
+            basePrefix,
+            classes,
+            options?.existingScope,
+            options?.mintScope,
+            options?.observe,
+        )
+    }
+
+    /**
+     * Harness-dispatched interpretation pass over this perspective (design v3
+     * §6 — the tool-calling counterpart to {@link runInterpretation}). The LLM
+     * sees a live per-class tool surface (`{Class}_query`, `{Class}_get`,
+     * `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives
+     * the extraction via tool calls; buffered proposals drain through the
+     * same overlay gate the single-shot path uses.
+     *
+     * @param transcript ordered `{ speaker, text }` turns
+     * @param basePrefix URI namespace new instance identities are minted under
+     * @param maxToolCalls upper bound on tool calls the harness will make in
+     *   one pass (must be > 0 — use {@link runInterpretation} for the
+     *   classic single-shot path)
+     * @param classes local names of the subject classes to extract into; omit for all
+     * @param modelOverride optional model override; omit for the default LLM
+     */
+    async runInterpretationWithHarness(
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        maxToolCalls: number,
+        classes?: string[],
+        modelOverride?: string,
+        // Optional live-debug observability. When both `observationId` and
+        // `emitDebugEvents` are supplied, every dispatched tool call fires
+        // `ToolCall` + `ToolResult` events on the `auto-processor-event`
+        // topic keyed by `observationId`. Subscribe with
+        // {@link addAutoProcessorEventListener} to render the harness loop
+        // live in a UI. Absent = fast headless path (no telemetry cost).
+        observationId?: string,
+        emitDebugEvents?: boolean,
+    ): Promise<string[]> {
+        return await this.#client.runInterpretationWithHarness(
+            this.#handle.uuid,
+            transcript,
+            basePrefix,
+            maxToolCalls,
+            classes,
+            modelOverride,
+            undefined,
+            observationId,
+            emitDebugEvents,
+        )
     }
 
     /**
@@ -573,6 +639,25 @@ export class PerspectiveProxy {
      */
     async addAutoProcessor(config: AddAutoProcessorConfig): Promise<string> {
         return await this.#client.addAutoProcessor(this.#handle.uuid, config)
+    }
+
+    /**
+     * Stop an auto-processor by deleting its config.
+     *
+     * The registration is data — the watch loop reads the processor set back out of the
+     * perspective's graph on every tick — so deleting the config is what stops it, and there is
+     * nothing else to unregister. The config is `Shared`, so this stops the processor for the
+     * neighbourhood rather than only for this peer.
+     *
+     * Resolves `true` when there was a processor to remove and `false` when there was not; a
+     * processor another peer has already removed is not an error.
+     *
+     * The processor's `InterpretationRun` nodes stay: they are the record of what it did and the
+     * processed-turn cursor, so a processor later registered under the same id resumes where this
+     * one left off rather than re-reading every turn.
+     */
+    async removeAutoProcessor(processorId: string): Promise<boolean> {
+        return await this.#client.removeAutoProcessor(this.#handle.uuid, processorId)
     }
 
     /**
@@ -604,6 +689,19 @@ export class PerspectiveProxy {
     /** Subscribe to this perspective's auto-processor step signals. */
     async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
         return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+    }
+
+    /**
+     * Subscribe to this perspective's auto-processor neighbourhood-state
+     * events — fires when this executor claims / finishes / abandons a
+     * batch. Perspective-scoped, so a UI can render "someone is
+     * auto-processing this" without receiving the batch payload. See
+     * `AutoProcessorNeighbourhoodStateEvent`.
+     */
+    async addAutoProcessorNeighbourhoodStateListener(
+        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
+    ): Promise<void> {
+        return await this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb)
     }
 
     /**

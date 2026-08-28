@@ -33,7 +33,7 @@
   "dependencies": {
     "@holochain/client": "0.16.0",
     "base64-js": "*",
-    "pako": "*"
+    "pako": "^2.1.0"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^20.0.0",
@@ -61,5 +61,5 @@
       "pako": "2.1.0"
     }
   },
-  "version": "0.13.0-test-interpretation-1"
+  "version": "0.13.0-test-interpretation-2"
 }

@@ -5383,3 +5383,395 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
         "base2's body must be unaffected by base1's independent update"
     );
 }
+
+/// A disjunction filters in SPARQL, and keeps its ordering and limit.
+///
+/// Before the where clause was compiled as one tree, `OR` was skipped by the
+/// emitter and evaluated post-hydration — which also disabled the SPARQL
+/// pagination pushdown entirely, because `all_where_pushable` returned false on
+/// sight of a combinator. The rows were right (the Rust filter ran) but the
+/// `ORDER BY` was not applied at the SPARQL level and the whole class was
+/// hydrated to answer a two-row query.
+///
+/// This is the shape the documented cross-field search box compiles to.
+#[tokio::test]
+async fn test_or_where_filters_in_sparql_with_order_and_limit() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for (base, title, body, ts) in [
+        ("we://post/1", "Alpha", "about cats", "1700000000000"),
+        ("we://post/2", "Beta", "about dogs", "1700000000001"),
+        ("we://post/3", "Gamma", "about cats", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://post", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://body",
+                &format!("literal:string:{}", literal_percent_encode(body)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            },
+            "title": { "predicate": "we://title", "resolveLanguage": "literal" },
+            "body": { "predicate": "we://body", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // title == "Alpha" OR body == "about dogs"  → posts 1 and 2, not 3.
+    let or_clause = super::types::WhereCondition::SubClauses(vec![
+        BTreeMap::from([(
+            "title".to_string(),
+            super::types::WhereCondition::String("Alpha".to_string()),
+        )]),
+        BTreeMap::from([(
+            "body".to_string(),
+            super::types::WhereCondition::String("about dogs".to_string()),
+        )]),
+    ]);
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([("OR".to_string(), or_clause)])),
+        order: Some(vec![(
+            "title".to_string(),
+            super::types::OrderDirection::DESC,
+        )]),
+        limit: Some(10),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .unwrap();
+
+    let titles: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["title"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(
+        titles,
+        vec!["Beta", "Alpha"],
+        "the disjunction must match exactly posts 1 and 2, ordered by title DESC",
+    );
+}
+
+/// A negation filters in SPARQL.
+#[tokio::test]
+async fn test_not_where_filters_in_sparql() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for (base, title, ts) in [
+        ("we://post/1", "keep", "1700000000000"),
+        ("we://post/2", "drop", "1700000000001"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://post", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            },
+            "title": { "predicate": "we://title", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "NOT".to_string(),
+            super::types::WhereCondition::SubClause(BTreeMap::from([(
+                "title".to_string(),
+                super::types::WhereCondition::String("drop".to_string()),
+            )])),
+        )])),
+        limit: Some(10),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .unwrap();
+
+    let titles: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["title"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(titles, vec!["keep"]);
+}
+
+/// Two conditions on one property, inside a combinator, must not collide.
+///
+/// Variable names are derived from the property name. That is safe while a where
+/// clause is a flat map — keys are unique — but a combinator lets the same
+/// property appear twice, and both leaves then emit `BIND(… AS ?_pw_title_v)`
+/// into the same group. SPARQL forbids binding a variable already in scope, so
+/// this did not return the wrong rows: the query failed to parse
+/// ("Query is not valid read-only SPARQL … expected [_]").
+#[tokio::test]
+async fn test_and_with_two_conditions_on_one_property() {
+    let store = SparqlStore::new(None).unwrap();
+    for (base, title) in [("ns://p/1", "alpha beta"), ("ns://p/2", "alpha only")] {
+        store
+            .add_link(&make_link(base, "ns://flag", "ns://post", "1"))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "ns://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                "1",
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{"className":"Post","properties":{
+        "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://post"},
+        "title":{"predicate":"ns://title","resolveLanguage":"literal"}},"relations":{}}"#;
+
+    let contains = |v: &str| {
+        super::types::WhereCondition::Ops(super::types::WhereOps {
+            contains: Some(serde_json::Value::String(v.to_string())),
+            ..Default::default()
+        })
+    };
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "AND".to_string(),
+            super::types::WhereCondition::SubClauses(vec![
+                BTreeMap::from([("title".to_string(), contains("alpha"))]),
+                BTreeMap::from([("title".to_string(), contains("beta"))]),
+            ]),
+        )])),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .expect("the clause must compile to valid SPARQL");
+
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["ns://p/1"],
+        "only the title containing both terms matches",
+    );
+}
+
+/// A `NOT` branch constraining a property the outer clause also constrains.
+///
+/// Not a bug that was observed — `FILTER NOT EXISTS` opens its own group, so this
+/// case survived the collision above and returns the right rows either way. Kept
+/// as a guard, because it is the shape most likely to break if the uniquifying
+/// ever regresses.
+#[tokio::test]
+async fn test_not_on_a_property_also_constrained_outside() {
+    let store = SparqlStore::new(None).unwrap();
+    for (base, title) in [("ns://p/1", "alpha beta"), ("ns://p/2", "alpha only")] {
+        store
+            .add_link(&make_link(base, "ns://flag", "ns://post", "1"))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "ns://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                "1",
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{"className":"Post","properties":{
+        "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://post"},
+        "title":{"predicate":"ns://title","resolveLanguage":"literal"}},"relations":{}}"#;
+
+    let contains = |v: &str| {
+        super::types::WhereCondition::Ops(super::types::WhereOps {
+            contains: Some(serde_json::Value::String(v.to_string())),
+            ..Default::default()
+        })
+    };
+
+    // title contains "alpha" AND NOT title contains "beta"
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([
+            ("title".to_string(), contains("alpha")),
+            (
+                "NOT".to_string(),
+                super::types::WhereCondition::SubClause(BTreeMap::from([(
+                    "title".to_string(),
+                    contains("beta"),
+                )])),
+            ),
+        ])),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .expect("the clause must compile to valid SPARQL");
+
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["ns://p/2"], "the one without \"beta\"");
+}
+
+/// A getter relation that names a target class hydrates through `include`.
+///
+/// This is the traversal a link-shaped relation cannot express: the connection
+/// between two nodes is itself a record (a reified edge), so there is no single
+/// predicate for `through` to name. A getter walks the two hops; `targetClassName`
+/// is what lets the result become typed instances rather than bare URIs.
+///
+/// The two were mutually exclusive in the TypeScript decorator until this change,
+/// even though every layer beneath — SHACL emission, shape parsing, getter
+/// evaluation, include resolution — already supported the pair.
+#[tokio::test]
+async fn test_getter_relation_with_target_class_hydrates_via_include() {
+    let store = SparqlStore::new(None).unwrap();
+
+    let node_a = "we://node/a";
+    let node_b = "we://node/b";
+    let edge = "we://rel/1";
+
+    // Two nodes of the same class.
+    for (base, text, ts) in [
+        (node_a, "Node A", "1700000000000"),
+        (node_b, "Node B", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://text_block", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://text",
+                &format!("literal:string:{}", literal_percent_encode(text)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    // The edge: a record whose two to-one relations name the ends it joins.
+    store
+        .add_link(&make_link(
+            edge,
+            "we://relationship_source",
+            node_a,
+            "1700000000004",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            edge,
+            "we://relationship_target",
+            node_b,
+            "1700000000005",
+        ))
+        .unwrap();
+
+    // `related` is defined by a two-hop traversal through the edge record, and
+    // names its own class so the values can be hydrated. Self-referential —
+    // a node relates to other nodes — which also exercises the target shape
+    // resolving to the shape currently being queried.
+    let shape_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://text_block"
+            },
+            "text": { "predicate": "we://text", "resolveLanguage": "literal" }
+        },
+        "relations": {
+            "related": {
+                "kind": "hasMany",
+                "getter": "SELECT ?target WHERE { ?rel <we://relationship_source> <Base> . ?rel <we://relationship_target> ?target . }",
+                "targetClassName": "TextBlock"
+            }
+        }
+    }"#;
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "id".to_string(),
+            super::types::WhereCondition::String(node_a.to_string()),
+        )])),
+        include: Some(HashMap::from([(
+            "related".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "TextBlock", &query, shape_json)
+        .await
+        .unwrap();
+
+    assert_eq!(result.instances.len(), 1, "expected node A");
+    let related = result.instances[0]["related"]
+        .as_array()
+        .expect("related must hydrate as an array");
+
+    assert_eq!(related.len(), 1, "A is joined to exactly one node");
+    assert_eq!(
+        related[0]["id"].as_str().unwrap(),
+        node_b,
+        "the traversal must land on the far end of the edge",
+    );
+    assert_eq!(
+        related[0]["text"].as_str().unwrap(),
+        "Node B",
+        "and it must be a hydrated instance, not a bare URI — which is what \
+         naming the target class buys",
+    );
+}

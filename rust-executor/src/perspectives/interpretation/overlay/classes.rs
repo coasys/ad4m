@@ -27,7 +27,8 @@ const INTERP_RUN_TARGET_CLASS: &str = "ad4m://InterpretationRun";
 /// `literal:string:` targets, which keeps provenance stable and cheaply
 /// decodable (no signed-envelope round-trip).
 // See auto_processor::config for why the SDNA blobs are external JSON files
-// loaded via `include_str!`.
+// loaded via `include_str!`. #903 adds `debug_prompt` + `debug_response`
+// scalar properties to the JSON side of the parity pair.
 const INTERP_RUN_SDNA: &str = include_str!("../../hardwired_sdna/interpretation_run.json");
 
 /// AutoProcessor cursor extras on an [`InterpretationRun`]: the processor
@@ -64,6 +65,13 @@ pub(crate) struct InterpretationRunMeta {
     /// the prompt that produced this pass's inferences.
     pub prompt_version: String,
     pub ran_at: String,
+    /// Optional live-debug prompt string persisted on the run when the caller
+    /// enables observability (AutoProcessor `emitDebugEvents`). `None` in the
+    /// normal path — LLM prompts are large and syncing them across a
+    /// neighbourhood by default would blow the shared-graph payload.
+    pub debug_prompt: Option<String>,
+    /// Optional live-debug response string, same rules as `debug_prompt`.
+    pub debug_response: Option<String>,
 }
 
 impl InterpretationRunMeta {
@@ -86,6 +94,8 @@ impl InterpretationRunMeta {
             model: task.model_id.clone(),
             prompt_version,
             ran_at,
+            debug_prompt: None,
+            debug_response: None,
         }
     }
 }
@@ -109,15 +119,16 @@ pub(crate) async fn ensure_interpretation_overlay_classes(
         context,
     )
     .await?;
-    // `sources` is the newest property on the run class, so a perspective that
-    // registered the pre-cursor SDNA is refreshed rather than left with a shape
-    // whose `processor`/`sources` setters do not exist.
+    // `debug_response` is the newest property on the run class, so a
+    // perspective that registered the pre-debug SDNA is refreshed rather
+    // than left with a shape whose `debug_prompt`/`debug_response` setters
+    // do not exist — `write_processor` would silently drop those values.
     ensure_subject_class(
         perspective,
         INTERP_RUN_CLASS,
         INTERP_RUN_TARGET_CLASS,
         INTERP_RUN_SDNA,
-        Some("ad4m://interp/sources"),
+        Some("ad4m://interp/debug_response"),
         context,
     )
     .await
@@ -154,6 +165,16 @@ pub(crate) async fn mint_interpretation_run(
             values["sources"] = first.clone().into();
             rest_sources.extend(rest.iter().cloned());
         }
+    }
+    // Debug-mode: persist raw LLM I/O onto the run so a UI can look it up
+    // post-hoc, not just via the live `Processed` event (which a slow client
+    // could miss). Omitted when the caller left them `None` — the normal
+    // non-debug pass.
+    if let Some(prompt) = &meta.debug_prompt {
+        values["debugPrompt"] = prompt.clone().into();
+    }
+    if let Some(response) = &meta.debug_response {
+        values["debugResponse"] = response.clone().into();
     }
     perspective
         .create_subject(
