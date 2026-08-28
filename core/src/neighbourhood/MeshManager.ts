@@ -310,9 +310,10 @@ export class MeshManager {
             const message = parseCallMessage(payload)
             if (!message || message.call !== this.callId) return
 
-            // Check unicast addressing in payload
+            // Check unicast addressing in payload.
+            // Broadcast messages carry TARGET_ALL ("*") — accept those too.
             const to = (payload as { to?: unknown }).to
-            if (typeof to === "string" && to !== this.selfId) return
+            if (typeof to === "string" && to !== TARGET_ALL && to !== this.selfId) return
 
             // Only negotiate with peers the roster placed in the call.
             // Without this, anyone on the channel could open a connection

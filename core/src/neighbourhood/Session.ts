@@ -356,14 +356,20 @@ export function createSession(config: SessionImplConfig): Session {
         },
 
         async destroy() {
+            // Capture refs before leave() nulls them
+            const mesh = meshManager
+            const sfu = sfuManager
             if (state === "active" || state === "joining") await session.leave()
             stopRosterPolling()
-            if (meshManager) { await meshManager.destroy(); meshManager = null }
-            if (sfuManager) { await sfuManager.destroy(); sfuManager = null }
+            if (mesh) { await mesh.destroy() }
+            if (sfu) { await sfu.destroy() }
+            meshManager = null
+            sfuManager = null
+            // Emit closed BEFORE clearing listeners
+            setState("closed")
             callbacks.clear()
             trackListeners.length = 0
             dataListeners.length = 0
-            setState("closed")
         },
     }
 
