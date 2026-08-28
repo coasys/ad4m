@@ -5697,9 +5697,9 @@ async fn test_subject_classes_of_returns_every_class_most_specific_first() {
         "the instance is a Post as well as an ImagePost, and both are reported",
     );
     assert_eq!(
-        crate::perspectives::subject_classes_of::most_specific(classes),
+        classes.first().map(String::as_str),
         Some("ImagePost"),
-        "callers that can only act on one class get the derived one",
+        "callers that can only act on one class take the head and get the derived one",
     );
 }
 

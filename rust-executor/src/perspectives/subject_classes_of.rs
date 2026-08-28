@@ -20,8 +20,8 @@
 //! so an `ImagePost` conforms to `Post` as well — and to any unrelated class
 //! whose required set happens to be a subset. Membership is therefore genuinely
 //! a *set*, and that set is what this module returns. Picking one member out of
-//! it is a policy, not a fact, so it lives in [`most_specific`] where a caller
-//! opts into it by name.
+//! it is a policy, not a fact, so this module does not pick: it orders the set
+//! most specific first and leaves the choice to the caller.
 //!
 //! # Strategy
 //!
@@ -141,28 +141,15 @@ fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
     matches.iter().map(|(name, _)| name.clone()).collect()
 }
 
-/// The single best class for a caller that can only act on one.
-///
-/// Some callers genuinely need one answer — hydrating a URI against a shape, for
-/// instance, can only use one shape. This is the policy those callers should
-/// share, so that "which one did we pick" is a named, greppable decision rather
-/// than an inline `[0]` repeated at every call site with its own justification.
-///
-/// It is the *first* member under [`order_by_specificity`], which is the order
-/// [`subject_classes_of`] already returns. Callers that can handle the whole set
-/// should use the whole set: a URI conforming to two unrelated classes is a real
-/// situation, and this function's answer to it is arbitrary by construction.
-pub fn most_specific(classes: &[String]) -> Option<&str> {
-    classes.first().map(String::as_str)
-}
-
 /// Resolve each URI to every subject class it is an instance of, most specific
 /// first.
 ///
 /// Membership is structural and therefore not exclusive: an instance conforms to
 /// its parent classes, and to any unrelated class whose required set happens to
-/// be a subset of what it carries. All of them are returned. Use
-/// [`most_specific`] to collapse the list where a caller can only act on one.
+/// be a subset of what it carries. All of them are returned, ordered by
+/// [`order_by_specificity`]; a caller that can only act on one takes the first,
+/// accepting that a URI conforming to two unrelated classes makes that choice
+/// arbitrary.
 ///
 /// A URI is **absent** from the result when no *registered* class matched it.
 /// That covers two situations, and nothing here separates them: the URI may not
@@ -358,14 +345,6 @@ mod tests {
             order_by_specificity(&mut a),
             vec!["Alpha".to_string(), "Beta".to_string()]
         );
-    }
-
-    #[test]
-    fn test_most_specific_reads_the_head_of_the_ordering() {
-        let mut c = vec![("Post".to_string(), 1), ("ImagePost".to_string(), 3)];
-        let ordered = order_by_specificity(&mut c);
-        assert_eq!(most_specific(&ordered), Some("ImagePost"));
-        assert_eq!(most_specific(&[]), None);
     }
 
     #[test]

@@ -3341,8 +3341,8 @@ impl PerspectiveInstance {
     /// queries.
     ///
     /// Membership is structural and therefore not exclusive — an instance
-    /// conforms to its parent classes too — so the answer is a list. Use
-    /// [`subject_classes_of::most_specific`] where only one class can be acted on.
+    /// conforms to its parent classes too — so the answer is a list, ordered
+    /// most specific first. A caller that can only act on one takes the first.
     ///
     /// URIs that match no registered class are simply absent from the map.
     pub fn subject_classes_of(
