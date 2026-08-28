@@ -468,4 +468,6 @@ export interface ModelMetadata {
   properties: Record<string, PropertyMetadata>;
   /** Map of relation name to metadata */
   relations: Record<string, RelationMetadata>;
+  /** Whether instances are stored in named graphs */
+  graph: boolean;
 }

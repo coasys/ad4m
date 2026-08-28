@@ -47,6 +47,9 @@ pub struct AddLinkParams {
     pub predicate: String,
     /// Link target URI
     pub target: String,
+    /// Optional named graph IRI. Places the link in a named graph within
+    /// the perspective, enabling graph-scoped queries and bulk operations.
+    pub graph: Option<String>,
 }
 
 /// Parameters for querying links in a perspective
@@ -60,6 +63,9 @@ pub struct QueryLinksParams {
     pub predicate: Option<String>,
     /// Optional target URI filter
     pub target: Option<String>,
+    /// Optional named graph IRI filter. When set, only links in that
+    /// named graph appear in results.
+    pub graph: Option<String>,
 }
 
 /// Parameters for adding SDNA (subject class definition) to a perspective
@@ -207,7 +213,7 @@ impl Ad4mMcpHandler {
 
     /// Add a link to a perspective
     #[tool(
-        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members."
+        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members. Pass the optional 'graph' parameter (a named graph IRI) to place the link in a specific named graph within the perspective."
     )]
     pub async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
         let p = &params.0;
@@ -221,18 +227,28 @@ impl Ad4mMcpHandler {
                 };
 
                 match perspective
-                    .add_link(link, LinkStatus::Shared, None, &agent_context)
+                    .add_link(
+                        link,
+                        LinkStatus::Shared,
+                        None,
+                        &agent_context,
+                        p.graph.clone(),
+                    )
                     .await
                 {
                     Ok(decorated) => {
+                        let mut link_json = json!({
+                            "source": decorated.data.source,
+                            "predicate": decorated.data.predicate,
+                            "target": decorated.data.target,
+                            "timestamp": decorated.timestamp,
+                        });
+                        if let Some(ref g) = decorated.graph {
+                            link_json["graph"] = json!(g);
+                        }
                         let result = json!({
                             "success": true,
-                            "link": {
-                                "source": decorated.data.source,
-                                "predicate": decorated.data.predicate,
-                                "target": decorated.data.target,
-                                "timestamp": decorated.timestamp,
-                            }
+                            "link": link_json,
                         });
                         serde_json::to_string_pretty(&result)
                             .unwrap_or_else(|e| format!("Error: {}", e))
@@ -246,7 +262,7 @@ impl Ad4mMcpHandler {
 
     /// Query links in a perspective
     #[tool(
-        description = "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination — omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values."
+        description = "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination — omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values. Pass the optional 'graph' parameter to restrict results to a specific named graph."
     )]
     pub async fn query_links(&self, params: Parameters<QueryLinksParams>) -> String {
         let p = &params.0;
@@ -262,16 +278,25 @@ impl Ad4mMcpHandler {
 
                 match perspective.get_links(&query).await {
                     Ok(links) => {
+                        let graph_filter = p.graph.as_deref();
                         let result: Vec<serde_json::Value> = links
                             .iter()
+                            .filter(|l| match graph_filter {
+                                Some(g) => l.graph.as_deref() == Some(g),
+                                None => true,
+                            })
                             .map(|l| {
-                                json!({
+                                let mut obj = json!({
                                     "source": l.data.source,
                                     "predicate": l.data.predicate,
                                     "target": l.data.target,
                                     "timestamp": l.timestamp,
                                     "author": l.author,
-                                })
+                                });
+                                if let Some(ref g) = l.graph {
+                                    obj["graph"] = json!(g);
+                                }
+                                obj
                             })
                             .collect();
                         serde_json::to_string_pretty(&result)

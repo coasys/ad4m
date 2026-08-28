@@ -339,6 +339,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         shape_uri,
         properties,
         include_relations,
+        has_graph: false, // Store-loaded shapes don't carry this; use JSON path
         interpretation_hint: class_hint,
     })
 }
@@ -678,6 +679,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         shape_uri,
         properties,
         include_relations,
+        has_graph: meta["graph"].as_bool().unwrap_or(false),
         interpretation_hint: None,
     })
 }

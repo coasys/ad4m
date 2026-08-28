@@ -175,6 +175,7 @@ pub async fn write_claim(
             })),
             None,
             context,
+            None,
         )
         .await
         .map_err(|e| anyhow::anyhow!("write_claim: create_subject failed: {e:#}"))?;
@@ -188,6 +189,7 @@ pub async fn write_claim(
             LinkStatus::Shared,
             None,
             context,
+            None,
         )
         .await
         .map_err(|e| anyhow::anyhow!("write_claim: add_link(has_claim) failed: {e:#}"))?;
@@ -213,7 +215,7 @@ pub async fn active_claimants(
     })
     .to_string();
     let result_json = perspective
-        .model_query(PROCESSING_CLAIM_CLASS, &query)
+        .model_query(PROCESSING_CLAIM_CLASS, &query, None)
         .await
         .map_err(|e| anyhow::anyhow!("active_claimants: model_query failed: {e:#}"))?;
     let result: serde_json::Value = serde_json::from_str(&result_json)

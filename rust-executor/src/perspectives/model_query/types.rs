@@ -481,6 +481,9 @@ pub struct ModelShape {
     /// Enriched relation metadata for include resolution, populated
     /// directly from the perspective's SHACL triples.
     pub(crate) include_relations: Vec<ShapeRelation>,
+    /// Whether instances of this model are stored in named graphs
+    #[allow(dead_code)]
+    pub(crate) has_graph: bool,
     /// Class-level natural-language hint, read back from the
     /// `ad4m://interpretation_hint` link on the shape node.  Steers the generic
     /// LLM extractor toward what instances of this class represent.  `None`

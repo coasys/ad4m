@@ -899,6 +899,7 @@ pub(crate) async fn write_mint_scope_links(
                 LinkStatus::Shared,
                 None,
                 context,
+                None,
             )
             .await
             .map_err(|e| {

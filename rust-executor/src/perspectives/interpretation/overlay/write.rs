@@ -56,6 +56,7 @@ pub(super) async fn write_overlay(
                 Some(serde_json::json!({ "kind": ow.kind.as_str(), "run": run_uri })),
                 batch_id.clone(),
                 context,
+                None,
             )
             .await
             .map_err(|e| anyhow::anyhow!("write_overlay: create_subject(overlay) failed: {e:#}"))?;

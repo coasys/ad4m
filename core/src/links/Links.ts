@@ -42,10 +42,14 @@ export class LinkExpression extends ExpressionGeneric(Link) {
         return hash;
     }
     status?: LinkStatus;
+
+    graph?: string;
 };
 export class LinkExpressionInput extends ExpressionGenericInput(LinkInput) {
     hash: () => number;
     status?: LinkStatus;
+
+    graph?: string;
 };
 
 export function linkEqual(l1: LinkExpression, l2: LinkExpression): boolean {
@@ -53,7 +57,8 @@ export function linkEqual(l1: LinkExpression, l2: LinkExpression): boolean {
         l1.timestamp == l2.timestamp &&
         l1.data.source == l2.data.source &&
         l1.data.predicate == l2.data.predicate &&
-        l1.data.target == l2.data.target
+        l1.data.target == l2.data.target &&
+        (l1.graph ?? '') == (l2.graph ?? '')
 }
 
 export function isLink(l: any): boolean {

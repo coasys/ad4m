@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> DecoratedLinkExpression {
     DecoratedLinkExpression {
         author: "did:key:test123".to_string(),
+        graph: None,
         timestamp: ts.to_string(),
         data: Link {
             source: source.to_string(),
@@ -672,6 +673,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             identity: false,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     }
 }
@@ -717,9 +719,17 @@ async fn test_resolve_projections_count() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -763,9 +773,17 @@ async fn test_resolve_projections_list() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let items = instances[0]["$items"]
@@ -808,9 +826,17 @@ async fn test_resolve_projections_scalar() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let val = &instances[0]["$firstItem"];
@@ -845,9 +871,17 @@ async fn test_resolve_projections_count_zero_when_no_links() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -912,9 +946,17 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
@@ -976,9 +1018,17 @@ async fn test_resolve_projections_where_filter_by_author() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
@@ -1024,7 +1074,7 @@ async fn test_deep_query_flag_controls_property_getters() {
     let getter_props_deep: Vec<&ShapeProperty> = shape
         .properties
         .iter()
-        .filter(|p| p.getter.is_some() && (true || p.is_collection || p.is_scalar_relation))
+        .filter(|p| p.getter.is_some())
         .collect();
     assert_eq!(
         getter_props_deep.len(),
@@ -1250,11 +1300,12 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             identity: false,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result = evaluate_getters(&store, &mut instances, &shape, None, true);
+    let eval_result = evaluate_getters(&store, &mut instances, &shape, None, true, None);
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -1817,11 +1868,12 @@ async fn test_where_filter_signed_expression_string() {
             identity: false,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None).unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -1894,11 +1946,12 @@ async fn test_where_filter_signed_expression_no_matches() {
             identity: false,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None).unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2019,11 +2072,12 @@ async fn test_where_filter_multiple_conditions() {
             identity: false,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None).unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2089,11 +2143,12 @@ async fn test_where_filter_missing_property_on_target() {
             identity: false,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None).unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2157,11 +2212,12 @@ async fn test_where_filter_plain_literal_string() {
             identity: false,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None).unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2248,11 +2304,12 @@ async fn test_where_filter_on_multiple_instances() {
             identity: false,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None).unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -2669,6 +2726,7 @@ fn make_shape(props: Vec<ShapeProperty>) -> ModelShape {
         shape_uri: String::new(),
         properties: props,
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     }
 }
@@ -4193,6 +4251,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             identity: false,
         }],
         include_relations: vec![],
+        has_graph: false,
         interpretation_hint: None,
     };
     resolver.register("Signal", signal_shape);
@@ -4219,9 +4278,17 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0)
-        .await
-        .unwrap();
+    resolve_projections(
+        &store,
+        &mut instances,
+        &projections,
+        &shape,
+        &resolver,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
 
     let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -4244,9 +4311,17 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0)
-        .await
-        .unwrap();
+    resolve_projections(
+        &store,
+        &mut instances2,
+        &projections2,
+        &shape,
+        &resolver,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
 
     let got = &instances2[0]["$myLikeSignal"];
     assert_eq!(
@@ -4582,6 +4657,7 @@ async fn test_sort_by_relation_property_asc() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -4657,6 +4733,7 @@ async fn test_sort_by_relation_property_desc() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -4750,6 +4827,7 @@ async fn test_sort_by_relation_property_with_signed_envelope_literal() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -4855,6 +4933,7 @@ async fn test_sort_by_relation_property_with_missing_relation() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -5200,7 +5279,7 @@ async fn test_model_query_from_js_wire_format() {
     eprintln!("[wire] parsed query: {:?}", query_input);
 
     let (resolver, shape) = StaticShapeResolver::from_json("TestPost", shape_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
         .await
         .unwrap();
     assert_eq!(
@@ -5215,7 +5294,7 @@ async fn test_model_query_from_js_wire_format() {
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
     eprintln!("[wire] parsed not query: {:?}", query_input);
 
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
         .await
         .unwrap();
     assert_eq!(
@@ -5228,7 +5307,7 @@ async fn test_model_query_from_js_wire_format() {
     // between from JS wire format
     let wire_json = r#"{"where": {"viewCount": {"between": [20, 40]}}, "deepQuery": true}"#;
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
         .await
         .unwrap();
     assert_eq!(

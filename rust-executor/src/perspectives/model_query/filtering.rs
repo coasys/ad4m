@@ -1122,6 +1122,7 @@ mod tests {
             shape_uri: "".to_string(),
             properties: vec![],
             include_relations: vec![],
+            has_graph: false,
             interpretation_hint: None,
         }
     }

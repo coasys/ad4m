@@ -517,10 +517,26 @@ export class PerspectiveProxy {
      * @param parameters - Optional parameters that replace "value" in actions
      * @param batchId - Optional batch ID to group this operation with others
      */
-    async executeAction(actions, expression, parameters: Parameter[], batchId?: string) {
-        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId)
+    async executeAction(actions, expression, parameters: Parameter[], batchId?: string, graph?: string) {
+        const result = await this.#client.executeCommands(this.#handle.uuid, JSON.stringify(actions), expression, JSON.stringify(parameters), batchId, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result
+    }
+
+    /**
+     * List all named graph IRIs in this perspective.
+     */
+    async graphs(): Promise<string[]> {
+        return await this.#client.namedGraphs(this.#handle.uuid);
+    }
+
+    /**
+     * Remove a named graph and all its quads.
+     */
+    async removeGraph(graphIri: string): Promise<boolean> {
+        const result = await this.#client.removeNamedGraph(this.#handle.uuid, graphIri);
+        invalidatePerspectiveCache(this.#handle.uuid);
+        return result;
     }
 
     /**
@@ -747,11 +763,12 @@ export class PerspectiveProxy {
      * @param query - SPARQL query string
      * @returns Query results as parsed JSON
      */
-    async querySparql<T = any>(query: string): Promise<T> {
-        const cached = getCachedResult(this.#handle.uuid, query);
+    async querySparql<T = any>(query: string, graphs?: string[]): Promise<T> {
+        const cacheKey = graphs && graphs.length > 0 ? `${query}|${graphs.join(',')}` : query;
+        const cached = getCachedResult(this.#handle.uuid, cacheKey);
         if (cached !== undefined) return cached as T;
-        const result = await this.#client.querySparql(this.#handle.uuid, query);
-        setCachedResult(this.#handle.uuid, query, result);
+        const result = await this.#client.querySparql(this.#handle.uuid, query, graphs);
+        setCachedResult(this.#handle.uuid, cacheKey, result);
         return result as T;
     }
 
@@ -766,8 +783,8 @@ export class PerspectiveProxy {
      * @param queryJson - Structured query as JSON string
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: string, queryJson: string): Promise<{ instances: any[], totalCount: number }> {
-        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson);
+    async modelQuery(className: string, queryJson: string, graphIris?: string[]): Promise<{ instances: any[], totalCount: number }> {
+        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, graphIris);
     }
 
     /**
@@ -804,8 +821,8 @@ export class PerspectiveProxy {
      * @param queryJson - JSON-serialized query parameters (same as modelQuery)
      * @returns Object with `subscriptionId` and initial `result`
      */
-    async modelSubscribe(className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
-        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson);
+    async modelSubscribe(className: string, queryJson: string, graphIris?: string[]): Promise<{ subscriptionId: string, result: any }> {
+        return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson, graphIris);
     }
 
     /**
@@ -833,8 +850,8 @@ export class PerspectiveProxy {
      * }, "local");
      * ```
      */
-    async add(link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId)
+    async add(link: Link, status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression> {
+        const result = await this.#client.addLink(this.#handle.uuid, link, status, batchId, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
@@ -848,8 +865,8 @@ export class PerspectiveProxy {
      * @param batchId - Optional batch ID to group this operation with others
      * @returns Array of created LinkExpressions
      */
-    async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId)
+    async addLinks(links: Link[], status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression[]> {
+        const result = await this.#client.addLinks(this.#handle.uuid, links, status, batchId, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
@@ -1714,7 +1731,8 @@ export class PerspectiveProxy {
         subjectClass: T, 
         exprAddr: string,
         initialValues?: Record<string, any>,
-        batchId?: B
+        batchId?: B,
+        graph?: string
     ): Promise<B extends undefined ? T : string> {
         let className: string;
 
@@ -1728,7 +1746,8 @@ export class PerspectiveProxy {
                 }), 
                 exprAddr,
                 initialValues ? JSON.stringify(initialValues) : undefined,
-                batchId
+                batchId,
+                graph
             );
         } else {
             const obj = subjectClass as any;
@@ -1745,7 +1764,8 @@ export class PerspectiveProxy {
                 }), 
                 exprAddr,
                 initialValues ? JSON.stringify(initialValues) : undefined,
-                batchId
+                batchId,
+                graph
             );
         }
 

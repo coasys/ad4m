@@ -18,6 +18,7 @@ use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 fn make_link_for_round_trip(link: Link) -> DecoratedLinkExpression {
     DecoratedLinkExpression {
         author: "did:key:test_writer".to_string(),
+        graph: None,
         timestamp: "1700000000000".to_string(),
         data: link,
         proof: DecoratedExpressionProof {
@@ -704,6 +705,7 @@ async fn e2e_shacl_shape_with_where_ops() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -732,6 +734,7 @@ async fn e2e_shacl_shape_with_where_ops() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();

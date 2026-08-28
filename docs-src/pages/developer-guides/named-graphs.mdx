@@ -1,0 +1,262 @@
+import { Callout } from "nextra/components";
+
+# Named Graphs in AD4M
+
+Named graphs partition the RDF store that backs a Perspective into isolated subgraphs. Each named graph is identified by an IRI, and any link — or every link of a model instance — can be assigned to one. This lets you **scope queries** to a subset of the data, **drop an entire collection** in a single operation, and keep **subscription fanout** tight, all while staying fully compatible with perspectives that don't use them.
+
+## Why Named Graphs Exist
+
+### The problem: one Perspective, one big store
+
+Every Perspective stores its links in a single RDF graph (via [Oxigraph](https://github.com/oxigraph/oxigraph)). That's simple, and it works well until a Perspective grows large and heterogeneous.
+
+Consider a Flux community: one Perspective holds dozens of channels, each with thousands of messages — hundreds of thousands of links in total. Operations that are *conceptually* local now touch the *whole* store:
+
+- **Deleting a channel** means removing every one of its links one at a time, then hunting down incoming references to them from elsewhere.
+- **Querying "the messages in this channel"** scans across every channel's data and filters the result.
+- **A subscription watching one channel** re-evaluates whenever *any* channel changes.
+
+The data has a natural structure — channels are independent collections — but the store is flat, so cost scales with the size of the whole Perspective instead of the collection you actually care about.
+
+### The fix: partition by domain boundary
+
+Named graphs let you carve that single store into subgraphs that match your application's natural boundaries — one graph per channel, per document, per board. Once the data is partitioned:
+
+- **Bulk deletion becomes O(1).** Dropping a graph removes all of its quads in one store operation instead of N individual deletions.
+- **Queries become selective.** Scope a query to one graph and the engine only reads that graph's quads.
+- **Subscriptions stay quiet.** A subscription scoped to a graph only re-runs when that graph changes.
+- **Data is isolated.** Each collection is a self-contained unit you can enumerate, query, or drop independently.
+
+<Callout type="info" emoji="ℹ️">
+  Named graphs are **opt-in and backward compatible**. A Perspective that doesn't use them behaves exactly as before — every link lives in the default graph. Adopt named graphs for the collections that benefit and leave the rest of your schema untouched.
+</Callout>
+
+## The Graph IRI Convention
+
+A named graph is identified by an IRI. AD4M's model layer uses the convention:
+
+```
+ad4m://graph/<baseExpression>
+```
+
+where `<baseExpression>` is the `id` (root URI) of the model instance that owns the graph. A channel with id `flux://channel-42` therefore roots the graph `ad4m://graph/flux://channel-42`.
+
+You rarely construct these by hand — the model layer derives them for you — but the helper is available when you need it:
+
+```typescript
+Ad4mModel.graphIriFor("flux://channel-42");
+// "ad4m://graph/flux://channel-42"
+```
+
+## Using Named Graphs with Model Classes (Recommended)
+
+The simplest way to use named graphs is to declare a model class **graph-rooted** with `@Model({ graph: true })`. Every instance of that class then stores its links in its own named graph automatically — you never pass a graph IRI around.
+
+```typescript
+import { Ad4mModel, Model, Property, HasMany } from '@coasys/ad4m';
+
+@Model({ name: "Channel", graph: true })
+class Channel extends Ad4mModel {
+  @Property({ through: "flux://name" })
+  name: string = "";
+
+  @HasMany(() => Message, { through: "ad4m://has_child" })
+  messages: string[] = [];
+}
+
+@Model({ name: "Message" })
+class Message extends Ad4mModel {
+  @Property({ through: "flux://body" })
+  body: string = "";
+}
+```
+
+With `graph: true` on `Channel`, the whole lifecycle becomes graph-aware:
+
+```typescript
+const channel = await Channel.create(perspective, { name: "general" });
+
+// Child messages are written into the channel's graph automatically
+await Message.create(perspective, { body: "hello" }, {
+  parent: { model: Channel, id: channel.id }
+});
+
+// This query only scans the channel's graph
+const messages = await Message.query(perspective).parent(channel).get();
+
+// Drops every link in ad4m://graph/<channel.id> in a single operation,
+// including cleanup of incoming references from other graphs
+await channel.delete();
+```
+
+What each step does:
+
+- **Create / update** writes the channel's links into `ad4m://graph/<channel.id>`.
+- **Child instances** added with a `parent` land in the *parent's* graph — messages live alongside their channel.
+- **Parent-scoped queries** on a graph-rooted parent are automatically restricted to that parent's graph.
+- **Delete** drops the whole graph in one operation.
+
+<Callout type="info" emoji="ℹ️">
+  Only `@Model` takes the `graph` option — not `@Property` or the relation decorators (`@HasMany`, `@HasOne`, …). A model roots **one** graph, and all of its properties and child relations live inside it. This keeps the mental model simple: one instance, one graph.
+</Callout>
+
+### How the model layer routes writes
+
+When a class is graph-rooted, each instance exposes its graph IRI, and the framework threads it through every write — property setters, relation mutations, and `save()` all target the instance's graph, so its data never leaks into the default graph or another instance's graph:
+
+```typescript
+channel.graphIri; // "ad4m://graph/<channel.id>"
+```
+
+Introspection reflects graph-rooting too:
+
+```typescript
+Channel.getModelMetadata().graph; // true
+Message.getModelMetadata().graph; // false
+```
+
+## Using Named Graphs at the Link Level
+
+If you work with raw links instead of model classes, the graph is an optional trailing argument on the add methods, and a field on every returned `LinkExpression`.
+
+```typescript
+const graph = "ad4m://graph/flux://channel-42";
+
+// Place a single link in a graph
+await perspective.add(
+  { source: "flux://channel-42", predicate: "flux://body", target: "literal://string:hello" },
+  "shared",      // status
+  undefined,     // batchId
+  graph          // graph
+);
+
+// Bulk-add many links to a graph in one call
+await perspective.addLinks(links, "shared", undefined, graph);
+```
+
+Every `LinkExpression` returned from a query carries its `graph` (or `undefined` for default-graph links):
+
+```typescript
+const links = await perspective.get({ source: "flux://channel-42" });
+links[0].graph; // "ad4m://graph/flux://channel-42"
+```
+
+### Listing and dropping graphs
+
+```typescript
+// List every named graph IRI in the Perspective
+const graphs = await perspective.graphs();
+// ["ad4m://graph/flux://channel-42", "ad4m://graph/flux://channel-7", ...]
+
+// Drop a graph and all of its quads
+await perspective.removeGraph("ad4m://graph/flux://channel-42");
+```
+
+<Callout type="warning" emoji="⚠️">
+  `removeGraph()` is destructive and irreversible — it deletes every link in the graph. It also cleans up dangling references: any link in another graph that points at a subject inside the dropped graph is removed too, so you're never left with links to nodes that no longer exist.
+</Callout>
+
+## Scoped SPARQL Queries
+
+`querySparql()` takes an optional second argument — a list of graph IRIs to scope the query to. When provided, the query's default dataset becomes the **union of those graphs**, while the query body itself stays graph-agnostic:
+
+```typescript
+// Only scans the two named channels
+const messages = await perspective.querySparql(`
+  SELECT ?msg ?body WHERE {
+    ?msg <flux://body> ?body .
+  }
+`, [
+  "ad4m://graph/flux://channel-42",
+  "ad4m://graph/flux://channel-7"
+]);
+```
+
+The same query *without* the second argument scans the whole Perspective.
+
+### Dataset resolution priority
+
+When you run a SPARQL query, the store decides which graphs to read in this order:
+
+1. **The query names its own graphs.** If the SPARQL uses `FROM`, `FROM NAMED`, or `GRAPH`, that is honoured exactly as written — a self-describing query always wins.
+2. **A `graphs` argument is provided.** The default dataset is set to the union of those graph IRIs.
+3. **The Perspective has named graphs but you scoped nothing.** The default dataset is the union of *all* graphs, so an unscoped query still sees everything.
+4. **No named graphs at all.** The ordinary default graph — exactly how a Perspective without named graphs behaves.
+
+The key guarantee: named graphs never change the *results* of an existing query; they only give you a way to *narrow the scope*. There is no query rewriting or `FROM` injection — your SPARQL string is passed to the engine unchanged.
+
+<Callout type="info" emoji="ℹ️">
+  Raw SPARQL that already uses `GRAPH ?g { ... }` or `FROM <...>` stays in full control. The `graphs` argument is a convenience for the common case of "restrict this ordinary query to these graphs".
+</Callout>
+
+## Scoped Model Queries and Subscriptions
+
+The model query engine accepts graph scoping too. `modelQuery()` and `modelSubscribe()` each take an optional list of graph IRIs:
+
+```typescript
+await perspective.modelQuery("Message", queryJson, [
+  "ad4m://graph/flux://channel-42"
+]);
+```
+
+With model classes you rarely call these directly — a parent-scoped query on a graph-rooted model resolves the graph for you:
+
+```typescript
+// Internally scopes to ["ad4m://graph/<channel.id>"]
+await Message.query(perspective).parent(channel).get();
+```
+
+Subscriptions scoped to a graph only re-evaluate when that graph changes.
+
+## Under the Hood
+
+- **RDF named graphs / quads.** AD4M stores links in Oxigraph. A link in the default graph is a *triple*; a link in a named graph is a *quad* whose fourth component is the graph IRI. Named graphs are a native RDF concept ([RDF 1.2 datasets](https://www.w3.org/TR/rdf12-concepts/)), not an AD4M bolt-on.
+- **Scoped reads set the SPARQL default dataset.** The executor uses Oxigraph's dataset API to restrict a query to the requested graphs at execution time. There's no query rewriting, so the SPARQL you write is the SPARQL that runs.
+- **Bulk delete drops the graph.** `removeGraph` removes all quads in the graph in one store operation, then runs a single batched query to find and remove incoming references from other graphs — so dropping a channel never strands links that pointed into it.
+- **The wire surface.** Over the executor's JSON-RPC API, the `graph` parameter rides along on `perspective.addLink` / `addLinks` / `executeCommands`; the `graphs` filter on `perspective.querySparql`; and `graph_iris` on `perspective.modelQuery` / `modelSubscribe`. `perspective.namedGraphs` lists them and `perspective.removeNamedGraph` drops one. Clients that don't send these fields get the default-graph behaviour, unchanged.
+
+## When to Use Named Graphs
+
+Use named graphs when a Perspective holds many independent collections with their own lifecycle — channels, documents, boards — that you delete, query, or subscribe to one at a time. Skip them when the Perspective is small or flat, or the data has no natural partition.
+
+They're opt-in per model class and per link, so you can introduce them exactly where they pay off and leave the rest of your schema unchanged.
+
+## API Reference
+
+### `@Model` decorator
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `graph` | `boolean` | `false` | When `true`, each instance stores its links in the named graph `ad4m://graph/<id>`, enabling scoped queries and O(1) bulk deletion. |
+
+### `PerspectiveProxy`
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `graphs` | `graphs(): Promise<string[]>` | List all named graph IRIs in the Perspective. |
+| `removeGraph` | `removeGraph(graphIri: string): Promise<boolean>` | Drop a named graph and all its quads, including incoming references from other graphs. |
+| `add` | `add(link, status?, batchId?, graph?): Promise<LinkExpression>` | Add a link, optionally into `graph`. |
+| `addLinks` | `addLinks(links, status?, batchId?, graph?): Promise<LinkExpression[]>` | Bulk-add links, optionally into `graph`. |
+| `querySparql` | `querySparql(query, graphs?): Promise<T>` | Run a SPARQL query, optionally scoped to a union of `graphs`. |
+| `modelQuery` | `modelQuery(className, queryJson, graphIris?)` | Model query, optionally scoped to `graphIris`. |
+| `modelSubscribe` | `modelSubscribe(className, queryJson, graphIris?)` | Model subscription, optionally scoped to `graphIris`. |
+
+### `Ad4mModel`
+
+| Member | Signature | Description |
+|--------|-----------|-------------|
+| `graphIri` | `get graphIri(): string \| undefined` | The instance's graph IRI, or `undefined` when the class isn't graph-rooted. |
+| `graphIriFor` | `static graphIriFor(baseExpression: string): string` | Build a graph IRI from a base expression. |
+| `getModelMetadata().graph` | `boolean` | Whether the class is graph-rooted. |
+
+### `LinkExpression`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `graph` | `string \| undefined` | The named graph this link belongs to, or `undefined` for default-graph links. |
+
+## Related Resources
+
+- [Model Classes Guide](/developer-guides/model-classes) — Defining `@Model` classes and querying them
+- [SPARQL Queries Guide](/developer-guides/sparql-queries) — Direct SPARQL access to the RDF store
+- [Perspectives](/perspectives) — Understanding Perspectives and links

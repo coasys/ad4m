@@ -145,6 +145,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
                 invalid: None,
             },
             status: Some(status.clone()),
+            graph: None,
         };
 
         // Convert literal:// → literal: in all URI fields
@@ -316,6 +317,7 @@ mod tests {
                 invalid: None,
             },
             status: None,
+            graph: None,
         };
 
         let conversions = convert_link_literal_uris(&mut link);
@@ -342,6 +344,7 @@ mod tests {
                 invalid: None,
             },
             status: None,
+            graph: None,
         };
 
         let conversions = convert_link_literal_uris(&mut link);
@@ -368,6 +371,7 @@ mod tests {
                 invalid: None,
             },
             status: None,
+            graph: None,
         };
 
         let conversions = convert_link_literal_uris(&mut link);
@@ -394,6 +398,7 @@ mod tests {
                 invalid: None,
             },
             status: None,
+            graph: None,
         };
 
         let conversions = convert_link_literal_uris(&mut link);
@@ -455,6 +460,7 @@ mod tests {
                 key: "key1".to_string(),
             },
             status: Some(LinkStatus::Local),
+            graph: None,
         };
 
         let link2 = LinkExpression {
@@ -470,6 +476,7 @@ mod tests {
                 key: "key2".to_string(),
             },
             status: Some(LinkStatus::Local),
+            graph: None,
         };
 
         Ad4mDb::with_global_instance(|db| {
@@ -538,6 +545,7 @@ mod tests {
                 key: "key".to_string(),
             },
             status: Some(LinkStatus::Shared),
+            graph: None,
         };
 
         let link_already_canonical = LinkExpression {
@@ -553,6 +561,7 @@ mod tests {
                 key: "key2".to_string(),
             },
             status: Some(LinkStatus::Shared),
+            graph: None,
         };
 
         Ad4mDb::with_global_instance(|db| {
@@ -623,6 +632,7 @@ mod tests {
                 key: "key".to_string(),
             },
             status: Some(LinkStatus::Local),
+            graph: None,
         };
 
         Ad4mDb::with_global_instance(|db| {

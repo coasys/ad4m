@@ -6,8 +6,8 @@ use inputs::PullArguments;
 use lazy_static::lazy_static;
 
 use perspective_diff_sync_integrity::{
-    CommitInput, HashBroadcast, HashReference, OnlineAgent, OnlineAgentAndAction, Perspective,
-    PerspectiveDiff, PerspectiveDiffEntryReference, PerspectiveExpression, PullResult,
+    CommitInput, HashBroadcast, HashReference, OnlineAgent, OnlineAgentAndAction,
+    Perspective, PerspectiveDiff, PerspectiveDiffEntryReference, PerspectiveExpression, PullResult,
     RoutedSignalPayload,
 };
 

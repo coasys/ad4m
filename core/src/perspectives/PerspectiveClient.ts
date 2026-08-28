@@ -118,9 +118,13 @@ export class PerspectiveClient {
         return JSON.parse(result)
     }
 
-    async querySparql<T = any>(uuid: string, query: string): Promise<T> {
-        const result = await this.#apiClient.call<string>('perspective.querySparql', { uuid, engine: 'sparql', query })
+    async querySparql<T = any>(uuid: string, query: string, graphs?: string[]): Promise<T> {
+        const result = await this.#apiClient.call<string>('perspective.querySparql', { uuid, engine: 'sparql', query, graphs: graphs || null })
         return JSON.parse(result) as T
+    }
+
+    async namedGraphs(uuid: string): Promise<string[]> {
+        return this.#apiClient.call<string[]>('perspective.namedGraphs', { uuid })
     }
 
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
@@ -178,9 +182,9 @@ export class PerspectiveClient {
         )
     }
 
-    async modelQuery(uuid: string, className: string, queryJson: string): Promise<any> {
+    async modelQuery(uuid: string, className: string, queryJson: string, graphIris?: string[]): Promise<any> {
         const resultJson = await this.#apiClient.call<string>(
-            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }
+            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson, graph_iris: graphIris || null }
         )
         return JSON.parse(resultJson)
     }
@@ -202,9 +206,9 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
-    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
+    async modelSubscribe(uuid: string, className: string, queryJson: string, graphIris?: string[]): Promise<{ subscriptionId: string, result: any }> {
         const response = await this.#apiClient.call<{ subscription_id: string, result: string }>(
-            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
+            'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson, graph_iris: graphIris || null }
         )
         return {
             subscriptionId: response.subscription_id,
@@ -227,15 +231,15 @@ export class PerspectiveClient {
         return { perspectiveRemove: result }
     }
 
-    async addLink(uuid: string, link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
+    async addLink(uuid: string, link: Link, status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression> {
         return this.#apiClient.call<LinkExpression>(
-            'perspective.addLink', { uuid, link, status, batchId }
+            'perspective.addLink', { uuid, link, status, batchId, graph: graph || null }
         )
     }
 
-    async addLinks(uuid: string, links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
+    async addLinks(uuid: string, links: Link[], status: LinkStatus = 'shared', batchId?: string, graph?: string): Promise<LinkExpression[]> {
         return this.#apiClient.call<LinkExpression[]>(
-            'perspective.addLinks', { uuid, links, status, batchId }
+            'perspective.addLinks', { uuid, links, status, batchId, graph: graph || null }
         )
     }
 
@@ -472,15 +476,21 @@ export class PerspectiveClient {
         )
     }
 
-    async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
+    async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string, graph?: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
-            'perspective.executeCommands', { uuid, commands, expression, parameters, batchId }
+            'perspective.executeCommands', { uuid, commands, expression, parameters, batchId, graph: graph || null }
         )
     }
 
-    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
+    async removeNamedGraph(uuid: string, graphIri: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
-            'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
+            'perspective.removeNamedGraph', { uuid, graphIri }
+        )
+    }
+
+    async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string, graph?: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId, graph: graph || null }
         )
     }
 

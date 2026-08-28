@@ -24,6 +24,8 @@ pub struct LinkExpression {
     pub data: Triple,
     pub timestamp: String,
     pub proof: ExpressionProof,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, SerializedBytes, Default, PartialEq, Eq, Hash, Ord, PartialOrd)]

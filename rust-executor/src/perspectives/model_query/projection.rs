@@ -58,6 +58,7 @@ pub(super) async fn resolve_projections(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    graph_iris: Option<&[String]>,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -131,7 +132,7 @@ pub(super) async fn resolve_projections(
                 reifier_patterns = reifier_patterns,
             );
 
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_with_graphs(&sparql, graph_iris)?;
             let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
             let mut count_map: HashMap<String, u64> = HashMap::new();
@@ -175,7 +176,7 @@ pub(super) async fn resolve_projections(
                 order_clause = order_clause,
             );
 
-            let result_json = store.query(&sparql)?;
+            let result_json = store.query_with_graphs(&sparql, graph_iris)?;
             let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
             // Collapse duplicate targets per parent.
@@ -253,6 +254,7 @@ pub(super) async fn resolve_projections(
                                 &sub_query,
                                 resolver,
                                 depth + 1,
+                                graph_iris,
                             ))
                             .await
                             {

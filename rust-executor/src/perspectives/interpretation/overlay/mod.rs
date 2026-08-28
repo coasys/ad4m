@@ -695,6 +695,7 @@ mod tests {
             Some(json!({ "title": "Human authored title" })),
             None,
             &ctx,
+            None,
         )
         .await
         .expect("seed create");

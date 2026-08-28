@@ -310,6 +310,7 @@ mod tests {
             LinkStatus::Local,
             None,
             ctx,
+            None,
         )
         .await
         .expect("add_links");
@@ -436,6 +437,7 @@ mod tests {
             crate::types::LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .unwrap();

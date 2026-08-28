@@ -471,6 +471,24 @@ recipe://chocolate-cake-123 -[recipe://ingredient]-> ingredient://sugar
 
 Every node in this graph is a URL pointing to an Expression in some language.
 
+By default, this instance subgraph lives in the perspective's **single default RDF graph**, interleaved with every other instance. That is a logical subgraph (a set of connected nodes), not a physically partitioned one.
+
+### Named-Graph Partitioning (Opt-In)
+
+Adding `graph: true` to `@Model` roots **each instance in its own named graph**, physically partitioning the perspective's store:
+
+```typescript
+@Model({ name: "Channel", graph: true })
+class Channel extends Ad4mModel {
+  @Property({ through: "flux://name" })
+  name: string = "";
+}
+```
+
+Every write for an instance is automatically threaded into the graph identified by `ad4m://graph/<instanceId>`, deleting an instance becomes an O(1) graph drop instead of a per-link teardown, and queries can be scoped to a single instance's graph so the engine skips every other partition. This is worth it when a perspective holds many independent collections (channels, boards, documents) that are created, queried, and deleted as units.
+
+Named-graph partitioning is fully covered — including link-level APIs, scoped SPARQL, subscriptions, and when to reach for it — in the [Named Graphs guide](/developer-guides/named-graphs).
+
 ### Instance Identity
 
 Each model instance has a unique `id` that serves as the root node of its subgraph. You can specify it or let AD4M generate one:

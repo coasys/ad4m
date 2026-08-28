@@ -403,6 +403,7 @@ impl Ad4mMcpHandler {
                         initial_values,
                         None,
                         &agent_context,
+                        None,
                     )
                     .await
                 {
@@ -452,6 +453,7 @@ impl Ad4mMcpHandler {
                         parameters,
                         None,
                         &agent_context,
+                        None,
                     )
                     .await
                 {
@@ -523,7 +525,7 @@ impl Ad4mMcpHandler {
                 };
 
                 match perspective
-                    .add_link(link, LinkStatus::Shared, None, &agent_context)
+                    .add_link(link, LinkStatus::Shared, None, &agent_context, None)
                     .await
                 {
                     Ok(_) => serde_json::to_string_pretty(&json!({
@@ -613,7 +615,7 @@ impl Ad4mMcpHandler {
                 };
 
                 match perspective
-                    .add_link(link, LinkStatus::Shared, None, &agent_context)
+                    .add_link(link, LinkStatus::Shared, None, &agent_context, None)
                     .await
                 {
                     Ok(_) => serde_json::to_string_pretty(&json!({
