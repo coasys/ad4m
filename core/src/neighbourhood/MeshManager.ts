@@ -402,20 +402,31 @@ export class MeshManager {
      *
      * Uses `RTCRtpSender.replaceTrack` — no renegotiation required.
      * Pass `null` to stop sending that kind.
+     *
+     * Also updates the internal `outbound` map and `outboundStream` so
+     * state stays consistent whether called from Session or directly.
+     * `setOutboundTrack` delegates here.
      */
     async replaceTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
+        const previous = this.outbound.get(kind)
+        this.outbound.set(kind, track)
+        if (this.outboundStream) {
+            if (previous) this.outboundStream.removeTrack(previous)
+            if (track) this.outboundStream.addTrack(track)
+        }
+        if (this.closed) return
+
         await Promise.all(
-            [...this.slots.values()].map(async (slot) => {
-                const sender = slot.pc.getSenders().find(
-                    (s) => s.track?.kind === kind
-                        || (!s.track && slot.pc.getTransceivers().find(
-                            (t) => t.sender === s && t.receiver?.track?.kind === kind,
-                        )),
-                )
-                if (sender) {
-                    await sender.replaceTrack(track)
-                } else if (track) {
-                    slot.pc.addTrack(track)
+            [...this.slots.entries()].map(async ([peerId, slot]) => {
+                try {
+                    const sender = slot.senders.get(kind)
+                    if (sender) {
+                        await sender.replaceTrack(track)
+                    } else if (track) {
+                        slot.senders.set(kind, slot.pc.addTrack(track, this.outboundStream!))
+                    }
+                } catch (error) {
+                    this.emit("error", new Error(`replacing ${kind} track for ${peerId}: ${error}`))
                 }
             }),
         )
@@ -464,37 +475,12 @@ export class MeshManager {
      * Set what this agent sends on a track kind.  `null` stops sending
      * that kind.
      *
-     * Replaces the track on the existing sender where one exists,
-     * which makes camera↔screen swapping free: `replaceTrack` does
-     * not renegotiate, so the switch happens instantly and cannot fail
-     * half-way for one peer and not another.
+     * Legacy entry point — delegates to `replaceTrack`, which handles
+     * both the outbound state bookkeeping and the per-slot sender
+     * replacement.  Kept for WE's mesh-path compatibility.
      */
     async setOutboundTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
-        const previous = this.outbound.get(kind)
-        this.outbound.set(kind, track)
-        if (this.outboundStream) {
-            if (previous) this.outboundStream.removeTrack(previous)
-            if (track) this.outboundStream.addTrack(track)
-        }
-        if (this.closed) return
-
-        await Promise.all(
-            [...this.slots.entries()].map(async ([peerId, slot]) => {
-                try {
-                    const sender = slot.senders.get(kind)
-                    if (sender) {
-                        await sender.replaceTrack(track)
-                    } else if (track) {
-                        // Only reachable if `addTransceiver` failed above.
-                        // Adding a sender here *does* fire `negotiationneeded`,
-                        // which perfect negotiation resolves.
-                        slot.senders.set(kind, slot.pc.addTrack(track, this.outboundStream!))
-                    }
-                } catch (error) {
-                    this.fail(`setting ${kind} track for ${peerId}`, error)
-                }
-            }),
-        )
+        await this.replaceTrack(kind, track)
     }
 
     // ── Peer connection management ──────────────────────────────────
