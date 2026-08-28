@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::domain::Perspective;
 use crate::types::{Agent, AgentStatus};
 use crate::types::{Expression, ExpressionProof};
-use crate::wallet::Wallet;
+use crate::wallet::{wallet_backend, LocalWallet};
 
 pub mod capabilities;
 pub mod signatures;
@@ -91,14 +91,10 @@ pub struct AgentStore {
 }
 
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
-    // For user contexts, ensure the key exists
     if context.is_main_agent {
-        let wallet_instance = Wallet::instance();
-        let wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref = wallet.as_ref().expect("wallet instance");
+        let backend = wallet_backend();
         let key_name = context.wallet_key_name();
-
-        wallet_ref
+        backend
             .get_did_document(&key_name)
             .ok_or(anyhow!("{} key not found", key_name))
     } else if let Some(user_email) = &context.user_email {
@@ -134,12 +130,9 @@ pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
 }
 
 pub fn sign_for_context(payload: &[u8], context: &AgentContext) -> Result<Vec<u8>, AnyError> {
-    let wallet_instance = Wallet::instance();
-    let wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_ref().expect("wallet instance");
+    let backend = wallet_backend();
     let key_name = context.wallet_key_name();
-
-    let signature = wallet_ref
+    let signature = backend
         .sign(&key_name, payload)
         .ok_or(anyhow!("{} key not found", key_name))?;
     Ok(signature)
@@ -164,14 +157,15 @@ pub fn sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
 }
 
 pub fn check_keys_and_create(did: String) -> did_key::Document {
-    let wallet_instance = Wallet::instance();
-    let mut wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_mut().expect("wallet instance");
-    let name = "main".to_string();
-    if wallet_ref.get_did_document(&name).is_none() {
-        wallet_ref.initialize_keys(name, did).unwrap()
+    let backend = wallet_backend();
+    let name = "main";
+    if backend.get_did_document(name).is_none() {
+        let local = backend
+            .as_any()
+            .downcast_ref::<LocalWallet>()
+            .expect("check_keys_and_create requires LocalWallet backend");
+        local.initialize_keys(name, &did).unwrap()
     } else {
-        drop(wallet);
         did_document()
     }
 }
@@ -353,10 +347,12 @@ impl AgentService {
     }
 
     pub fn is_unlocked(&self) -> bool {
-        let wallet_instance = Wallet::instance();
-        let mut wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
-        wallet_ref.is_unlocked()
+        let backend = wallet_backend();
+        let local = backend
+            .as_any()
+            .downcast_ref::<LocalWallet>()
+            .expect("is_unlocked requires LocalWallet backend");
+        local.is_unlocked()
     }
 
     fn signing_checks(&self) -> Result<(), AnyError> {
@@ -393,22 +389,16 @@ impl AgentService {
     /// Ensure a user key exists in the wallet, generating it if necessary.
     /// Uses email as the wallet key name.
     pub fn ensure_user_key_exists(user_email: &str) -> Result<(), AnyError> {
-        let wallet_instance = Wallet::instance();
-        let mut wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref = wallet.as_mut().expect("wallet instance");
+        let backend = wallet_backend();
 
-        // Debug: Show current wallet state
-        let available_keys = wallet_ref.list_key_names();
+        let available_keys = backend.list_key_names();
         log::debug!(
             "🔧 ensure_user_key_exists() called for user: '{}'",
             user_email
         );
         log::debug!("🔧 Available keys before check: {:?}", available_keys);
 
-        if wallet_ref
-            .get_did_document(&user_email.to_string())
-            .is_some()
-        {
+        if backend.get_did_document(user_email).is_some() {
             log::debug!("✅ Key already exists for user: '{}'", user_email);
             return Ok(());
         }
@@ -421,32 +411,27 @@ impl AgentService {
             "⚠️  This will create a NEW DID! Available keys were: {:?}",
             available_keys
         );
-        wallet_ref.generate_keypair(user_email.to_string());
+        backend.generate_keypair(user_email)?;
 
         Ok(())
     }
 
     /// Get user agent data for a specific user email. Fails if the user does not exist.
     pub fn get_user_agent_data(user_email: &str) -> Result<AgentData, AnyError> {
-        let wallet_instance = Wallet::instance();
-        let wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref = wallet.as_ref().expect("wallet instance");
+        let backend = wallet_backend();
 
-        // Debug: Show what keys we have and what we're looking for
-        let available_keys = wallet_ref.list_key_names();
+        let available_keys = backend.list_key_names();
         log::trace!("🔍 get_user_agent_data() called for user: '{}'", user_email);
         log::trace!("🔍 Available keys in wallet: {:?}", available_keys);
 
-        let did_document = wallet_ref
-            .get_did_document(&user_email.to_string())
-            .ok_or_else(|| {
-                log::error!(
-                    "❌ No key found for user '{}'. Available keys: {:?}",
-                    user_email,
-                    available_keys
-                );
-                anyhow!("No key found for user {}", user_email)
-            })?;
+        let did_document = backend.get_did_document(user_email).ok_or_else(|| {
+            log::error!(
+                "❌ No key found for user '{}'. Available keys: {:?}",
+                user_email,
+                available_keys
+            );
+            anyhow!("No key found for user {}", user_email)
+        })?;
 
         let signing_key_id = did_document.verification_method[0].id.clone();
         let did = did_document.id.clone();
@@ -463,29 +448,18 @@ impl AgentService {
 
     /// Check whether a user key exists in the wallet.
     pub fn user_exists(user_email: &str) -> bool {
-        let wallet_instance = Wallet::instance();
-        if let Ok(wallet) = wallet_instance.lock() {
-            if let Some(wallet_ref) = wallet.as_ref() {
-                return wallet_ref
-                    .get_did_document(&user_email.to_string())
-                    .is_some();
-            }
-        }
-        false
+        let backend = wallet_backend();
+        backend.key_exists(user_email)
     }
 
     /// List all user emails that have keys in the wallet (excluding "main")
     pub fn list_user_emails() -> Result<Vec<String>, AnyError> {
-        let wallet_instance = Wallet::instance();
-        let wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref = wallet.as_ref().expect("wallet instance");
-
-        let all_keys = wallet_ref.list_key_names();
+        let backend = wallet_backend();
+        let all_keys = backend.list_key_names();
         let user_emails: Vec<String> = all_keys
             .into_iter()
             .filter(|key_name| key_name != "main")
             .collect();
-
         Ok(user_emails)
     }
 
@@ -599,16 +573,14 @@ impl AgentService {
     }
 
     pub fn create_new_keys(&mut self) {
-        let wallet_instance = Wallet::instance();
-        let did = {
-            let mut wallet = wallet_instance.lock().expect("wallet lock");
-            let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
-            wallet_ref.generate_keypair("main".to_string());
-            wallet_ref
-                .get_did_document(&"main".to_string())
-                .expect("couldn't get DID document for keys that were just generated above")
-                .id
-        };
+        let backend = wallet_backend();
+        backend
+            .generate_keypair("main")
+            .expect("failed to generate main keypair");
+        let did = backend
+            .get_did_document("main")
+            .expect("couldn't get DID document for keys that were just generated above")
+            .id;
 
         self.did_document = Some(serde_json::to_string(&did_document()).unwrap());
         self.did = Some(did.clone());
@@ -621,15 +593,15 @@ impl AgentService {
     }
 
     pub fn unlock(&mut self, password: String) -> Result<(), AnyError> {
-        let wallet_instance = Wallet::instance();
-        let mut wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
-        let result = wallet_ref.unlock(password.clone());
+        let backend = wallet_backend();
+        let local = backend
+            .as_any()
+            .downcast_ref::<LocalWallet>()
+            .expect("unlock requires LocalWallet backend");
+        let result = local.unlock(&password);
         if result.is_ok() {
             self.passphrase = Some(password);
-
-            // Debug: Show what keys are present after unlock
-            let key_names = wallet_ref.list_key_names();
+            let key_names = backend.list_key_names();
             log::debug!("🔑 Wallet unlocked. Keys present: {:?}", key_names);
         }
         result
@@ -641,23 +613,24 @@ impl AgentService {
             self.save(self.passphrase.clone().unwrap());
         }
 
-        let wallet_instance = Wallet::instance();
-        {
-            let mut wallet = wallet_instance.lock().expect("wallet lock");
-            let wallet_ref: &mut Wallet = wallet.as_mut().expect("wallet instance");
-            wallet_ref.lock(password);
-        }
+        let backend = wallet_backend();
+        let local = backend
+            .as_any()
+            .downcast_ref::<LocalWallet>()
+            .expect("lock requires LocalWallet backend");
+        local.lock(&password);
 
         // Clear the stored passphrase after locking
         self.passphrase = None;
     }
 
     pub fn save(&self, password: String) {
-        let wallet_instance = Wallet::instance();
-        let mut wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref = wallet.as_mut().expect("wallet instance");
-
-        let keystore = wallet_ref.export(password);
+        let backend = wallet_backend();
+        let local = backend
+            .as_any()
+            .downcast_ref::<LocalWallet>()
+            .expect("save requires LocalWallet backend");
+        let keystore = local.export(&password);
 
         let store = AgentStore {
             did: self.did.clone().unwrap().clone(),
@@ -684,13 +657,12 @@ impl AgentService {
         self.signing_key_id = Some(dump.signing_key_id);
 
         {
-            let wallet_instance = Wallet::instance();
-            let mut wallet = match wallet_instance.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            let wallet_ref = wallet.as_mut().expect("wallet instance");
-            wallet_ref.load(dump.keystore);
+            let backend = wallet_backend();
+            let local = backend
+                .as_any()
+                .downcast_ref::<LocalWallet>()
+                .expect("load requires LocalWallet backend");
+            local.load(&dump.keystore);
         }
 
         if std::path::Path::new(self.file_profile.as_str()).exists() {
@@ -985,11 +957,8 @@ mod tests {
         );
 
         // Verify the key was actually created
-        let wallet_instance = Wallet::instance();
-        let wallet = wallet_instance.lock().expect("wallet lock");
-        let wallet_ref = wallet.as_ref().expect("wallet instance");
-
-        let did_doc = wallet_ref.get_did_document(&test_user_email.to_string());
+        let backend = wallet_backend();
+        let did_doc = backend.get_did_document(test_user_email);
         assert!(
             did_doc.is_some(),
             "User key should exist in wallet after generation"
@@ -1039,12 +1008,14 @@ mod tests {
         AgentService::ensure_user_key_exists(test_user_email2)
             .expect("Failed to create user 2 key");
 
-        // Should now have 2 more users
+        // Should now have at least 2 more users (other parallel tests may
+        // have added keys to the shared wallet backend concurrently).
         let final_users = AgentService::list_user_emails().expect("Failed to list user emails");
-        assert_eq!(
+        assert!(
+            final_users.len() >= initial_count + 2,
+            "Should have at least 2 more users after key generation, got {} (initial {})",
             final_users.len(),
-            initial_count + 2,
-            "Should have 2 more users after key generation"
+            initial_count
         );
 
         assert!(
@@ -1269,17 +1240,10 @@ mod tests {
     /// verify that `ensure_main_agent_loaded` recovers from disk.
     #[test]
     fn get_agent_recovers_from_disk_after_memory_cleared() {
+        ensure_setup();
         let tmp = tempfile::tempdir().expect("create temp dir");
         let app_path = tmp.path().to_str().unwrap().to_string();
         std::fs::create_dir_all(format!("{}/ad4m", app_path)).expect("create ad4m dir");
-
-        // Bootstrap wallet
-        {
-            let wallet_instance = crate::wallet::Wallet::instance();
-            let mut wallet = wallet_instance.lock().expect("wallet lock");
-            let wallet_ref = wallet.as_mut().expect("wallet instance");
-            wallet_ref.generate_keypair("main".to_string());
-        }
 
         let expected_did = {
             let global = AgentService::global_instance();
@@ -1330,5 +1294,11 @@ mod tests {
             agent.perspective.is_some(),
             "recovered agent must have a perspective"
         );
+
+        // Restore the global AgentService and re-sync with the wallet's
+        // current "main" key. The test above replaced the "main" key via
+        // create_new_keys(); re-initialising the agent re-generates the key
+        // and syncs the DID, preventing mismatches for subsequent tests.
+        setup_agent();
     }
 }

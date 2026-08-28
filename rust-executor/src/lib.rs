@@ -16,7 +16,7 @@ pub mod runtime_service;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
-mod wallet;
+pub mod wallet;
 
 pub mod agent;
 pub mod ai_service;
@@ -302,6 +302,29 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it
     crate::config::set_global_config(config.clone());
+
+    // Initialise the wallet backend based on config.
+    // "shared" mode connects to an external HTTP wallet service;
+    // everything else (including unset) uses the in-process LocalWallet.
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::wallet::WalletBackend> = match config.wallet_backend.as_deref()
+        {
+            Some("shared") => {
+                let url = config
+                    .wallet_backend_url
+                    .as_ref()
+                    .expect("WALLET_BACKEND_URL required when wallet_backend = shared");
+                info!("Initialising shared wallet backend at {}", url);
+                Arc::new(crate::wallet::SharedWallet::new(url.clone()))
+            }
+            _ => {
+                info!("Initialising local wallet backend");
+                Arc::new(crate::wallet::LocalWallet::new())
+            }
+        };
+        crate::wallet::init_wallet_backend(backend);
+    }
 
     // Create data directories that were previously created by the JS executor's Config.init().
     // These must exist before any service tries to write to them.
