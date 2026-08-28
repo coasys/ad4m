@@ -29,6 +29,8 @@ export * from "./neighbourhood/NeighbourhoodProxy";
 export * from "./neighbourhood/SfuTypes";
 export type { SfuNeighbourhoodApi } from "./neighbourhood/SfuManager";
 export type { Session, SessionTopology, SessionState, SessionEvent, SessionEventCallback, SessionCreateOptions } from "./neighbourhood/Session";
+export { MeshManager, createTelepresenceChannel, parseCallMessage, CALL_PROTOCOL_VERSION } from "./neighbourhood/MeshManager";
+export type { SignallingChannel, TelepresenceProxy, MeshManagerOptions, MeshEvent, MeshEventCallback, CallBody, CallMessage, CallEnvelope } from "./neighbourhood/MeshManager";
 export * from "./typeDefs";
 export * from "./DID";
 export * from "./utils";
