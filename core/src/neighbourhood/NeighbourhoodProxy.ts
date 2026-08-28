@@ -10,58 +10,110 @@ import type {
     SfuRoomInfo,
     TrackMapEntry,
 } from "./SfuTypes";
+import type { SfuNeighbourhoodApi } from "./SfuManager";
+import type { SessionFactory } from "./SessionFactory";
+import { createSessionFactory } from "./SessionFactory";
 
 export class NeighbourhoodProxy {
     #client: NeighbourhoodClient
     #pID: string
+    #agentDid: string
+    #sessionFactory: SessionFactory | null = null
 
-    constructor(client: NeighbourhoodClient, pID: string) {
+    constructor(client: NeighbourhoodClient, pID: string, agentDid: string = "") {
         this.#client = client
         this.#pID = pID
+        this.#agentDid = agentDid
     }
 
+    // ── Telepresence ────────────────────────────────────────────────────
+    //
+    // Link-language ephemeral messaging: presence, signalling, broadcast.
+    // Routes through the neighbourhood's link language.
+
+    /** List DIDs of agents who have joined this neighbourhood. */
     async otherAgents(): Promise<DID[]> {
         return await this.#client.otherAgents(this.#pID)
     }
 
+    /** Check whether the neighbourhood's link language supports telepresence. */
     async hasTelepresenceAdapter(): Promise<boolean> {
         return await this.#client.hasTelepresenceAdapter(this.#pID)
     }
 
+    /** List agents currently online in this neighbourhood. */
     async onlineAgents(): Promise<OnlineAgent[]> {
         return await this.#client.onlineAgents(this.#pID)
     }
 
+    /** Set this agent's online status with a signed perspective payload. */
     async setOnlineStatus(status: Perspective): Promise<boolean> {
         return await this.#client.setOnlineStatus(this.#pID, status)
     }
 
+    /** Set this agent's online status with an unsigned perspective payload. */
     async setOnlineStatusU(status: PerspectiveUnsignedInput): Promise<boolean> {
         return await this.#client.setOnlineStatusU(this.#pID, status)
     }
 
+    /** Send a signed signal to a specific remote agent via the link language. */
     async sendSignal(remoteAgentDid: string, payload: Perspective): Promise<boolean> {
         return await this.#client.sendSignal(this.#pID, remoteAgentDid, payload)
     }
 
+    /** Send an unsigned signal to a specific remote agent via the link language. */
     async sendSignalU(remoteAgentDid: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
         return await this.#client.sendSignalU(this.#pID, remoteAgentDid, payload)
     }
 
+    /** Broadcast a signed signal to all agents in the neighbourhood. */
     async sendBroadcast(payload: Perspective, loopback: boolean = false): Promise<boolean> {
         return await this.#client.sendBroadcast(this.#pID, payload, loopback)
     }
 
+    /** Broadcast an unsigned signal to all agents in the neighbourhood. */
     async sendBroadcastU(payload: PerspectiveUnsignedInput, loopback: boolean = false): Promise<boolean> {
         return await this.#client.sendBroadcastU(this.#pID, payload, loopback)
     }
 
+    /** Register a handler for incoming telepresence signals. */
     async addSignalHandler(handler: (payload: PerspectiveExpression) => void): Promise<void> {
         await this.#client.addSignalHandler(this.#pID, handler)
     }
 
+    /** Remove a previously registered signal handler. */
     removeSignalHandler(handler: (payload: PerspectiveExpression) => void) {
         this.#client.removeSignalHandler(this.#pID, handler)
+    }
+
+    // ── Sessions ────────────────────────────────────────────────────────
+    //
+    // WebRTC media sessions wrapping mesh and SFU topologies.
+    // The session surface handles topology resolution, SDP negotiation,
+    // cascade redirects, and failover internally.
+
+    /** Session factory for creating WebRTC media sessions in this neighbourhood. */
+    get session(): SessionFactory {
+        if (!this.#sessionFactory) {
+            const api = this.#buildSfuApi()
+            this.#sessionFactory = createSessionFactory(api, this.#agentDid, "")
+        }
+        return this.#sessionFactory
+    }
+
+    #buildSfuApi(): SfuNeighbourhoodApi {
+        const client = this.#client
+        return {
+            callJoin: (url, room, offer) => client.sfuCallJoin(url, room, offer),
+            callLeave: (url, room) => client.sfuCallLeave(url, room),
+            callSetQualityPreference: (url, room, pref) => client.sfuCallSetQualityPreference(url, room, pref),
+            callAnswerServerOffer: (url, room, answer) => client.sfuCallAnswerServerOffer(url, room, answer),
+            subscribeCallRenegotiationOffer: (did, cb) => client.subscribeSfuCallRenegotiationOffer(did, cb),
+            subscribeMigrateEvent: (did, cb) => client.subscribeSfuMigrateEvent(did, cb),
+            addIceCandidate: (url, room, candidate) => client.sfuAddIceCandidate(url, room, candidate),
+            sendData: (url, room, label, data, binary) => client.sfuSendData(url, room, label, data, binary),
+            subscribeDataChannel: (cb) => client.subscribeSfuDataChannel(cb),
+        }
     }
 
     // ── SFU (Selective Forwarding Unit) ─────────────────────────────────
