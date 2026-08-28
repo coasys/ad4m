@@ -815,15 +815,34 @@ export interface RelationOptions {
      */
     through?: string;
     /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations.
-     *  Cannot be combined with `getter`. */
+     *  Combines with `getter`, where it names the class the traversal's values hydrate into. */
     target?: () => Ad4mModelLike;
     /**
      * Custom getter to resolve the relation values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "SELECT ?target WHERE { ?target <flux://has_reply> <Base> . }"
      *
-     * Mutually exclusive with `through` and `target`. When `getter` is provided the
-     * relation is read-only (no adder/remover actions are generated).
+     * Mutually exclusive with `through` — a getter replaces link-based resolution,
+     * so there is no predicate to add to or remove from. When `getter` is provided
+     * the relation is read-only (no adder/remover actions are generated).
+     *
+     * **Combines with `target`**, which names the class the traversal's values
+     * hydrate into — without it `include` has no shape to resolve and the relation
+     * can only return bare URIs. Also combines with `where`, applied as a
+     * post-getter filter against the target class.
+     *
+     * @example Traversing a reified edge — a connection stored as a record rather
+     * than a predicate, so no `through` can express it:
+     * ```typescript
+     * @HasMany({
+     *   getter: `SELECT ?target WHERE {
+     *     ?citation <paper://cites_from> <Base> .
+     *     ?citation <paper://cites_to> ?target .
+     *   }`,
+     *   target: () => Paper,
+     * })
+     * cited: Paper[] = [];
+     * ```
      */
     getter?: string;
     /** Whether the link is stored locally (not shared on the network) */
@@ -844,7 +863,8 @@ export interface RelationOptions {
      * auto-derived from the target shape (flags + required properties).
      * Providing `where` overrides this auto-derivation.
      *
-     * Mutually exclusive with `getter` and `filter: false`.
+     * Mutually exclusive with `filter: false`. Combines with `getter`, where it
+     * is applied as a post-getter filter against the target class.
      *
      * @example
      * ```typescript
@@ -923,7 +943,16 @@ function resolveRelationArgs(
         ? { ...(second || {}), target: first }
         : first;
 
-    // getter is mutually exclusive with through, target, and where
+    // `where` and `filter: false` contradict each other on every relation,
+    // getter-backed ones included — checked before the getter path returns.
+    if (opts.where && opts.filter === false) {
+        throw new Error(
+            'Relation decorator: `where` and `filter: false` are contradictory. ' +
+            '`where` adds filtering constraints; `filter: false` disables filtering.'
+        );
+    }
+
+    // getter is mutually exclusive with through
     if (opts.getter) {
         if (opts.through) {
             throw new Error(
@@ -932,35 +961,44 @@ function resolveRelationArgs(
                 '(with optional `target`) for standard link-based relations.'
             );
         }
-        if (opts.target) {
-            throw new Error(
-                'Relation decorator: `getter` and `target` are mutually exclusive. ' +
-                '`target` auto-generates a conformance getter from the model shape; ' +
-                'providing both is contradictory.'
-            );
-        }
-        if (opts.where) {
-            throw new Error(
-                'Relation decorator: `where` and `getter` are mutually exclusive. ' +
-                'Use `where` for DSL-based filtering, or `getter` for raw getter expression.'
-            );
-        }
+        // `target` and `where` are NOT mutually exclusive with `getter`.
+        //
+        // `target` does two separable jobs: it auto-derives a conformance
+        // getter, and it names the class the relation's values hydrate into.
+        // Only the first conflicts with an explicit getter, and `buildSHACL`
+        // already resolves that on its own — an explicit getter wins the getter
+        // slot, while `sh:class` / `ad4m:targetClassName` are emitted from
+        // `target` independently.
+        //
+        // Refusing the pair cost the one thing a custom getter is for. A getter
+        // expresses a traversal the link-shaped DSL cannot — most usefully
+        // through a reified edge, where the connection is a record rather than
+        // a predicate:
+        //
+        //     @HasMany({
+        //       getter: "SELECT ?target WHERE { \
+        //                  ?citation <paper://cites_from> <Base> . \
+        //                  ?citation <paper://cites_to> ?target . }",
+        //       target: () => Paper,
+        //     })
+        //     cited: Paper[] = [];
+        //
+        // Without `target` the relation has no target class, so `include` on it
+        // resolves a shape named "" and fails — leaving a traversal that can
+        // only ever return bare URIs. With it, the values hydrate like any other
+        // relation, because getters are evaluated before include resolution.
+        //
+        // `where` is the same story: the executor applies post-getter where
+        // filters specifically to getter-backed relations
+        // (`apply_where_filter_to_relation`), and emitting `wherePredicates`
+        // needs `target` to resolve the target's metadata — so the runtime is
+        // built for all three together and only this check said otherwise.
         return opts;
     }
 
     // Default predicate when not provided
     if (!opts.through) {
         opts.through = 'ad4m://has_child';
-    }
-
-    // where validation
-    if (opts.where) {
-        if (opts.filter === false) {
-            throw new Error(
-                'Relation decorator: `where` and `filter: false` are contradictory. ' +
-                '`where` adds filtering constraints; `filter: false` disables filtering.'
-            );
-        }
     }
 
     return opts;
@@ -1093,15 +1131,23 @@ export function HasOne(
                 local: opts.local,
             })(target, key);
 
-            // Add prototype methods for add/remove/set (mirroring @HasMany)
-            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any) {
-                return (this as any).addRelationValue(relKey, arg);
+            // Add prototype methods for add/remove/set (mirroring @HasMany).
+            //
+            // `batchId` is part of that mirroring: without it a to-one link
+            // cannot join a write group, so anything that creates a record and
+            // then points it at something has to commit twice and every
+            // subscriber sees the state in between — a record whose to-one
+            // relation is still empty. Anything rendering from a subscription
+            // therefore has a frame in which the record exists and points at
+            // nothing.
+            (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).addRelationValue(relKey, arg, batchId);
             };
-            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any) {
-                return (this as any).removeRelationValue(relKey, arg);
+            (target as any)[`remove${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).removeRelationValue(relKey, arg, batchId);
             };
-            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any) {
-                return (this as any).setRelationValues(relKey, arg);
+            (target as any)[`set${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
+                return (this as any).setRelationValues(relKey, arg, batchId);
             };
         } else {
             Object.defineProperty(target, relKey, { configurable: true, writable: true });
