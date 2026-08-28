@@ -33,3 +33,25 @@ pub use types::{
     SfuParticipantInfo, SfuPipeRenegotiationAnswer, SfuPipeRenegotiationOffer, SfuRoomInfo,
     TrackMapEntry,
 };
+
+/// Detect the default outbound IP address of this machine.
+///
+/// Creates a UDP socket and connects it to a public address (8.8.8.8:80).
+/// The OS routing table selects the appropriate interface — no packet
+/// leaves the machine.  Returns the local IP the OS chose, which on a
+/// single-NIC server equals the publicly reachable address.
+///
+/// Falls back to `127.0.0.1` when detection fails (no network, no
+/// default route, containerised environment with no outbound).
+pub fn detect_outbound_ip() -> std::net::IpAddr {
+    let fallback = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") else {
+        return fallback;
+    };
+    // connect() on a UDP socket sets the default destination without
+    // sending anything.  The kernel selects the outbound interface.
+    if socket.connect("8.8.8.8:80").is_err() {
+        return fallback;
+    }
+    socket.local_addr().map(|a| a.ip()).unwrap_or(fallback)
+}
