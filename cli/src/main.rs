@@ -167,7 +167,6 @@ enum Domain {
         #[arg(long)]
         pid_file: Option<String>,
     },
-    RunLocalHcServices {},
     Eve {
         #[command(subcommand)]
         command: EveCommands,
@@ -294,11 +293,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    if let Domain::RunLocalHcServices {} = args.domain {
-        rust_executor::run_local_hc_services().await?;
-        return Ok(());
-    }
-
     if let Domain::Eve { command } = args.domain {
         eve::run(command).await?;
         return Ok(());
@@ -349,7 +343,6 @@ async fn main() -> Result<()> {
             mcp_port: _,
             pid_file: _,
         } => unreachable!(),
-        Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),
     }
 

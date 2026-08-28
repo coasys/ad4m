@@ -185,6 +185,12 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
+    async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
+        return await this.#apiClient.call<Record<string, string[]>>(
+            'perspective.subjectClassesOf', { uuid, uris }
+        )
+    }
+
     async evaluateGetters(
         uuid: string,
         className: string,
@@ -356,6 +362,13 @@ export class PerspectiveClient {
     async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
         return this.#apiClient.call<string>(
             'perspective.addAutoProcessor', { uuid, ...config },
+        )
+    }
+
+    /** Delete an auto-processor's config. `false` when there was none to delete. */
+    async removeAutoProcessor(uuid: string, processorId: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.removeAutoProcessor', { uuid, processorId },
         )
     }
 

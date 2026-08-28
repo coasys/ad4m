@@ -642,6 +642,25 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Stop an auto-processor by deleting its config.
+     *
+     * The registration is data — the watch loop reads the processor set back out of the
+     * perspective's graph on every tick — so deleting the config is what stops it, and there is
+     * nothing else to unregister. The config is `Shared`, so this stops the processor for the
+     * neighbourhood rather than only for this peer.
+     *
+     * Resolves `true` when there was a processor to remove and `false` when there was not; a
+     * processor another peer has already removed is not an error.
+     *
+     * The processor's `InterpretationRun` nodes stay: they are the record of what it did and the
+     * processed-turn cursor, so a processor later registered under the same id resumes where this
+     * one left off rather than re-reading every turn.
+     */
+    async removeAutoProcessor(processorId: string): Promise<boolean> {
+        return await this.#client.removeAutoProcessor(this.#handle.uuid, processorId)
+    }
+
+    /**
      * Pending interpretation overlays on this perspective — LLM suggestions the
      * §4 divergence gate staged rather than applied, awaiting human accept/reject.
      */
@@ -749,6 +768,41 @@ export class PerspectiveProxy {
      */
     async modelQuery(className: string, queryJson: string): Promise<{ instances: any[], totalCount: number }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson);
+    }
+
+    /** Resolve each URI to the names of every subject class it is an instance of.
+     *
+     * The counterpart of {@link isSubjectInstance}, which asks the same question
+     * one class at a time. Without this, finding the class of an arbitrary URI
+     * meant looping over every registered class — a round trip each — and doing
+     * it again for every URI.
+     *
+     * Class membership in AD4M is structural — a URI belongs to a class when it
+     * carries that class's flags and required properties — so membership is **not
+     * exclusive**: an instance conforms to its parent classes, and to any
+     * unrelated class whose required set happens to be a subset of what it
+     * carries. Every match is returned.
+     *
+     * The list is ordered **most specific first**, meaning by the number of
+     * triples the class requires — a subclass requires everything its parent does
+     * and more — with ties broken alphabetically so that every peer answers
+     * identically. A caller that can only act on one class should take
+     * `classes[0]`, but that head is only a heuristic: it is arbitrary between two
+     * unrelated classes requiring the same number of triples, which is exactly
+     * the case the full list exists to expose.
+     *
+     * A URI is **absent from the result** when no *registered* class matched it.
+     * That covers two situations, and nothing here separates them: the URI may
+     * not be a subject instance at all, or it may be an instance of a class this
+     * perspective has not registered. Absence is used rather than an empty list
+     * because an empty list would claim the stronger thing — that the URI belongs
+     * to no class — which this cannot know.
+     *
+     * @param uris The expression URIs to classify.
+     */
+    async subjectClassesOf(uris: string[]): Promise<Record<string, string[]>> {
+        if (uris.length === 0) return {};
+        return await this.#client.subjectClassesOf(this.#handle.uuid, uris);
     }
 
     /**
