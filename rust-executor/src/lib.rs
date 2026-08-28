@@ -187,10 +187,10 @@ async fn holochain_signal_receiver() {
                     // languages that want direct-signal support can wire it
                     // in later via a dedicated handler.
                     //
-                    // Matched explicitly rather than falling through the
-                    // wildcard so any *future* Signal variant surfaces as a
-                    // real unhandled-variant log line instead of being silently
-                    // rebranded as an AppDirect. (Data's PR #907 review MED-4.)
+                    // Matched explicitly so any *future* Signal variant
+                    // surfaces as an unhandled-variant compile error instead
+                    // of being silently rebranded as an AppDirect.
+                    // (Data's PR #907 review MED-4.)
                     Signal::AppDirect { .. } => {
                         log::debug!(
                             "Received Signal::AppDirect (HC 0.7 direct peer signal; \
