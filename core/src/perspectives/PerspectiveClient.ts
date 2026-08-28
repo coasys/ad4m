@@ -483,6 +483,43 @@ export class PerspectiveClient {
         )
     }
 
+    // ── SHACL resolution (server-side) ─────────────────────────────────────────
+    // These methods delegate shape resolution to the executor, which reads links
+    // from its local store in-process.  Each call replaces the multi-round-trip
+    // `queryLinks` sequences the old PerspectiveProxy methods performed.
+
+    /** List the names of every SHACL shape stored in a perspective (one RPC call). */
+    async getShaclNames(uuid: string): Promise<string[]> {
+        return this.#apiClient.call<string[]>('perspective.getShaclNames', { uuid })
+    }
+
+    /** Resolve a shape's `sh:targetClass` by name (one RPC call). */
+    async getShaclTargetClass(uuid: string, name: string): Promise<string | null> {
+        return this.#apiClient.call<string | null>('perspective.getShaclTargetClass', { uuid, name })
+    }
+
+    /**
+     * Retrieve a single SHACL shape's link triples by name (one RPC call).
+     * Returns `{shapeUri, links}` for reconstruction via `SHACLShape.fromLinks()`,
+     * or `null` if no shape with that name exists.
+     */
+    async getShacl(uuid: string, name: string): Promise<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null> {
+        return this.#apiClient.call<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null>(
+            'perspective.getShacl', { uuid, name }
+        )
+    }
+
+    /**
+     * Retrieve all SHACL shapes in one call.  Returns an array of
+     * `{name, shapeUri, links}` — one entry per shape (one RPC call).
+     */
+    async getAllShacl(uuid: string): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
+        return this.#apiClient.call<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>>(
+            'perspective.getAllShacl', { uuid }
+        )
+    }
+
+
     // ExpressionClient functions, needed for Subjects:
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {
         return await this.#expressionClient!.get(expressionURI)

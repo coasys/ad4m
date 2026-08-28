@@ -1,5 +1,6 @@
 //! Perspective WS-native handlers.
 
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1757,6 +1758,253 @@ async fn interpretation_overlays_handler(
     Ok(serde_json::to_value(overlays)?)
 }
 
+// ── SHACL resolution endpoints ──
+//
+// These handlers move SHACL shape resolution from the TypeScript SDK (which paid
+// N×M queryLinks round trips per shape) into the executor, where link reads hit
+// the local SQLite store directly.  A perspective with 26 shapes that previously
+// generated ~261 WS-RPC round trips now resolves in a single call to
+// `perspective.getAllShacl`.
+
+/// Helper: build a LinkQuery with only `source` and optionally `predicate` set.
+fn shacl_link_query(source: &str, predicate: Option<&str>) -> LinkQuery {
+    LinkQuery {
+        source: Some(source.to_string()),
+        predicate: predicate.map(|p| p.to_string()),
+        ..Default::default()
+    }
+}
+
+/// Simplified link triple returned by SHACL resolution endpoints.
+/// Matches the `{source, predicate, target}` shape that
+/// `SHACLShape.fromLinks()` in the TypeScript SDK expects.
+#[derive(Debug, Serialize)]
+struct ShaclLinkTriple {
+    source: String,
+    predicate: String,
+    target: String,
+}
+
+/// List the names of every SHACL shape stored in a perspective.
+/// Equivalent to the SDK's `PerspectiveProxy.getShaclNames()` but resolved
+/// in-process — one handler call replaces one `queryLinks` round trip, plus
+/// deduplication happens server-side.
+async fn get_shacl_names(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+
+    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
+    let links = perspective
+        .get_links(&query)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    // Extract names from literal URL targets: "literal:string:shacl://Name" → "Name"
+    let mut seen = std::collections::HashSet::new();
+    let names: Vec<String> = links
+        .iter()
+        .filter_map(|link| {
+            let target = &link.data.target;
+            // Strip "literal:string:shacl://" prefix to get the bare name
+            target
+                .strip_prefix("literal:string:shacl://")
+                .map(|name| name.to_string())
+        })
+        .filter(|name| seen.insert(name.clone()))
+        .collect();
+
+    Ok(serde_json::to_value(names)?)
+}
+
+/// Resolve a shape's `sh:targetClass` by name without fetching its properties.
+/// Equivalent to the SDK's `PerspectiveProxy.getShaclTargetClass(name)` — two
+/// in-process link reads instead of two WS-RPC round trips.
+async fn get_shacl_target_class(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let name = params.require_str("name")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+
+    // Step 1: name → shapeUri
+    let literal_url = format!("literal:string:shacl://{}", name);
+    let uri_links = perspective
+        .get_links(&shacl_link_query(
+            &literal_url,
+            Some("ad4m://shacl_shape_uri"),
+        ))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let shape_uri = match uri_links.first() {
+        Some(link) => &link.data.target,
+        None => return Ok(Value::Null),
+    };
+
+    // Step 2: shapeUri → all direct links → find sh://targetClass
+    let shape_links = perspective
+        .get_links(&shacl_link_query(shape_uri, None))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let target_class = shape_links
+        .iter()
+        .find(|l| l.data.predicate.as_deref() == Some("sh://targetClass"))
+        .map(|l| l.data.target.clone());
+
+    Ok(serde_json::to_value(target_class)?)
+}
+
+/// Collect all link triples that define a shape and its property sub-shapes.
+/// Used by both `get_shacl` and `get_all_shacl` to avoid duplicating the
+/// multi-step resolution logic.
+async fn resolve_shacl_links(
+    perspective: &PerspectiveInstance,
+    name: &str,
+) -> Result<Option<(String, Vec<ShaclLinkTriple>)>, WsRpcError> {
+    // Step 1: name → shapeUri
+    let literal_url = format!("literal:string:shacl://{}", name);
+    let uri_links = perspective
+        .get_links(&shacl_link_query(
+            &literal_url,
+            Some("ad4m://shacl_shape_uri"),
+        ))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let shape_uri = match uri_links.first() {
+        Some(link) => link.data.target.clone(),
+        None => return Ok(None),
+    };
+
+    // Step 2: get all links from the shape node (targetClass, properties, etc.)
+    let shape_links = perspective
+        .get_links(&shacl_link_query(&shape_uri, None))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    // Step 3: find property shape URIs
+    let prop_uris: Vec<String> = shape_links
+        .iter()
+        .filter(|l| l.data.predicate.as_deref() == Some("sh://property"))
+        .map(|l| l.data.target.clone())
+        .collect();
+
+    // Step 4: fetch links from each property sub-shape (all independent reads)
+    let mut all_prop_links = Vec::new();
+    for prop_uri in &prop_uris {
+        let prop_links = perspective
+            .get_links(&shacl_link_query(prop_uri, None))
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        all_prop_links.extend(prop_links);
+    }
+
+    // Step 5: merge shape links + property links, deduplicate
+    let mut seen = std::collections::HashSet::new();
+    let mut triples = Vec::new();
+    for link in shape_links.iter().chain(all_prop_links.iter()) {
+        let source = link.data.source.clone();
+        let predicate = link.data.predicate.clone().unwrap_or_default();
+        let target = link.data.target.clone();
+        let key = format!("{} {} {}", source, predicate, target);
+        if seen.insert(key) {
+            triples.push(ShaclLinkTriple {
+                source,
+                predicate,
+                target,
+            });
+        }
+    }
+
+    Ok(Some((shape_uri, triples)))
+}
+
+/// Retrieve a single SHACL shape by name.  Returns the shape URI and all link
+/// triples needed to reconstruct the shape via `SHACLShape.fromLinks()`.
+/// Equivalent to the SDK's `PerspectiveProxy.getShacl(name)` — one handler
+/// call replaces 3+N `queryLinks` round trips.
+async fn get_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let name = params.require_str("name")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+
+    match resolve_shacl_links(&perspective, &name).await? {
+        Some((shape_uri, links)) => {
+            Ok(serde_json::json!({ "shapeUri": shape_uri, "links": links }))
+        }
+        None => Ok(Value::Null),
+    }
+}
+
+/// Retrieve all SHACL shapes in one call.  Returns an array of
+/// `{name, shapeUri, links}` objects — the client reconstructs each shape
+/// with `SHACLShape.fromLinks(entry.links, entry.shapeUri)`.  Equivalent to
+/// the SDK's `PerspectiveProxy.getAllShacl()` — one handler call replaces
+/// 1 + N×(3+M) `queryLinks` round trips (N shapes, M properties each).
+async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+
+    // Step 1: get all shape names
+    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
+    let name_links = perspective
+        .get_links(&query)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let mut seen_names = std::collections::HashSet::new();
+    let names: Vec<String> = name_links
+        .iter()
+        .filter_map(|link| {
+            link.data
+                .target
+                .strip_prefix("literal:string:shacl://")
+                .map(|n| n.to_string())
+        })
+        .filter(|name| seen_names.insert(name.clone()))
+        .collect();
+
+    // Step 2: resolve each shape's full link set
+    let mut results = Vec::new();
+    for name in &names {
+        if let Some((shape_uri, links)) = resolve_shacl_links(&perspective, name).await? {
+            results.push(serde_json::json!({
+                "name": name,
+                "shapeUri": shape_uri,
+                "links": links,
+            }));
+        }
+    }
+
+    Ok(Value::Array(results))
+}
+
 // ── Registration ──
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -1810,4 +2058,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "perspective.interpretationOverlays",
         interpretation_overlays_handler,
     );
+    map.register("perspective.getShaclNames", get_shacl_names);
+    map.register("perspective.getShaclTargetClass", get_shacl_target_class);
+    map.register("perspective.getShacl", get_shacl);
+    map.register("perspective.getAllShacl", get_all_shacl);
 }
