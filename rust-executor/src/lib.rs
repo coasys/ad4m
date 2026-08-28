@@ -197,9 +197,6 @@ async fn holochain_signal_receiver() {
                              not routed to per-language handlers)"
                         );
                     }
-                    _ => {
-                        log::debug!("Received unhandled Holochain signal variant: {:?}", signal);
-                    }
                 }
             } else {
                 // stream_receiver.recv() returned None — channel closed.
@@ -221,7 +218,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     unsafe {
         let mut action: sigaction = std::mem::zeroed();
         action.sa_flags = SA_ONSTACK;
-        action.sa_sigaction = handle_sigurg as sighandler_t;
+        action.sa_sigaction = handle_sigurg as *const () as sighandler_t;
         sigemptyset(&mut action.sa_mask);
 
         if libc::sigaction(SIGURG, &action, ptr::null_mut()) != 0 {

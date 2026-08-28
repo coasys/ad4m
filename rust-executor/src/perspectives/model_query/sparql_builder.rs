@@ -1003,7 +1003,7 @@ fn compile_leaf_condition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::model_query::test_helpers::{flag, prop, relation, shape};
+    use crate::perspectives::model_query::test_helpers::{flag, prop, shape};
 
     fn make_pg(sort_key: SortKey, direction: OrderDirection) -> SparqlPagination {
         SparqlPagination {

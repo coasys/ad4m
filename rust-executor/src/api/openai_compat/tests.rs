@@ -617,7 +617,7 @@ fn init_test_db() {
         // If a prior init attempt panicked, the mutex may be poisoned.
         // Recover by taking the poisoned inner value.
         let arc = crate::db::Ad4mDb::global_instance();
-        let mut guard = match arc.lock() {
+        let guard = match arc.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
