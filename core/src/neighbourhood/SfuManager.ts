@@ -718,6 +718,30 @@ export class SfuManager {
         return Array.from(this.state.participants.values())
     }
 
+    // ── Track replacement ──────────────────────────────────────────
+
+    /**
+     * Replace the outbound track of a given kind on the SFU peer connection.
+     *
+     * Uses `RTCRtpSender.replaceTrack` — no renegotiation required.
+     * Pass `null` to stop sending that kind.
+     */
+    async replaceTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
+        const pc = this.state.peerConnection
+        if (!pc) return
+        const sender = pc.getSenders().find(
+            (s) => s.track?.kind === kind
+                || (!s.track && pc.getTransceivers().find(
+                    (t) => t.sender === s && t.receiver?.track?.kind === kind,
+                )),
+        )
+        if (sender) {
+            await sender.replaceTrack(track)
+        } else if (track) {
+            pc.addTrack(track)
+        }
+    }
+
     // ── Data channel relay ──────────────────────────────────────────
 
     /**

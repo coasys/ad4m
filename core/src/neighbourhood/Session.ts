@@ -35,6 +35,14 @@ export interface Session {
     readonly participants: ReadonlyArray<SfuParticipantInfo>
     /** Subscribe to incoming remote media tracks. Returns an unsubscribe function. */
     onTrack(cb: (stream: MediaStream, track: MediaStreamTrack) => void): () => void
+    /**
+     * Replace the outbound track of a given kind on all peer connections.
+     *
+     * Uses `RTCRtpSender.replaceTrack` — no renegotiation, so camera↔screen
+     * swaps and mute/unmute are instant and atomic across all peers.
+     * Pass `null` to stop sending that kind without tearing down the transceiver.
+     */
+    replaceTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void>
     /** Set the preferred simulcast quality layer. */
     setQualityPreference(pref: SfuQualityPreference): Promise<void>
     /** Send data to all other participants via the SFU relay. */
@@ -289,6 +297,7 @@ export function createSession(config: SessionImplConfig): Session {
             if (meshManager) {
                 return meshManager.getParticipants().map(p => ({
                     agentDid: p.did,
+                    stream: p.stream,
                     hasAudio: p.hasAudio,
                     hasVideo: p.hasVideo,
                     isActiveSpeaker: p.isActiveSpeaker,
@@ -297,6 +306,7 @@ export function createSession(config: SessionImplConfig): Session {
             if (sfuManager) {
                 return sfuManager.getParticipants().map(p => ({
                     agentDid: p.did,
+                    stream: p.stream,
                     hasAudio: p.hasAudio,
                     hasVideo: p.hasVideo,
                     isActiveSpeaker: p.isActiveSpeaker,
@@ -311,6 +321,12 @@ export function createSession(config: SessionImplConfig): Session {
                 const idx = trackListeners.indexOf(cb)
                 if (idx !== -1) trackListeners.splice(idx, 1)
             }
+        },
+
+        async replaceTrack(kind, track) {
+            if (meshManager) { await meshManager.replaceTrack(kind, track); return }
+            if (sfuManager) { await sfuManager.replaceTrack(kind, track); return }
+            throw new Error("Session not active")
         },
 
         async setQualityPreference(pref) {
