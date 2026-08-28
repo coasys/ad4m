@@ -10,7 +10,6 @@ import type {
     SfuRoomInfo,
     TrackMapEntry,
 } from "./SfuTypes";
-import type { SfuNeighbourhoodApi } from "./SfuManager";
 import { createSession, type Session, type SessionCreateOptions } from "./Session";
 import { createTelepresenceChannel } from "./MeshManager";
 
@@ -101,7 +100,7 @@ export class NeighbourhoodProxy {
     createSession(roomName: string, options?: SessionCreateOptions): Session {
         const proxy = this
         const session = createSession({
-            api: this.#buildSfuApi(),
+            api: this.#client,
             roomId: roomName,
             agentDid: this.#agentDid,
             neighbourhoodUrl: options?.neighbourhoodUrl ?? "",
@@ -121,21 +120,6 @@ export class NeighbourhoodProxy {
             }
         })
         return session
-    }
-
-    #buildSfuApi(): SfuNeighbourhoodApi {
-        const client = this.#client
-        return {
-            callJoin: (url, room, offer) => client.sfuCallJoin(url, room, offer),
-            callLeave: (url, room) => client.sfuCallLeave(url, room),
-            callSetQualityPreference: (url, room, pref) => client.sfuCallSetQualityPreference(url, room, pref),
-            callAnswerServerOffer: (url, room, answer) => client.sfuCallAnswerServerOffer(url, room, answer),
-            subscribeCallRenegotiationOffer: (did, cb) => client.subscribeSfuCallRenegotiationOffer(did, cb),
-            subscribeMigrateEvent: (did, cb) => client.subscribeSfuMigrateEvent(did, cb),
-            addIceCandidate: (url, room, candidate) => client.sfuAddIceCandidate(url, room, candidate),
-            sendData: (url, room, label, data, binary) => client.sfuSendData(url, room, label, data, binary),
-            subscribeDataChannel: (cb) => client.subscribeSfuDataChannel(cb),
-        }
     }
 
     // ── SFU (Selective Forwarding Unit) ─────────────────────────────────

@@ -24,28 +24,29 @@ import type {
 // ── Public types ──────────────────────────────────────────────────
 
 /** Minimal interface for the neighbourhood client methods the SFU
- *  manager calls.  NeighbourhoodClient satisfies this directly. */
+ *  manager calls.  NeighbourhoodClient satisfies this directly —
+ *  pass the client through without an adapter. */
 export interface SfuNeighbourhoodApi {
-    callJoin(
+    sfuCallJoin(
         neighbourhoodUrl: string,
         roomName: string,
         sdpOffer: string,
     ): Promise<CallSessionInfo>
-    callLeave(
+    sfuCallLeave(
         neighbourhoodUrl: string,
         roomName: string,
     ): Promise<boolean>
-    callSetQualityPreference(
+    sfuCallSetQualityPreference(
         neighbourhoodUrl: string,
         roomName: string,
         preference: SfuQualityPreference,
     ): Promise<boolean>
-    callAnswerServerOffer(
+    sfuCallAnswerServerOffer(
         neighbourhoodUrl: string,
         roomName: string,
         sdpAnswer: string,
     ): Promise<boolean>
-    subscribeCallRenegotiationOffer(
+    subscribeSfuCallRenegotiationOffer(
         targetDid: string,
         callback: (event: {
             targetDid: string
@@ -55,7 +56,7 @@ export interface SfuNeighbourhoodApi {
             trackMapping?: TrackMapEntry[]
         }) => void,
     ): () => void
-    subscribeMigrateEvent(
+    subscribeSfuMigrateEvent(
         targetDid: string,
         callback: (event: {
             targetDid: string
@@ -64,19 +65,19 @@ export interface SfuNeighbourhoodApi {
             migrateToDid: string
         }) => void,
     ): () => void
-    addIceCandidate(
+    sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
         candidate: string,
     ): Promise<boolean>
-    sendData(
+    sfuSendData(
         neighbourhoodUrl: string,
         roomName: string,
         channelLabel: string,
         data: string,
         binary?: boolean,
     ): Promise<boolean>
-    subscribeDataChannel(
+    subscribeSfuDataChannel(
         callback: (message: SfuDataMessage) => void,
     ): () => void
 }
@@ -455,7 +456,7 @@ export class SfuManager {
         pc.onicecandidate = (event) => {
             if (!event.candidate) return
             if (joinComplete) {
-                this.neighbourhood.addIceCandidate(
+                this.neighbourhood.sfuAddIceCandidate(
                     this.neighbourhoodUrl,
                     this.roomId,
                     event.candidate.candidate,
@@ -476,7 +477,7 @@ export class SfuManager {
 
         const sdpOffer = JSON.stringify(pc.localDescription)
         const session: CallSessionInfo =
-            await this.neighbourhood.callJoin(
+            await this.neighbourhood.sfuCallJoin(
                 this.neighbourhoodUrl,
                 this.roomId,
                 sdpOffer,
@@ -510,7 +511,7 @@ export class SfuManager {
         // Flush buffered trickle ICE candidates
         joinComplete = true
         for (const candidate of pendingCandidates) {
-            this.neighbourhood.addIceCandidate(
+            this.neighbourhood.sfuAddIceCandidate(
                 this.neighbourhoodUrl,
                 this.roomId,
                 candidate,
@@ -524,7 +525,7 @@ export class SfuManager {
 
         // Subscribe to server-initiated renegotiation offers
         this.renegotiationUnsubscribe =
-            this.neighbourhood.subscribeCallRenegotiationOffer(
+            this.neighbourhood.subscribeSfuCallRenegotiationOffer(
                 this.agentDid,
                 async (event) => {
                     if (event.neighbourhoodUrl !== this.neighbourhoodUrl)
@@ -557,7 +558,7 @@ export class SfuManager {
                         const answerJson = JSON.stringify(
                             currentPc.localDescription,
                         )
-                        await this.neighbourhood.callAnswerServerOffer(
+                        await this.neighbourhood.sfuCallAnswerServerOffer(
                             this.neighbourhoodUrl,
                             event.roomName,
                             answerJson,
@@ -574,7 +575,7 @@ export class SfuManager {
         // (overloaded) node and rejoin on a less-loaded peer.
         // Same flow as cascade failover: leave → set target → rejoin.
         this.migrateUnsubscribe =
-            this.neighbourhood.subscribeMigrateEvent(
+            this.neighbourhood.subscribeSfuMigrateEvent(
                 this.agentDid,
                 async (event) => {
                     if (event.neighbourhoodUrl !== this.neighbourhoodUrl)
@@ -604,7 +605,7 @@ export class SfuManager {
                         this.state.peerConnection = null
                     }
                     try {
-                        await this.neighbourhood.callLeave(
+                        await this.neighbourhood.sfuCallLeave(
                             this.neighbourhoodUrl,
                             this.roomId,
                         )
@@ -670,7 +671,7 @@ export class SfuManager {
             this.state.peerConnection = null
         }
         try {
-            await this.neighbourhood.callLeave(
+            await this.neighbourhood.sfuCallLeave(
                 this.neighbourhoodUrl,
                 this.roomId,
             )
@@ -698,7 +699,7 @@ export class SfuManager {
             return
         }
         try {
-            await this.neighbourhood.callSetQualityPreference(
+            await this.neighbourhood.sfuCallSetQualityPreference(
                 this.neighbourhoodUrl,
                 this.roomId,
                 preference,
@@ -734,7 +735,7 @@ export class SfuManager {
             return
         }
         try {
-            await this.neighbourhood.sendData(
+            await this.neighbourhood.sfuSendData(
                 this.neighbourhoodUrl,
                 this.roomId,
                 channelLabel,
@@ -764,7 +765,7 @@ export class SfuManager {
             }
         }
         this.dataChannelUnsubscribe =
-            this.neighbourhood.subscribeDataChannel(callback)
+            this.neighbourhood.subscribeSfuDataChannel(callback)
         return () => {
             if (this.dataChannelUnsubscribe) {
                 try {
