@@ -93,9 +93,29 @@ pub struct Ad4mConfig {
     pub mcp_port: Option<u16>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,
+    /// Wallet backend type: "local" (default) or "shared".
+    /// "local" keeps keys in-process (self-hosted default).
+    /// "shared" delegates to an external HTTP wallet service.
+    pub wallet_backend: Option<String>,
+    /// Base URL for the shared wallet service (required when wallet_backend = "shared").
+    pub wallet_backend_url: Option<String>,
+    /// Name of the key used for JWT signing. Defaults to "main" (local) or "platform" (shared).
+    pub wallet_signing_key_name: Option<String>,
 }
 
 impl Ad4mConfig {
+    /// Resolve the wallet signing key name from config, falling back to
+    /// "main" for local mode or "platform" for shared mode.
+    pub fn signing_key_name(&self) -> String {
+        if let Some(name) = &self.wallet_signing_key_name {
+            return name.clone();
+        }
+        match self.wallet_backend.as_deref() {
+            Some("shared") => "platform".to_string(),
+            _ => "main".to_string(),
+        }
+    }
+
     pub fn prepare(&mut self) {
         if self.app_data_path.is_none() {
             self.app_data_path = Some(
@@ -183,6 +203,9 @@ impl Default for Ad4mConfig {
             enable_mcp: None,
             mcp_port: None,
             pid_file: None,
+            wallet_backend: None,
+            wallet_backend_url: None,
+            wallet_signing_key_name: None,
         };
         config.prepare();
         config
