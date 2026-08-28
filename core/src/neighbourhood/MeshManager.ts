@@ -405,7 +405,6 @@ export class MeshManager {
      *
      * Also updates the internal `outbound` map and `outboundStream` so
      * state stays consistent whether called from Session or directly.
-     * `setOutboundTrack` delegates here.
      */
     async replaceTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
         const previous = this.outbound.get(kind)
@@ -467,20 +466,6 @@ export class MeshManager {
                 console.error("mesh: data listener error:", e)
             }
         }
-    }
-
-    // ── Outbound tracks ─────────────────────────────────────────────
-
-    /**
-     * Set what this agent sends on a track kind.  `null` stops sending
-     * that kind.
-     *
-     * Legacy entry point — delegates to `replaceTrack`, which handles
-     * both the outbound state bookkeeping and the per-slot sender
-     * replacement.  Kept for WE's mesh-path compatibility.
-     */
-    async setOutboundTrack(kind: "audio" | "video", track: MediaStreamTrack | null): Promise<void> {
-        await this.replaceTrack(kind, track)
     }
 
     // ── Peer connection management ──────────────────────────────────
