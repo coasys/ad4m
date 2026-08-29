@@ -245,6 +245,41 @@ pub async fn run_semantic_check(
     Ok(parse_semantic_check_response(&raw))
 }
 
+// --------------------------------------------------------------------------
+// Slice 10.5c — AIService-backed real implementation
+// --------------------------------------------------------------------------
+
+/// Real [`SemanticCheckLlm`] that delegates to
+/// [`crate::ai_service::AIService::prompt`].
+///
+/// The check reuses the caller-supplied `task_id` so the semantic-check
+/// completion is dispatched onto the same spawned worker (and the same
+/// billing scope) as the extraction pass it gates. `model_id` on the trait
+/// method is ignored here: the routing model is baked into the task row
+/// AIService already looks up, so passing a different id would be a lie.
+///
+/// The `run.rs` call sites build one of these per interpretation pass and
+/// hand it in with the pass's `task.model_id` for the *hint-rendering*
+/// side (which is where the trait's `model_id` argument actually shows up
+/// — in the semantic-check prompt header, not in AIService dispatch).
+pub struct AIServiceSemanticCheck {
+    pub task_id: String,
+}
+
+#[async_trait::async_trait]
+impl SemanticCheckLlm for AIServiceSemanticCheck {
+    async fn confirm(&self, _model_id: &str, prompt: &str) -> Result<String> {
+        let ai = crate::ai_service::AIService::global_instance()
+            .await
+            .map_err(|e| anyhow::anyhow!("AIService not ready: {e:#}"))?;
+        let res = ai
+            .prompt(self.task_id.clone(), prompt.to_string(), None)
+            .await
+            .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+        Ok(res.text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

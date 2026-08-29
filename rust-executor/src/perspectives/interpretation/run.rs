@@ -777,16 +777,22 @@ pub async fn run_interpretation_with_strategy_and_model(
     // of the acting DID. Silent-fallback throughout (see the fn doc) so
     // the extraction pass cannot break on a flow-layer stumble.
     //
-    // Slice 10.5b — `semantic_check = None` for now. The signature
-    // accepts an optional `(&dyn SemanticCheckLlm, &str)` gate; slice
-    // 10.5c will wire the AIService-backed implementation and pick the
-    // model_id off the same task row this extraction pass uses. Passing
-    // `None` here keeps the pre-10.5b behaviour byte-identical.
+    // Slice 10.5c — semantic-check gate is now live. Reuses the same
+    // task row (and hence the same worker + billing scope) as the
+    // extraction pass, so an operator swapping models on the shared-
+    // default row auto-swaps the semantic-check model in lock-step.
+    // States without a `semanticCheck` hint short-circuit to Pass
+    // inside `run_semantic_check` without touching the LLM, and any
+    // LLM error becomes a discard-with-log at the gate — the
+    // extraction pass cannot break on a flow-layer stumble.
+    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
+        task_id: task.task_id.clone(),
+    };
     let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
         perspective,
         scope,
         context,
-        None,
+        Some((&semantic_check, task.model_id.as_str())),
     )
     .await;
 
@@ -1030,13 +1036,18 @@ pub async fn run_interpretation_with_harness_and_model(
     // slice. The proposals themselves land on the graph regardless,
     // which is the load-bearing property.
     //
-    // Slice 10.5b — `semantic_check = None` here too. Same rationale as
-    // the single-shot path: 10.5c will wire the AIService-backed LLM.
+    // Slice 10.5c — semantic-check gate live here as well. Same
+    // AIService-backed impl, same reuse of `task.task_id` so the
+    // billing scope + spawned worker match the harness path's own
+    // extraction dispatch.
+    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
+        task_id: task.task_id.clone(),
+    };
     let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
         perspective,
         scope,
         context,
-        None,
+        Some((&semantic_check, task.model_id.as_str())),
     )
     .await;
     if !flow_proposals.is_empty() {
