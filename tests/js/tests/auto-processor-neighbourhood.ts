@@ -236,12 +236,18 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           budgetMs: number,
           label: string,
         ): Promise<void> {
+          // Single deadline across BOTH phases (reach-count + stabilization),
+          // so the total wall-clock cost of this helper is bounded by
+          // `budgetMs`, not `2 * budgetMs`. CodeRabbit caught this on #933:
+          // the old shape granted a fresh budget to each phase and could
+          // silently double the suite's timeout headroom on a slow runner.
+          const deadline = Date.now() + budgetMs;
+          const remainingMs = () => Math.max(1, deadline - Date.now());
           await waitUntil(
             () => retired().length >= minCount,
-            budgetMs,
+            remainingMs(),
             `${label}: retirement count to reach ${minCount}`,
           );
-          const deadline = Date.now() + budgetMs;
           let lastCount = retired().length;
           let lastChangeAt = Date.now();
           while (Date.now() < deadline) {
