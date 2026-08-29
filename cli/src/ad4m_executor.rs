@@ -267,6 +267,7 @@ async fn main() -> Result<()> {
                 enable_mcp,
                 mcp_port,
                 pid_file,
+                ..Default::default()
             })
             .await;
         })
