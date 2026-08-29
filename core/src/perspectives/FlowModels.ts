@@ -22,6 +22,8 @@
 import { Ad4mModel } from "../model/Ad4mModel";
 import { HasMany, Optional, Property } from "../model/decorators";
 import { Model } from "../model/decorators";
+import type { PerspectiveProxy } from "./PerspectiveProxy";
+import { computeFlowEvidenceHash } from "./FlowEvidenceHash";
 
 // ── FlowTransitionProposal ──────────────────────────────────────────────────
 // Mirrors the Rust hardwired `flow_transition_proposal.json` SDNA (once wired
@@ -63,12 +65,15 @@ export class FlowTransitionProposal extends Ad4mModel {
   evidence: string[] = [];
 
   /**
-   * JSON blob: `{ [uri]: sha256_hex }` — one entry per evidence URI, hashing
-   * the canonicalized graph-visible properties (sorted by property URI,
-   * multi-values sorted lexicographically) at proposal time. Downstream
-   * verifiers use it to detect edits to cited instances after the proposal
-   * was written. Stored as an opaque string because SHACL properties carry
-   * no rich-object type; the engine parses it back into a map.
+   * Scalar SHA-256 hex digest (lowercase, 64 chars) of the canonicalized
+   * evidence bag. Byte-for-byte parity with Rust
+   * `rust-executor/src/perspectives/flow_evaluator.rs::evidence_hash` and
+   * TS {@link computeFlowEvidenceHash} — see that helper's docstring for
+   * the exact byte layout. Named `evidenceHashes` (plural) because the
+   * digest covers the whole bag; not a per-URI JSON map.
+   * Downstream consensus verification (design §7) recomputes this hash
+   * to check the evidence list hasn't been tampered with after the
+   * proposal was written.
    */
   @Property({ through: "ad4m://flow/evidence_hashes", required: true })
   evidenceHashes: string = "";
@@ -100,6 +105,92 @@ export class FlowTransitionProposal extends Ad4mModel {
    */
   @Property({ through: "ad4m://flow/created_at", required: true })
   proposedAt: string = "";
+
+  /**
+   * Client-side factory: mint a new `FlowTransitionProposal` on-graph.
+   *
+   * Symmetric with what the Rust engine's auto-processor writes when a
+   * satisfied `requires` clause fires (see
+   * `rust-executor/src/perspectives/flow_classes.rs::write_flow_transition_proposal`)
+   * — same predicate set, same evidence-hash algorithm — so downstream
+   * consensus verification (design §7) cannot tell engine-minted and
+   * client-minted proposals apart from the on-graph shape.
+   *
+   * Called by the OO wrapper `FlowInstance.proposeTransition(...)` (lands
+   * with the wrapper on PR #929's branch) and by any client that already
+   * knows the instance URI + fromState (e.g. bots writing proposals
+   * directly, UI "propose" buttons).
+   *
+   * @throws When `toState` is empty (must be a real declared state name).
+   * @throws When `proposer` is empty (must be a DID).
+   * @returns The freshly-minted `FlowTransitionProposal` (hydrated).
+   */
+  static async propose(
+    perspective: PerspectiveProxy,
+    opts: BuildFlowTransitionProposalOpts,
+  ): Promise<FlowTransitionProposal> {
+    const fields = buildFlowTransitionProposalFields(opts);
+    return FlowTransitionProposal.create(perspective, fields);
+  }
+}
+
+/**
+ * Input contract for {@link FlowTransitionProposal.propose} and its pure
+ * companion {@link buildFlowTransitionProposalFields}. Fields mirror the
+ * @Model properties on {@link FlowTransitionProposal}, with two
+ * consensus-verifier-relevant additions:
+ *
+ * - `classNames`: the ordered class-URI list from the flow's `requires`
+ *   clauses. Feeds the evidence hash. Load-bearing ordering — the flow
+ *   definition author controls it and consensus verifiers reproduce it
+ *   from the on-graph `SHACLFlow` at verification time.
+ * - `proposedAt`: RFC3339 timestamp. Optional; defaults to
+ *   `new Date().toISOString()`. Tests inject a fixed value to lock
+ *   deterministic on-graph output.
+ */
+export interface BuildFlowTransitionProposalOpts {
+  flowInstance: string;
+  fromState: string;
+  toState: string;
+  proposer: string;
+  evidence: readonly string[];
+  classNames: readonly string[];
+  rationale?: string;
+  runUri?: string;
+  proposedAt?: string;
+}
+
+/**
+ * Pure helper: assemble the `{ [field]: value }` record that
+ * {@link FlowTransitionProposal.propose} passes to `Ad4mModel.create`.
+ * Split out so the field-derivation logic (evidence hashing, timestamp
+ * stamping, optional-field pruning) is unit-testable without a live
+ * perspective. `propose()` = this + `create()`, nothing else.
+ *
+ * @throws When `toState` or `proposer` are empty strings.
+ */
+export function buildFlowTransitionProposalFields(
+  opts: BuildFlowTransitionProposalOpts,
+): Record<string, unknown> {
+  if (!opts.toState) {
+    throw new Error("FlowTransitionProposal.propose: toState is required");
+  }
+  if (!opts.proposer) {
+    throw new Error("FlowTransitionProposal.propose: proposer is required");
+  }
+  const evidenceHashes = computeFlowEvidenceHash(opts.classNames, opts.evidence);
+  const fields: Record<string, unknown> = {
+    flowInstance: opts.flowInstance,
+    fromState: opts.fromState,
+    toState: opts.toState,
+    proposer: opts.proposer,
+    evidence: [...opts.evidence],
+    evidenceHashes,
+    proposedAt: opts.proposedAt ?? new Date().toISOString(),
+  };
+  if (opts.rationale !== undefined) fields.rationale = opts.rationale;
+  if (opts.runUri !== undefined) fields.runUri = opts.runUri;
+  return fields;
 }
 
 // ── FlowInstance ────────────────────────────────────────────────────────────
