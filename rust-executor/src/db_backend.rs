@@ -72,14 +72,10 @@ impl DbBackend for LocalDb {
         Ad4mDb::with_global_instance(|db| {
             // Route to the appropriate Ad4mDb method based on table name
             match table {
-                "users" => {
-                    let user = db.get_user_by_email(row_id);
-                    match user {
-                        Ok(Some(u)) => Ok(Some(serde_json::to_value(u)?)),
-                        Ok(None) => Ok(None),
-                        Err(e) => Err(e),
-                    }
-                }
+                "users" => match db.get_user(row_id) {
+                    Ok(u) => Ok(Some(serde_json::to_value(u)?)),
+                    Err(_) => Ok(None), // QueryReturnedNoRows → not found
+                },
                 "settings" => {
                     let val = db.get_setting(row_id);
                     match val {
@@ -96,7 +92,7 @@ impl DbBackend for LocalDb {
     fn list(&self, _did: &str, table: &str) -> Result<Vec<Value>, AnyError> {
         Ad4mDb::with_global_instance(|db| match table {
             "users" => {
-                let users = db.get_all_users()?;
+                let users = db.list_users()?;
                 Ok(users
                     .into_iter()
                     .filter_map(|u| serde_json::to_value(u).ok())
@@ -125,7 +121,7 @@ impl DbBackend for LocalDb {
         })
     }
 
-    fn delete(&self, _did: &str, table: &str, row_id: &str) -> Result<(), AnyError> {
+    fn delete(&self, _did: &str, table: &str, _row_id: &str) -> Result<(), AnyError> {
         Ad4mDb::with_global_instance(|_db| {
             Err(anyhow!("LocalDb: delete not implemented for '{}'", table))
         })
