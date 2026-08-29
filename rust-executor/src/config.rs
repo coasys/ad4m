@@ -101,6 +101,24 @@ pub struct Ad4mConfig {
     pub wallet_backend_url: Option<String>,
     /// Name of the key used for JWT signing. Defaults to "main" (local) or "platform" (shared).
     pub wallet_signing_key_name: Option<String>,
+
+    /// Database backend type: "local" (default) or "shared".
+    /// "local" uses the in-process SQLite database (Ad4mDb).
+    /// "shared" delegates to the platform Worker's internal DB API.
+    pub db_backend: Option<String>,
+    /// Base URL for the shared DB service (required when db_backend = "shared").
+    pub db_backend_url: Option<String>,
+
+    /// Perspective store backend type: "local" (default) or "shared".
+    /// "local" uses OxiGraph only (current behaviour).
+    /// "shared" dual-writes to OxiGraph + platform Worker D1.
+    pub perspective_store_backend: Option<String>,
+    /// Base URL for the shared perspective store (required when perspective_store_backend = "shared").
+    pub perspective_store_url: Option<String>,
+
+    /// Bearer token for internal API authentication.
+    /// Shared across all three backends (wallet, db, perspective store).
+    pub internal_api_token: Option<String>,
 }
 
 impl Ad4mConfig {
@@ -206,6 +224,11 @@ impl Default for Ad4mConfig {
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,
+            db_backend: None,
+            db_backend_url: None,
+            perspective_store_backend: None,
+            perspective_store_url: None,
+            internal_api_token: None,
         };
         config.prepare();
         config

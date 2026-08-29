@@ -309,6 +309,41 @@ pub trait WalletBackend: Send + Sync {
 
     /// Downcast support for local-only operations (export, unlock, etc.).
     fn as_any(&self) -> &dyn Any;
+
+    // ── Local-only operations with defaults for shared mode ──────────
+
+    /// Check whether the keystore has been decrypted.
+    /// Shared mode: always true (keys live server-side, no local encryption).
+    fn is_unlocked(&self) -> bool {
+        true
+    }
+
+    /// Decrypt the keystore with `passphrase`, making keys available.
+    /// Shared mode: no-op success (keys always accessible via API).
+    fn unlock(&self, _passphrase: &str) -> Result<(), AnyError> {
+        Ok(())
+    }
+
+    /// Encrypt and clear keys from memory.
+    /// Shared mode: no-op (keys persist server-side).
+    fn lock(&self, _passphrase: &str) {}
+
+    /// Export the keystore encrypted with `passphrase`.
+    /// Shared mode: returns empty string (export not supported remotely).
+    fn export(&self, _passphrase: &str) -> String {
+        String::new()
+    }
+
+    /// Load an encrypted keystore blob (decrypt later with `unlock`).
+    /// Shared mode: no-op (keys managed server-side).
+    fn load(&self, _data: &str) {}
+
+    /// Import a DID's keys by resolving the DID string.
+    /// Shared mode: delegates to `generate_keypair`.
+    fn initialize_keys(&self, name: &str, _did: &str) -> Option<did_key::Document> {
+        let _ = self.generate_keypair(name);
+        self.get_did_document(name)
+    }
 }
 
 // ── Global accessor ─────────────────────────────────────────────────────────
@@ -435,6 +470,36 @@ impl WalletBackend for LocalWallet {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn is_unlocked(&self) -> bool {
+        let wallet = self.inner.lock().expect("wallet lock");
+        wallet.is_unlocked()
+    }
+
+    fn unlock(&self, passphrase: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.unlock(passphrase.to_string())
+    }
+
+    fn lock(&self, passphrase: &str) {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.lock(passphrase.to_string());
+    }
+
+    fn export(&self, passphrase: &str) -> String {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.export(passphrase.to_string())
+    }
+
+    fn load(&self, data: &str) {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.load(data.to_string());
+    }
+
+    fn initialize_keys(&self, name: &str, did: &str) -> Option<did_key::Document> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.initialize_keys(name.to_string(), did.to_string())
     }
 }
 

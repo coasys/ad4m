@@ -10,6 +10,7 @@ pub mod helpers;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
+pub mod perspective_store_backend;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
@@ -23,6 +24,7 @@ pub mod ai_service;
 pub mod billing;
 mod dapp_server;
 pub mod db;
+pub mod db_backend;
 pub mod init;
 pub mod languages;
 pub mod logging;
@@ -324,6 +326,63 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             }
         };
         crate::wallet::init_wallet_backend(backend);
+    }
+
+    // Initialise the database backend.
+    // "shared" mode delegates to the platform Worker's internal DB API;
+    // everything else uses the in-process Ad4mDb (LocalDb).
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::db_backend::DbBackend> = match config.db_backend.as_deref() {
+            Some("shared") => {
+                let url = config
+                    .db_backend_url
+                    .as_ref()
+                    .expect("DB_BACKEND_URL required when db_backend = shared");
+                let token = config
+                    .internal_api_token
+                    .as_ref()
+                    .expect("INTERNAL_API_TOKEN required for shared backends");
+                info!("Initialising shared database backend at {}", url);
+                Arc::new(crate::db_backend::SharedDb::new(url.clone(), token.clone()))
+            }
+            _ => {
+                info!("Initialising local database backend");
+                Arc::new(crate::db_backend::LocalDb::new())
+            }
+        };
+        crate::db_backend::init_db_backend(backend);
+    }
+
+    // Initialise the perspective store backend.
+    // "shared" mode mirrors link mutations to the platform Worker for durability;
+    // "local" mode relies on OxiGraph's RocksDB persistence only.
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::perspective_store_backend::PerspectiveStoreBackend> =
+            match config.perspective_store_backend.as_deref() {
+                Some("shared") => {
+                    let url = config.perspective_store_url.as_ref().expect(
+                        "PERSPECTIVE_STORE_URL required when perspective_store_backend = shared",
+                    );
+                    let token = config
+                        .internal_api_token
+                        .as_ref()
+                        .expect("INTERNAL_API_TOKEN required for shared backends");
+                    info!("Initialising shared perspective store at {}", url);
+                    Arc::new(
+                        crate::perspective_store_backend::SharedPerspectiveStore::new(
+                            url.clone(),
+                            token.clone(),
+                        ),
+                    )
+                }
+                _ => {
+                    info!("Initialising local perspective store backend");
+                    Arc::new(crate::perspective_store_backend::LocalPerspectiveStore::new())
+                }
+            };
+        crate::perspective_store_backend::init_perspective_store_backend(backend);
     }
 
     // Create data directories that were previously created by the JS executor's Config.init().

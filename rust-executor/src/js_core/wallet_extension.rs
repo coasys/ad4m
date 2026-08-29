@@ -3,7 +3,7 @@ use deno_core::{anyhow::anyhow, op2};
 use serde::{Deserialize, Serialize};
 
 use crate::js_core::error::AnyhowWrapperError;
-use crate::wallet::{wallet_backend, LocalWallet};
+use crate::wallet::wallet_backend;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -54,39 +54,23 @@ fn wallet_create_main_key() -> Result<(), AnyhowWrapperError> {
 #[op2(fast)]
 fn wallet_is_unlocked() -> Result<bool, AnyhowWrapperError> {
     let backend = wallet_backend();
-    let local = backend
-        .as_any()
-        .downcast_ref::<LocalWallet>()
-        .ok_or(AnyhowWrapperError::from(anyhow!(
-            "is_unlocked requires LocalWallet backend"
-        )))?;
-    Ok(local.is_unlocked())
+    Ok(backend.is_unlocked())
 }
 
 #[op2]
 #[serde]
 fn wallet_unlock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
     let backend = wallet_backend();
-    let local = backend
-        .as_any()
-        .downcast_ref::<LocalWallet>()
-        .ok_or(AnyhowWrapperError::from(anyhow!(
-            "unlock requires LocalWallet backend"
-        )))?;
-    local.unlock(&passphrase).map_err(AnyhowWrapperError::from)
+    backend
+        .unlock(&passphrase)
+        .map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
 #[serde]
 fn wallet_lock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
     let backend = wallet_backend();
-    let local = backend
-        .as_any()
-        .downcast_ref::<LocalWallet>()
-        .ok_or(AnyhowWrapperError::from(anyhow!(
-            "lock requires LocalWallet backend"
-        )))?;
-    local.lock(&passphrase);
+    backend.lock(&passphrase);
     Ok(())
 }
 
@@ -94,26 +78,14 @@ fn wallet_lock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
 #[string]
 fn wallet_export(#[string] passphrase: String) -> Result<String, AnyhowWrapperError> {
     let backend = wallet_backend();
-    let local = backend
-        .as_any()
-        .downcast_ref::<LocalWallet>()
-        .ok_or(AnyhowWrapperError::from(anyhow!(
-            "export requires LocalWallet backend"
-        )))?;
-    Ok(local.export(&passphrase))
+    Ok(backend.export(&passphrase))
 }
 
 #[op2]
 #[serde]
 fn wallet_load(#[string] data: String) -> Result<(), AnyhowWrapperError> {
     let backend = wallet_backend();
-    let local = backend
-        .as_any()
-        .downcast_ref::<LocalWallet>()
-        .ok_or(AnyhowWrapperError::from(anyhow!(
-            "load requires LocalWallet backend"
-        )))?;
-    local.load(&data);
+    backend.load(&data);
     Ok(())
 }
 
