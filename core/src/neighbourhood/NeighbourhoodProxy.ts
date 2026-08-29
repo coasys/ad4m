@@ -8,6 +8,7 @@ import type {
     SfuDataMessage,
     SfuQualityPreference,
     SfuRoomInfo,
+    SfuStatus,
     TrackMapEntry,
 } from "./SfuTypes";
 import { createSession, type Session, type SessionCreateOptions } from "./Session";
@@ -18,6 +19,8 @@ export class NeighbourhoodProxy {
     #pID: string
     #agentDid: string
     #sessions: Session[] = []
+    /** Cached SFU status — fetched once per proxy lifetime. */
+    #sfuStatusCache: SfuStatus | null = null
 
     constructor(client: NeighbourhoodClient, pID: string, agentDid: string = "") {
         this.#client = client
@@ -96,8 +99,22 @@ export class NeighbourhoodProxy {
         return this.#sessions
     }
 
-    /** Create a WebRTC media session. Call session.join(localStream) to connect. */
-    createSession(roomName: string, options?: SessionCreateOptions): Session {
+    /**
+     * Create a WebRTC media session.  Call `session.join(localStream)` to connect.
+     *
+     * Fetches the local executor's SFU status (cached after the first
+     * call) and passes it into the session so public executors
+     * automatically advertise SFU capability in call-presence.
+     */
+    async createSession(roomName: string, options?: SessionCreateOptions): Promise<Session> {
+        // Fetch SFU status once — reachability only changes at executor restart.
+        if (!this.#sfuStatusCache) {
+            try {
+                this.#sfuStatusCache = await this.#client.sfuStatus()
+            } catch {
+                // Non-fatal — session works without SFU advertisement.
+            }
+        }
         const proxy = this
         const session = createSession({
             api: this.#client,
@@ -105,6 +122,7 @@ export class NeighbourhoodProxy {
             agentDid: this.#agentDid,
             neighbourhoodUrl: options?.neighbourhoodUrl ?? "",
             topology: options?.topology ?? "auto",
+            localSfuStatus: this.#sfuStatusCache ?? undefined,
             // Mesh needs a signalling channel and presence callbacks.
             // SFU ignores these — they remain unused when the resolved
             // topology selects the SFU path.
@@ -128,6 +146,14 @@ export class NeighbourhoodProxy {
     // the neighbourhood URL explicitly — the proxy is per-perspective,
     // not per-neighbourhood, and the URL is owned by the consumer (Flux's
     // call context, the WE UI, etc).
+
+    /**
+     * Discover SFU-capable nodes by scanning online agents' presence
+     * in this neighbourhood for the `ad4m://sfu/available` predicate.
+     */
+    async availableSfuNodes(): Promise<{ did: string; bindAddress: string }[]> {
+        return await this.#client.availableSfuNodes(this.#pID)
+    }
 
     async sfuConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
         return await this.#client.sfuGetConfig(neighbourhoodUrl)

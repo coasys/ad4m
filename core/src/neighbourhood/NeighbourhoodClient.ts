@@ -350,6 +350,37 @@ export class NeighbourhoodClient {
         })
     }
 
+    // ── SFU discovery ──────────────────────────────────────────────────
+
+    /**
+     * Discover SFU-capable nodes in a neighbourhood by scanning online
+     * agents' presence links for the `ad4m://sfu/available` predicate.
+     *
+     * Returns an array of `{ did, bindAddress }` for each agent whose
+     * executor advertises a publicly reachable SFU.  Empty when no
+     * agents with public SFU capability appear in the neighbourhood.
+     *
+     * @param perspectiveId  The neighbourhood's perspective handle UUID.
+     */
+    async availableSfuNodes(
+        perspectiveId: string,
+    ): Promise<{ did: string; bindAddress: string }[]> {
+        const SFU_PREDICATE = "ad4m://sfu/available"
+        const agents = await this.onlineAgents(perspectiveId)
+        const nodes: { did: string; bindAddress: string }[] = []
+        for (const agent of agents) {
+            const status = agent.status
+            if (!status?.links) continue
+            for (const link of status.links) {
+                const l = (link as any).data ?? link
+                if (l.predicate === SFU_PREDICATE && l.target) {
+                    nodes.push({ did: agent.did, bindAddress: l.target })
+                }
+            }
+        }
+        return nodes
+    }
+
     // ── SFU diagnostic / test-harness endpoints ────────────────────────
 
     /**

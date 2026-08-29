@@ -6,6 +6,7 @@ import type {
     SfuDataMessage,
     SfuQualityPreference,
     SfuParticipantInfo,
+    SfuStatus,
     IceServer,
 } from "./SfuTypes"
 
@@ -80,6 +81,10 @@ interface SessionImplConfig {
     /** Poll for agents currently online in the neighbourhood.  The
      *  session reconciles the result against its mesh connections. */
     onlineAgents?: () => Promise<OnlineAgent[]>
+    /** Local executor's SFU status.  When `isPublic` equals true, the
+     *  session advertises SFU capability in call-presence so other
+     *  agents can auto-discover relay nodes. */
+    localSfuStatus?: SfuStatus
 }
 
 /**
@@ -90,6 +95,13 @@ interface SessionImplConfig {
  */
 const CALL_PRESENCE_PREDICATE = "ad4m://session/in-call"
 
+/**
+ * SFU capability predicate.  Published in call-presence when the local
+ * executor's SFU has public reachability.  Other agents scan for this
+ * predicate to auto-discover relay nodes in the neighbourhood.
+ */
+export const SFU_AVAILABLE_PREDICATE = "ad4m://sfu/available"
+
 /** How often (ms) the mesh session polls `onlineAgents` for roster changes. */
 const ROSTER_POLL_INTERVAL_MS = 3_000
 
@@ -98,6 +110,7 @@ export function createSession(config: SessionImplConfig): Session {
         api, roomId, agentDid, neighbourhoodUrl,
         topology, sfuConfig, iceServers,
         channel, setOnlineStatus, onlineAgents,
+        localSfuStatus,
     } = config
 
     let state: SessionState = "idle"
@@ -136,9 +149,20 @@ export function createSession(config: SessionImplConfig): Session {
     async function announceCallPresence(): Promise<void> {
         if (!setOnlineStatus) return
         try {
-            await setOnlineStatus({
-                links: [{ source: agentDid, predicate: CALL_PRESENCE_PREDICATE, target: roomId }],
-            })
+            const links: { source: string; predicate: string; target: string }[] = [
+                { source: agentDid, predicate: CALL_PRESENCE_PREDICATE, target: roomId },
+            ]
+            // Advertise SFU capability when the local executor has a
+            // publicly reachable SFU.  Other agents' topology resolution
+            // scans for this predicate to auto-discover relay nodes.
+            if (localSfuStatus?.isPublic) {
+                links.push({
+                    source: agentDid,
+                    predicate: SFU_AVAILABLE_PREDICATE,
+                    target: localSfuStatus.bindAddress,
+                })
+            }
+            await setOnlineStatus({ links })
         } catch (err) {
             console.warn("session: call-presence announcement failed:", err)
         }
