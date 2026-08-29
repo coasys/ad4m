@@ -96,7 +96,7 @@ fn is_private_v4(ip: Ipv4Addr) -> bool {
         || (o[0] == 192 && o[1] == 168)          // 192.168.0.0/16  RFC 1918
         || (o[0] == 100 && (o[1] & 0xC0) == 64) // 100.64.0.0/10   CGNAT
         || (o[0] == 169 && o[1] == 254)          // 169.254.0.0/16  link-local
-        || ip.is_unspecified()                   // 0.0.0.0
+        || ip.is_unspecified() // 0.0.0.0
 }
 
 fn is_private_v6(ip: Ipv6Addr) -> bool {
@@ -326,7 +326,7 @@ mod tests {
         assert!(!is_private_ip("203.0.113.5".parse().unwrap()));
         assert!(!is_private_ip("1.1.1.1".parse().unwrap()));
         assert!(!is_private_ip("100.128.0.1".parse().unwrap())); // just outside CGNAT
-        assert!(!is_private_ip("172.32.0.1".parse().unwrap()));  // just outside 172.16/12
+        assert!(!is_private_ip("172.32.0.1".parse().unwrap())); // just outside 172.16/12
     }
 
     #[test]

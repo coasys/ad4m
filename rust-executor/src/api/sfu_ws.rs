@@ -320,10 +320,7 @@ async fn sfu_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         "bindAddress".to_string(),
         Value::String(svc.local_addr().to_string()),
     );
-    out.insert(
-        "detail".to_string(),
-        Value::String(format!("{}", reach)),
-    );
+    out.insert("detail".to_string(), Value::String(format!("{}", reach)));
     Ok(Value::Object(out))
 }
 
