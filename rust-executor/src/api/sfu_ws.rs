@@ -302,6 +302,31 @@ async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     Ok(Value::Bool(ok))
 }
 
+/// Read-only query: SFU service status including public reachability.
+/// Clients use this to determine whether this executor can serve as an
+/// SFU relay for remote participants.
+async fn sfu_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let svc = service()?;
+    let reach = svc.reachability();
+    let mut out = serde_json::Map::new();
+    out.insert(
+        "reachability".to_string(),
+        Value::String(reach.label().to_string()),
+    );
+    out.insert("isPublic".to_string(), Value::Bool(reach.is_public()));
+    out.insert(
+        "bindAddress".to_string(),
+        Value::String(svc.local_addr().to_string()),
+    );
+    out.insert(
+        "detail".to_string(),
+        Value::String(format!("{}", reach)),
+    );
+    Ok(Value::Object(out))
+}
+
 /// Read-only query: how many SFU↔SFU pipe transports are fully
 /// established right now.  The cascade scenarios poll this to assert
 /// the gossip-driven offer/answer round-trip lit up.
@@ -390,6 +415,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("sfu.sfuPeersForNeighbourhood", sfu_peers_for_neighbourhood);
     map.register("sfu.addIceCandidate", add_ice_candidate);
     map.register("sfu.sendData", send_data);
+    map.register("sfu.status", sfu_status);
     map.register("sfu.cascadeStatus", cascade_status);
     map.register("sfu.qualityPreferences", quality_preferences);
     map.register("sfu.ensureMembership", ensure_membership);
