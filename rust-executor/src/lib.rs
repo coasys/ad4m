@@ -317,8 +317,12 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                     .wallet_backend_url
                     .as_ref()
                     .expect("WALLET_BACKEND_URL required when wallet_backend = shared");
+                let token = config
+                    .internal_api_token
+                    .as_ref()
+                    .expect("INTERNAL_API_TOKEN required for shared backends");
                 info!("Initialising shared wallet backend at {}", url);
-                Arc::new(crate::wallet::SharedWallet::new(url.clone()))
+                Arc::new(crate::wallet::SharedWallet::new(url.clone(), token.clone()))
             }
             _ => {
                 info!("Initialising local wallet backend");

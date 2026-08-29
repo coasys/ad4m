@@ -153,7 +153,10 @@ impl SharedPerspectiveStore {
         SharedPerspectiveStore {
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to build SharedPerspectiveStore HTTP client"),
         }
     }
 
@@ -251,25 +254,22 @@ impl PerspectiveStoreBackend for SharedPerspectiveStore {
         let mut cursor: Option<String> = None;
 
         loop {
-            let mut url = format!("{}/{}/{}/links", self.base_url, did, perspective_id);
-            let mut params = Vec::new();
+            let url = format!("{}/{}/{}/links", self.base_url, did, perspective_id);
+            let mut query_params: Vec<(&str, String)> = Vec::new();
 
             if let Some(ref c) = cursor {
-                params.push(format!("cursor={}", c));
+                query_params.push(("cursor", c.clone()));
             }
             if let Some(s) = since {
-                params.push(format!("since={}", s));
+                query_params.push(("since", s.to_string()));
             }
-            params.push("limit=1000".to_string());
-
-            if !params.is_empty() {
-                url = format!("{}?{}", url, params.join("&"));
-            }
+            query_params.push(("limit", "1000".to_string()));
 
             let resp = self
                 .client
                 .get(&url)
                 .header("Authorization", self.auth_header())
+                .query(&query_params)
                 .send()
                 .map_err(|e| anyhow!("SharedPerspectiveStore fetch failed: {}", e))?;
 
@@ -292,9 +292,12 @@ impl PerspectiveStoreBackend for SharedPerspectiveStore {
                 all_links.extend(page);
             }
 
-            // Check for next cursor — if absent or null, stop paginating
+            // Check for next cursor — if absent, null, or unchanged, stop
             match result.get("nextCursor") {
                 Some(serde_json::Value::String(next)) => {
+                    if cursor.as_ref() == Some(next) {
+                        break; // Cursor unchanged — prevent infinite loop
+                    }
                     cursor = Some(next.clone());
                 }
                 _ => break,

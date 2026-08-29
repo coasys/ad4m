@@ -159,7 +159,10 @@ impl SharedDb {
         SharedDb {
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to build SharedDb HTTP client"),
             cache: RwLock::new(HashMap::new()),
         }
     }
