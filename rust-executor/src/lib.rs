@@ -451,7 +451,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             info!("SFU bind address auto-detected: {}", sfu_config.bind_addr.ip());
         }
         match crate::sfu::SfuService::start(sfu_config, gossip).await {
-            Ok(svc) => info!("SFU service ready on UDP {}", svc.local_addr()),
+            Ok(svc) => info!(
+                "SFU service ready on UDP {} (reachability: {})",
+                svc.local_addr(),
+                svc.reachability()
+            ),
             Err(e) => warn!("SFU service failed to start: {}", e),
         }
     }

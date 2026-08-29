@@ -13,6 +13,7 @@
 
 pub mod cascade;
 pub mod gossip;
+pub mod reachability;
 pub mod relay;
 pub mod room;
 pub mod server;
@@ -27,6 +28,7 @@ pub use gossip::{
     tcp::TcpGossip,
     CascadeGossip, GossipTarget, NoopGossip,
 };
+pub use reachability::{is_private_ip, SfuReachability};
 pub use service::{get_sfu_service, SfuService};
 pub use types::{
     CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuMigrateEvent,

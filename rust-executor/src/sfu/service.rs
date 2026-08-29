@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 
 use super::cascade::{CascadeManager, CascadeSignal};
 use super::gossip::{CascadeGossip, GossipTarget};
+use super::reachability::{check_reachability, SfuReachability};
 use super::room::{ParticipantId, RoomError, RoomId, RoomManager, SfuRoom};
 use super::server::{SfuCommand, SfuPeer, SfuServer, SfuServerConfig};
 use super::types::SfuMigrateEvent;
@@ -70,6 +71,9 @@ pub struct SfuService {
     /// gossiped to pipe peers so the sender node forwards the correct
     /// simulcast layer.
     local_quality_preferences: RwLock<HashMap<String, HashMap<String, String>>>,
+    /// Result of the startup reachability probe.  Determines whether
+    /// this executor advertises SFU capability into neighbourhoods.
+    reachability: SfuReachability,
 }
 
 impl SfuService {
@@ -93,6 +97,12 @@ impl SfuService {
 
         info!("SFU service started on {}", server.local_addr);
 
+        // Probe public reachability via STUN.  Fast path returns
+        // immediately for private IPs; otherwise takes up to ~9 s
+        // (3 attempts × 3 s timeout).
+        let reachability = check_reachability(server.local_addr.ip()).await;
+        info!("SFU reachability: {}", reachability);
+
         // Pre-create the CascadeManager so the service has a single
         // consistent view; cascade is effectively no-op when the
         // gossip is a NoopGossip (Send/Receive go nowhere).
@@ -109,6 +119,7 @@ impl SfuService {
             cascade_manager: Arc::new(RwLock::new(cascade_manager)),
             gossip: Arc::clone(&gossip),
             local_quality_preferences: RwLock::new(HashMap::new()),
+            reachability,
         });
 
         if let Some(rx) = gossip.take_inbound() {
@@ -669,6 +680,11 @@ impl SfuService {
     /// Get the local address of the SFU server.
     pub fn local_addr(&self) -> std::net::SocketAddr {
         self.server.local_addr
+    }
+
+    /// Get the reachability probe result from startup.
+    pub fn reachability(&self) -> &SfuReachability {
+        &self.reachability
     }
 
     // ---- Room management ----
