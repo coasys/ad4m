@@ -502,6 +502,7 @@ pub async fn write_engine_proposal(
     proposer_did: &str,
     proposed_at: &str,
     transition: &SatisfiedTransition,
+    rationale: Option<&str>,
     batch_id: Option<String>,
     context: &crate::agent::AgentContext,
 ) -> anyhow::Result<String> {
@@ -515,10 +516,38 @@ pub async fn write_engine_proposal(
         &transition.to_state,
         &transition.evidence_ids,
         &transition.evidence_hash,
+        rationale,
         batch_id,
         context,
     )
     .await
+}
+
+/// Slice 10.6c — an LLM-emitted "proposal to advance this flow" that the
+/// engine may honour when the deterministic `requires` guard also fires.
+///
+/// This is the boundary type between the interpretation layer (which parses
+/// [`crate::perspectives::interpretation::types::LlmFlowProposal`] from the
+/// LLM's JSON) and the flow-post-processing engine. Keeping the boundary
+/// type here (rather than importing `LlmFlowProposal` directly) avoids the
+/// `flow_evaluator` ← `interpretation` ← `flow_evaluator` module cycle.
+///
+/// - `instance_uri` — the FlowInstance URI the LLM cited (verbatim from
+///   the prompt's `active_flows[i].instance`).
+/// - `to_state` — one of that FlowInstance's `nextStates[j].name` values.
+/// - `reason` — optional short attribution. Written as the proposal's
+///   `rationale` field only when `Some(text)` with non-empty text.
+///
+/// Match semantics inside [`run_engine_proposal_pass`]: a hint matches a
+/// [`SatisfiedTransition`] iff BOTH `instance_uri` and `to_state` match.
+/// Unmatched hints (no satisfied transition for that pair) are silently
+/// discarded — the LLM cannot bypass the deterministic guard, and the
+/// prompt already documents this behavior.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmProposalHint {
+    pub instance_uri: String,
+    pub to_state: String,
+    pub reason: Option<String>,
 }
 
 // ============================================================================
@@ -554,6 +583,17 @@ pub async fn write_engine_proposal(
 /// (call sites pre-10.5c), the gate is skipped entirely and the pass
 /// behaves exactly as slice 10.4c shipped.
 ///
+/// `llm_hints` (slice 10.6c) carries the LLM's own `flow_proposals` output
+/// as a slice of [`LlmProposalHint`]s. When a hint matches a satisfied
+/// transition by `(instance_uri, to_state)`, the LLM's `reason` (if any)
+/// is written as the proposal's `rationale` field — attribution flows from
+/// the LLM to the on-graph proposal. Hints WITHOUT a matching satisfied
+/// transition are silently discarded (design §5.4 step 5: LLM cannot
+/// bypass the deterministic `requires` guard). Satisfied transitions
+/// without a matching hint still get an engine-emitted proposal, exactly
+/// as slice 10.4c/10.5c shipped — but with `rationale = None` (byte-
+/// identical writes to the pre-10.6c path). Pass `&[]` to opt out.
+///
 /// Returns the URIs of every `FlowTransitionProposal` this pass minted.
 /// The extraction pass threads these into
 /// [`crate::perspectives::interpretation::run::InterpretationOutcome::flow_proposals`]
@@ -566,6 +606,7 @@ pub async fn run_engine_proposal_pass(
         &dyn crate::perspectives::flow_semantic_check::SemanticCheckLlm,
         &str,
     )>,
+    llm_hints: &[LlmProposalHint],
 ) -> Vec<String> {
     // Load the flow catalogue. Empty on I/O failure — same policy as
     // `gather_active_flow_contexts`. An empty perspective has zero flows,
@@ -701,6 +742,21 @@ pub async fn run_engine_proposal_pass(
             }
         }
 
+        // Slice 10.6c — match LLM hints by (instance_uri, to_state). The
+        // first matching hint wins if the LLM emitted several for the
+        // same pair (the prompt caps at one per instance per pass, but
+        // this is a fail-safe against a chatty small model). An unmatched
+        // satisfied transition still writes — just without a rationale —
+        // preserving byte-identical behavior with the pre-10.6c path
+        // when `llm_hints` is empty or nothing matches.
+        let rationale = llm_hints
+            .iter()
+            .find(|h| {
+                h.instance_uri == transition.instance_uri && h.to_state == transition.to_state
+            })
+            .and_then(|h| h.reason.as_deref())
+            .filter(|s| !s.is_empty());
+
         let proposal_id = uuid::Uuid::new_v4().to_string();
         let batch_id = perspective.create_batch().await;
         let write_res = write_engine_proposal(
@@ -709,6 +765,7 @@ pub async fn run_engine_proposal_pass(
             &acting_did,
             &proposed_at,
             transition,
+            rationale,
             Some(batch_id.clone()),
             context,
         )
@@ -1956,6 +2013,7 @@ mod e2e_tests {
             proposer_did,
             proposed_at,
             t,
+            None, // rationale (slice 10.6c) — this e2e is the engine-only path
             None,
             &ctx,
         )
@@ -2115,6 +2173,7 @@ mod e2e_tests {
             None,
             &ctx,
             None,
+            &[], // llm_hints (slice 10.6c) — engine-only path
         )
         .await;
         assert!(
@@ -2139,6 +2198,7 @@ mod e2e_tests {
             None,
             &ctx,
             None,
+            &[], // llm_hints (slice 10.6c) — engine-only path
         )
         .await;
         assert_eq!(
@@ -2362,9 +2422,14 @@ mod e2e_tests {
             seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
 
         let llm = CannedLlm::responding("YES");
-        let minted =
-            run_engine_proposal_pass(&mut perspective, None, &ctx, Some((&llm, "test-model-42")))
-                .await;
+        let minted = run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+            Some((&llm, "test-model-42")),
+            &[],
+        )
+        .await;
         assert_eq!(minted.len(), 1, "Pass verdict ⇒ 1 proposal, got {minted:?}",);
         assert_eq!(
             llm.call_count(),
@@ -2390,9 +2455,14 @@ mod e2e_tests {
             seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
 
         let llm = CannedLlm::responding("NO");
-        let minted =
-            run_engine_proposal_pass(&mut perspective, None, &ctx, Some((&llm, "test-model-42")))
-                .await;
+        let minted = run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+            Some((&llm, "test-model-42")),
+            &[],
+        )
+        .await;
         assert!(
             minted.is_empty(),
             "Fail verdict ⇒ 0 proposals despite requires-satisfied, got {minted:?}",
@@ -2414,9 +2484,14 @@ mod e2e_tests {
             seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
 
         let llm = CannedLlm::erroring("simulated LLM outage");
-        let minted =
-            run_engine_proposal_pass(&mut perspective, None, &ctx, Some((&llm, "test-model-42")))
-                .await;
+        let minted = run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+            Some((&llm, "test-model-42")),
+            &[],
+        )
+        .await;
         assert!(
             minted.is_empty(),
             "LLM error ⇒ 0 proposals (fail-safe), got {minted:?}",
@@ -2492,15 +2567,168 @@ mod e2e_tests {
         // WITHOUT calling `.confirm()`. The proposal must still fire
         // and the LLM must record zero calls.
         let llm = CannedLlm::erroring("gate must not call me — no hint on this transition");
-        let minted =
-            run_engine_proposal_pass(&mut perspective, None, &ctx, Some((&llm, "test-model-42")))
-                .await;
+        let minted = run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+            Some((&llm, "test-model-42")),
+            &[],
+        )
+        .await;
         assert_eq!(minted.len(), 1, "auto-pass ⇒ 1 proposal, got {minted:?}",);
         assert_eq!(
             llm.call_count(),
             0,
             "auto-pass short-circuit ⇒ zero LLM calls, got {}",
             llm.call_count(),
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Slice 10.6c — LlmProposalHint matching / rationale attribution
+    // ---------------------------------------------------------------------
+
+    /// Helper: read the `ad4m://flow/rationale` link off a proposal URI and
+    /// return the decoded scalar value (or `None` if the property is absent).
+    /// The writer stores scalars as `literal:string:...` targets, so decode
+    /// by stripping the prefix. Kept local — the assertion shape (was the
+    /// rationale predicate set at all + does its value round-trip) is
+    /// specific enough that inlining across three tests would obscure it.
+    async fn read_rationale(
+        perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+        proposal_uri: &str,
+    ) -> Option<String> {
+        let links = perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(proposal_uri.to_string()),
+                predicate: Some("ad4m://flow/rationale".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links(proposal.rationale)");
+        let target = links.into_iter().next()?.data.target;
+        // `literal:string:<url-encoded>` — decode the same way callers of
+        // `resolve_property_value` would; a minimal peel here is sufficient
+        // because the write path uses a plain ASCII rationale in these tests.
+        target.strip_prefix("literal:string:").map(|s| {
+            // Cheap decode: real reader uses `urlencoding::decode`, but the
+            // test strings are ASCII with no reserved chars, so a percent-
+            // free string is byte-identical after decode. Fall back to the
+            // full decoder if a reserved char shows up.
+            urlencoding::decode(s)
+                .map(|c| c.into_owned())
+                .unwrap_or_else(|_| s.to_string())
+        })
+    }
+
+    /// LLM hint matches a satisfied transition ⇒ the proposal fires with
+    /// the LLM's `reason` written as the on-graph `rationale`. This is the
+    /// load-bearing "LLM attribution rides through" property of slice 10.6c.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn llm_hint_matches_transition_writes_rationale_e2e() {
+        let (mut perspective, ctx, inst_uri) =
+            seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
+
+        let hints = vec![LlmProposalHint {
+            instance_uri: inst_uri.clone(),
+            to_state: "scoped".to_string(),
+            reason: Some("LLM saw one Task and moved the flow forward".to_string()),
+        }];
+        let llm = CannedLlm::responding("YES");
+        let minted = run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+            Some((&llm, "test-model-42")),
+            &hints,
+        )
+        .await;
+        assert_eq!(
+            minted.len(),
+            1,
+            "matched hint + Pass verdict ⇒ 1 proposal, got {minted:?}",
+        );
+        let rationale = read_rationale(&perspective, &minted[0])
+            .await
+            .expect("matched hint MUST write a rationale link on the proposal");
+        assert_eq!(
+            rationale, "LLM saw one Task and moved the flow forward",
+            "written rationale must round-trip the LLM's reason verbatim",
+        );
+    }
+
+    /// LLM hint for a transition NOT in the satisfied set ⇒ hint is
+    /// silently dropped; the engine's own satisfied-transition proposal
+    /// still fires without a rationale. Documents design §5.4 step 5:
+    /// LLM cannot bypass the deterministic `requires` guard.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn llm_hint_without_matching_transition_is_discarded_e2e() {
+        let (mut perspective, ctx, inst_uri) =
+            seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
+
+        // Two hints: one names a state the flow never proposes on this
+        // pass (`does-not-exist`); the other names the correct state on
+        // an unknown instance URI. Both must be discarded.
+        let hints = vec![
+            LlmProposalHint {
+                instance_uri: inst_uri.clone(),
+                to_state: "does-not-exist".to_string(),
+                reason: Some("LLM guessed a state".to_string()),
+            },
+            LlmProposalHint {
+                instance_uri: "ad4m://flow/instance/never-minted".to_string(),
+                to_state: "scoped".to_string(),
+                reason: Some("LLM invented an instance URI".to_string()),
+            },
+        ];
+        let llm = CannedLlm::responding("YES");
+        let minted = run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+            Some((&llm, "test-model-42")),
+            &hints,
+        )
+        .await;
+        assert_eq!(
+            minted.len(),
+            1,
+            "unmatched hints must not spawn extra proposals — engine still fires the satisfied one",
+        );
+        assert!(
+            read_rationale(&perspective, &minted[0]).await.is_none(),
+            "engine-emitted proposal (no matching hint) must NOT carry a rationale",
+        );
+    }
+
+    /// LLM hint matches but `reason=None` (or empty string) ⇒ the write
+    /// path drops the rationale entirely rather than persisting an empty
+    /// scalar. Byte-identical to the pre-10.6c engine-only path for the
+    /// on-graph proposal shape.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn llm_hint_with_no_reason_writes_no_rationale_e2e() {
+        let (mut perspective, ctx, inst_uri) =
+            seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
+
+        let hints = vec![LlmProposalHint {
+            instance_uri: inst_uri.clone(),
+            to_state: "scoped".to_string(),
+            reason: None,
+        }];
+        let llm = CannedLlm::responding("YES");
+        let minted = run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+            Some((&llm, "test-model-42")),
+            &hints,
+        )
+        .await;
+        assert_eq!(minted.len(), 1, "matched hint + Pass ⇒ 1 proposal");
+        assert!(
+            read_rationale(&perspective, &minted[0]).await.is_none(),
+            "reason=None must NOT write a rationale — the SDNA allows omission and \
+             writing an empty scalar bloats the graph with a link carrying no signal",
         );
     }
 }
