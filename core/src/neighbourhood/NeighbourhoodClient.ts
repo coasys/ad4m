@@ -12,6 +12,7 @@ import type {
     SfuDataMessage,
     SfuQualityPreference,
     SfuRoomInfo,
+    SfuStatus,
     TrackMapEntry,
 } from "./SfuTypes"
 
@@ -350,6 +351,16 @@ export class NeighbourhoodClient {
     }
 
     // ── SFU diagnostic / test-harness endpoints ────────────────────────
+
+    /**
+     * Read-only: SFU service status including public reachability.
+     * Returns whether this executor can relay media to remote
+     * participants (public), sits behind NAT (nat), or could not
+     * determine its reachability (unknown).
+     */
+    async sfuStatus(): Promise<SfuStatus> {
+        return this.#apiClient.call<SfuStatus>("sfu.status", {})
+    }
 
     /**
      * Read-only: how many SFU↔SFU pipe transports are fully established,

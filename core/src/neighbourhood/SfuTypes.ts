@@ -121,6 +121,23 @@ export interface CallSessionInfo {
     streamMapping: string[]
 }
 
+/**
+ * SFU service status including public reachability.
+ *
+ * Returned by `sfu.status` — tells clients whether this executor can
+ * relay media to remote participants.
+ */
+export interface SfuStatus {
+    /** One of `"public"`, `"nat"`, or `"unknown"`. */
+    reachability: "public" | "nat" | "unknown"
+    /** True when the SFU accepts inbound connections from the internet. */
+    isPublic: boolean
+    /** The SFU server's bound UDP address (`ip:port`). */
+    bindAddress: string
+    /** Human-readable reachability detail (e.g. `"nat (bind 10.0.0.1, reflexive 203.0.113.5)"`). */
+    detail: string
+}
+
 /** Quality preference for selective forwarding (simulcast layer choice). */
 export type SfuQualityPreference = "high" | "medium" | "low" | "auto"
 
