@@ -142,10 +142,34 @@ describe("topology resolution", () => {
         expect(MeshManager).toHaveBeenCalled()
     })
 
-    it("resolves 'auto' without sfuConfig to SFU path", async () => {
-        const session = createSession(baseConfig({ topology: "auto" }))
+    it("resolves 'auto' without sfuConfig to SFU when local SFU is public", async () => {
+        const session = createSession(baseConfig({
+            topology: "auto",
+            localSfuStatus: { reachability: "public", isPublic: true, bindAddress: "1.2.3.4:0", detail: "" },
+        }))
         await session.join(fakeMediaStream())
         expect(SfuManager).toHaveBeenCalled()
+    })
+
+    it("resolves 'auto' to mesh when no SFU nodes found", async () => {
+        const session = createSession(baseConfig({
+            topology: "auto",
+            availableSfuNodes: async () => [],
+            channel: fakeChannel(),
+        }))
+        await session.join(fakeMediaStream())
+        expect(MeshManager).toHaveBeenCalled()
+        expect(SfuManager).not.toHaveBeenCalled()
+    })
+
+    it("resolves 'auto' to SFU when neighbourhood has available SFU nodes", async () => {
+        const session = createSession(baseConfig({
+            topology: "auto",
+            availableSfuNodes: async () => [{ did: "did:sfu:node1", bindAddress: "5.6.7.8:9000" }],
+        }))
+        await session.join(fakeMediaStream())
+        expect(SfuManager).toHaveBeenCalled()
+        expect(MeshManager).not.toHaveBeenCalled()
     })
 
     it("resolves 'auto' with sfuConfig.mode='designated' to SFU path", async () => {

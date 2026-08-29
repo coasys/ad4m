@@ -123,6 +123,7 @@ export class NeighbourhoodProxy {
             neighbourhoodUrl: options?.neighbourhoodUrl ?? "",
             topology: options?.topology ?? "auto",
             localSfuStatus: this.#sfuStatusCache ?? undefined,
+            availableSfuNodes: () => proxy.availableSfuNodes(),
             // Mesh needs a signalling channel and presence callbacks.
             // SFU ignores these — they remain unused when the resolved
             // topology selects the SFU path.
