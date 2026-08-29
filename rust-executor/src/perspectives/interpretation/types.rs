@@ -31,6 +31,49 @@ pub struct ProposedInstance {
     pub props: HashMap<String, serde_json::Value>,
 }
 
+/// One flow-transition the LLM proposes advancing to, in response to the
+/// `active_flows` block in the prompt (see `render_active_flow_for_prompt`).
+///
+/// The LLM emits only three fields — the rest of the on-graph
+/// `FlowTransitionProposal` (proposer DID, `proposedAt`, evidence hashes) is
+/// filled in by the engine post-processing pass so the LLM never has to invent
+/// crypto identity or run model_queries.
+///
+/// - `instance` names the FlowInstance URI (`active_flows[i].instance` in the
+///   prompt).
+/// - `to_state` names one of that instance's `nextStates[j].name` values.
+/// - `reason` is an optional short natural-language attribution the LLM
+///   attaches to explain why this proposal fires; the engine stores it as a
+///   note on the proposal.
+///
+/// The engine still requires the state's `requires` guard to be satisfied
+/// before it fires the proposal — an LLM proposal without evidence is
+/// discarded silently (see slice 10.6c). This mirrors design §5.4 step 5:
+/// LLM proposal + evidence → store; no LLM + evidence → engine emits; LLM
+/// only → discard (LLM cannot bypass the deterministic guard).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct LlmFlowProposal {
+    pub instance: String,
+    #[serde(rename = "toState")]
+    pub to_state: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// The full structured payload the LLM returns from one interpretation call:
+/// the extracted instances plus optional flow-transition proposals. Both
+/// vectors default to empty so a legacy bare-array response (pre-slice-10.6)
+/// still parses via [`parse_interpretation_response`]'s array→wrapper
+/// fallback, and a response that omits `flow_proposals` entirely just yields
+/// an empty vector on that field.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+pub struct InterpretationOutput {
+    #[serde(default)]
+    pub instances: Vec<ProposedInstance>,
+    #[serde(default)]
+    pub flow_proposals: Vec<LlmFlowProposal>,
+}
+
 /// The existing instances in scope for an interpretation pass, keyed by base
 /// URI (`id`). A single base can conform to multiple subject classes, so each
 /// key maps to a `Vec` of entries. This is the **single source of truth** the
