@@ -776,9 +776,19 @@ pub async fn run_interpretation_with_strategy_and_model(
     // fresh evidence, and a `FlowTransitionProposal` is minted on behalf
     // of the acting DID. Silent-fallback throughout (see the fn doc) so
     // the extraction pass cannot break on a flow-layer stumble.
-    let flow_proposals =
-        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, scope, context)
-            .await;
+    //
+    // Slice 10.5b — `semantic_check = None` for now. The signature
+    // accepts an optional `(&dyn SemanticCheckLlm, &str)` gate; slice
+    // 10.5c will wire the AIService-backed implementation and pick the
+    // model_id off the same task row this extraction pass uses. Passing
+    // `None` here keeps the pre-10.5b behaviour byte-identical.
+    let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+        perspective,
+        scope,
+        context,
+        None,
+    )
+    .await;
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
@@ -1019,9 +1029,16 @@ pub async fn run_interpretation_with_harness_and_model(
     // shape; extending the harness return to a struct is a separate
     // slice. The proposals themselves land on the graph regardless,
     // which is the load-bearing property.
-    let flow_proposals =
-        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, scope, context)
-            .await;
+    //
+    // Slice 10.5b — `semantic_check = None` here too. Same rationale as
+    // the single-shot path: 10.5c will wire the AIService-backed LLM.
+    let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+        perspective,
+        scope,
+        context,
+        None,
+    )
+    .await;
     if !flow_proposals.is_empty() {
         log::warn!(
             "harness: engine-proposal pass minted {} FlowTransitionProposal(s): {:?}",

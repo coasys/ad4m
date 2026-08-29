@@ -541,6 +541,19 @@ pub async fn write_engine_proposal(
 /// `scope`, when `Some`, narrows the FlowInstance load to the pass's
 /// anchor URI (same policy as [`crate::perspectives::flow_context::gather_active_flow_contexts`]).
 ///
+/// `semantic_check`, when `Some((llm, model_id))`, wires the slice 10.5
+/// 2nd-pass LLM confirmation between the deterministic evaluator and the
+/// on-graph write. For each `SatisfiedTransition` whose target state
+/// carries a `semantic_check` hint, [`crate::perspectives::flow_semantic_check::run_semantic_check`]
+/// is invoked and only a `Pass` verdict advances the transition to the
+/// write stage; `Fail` and `Ambiguous` discard the transition (fail-safe:
+/// an uncertain LLM must not silently advance a flow). Transitions
+/// without a per-state `semantic_check` hint are auto-passed without an
+/// LLM call. LLM I/O errors are treated as `discard` — flow layer must
+/// never break the extraction pass. When `semantic_check` is `None`
+/// (call sites pre-10.5c), the gate is skipped entirely and the pass
+/// behaves exactly as slice 10.4c shipped.
+///
 /// Returns the URIs of every `FlowTransitionProposal` this pass minted.
 /// The extraction pass threads these into
 /// [`crate::perspectives::interpretation::run::InterpretationOutcome::flow_proposals`]
@@ -549,6 +562,10 @@ pub async fn run_engine_proposal_pass(
     perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     scope: Option<&crate::perspectives::model_query::types::Scope>,
     context: &crate::agent::AgentContext,
+    semantic_check: Option<(
+        &dyn crate::perspectives::flow_semantic_check::SemanticCheckLlm,
+        &str,
+    )>,
 ) -> Vec<String> {
     // Load the flow catalogue. Empty on I/O failure — same policy as
     // `gather_active_flow_contexts`. An empty perspective has zero flows,
@@ -598,6 +615,25 @@ pub async fn run_engine_proposal_pass(
         return Vec::new();
     }
 
+    // Slice 10.5b — index FlowContext by instance_uri so the semantic-check
+    // gate can look up the flow's overall interpretationHint + next-state
+    // summaries when composing its confirmation prompt. Computed once per
+    // pass (not per transition) since multiple SatisfiedTransitions can
+    // share the same active FlowInstance. Only needed when
+    // `semantic_check` is `Some` — an empty HashMap when the gate is off
+    // costs one allocation and keeps the per-transition loop uniform.
+    let flow_ctx_by_uri: std::collections::HashMap<
+        String,
+        crate::perspectives::flow_context::FlowContext,
+    > = if semantic_check.is_some() {
+        crate::perspectives::flow_context::build_flow_contexts(&records, &flows_by_name)
+            .into_iter()
+            .map(|c| (c.instance_uri.clone(), c))
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
+
     // Each proposal writes inside its own batch — same
     // create_batch / commit_batch discipline `apply_with_overlay` uses
     // for `mint_interpretation_run`. `write_flow_transition_proposal`
@@ -611,6 +647,60 @@ pub async fn run_engine_proposal_pass(
 
     let mut minted = Vec::with_capacity(satisfied.len());
     for transition in &satisfied {
+        // Slice 10.5b — semantic-check gate. Runs BEFORE the write so a
+        // rejected/uncertain transition never lands as a proposal. The gate
+        // is skipped entirely when the caller passes `None` (back-compat
+        // with slice 10.4c's callers). When `Some((llm, model_id))`:
+        //   - transition has no `semantic_check` hint → `run_semantic_check`
+        //     short-circuits to `Pass` without an LLM call (see the
+        //     `build_semantic_check_prompt` contract).
+        //   - hint present → LLM is called; only `Pass` fires. `Fail` and
+        //     `Ambiguous` discard (fail-safe: uncertain LLM must not
+        //     silently advance a flow).
+        //   - LLM I/O error → discard the transition, log at `debug!`. The
+        //     flow layer must never break the extraction pass.
+        //   - FlowContext lookup miss (unexpected: every SatisfiedTransition
+        //     came from a record we built contexts for) → discard + log,
+        //     same fail-safe philosophy.
+        if let Some((llm, model_id)) = semantic_check {
+            let Some(flow_ctx) = flow_ctx_by_uri.get(&transition.instance_uri) else {
+                log::debug!(
+                    "run_engine_proposal_pass: no FlowContext for {}.{}→{} (instance {}); discarding",
+                    transition.flow_name,
+                    transition.from_state,
+                    transition.to_state,
+                    transition.instance_uri,
+                );
+                continue;
+            };
+            match crate::perspectives::flow_semantic_check::run_semantic_check(
+                llm, model_id, transition, flow_ctx,
+            )
+            .await
+            {
+                Ok(verdict) => {
+                    if !crate::perspectives::flow_semantic_check::should_fire_proposal(verdict) {
+                        log::debug!(
+                            "run_engine_proposal_pass: semantic-check {verdict:?} on {}.{}→{}; discarding",
+                            transition.flow_name,
+                            transition.from_state,
+                            transition.to_state,
+                        );
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    log::debug!(
+                        "run_engine_proposal_pass: semantic-check LLM error on {}.{}→{}: {e:#}; discarding",
+                        transition.flow_name,
+                        transition.from_state,
+                        transition.to_state,
+                    );
+                    continue;
+                }
+            }
+        }
+
         let proposal_id = uuid::Uuid::new_v4().to_string();
         let batch_id = perspective.create_batch().await;
         let write_res = write_engine_proposal(
@@ -2024,6 +2114,7 @@ mod e2e_tests {
             &mut perspective,
             None,
             &ctx,
+            None,
         )
         .await;
         assert!(
@@ -2047,6 +2138,7 @@ mod e2e_tests {
             &mut perspective,
             None,
             &ctx,
+            None,
         )
         .await;
         assert_eq!(
@@ -2120,5 +2212,295 @@ mod e2e_tests {
                 by_pred.get(pred),
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Slice 10.5b — the semantic-check gate wired into
+    // `run_engine_proposal_pass`.
+    // -----------------------------------------------------------------
+
+    /// Stub [`SemanticCheckLlm`] whose `confirm` returns a canned response
+    /// verbatim. Records prompt + model_id per call so the tests can
+    /// assert the gate is threading the right context down to the LLM
+    /// (same pattern the async-layer unit tests in
+    /// `flow_semantic_check` use).
+    struct CannedLlm {
+        response: String,
+        error: Option<String>,
+        calls: std::sync::Mutex<Vec<(String, String)>>, // (model_id, prompt)
+    }
+
+    impl CannedLlm {
+        fn responding(text: &str) -> Self {
+            Self {
+                response: text.to_string(),
+                error: None,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn erroring(msg: &str) -> Self {
+            Self {
+                response: String::new(),
+                error: Some(msg.to_string()),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::perspectives::flow_semantic_check::SemanticCheckLlm for CannedLlm {
+        async fn confirm(&self, model_id: &str, prompt: &str) -> anyhow::Result<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((model_id.to_string(), prompt.to_string()));
+            if let Some(msg) = &self.error {
+                return Err(anyhow::anyhow!(msg.clone()));
+            }
+            Ok(self.response.clone())
+        }
+    }
+
+    /// Seed the same Delivery + `requires` + FlowInstance shape the
+    /// 10.4c e2e uses, PLUS a per-state `ad4m://semantic_check` hint on
+    /// `scoped`. Returns `(perspective, ctx, instance_uri)`.
+    async fn seed_semantic_check_e2e_fixture(
+        semantic_check_hint: &str,
+    ) -> (
+        crate::perspectives::perspective_instance::PerspectiveInstance,
+        crate::agent::AgentContext,
+        String,
+    ) {
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        let scoped_uri = "delivery://Delivery.scoped";
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        let requires_json = r#"[{"className":"ns://Task","count":{"min":1}}]"#;
+        perspective
+            .add_link(
+                Link {
+                    source: scoped_uri.to_string(),
+                    predicate: Some("ad4m://requires".to_string()),
+                    target: lit(requires_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(scoped.requires)");
+        // The 10.5b payload — per-state semanticCheck hint (predicate is
+        // `ad4m://semanticCheck` in camelCase to match the parser at
+        // `shacl_parser::find_link`). Parser (slice 10.3a) reads this
+        // and mounts it on `FlowState.semantic_check`, which
+        // `evaluate_flow_transitions` threads into
+        // `SatisfiedTransition.semantic_check`, which
+        // `build_semantic_check_prompt` uses to produce a non-`None`
+        // prompt — which is the whole reason `run_semantic_check`
+        // actually calls the LLM here.
+        perspective
+            .add_link(
+                Link {
+                    source: scoped_uri.to_string(),
+                    predicate: Some("ad4m://semanticCheck".to_string()),
+                    target: lit(semantic_check_hint),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(scoped.semanticCheck)");
+
+        let base_uri = "ad4m://task/onboarding-10.5b";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.5b-inst",
+            "2026-08-27T02:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        // Seed the Task that satisfies `requires` — same
+        // `create_subject` path the interpretation pipeline uses. The
+        // deterministic guard is now met; the SEMANTIC-CHECK gate is the
+        // only thing between the transition and the on-graph proposal.
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "ad4m://task/1",
+            "Onboard Ana",
+        )
+        .await;
+
+        (perspective, ctx, inst_uri)
+    }
+
+    /// Semantic-check `Pass` (LLM returns "YES") ⇒ proposal fires,
+    /// exactly one LLM call, prompt was threaded through with the
+    /// correct model_id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn semantic_check_pass_fires_proposal_e2e() {
+        let (mut perspective, ctx, _inst_uri) =
+            seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
+
+        let llm = CannedLlm::responding("YES");
+        let minted =
+            run_engine_proposal_pass(&mut perspective, None, &ctx, Some((&llm, "test-model-42")))
+                .await;
+        assert_eq!(minted.len(), 1, "Pass verdict ⇒ 1 proposal, got {minted:?}",);
+        assert_eq!(
+            llm.call_count(),
+            1,
+            "gated transition ⇒ exactly one semantic-check LLM call, got {}",
+            llm.call_count(),
+        );
+        let (model_id, prompt) = llm.calls.lock().unwrap()[0].clone();
+        assert_eq!(model_id, "test-model-42", "model_id must thread through");
+        assert!(
+            prompt.contains("scoped") || prompt.to_lowercase().contains("scope"),
+            "prompt must mention the target state / hint, got: {prompt}",
+        );
+    }
+
+    /// Semantic-check `Fail` (LLM returns "NO") ⇒ transition is
+    /// discarded despite `requires` being satisfied. This is the
+    /// load-bearing property: an uncertain LLM cannot silently advance
+    /// a flow even when the deterministic guard says it could.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn semantic_check_fail_discards_transition_e2e() {
+        let (mut perspective, ctx, _inst_uri) =
+            seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
+
+        let llm = CannedLlm::responding("NO");
+        let minted =
+            run_engine_proposal_pass(&mut perspective, None, &ctx, Some((&llm, "test-model-42")))
+                .await;
+        assert!(
+            minted.is_empty(),
+            "Fail verdict ⇒ 0 proposals despite requires-satisfied, got {minted:?}",
+        );
+        assert_eq!(
+            llm.call_count(),
+            1,
+            "gate must still make the LLM call before deciding, got {}",
+            llm.call_count(),
+        );
+    }
+
+    /// Semantic-check LLM error ⇒ transition is discarded (fail-safe:
+    /// the flow layer must never break the extraction pass, and an
+    /// erroring LLM is treated the same as `Fail`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn semantic_check_llm_error_discards_transition_e2e() {
+        let (mut perspective, ctx, _inst_uri) =
+            seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
+
+        let llm = CannedLlm::erroring("simulated LLM outage");
+        let minted =
+            run_engine_proposal_pass(&mut perspective, None, &ctx, Some((&llm, "test-model-42")))
+                .await;
+        assert!(
+            minted.is_empty(),
+            "LLM error ⇒ 0 proposals (fail-safe), got {minted:?}",
+        );
+        assert_eq!(
+            llm.call_count(),
+            1,
+            "gate must attempt the LLM call before deciding, got {}",
+            llm.call_count(),
+        );
+    }
+
+    /// A transition WITHOUT a `semantic_check` hint ⇒ the LLM is not
+    /// called even when the gate is enabled (auto-pass short-circuit),
+    /// and the proposal still fires. Locks the "hint absent = no LLM
+    /// spend" invariant that keeps the gate cheap on flows without
+    /// explicit semantic checks.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn semantic_check_absent_hint_autopasses_no_llm_call_e2e() {
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        // Same shape as the 10.4c fixture — Delivery + requires on
+        // scoped, NO semantic_check link on any state.
+        let scoped_uri = "delivery://Delivery.scoped";
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        let requires_json = r#"[{"className":"ns://Task","count":{"min":1}}]"#;
+        perspective
+            .add_link(
+                Link {
+                    source: scoped_uri.to_string(),
+                    predicate: Some("ad4m://requires".to_string()),
+                    target: lit(requires_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(scoped.requires)");
+        let _ = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            "ad4m://task/no-hint",
+            "identified",
+            "e2e-10.5b-no-hint-inst",
+            "2026-08-27T02:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "ad4m://task/nohint-1",
+            "Onboard Ana",
+        )
+        .await;
+
+        // An "erroring" LLM: if the gate ever calls it, the whole
+        // transition would be discarded (per the LLM-error test above).
+        // Since the hint is absent, `build_semantic_check_prompt`
+        // returns None ⇒ `run_semantic_check` short-circuits to `Pass`
+        // WITHOUT calling `.confirm()`. The proposal must still fire
+        // and the LLM must record zero calls.
+        let llm = CannedLlm::erroring("gate must not call me — no hint on this transition");
+        let minted =
+            run_engine_proposal_pass(&mut perspective, None, &ctx, Some((&llm, "test-model-42")))
+                .await;
+        assert_eq!(minted.len(), 1, "auto-pass ⇒ 1 proposal, got {minted:?}",);
+        assert_eq!(
+            llm.call_count(),
+            0,
+            "auto-pass short-circuit ⇒ zero LLM calls, got {}",
+            llm.call_count(),
+        );
     }
 }
