@@ -1118,7 +1118,13 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
     let channel = "soa://channel/general";
     let contains = "ns://contains";
     let decoy_base = "soa://other/subgroup/decoy";
-    let attempts = 3u8;
+    // Four sequential LLM passes with multi-clause assertions in each — every
+    // pass has its own chance to flake (empty summary, unexpected merge on
+    // topic shift, off-vocabulary word). 8 attempts matches the tail-tolerance
+    // of `harness_intention_links_to_seeded_beliefs`; 3 was under the p99 on
+    // gemma3:12b (see CI job 24601 on `5605119aa` — three attempts back-to-back
+    // failed on independent clauses).
+    let attempts = 8u8;
     let mut last_err: Option<String> = None;
 
     for attempt in 1..=attempts {
