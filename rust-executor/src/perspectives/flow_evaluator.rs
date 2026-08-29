@@ -859,6 +859,36 @@ mod tests {
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    /// Byte-for-byte golden fixtures locking parity with the TypeScript
+    /// implementation in `core/src/perspectives/FlowEvidenceHash.ts`.
+    ///
+    /// The same expected hashes are asserted from the TS side in
+    /// `core/src/perspectives/FlowEvidenceHash.test.ts` — a divergence in
+    /// either language will fail both sides of the lock in the same PR.
+    ///
+    /// The fixtures were computed with `printf '<bytes>' | sha256sum`:
+    /// - `printf 'ns://Perspective\0' | sha256sum`
+    /// - `printf 'ns://X|ns://Y\0a\nb' | sha256sum`
+    /// - `printf 'ns://X\0a://1' | sha256sum`
+    #[test]
+    fn evidence_hash_matches_ts_parity_fixtures() {
+        assert_eq!(
+            evidence_hash(&["ns://Perspective".into()], &[]),
+            "2fa6bf06f407e1eeeda6f76b92285cdc2fd88feaaa141807aade362459990872",
+        );
+        assert_eq!(
+            evidence_hash(
+                &["ns://X".into(), "ns://Y".into()],
+                &["b".into(), "a".into()]
+            ),
+            "5245f683b6dcc4efe4ce46e7b0126bd56a37c8794298c2213a335248a9383f66",
+        );
+        assert_eq!(
+            evidence_hash(&["ns://X".into()], &["a://1".into()]),
+            "dcbb3c36dba1ec498c46f6f6129ae78e6585a781abd1a89f8ac6d5f7c4a3e568",
+        );
+    }
+
     // ---- cardinality_satisfied ----
 
     #[test]
