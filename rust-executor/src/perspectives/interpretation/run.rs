@@ -8,6 +8,7 @@ use super::{
     TranscriptTurn,
 };
 use crate::agent::AgentContext;
+use crate::ai_service::harness::flow_propose::{FlowProposalBuffer, FlowTransitionProposeProvider};
 use crate::ai_service::harness::propose::{
     class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
 };
@@ -1014,11 +1015,32 @@ pub async fn run_interpretation_with_harness_and_model(
     // not "mutate the graph." The buffer is drained after the loop.
     let buffer = ProposalBuffer::new();
     let classes_offered = propose_shapes.len();
-    let provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
+    let write_provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
         ad4m_filtered,
         propose_shapes,
         buffer.clone(),
         base_prefix.to_string(),
+    ));
+
+    // Slice 10.7c — wrap ONCE MORE in FlowTransitionProposeProvider so the
+    // LLM also sees one `{FlowName}_propose_transition` tool per active
+    // flow. Symmetric to `ProposeWritesProvider` above: the tool's side
+    // effect is "queue an LlmProposalHint," not "mutate the graph." The
+    // deterministic engine pass below still owns whether the hint lands
+    // as a FlowTransitionProposal — the LLM cannot bypass the `requires`
+    // guard, it just gets attribution + rationale on hints that already
+    // match a satisfied transition.
+    //
+    // Contexts passed by value (owned Vec) — the decorator holds them for
+    // the pass lifetime; the prompt block above got the same list already,
+    // so a mid-pass new instance can't appear on this surface (matches
+    // design v3 §6 stability guarantee).
+    let flow_buffer = FlowProposalBuffer::new();
+    let flow_tools_advertised = active_flows.len();
+    let provider: Arc<dyn ToolProvider> = Arc::new(FlowTransitionProposeProvider::new(
+        write_provider,
+        active_flows.clone(),
+        flow_buffer.clone(),
     ));
 
     // OpenAI-compat bridge: real CompletionSource that talks to AIService
@@ -1112,17 +1134,24 @@ pub async fn run_interpretation_with_harness_and_model(
     let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
         task_id: task.task_id.clone(),
     };
-    // Slice 10.6c — harness path passes `&[]`. The harness LLM writes via
-    // tool calls, not by emitting a JSON `InterpretationOutput` blob, so
-    // there is no LLM-side `flow_proposals` field to thread here. A future
-    // slice can add a `propose_flow_transition` tool to the harness surface
-    // if we want LLM-attributed proposals over the tool-calling path too.
+    // Slice 10.7c — drain the FlowTransitionProposeProvider's buffer into
+    // `LlmProposalHint`s and thread them into `run_engine_proposal_pass`.
+    // Symmetric to the strategy path's `flow_proposals` field on
+    // `InterpretationOutput` (slice 10.6c): the deterministic `requires`
+    // guard is still the arbiter, the LLM just gets attribution +
+    // rationale on hints that match a satisfied transition.
+    let llm_hints = flow_buffer.drain();
+    log::warn!(
+        "harness: flow-propose pass complete, hints_buffered={} flows_advertised={}",
+        llm_hints.len(),
+        flow_tools_advertised,
+    );
     let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
         perspective,
         scope,
         context,
         Some((&semantic_check, task.model_id.as_str())),
-        &[],
+        &llm_hints,
     )
     .await;
     if !flow_proposals.is_empty() {
