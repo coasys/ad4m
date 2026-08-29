@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::domain::Perspective;
 use crate::types::{Agent, AgentStatus};
 use crate::types::{Expression, ExpressionProof};
-use crate::wallet::{wallet_backend, LocalWallet};
+use crate::wallet::wallet_backend;
 
 pub mod capabilities;
 pub mod signatures;
@@ -160,11 +160,7 @@ pub fn check_keys_and_create(did: String) -> did_key::Document {
     let backend = wallet_backend();
     let name = "main";
     if backend.get_did_document(name).is_none() {
-        let local = backend
-            .as_any()
-            .downcast_ref::<LocalWallet>()
-            .expect("check_keys_and_create requires LocalWallet backend");
-        local.initialize_keys(name, &did).unwrap()
+        backend.initialize_keys(name, &did).unwrap()
     } else {
         did_document()
     }
@@ -348,11 +344,7 @@ impl AgentService {
 
     pub fn is_unlocked(&self) -> bool {
         let backend = wallet_backend();
-        let local = backend
-            .as_any()
-            .downcast_ref::<LocalWallet>()
-            .expect("is_unlocked requires LocalWallet backend");
-        local.is_unlocked()
+        backend.is_unlocked()
     }
 
     fn signing_checks(&self) -> Result<(), AnyError> {
@@ -594,11 +586,7 @@ impl AgentService {
 
     pub fn unlock(&mut self, password: String) -> Result<(), AnyError> {
         let backend = wallet_backend();
-        let local = backend
-            .as_any()
-            .downcast_ref::<LocalWallet>()
-            .expect("unlock requires LocalWallet backend");
-        let result = local.unlock(&password);
+        let result = backend.unlock(&password);
         if result.is_ok() {
             self.passphrase = Some(password);
             let key_names = backend.list_key_names();
@@ -614,11 +602,7 @@ impl AgentService {
         }
 
         let backend = wallet_backend();
-        let local = backend
-            .as_any()
-            .downcast_ref::<LocalWallet>()
-            .expect("lock requires LocalWallet backend");
-        local.lock(&password);
+        backend.lock(&password);
 
         // Clear the stored passphrase after locking
         self.passphrase = None;
@@ -626,11 +610,7 @@ impl AgentService {
 
     pub fn save(&self, password: String) {
         let backend = wallet_backend();
-        let local = backend
-            .as_any()
-            .downcast_ref::<LocalWallet>()
-            .expect("save requires LocalWallet backend");
-        let keystore = local.export(&password);
+        let keystore = backend.export(&password);
 
         let store = AgentStore {
             did: self.did.clone().unwrap().clone(),
@@ -658,11 +638,7 @@ impl AgentService {
 
         {
             let backend = wallet_backend();
-            let local = backend
-                .as_any()
-                .downcast_ref::<LocalWallet>()
-                .expect("load requires LocalWallet backend");
-            local.load(&dump.keystore);
+            backend.load(&dump.keystore);
         }
 
         if std::path::Path::new(self.file_profile.as_str()).exists() {
