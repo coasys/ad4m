@@ -29,6 +29,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ad4mClient, Link, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
 import { FlowInstance, FlowTransitionProposal } from "@coasys/ad4m";
+import { computeFlowEvidenceHash } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
 import { startAgent } from "../../helpers/index.js";
 
@@ -212,6 +213,154 @@ describe("FlowTransitionProposal — @Model", function () {
       .to.equal(expectedTargetClass);
     expect(actual, "TS shape must match Rust SDNA path→name pairs")
       .to.deep.equal(expected);
+  });
+});
+
+// ── FlowTransitionProposal.propose — v5 client factory (slice 10.8c) ─────────
+// End-to-end proof that the pure `buildFlowTransitionProposalFields` +
+// `Ad4mModel.create` composition mints a proposal on-graph that (a) round-trips
+// through `findAll` with all seven declared predicates, (b) hydrates evidence
+// as a collection (not a scalar), and (c) carries an `evidenceHashes` value
+// reproducible by the browser-side `computeFlowEvidenceHash` — so a Flux UI or
+// consensus verifier can independently re-derive it from the class list + the
+// listed evidence URIs without trusting the proposer.
+describe("FlowTransitionProposal.propose — v5 client factory", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-propose");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-propose-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    await FlowTransitionProposal.register(p);
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  it("mints a proposal on-graph that findAll can rehydrate with all declared fields", async () => {
+    const flowInstance = "ad4m://flow/instance/inst-live-1";
+    const classNames = ["ad4m://Task"];
+    const evidence = ["ad4m://task/1", "ad4m://task/2"];
+    const proposedAt = "2026-08-29T23:45:00Z";
+
+    const minted = await FlowTransitionProposal.propose(p, {
+      flowInstance,
+      fromState: "InProgress",
+      toState: "Review",
+      proposer: "did:example:alice",
+      evidence,
+      classNames,
+      rationale: "PR opened and awaiting review",
+      runUri: "ad4m://interp/run/run-live-1",
+      proposedAt,
+    });
+
+    expect(minted).to.be.instanceOf(FlowTransitionProposal);
+    expect(minted.flowInstance).to.equal(flowInstance);
+    expect(minted.toState).to.equal("Review");
+
+    const all = await FlowTransitionProposal.findAll(p);
+    expect(all).to.have.lengthOf(1);
+    const hydrated = all[0];
+    expect(hydrated.flowInstance).to.equal(flowInstance);
+    expect(hydrated.fromState).to.equal("InProgress");
+    expect(hydrated.toState).to.equal("Review");
+    expect(hydrated.proposer).to.equal("did:example:alice");
+    expect(hydrated.proposedAt).to.equal(proposedAt);
+    expect(hydrated.rationale).to.equal("PR opened and awaiting review");
+    expect(hydrated.runUri).to.equal("ad4m://interp/run/run-live-1");
+    expect(hydrated.evidence).to.have.members(evidence);
+    // The on-graph evidenceHashes value must be reproducible from the same
+    // (classNames, evidence) inputs — the whole point of the algorithm being
+    // pure and byte-parity across TS + Rust.
+    const expectedHash = computeFlowEvidenceHash(classNames, evidence);
+    expect(hydrated.evidenceHashes).to.equal(expectedHash);
+  });
+
+  it("omits optional fields (rationale, runUri) when the caller does not supply them", async () => {
+    const minted = await FlowTransitionProposal.propose(p, {
+      flowInstance: "ad4m://flow/instance/inst-live-2",
+      fromState: "Identified",
+      toState: "InProgress",
+      proposer: "did:example:bob",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-29T23:50:00Z",
+    });
+
+    const all = await FlowTransitionProposal.findAll(p);
+    expect(all).to.have.lengthOf(1);
+    const hydrated = all[0];
+    // Fields not written must hydrate to their @Property defaults — either
+    // undefined or the empty-string / empty-array init — never a lingering
+    // sibling proposal's value.
+    expect(hydrated.rationale ?? "").to.equal("");
+    expect(hydrated.runUri ?? "").to.equal("");
+    expect(hydrated.evidence ?? []).to.deep.equal([]);
+    // But the required scaffolding is still there:
+    expect(hydrated.flowInstance).to.equal("ad4m://flow/instance/inst-live-2");
+    expect(hydrated.fromState).to.equal("Identified");
+    expect(hydrated.toState).to.equal("InProgress");
+    // And the hash of empty inputs is still deterministic + reproducible.
+    expect(hydrated.evidenceHashes).to.equal(computeFlowEvidenceHash([], []));
+    // Keep referencing the caller-visible return so a lint pass can't strip
+    // the .propose() call to a dangling await.
+    expect(minted.proposer).to.equal("did:example:bob");
+  });
+
+  it("rejects empty toState / proposer at the factory boundary (no on-graph write)", async () => {
+    let caughtToState: unknown = null;
+    try {
+      await FlowTransitionProposal.propose(p, {
+        flowInstance: "ad4m://flow/instance/x",
+        fromState: "A",
+        toState: "",
+        proposer: "did:example:c",
+        evidence: [],
+        classNames: [],
+      });
+    } catch (e) {
+      caughtToState = e;
+    }
+    expect(String(caughtToState)).to.match(/toState is required/);
+
+    let caughtProposer: unknown = null;
+    try {
+      await FlowTransitionProposal.propose(p, {
+        flowInstance: "ad4m://flow/instance/x",
+        fromState: "A",
+        toState: "B",
+        proposer: "",
+        evidence: [],
+        classNames: [],
+      });
+    } catch (e) {
+      caughtProposer = e;
+    }
+    expect(String(caughtProposer)).to.match(/proposer is required/);
+
+    // Neither rejected call may have leaked a partial write on-graph.
+    const all = await FlowTransitionProposal.findAll(p);
+    expect(all).to.deep.equal([]);
   });
 });
 
