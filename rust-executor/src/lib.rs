@@ -448,7 +448,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 ),
             }
         } else {
-            info!("SFU bind address auto-detected: {}", sfu_config.bind_addr.ip());
+            info!(
+                "SFU bind address auto-detected: {}",
+                sfu_config.bind_addr.ip()
+            );
         }
         match crate::sfu::SfuService::start(sfu_config, gossip).await {
             Ok(svc) => info!(
