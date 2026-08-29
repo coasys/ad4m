@@ -307,6 +307,16 @@ pub trait WalletBackend: Send + Sync {
     /// Check if a key with `name` exists.
     fn key_exists(&self, name: &str) -> bool;
 
+    /// Atomically get or create a keypair — if a key with `name` already exists,
+    /// return without modification. Otherwise generate a new one.
+    /// Default uses `key_exists` + `generate_keypair` (non-atomic fallback).
+    fn get_or_create_keypair(&self, name: &str) -> Result<(), AnyError> {
+        if !self.key_exists(name) {
+            self.generate_keypair(name)?;
+        }
+        Ok(())
+    }
+
     /// Downcast support for local-only operations (export, unlock, etc.).
     fn as_any(&self) -> &dyn Any;
 
@@ -339,10 +349,10 @@ pub trait WalletBackend: Send + Sync {
     fn load(&self, _data: &str) {}
 
     /// Import a DID's keys by resolving the DID string.
-    /// Shared mode: delegates to `generate_keypair`.
-    fn initialize_keys(&self, name: &str, _did: &str) -> Option<did_key::Document> {
-        let _ = self.generate_keypair(name);
-        self.get_did_document(name)
+    /// Default: returns None (shared backends cannot import local key material).
+    /// LocalWallet overrides this to resolve the DID and import its keys.
+    fn initialize_keys(&self, _name: &str, _did: &str) -> Option<did_key::Document> {
+        None
     }
 }
 
@@ -468,6 +478,14 @@ impl WalletBackend for LocalWallet {
         wallet.get_did_document(&name.to_string()).is_some()
     }
 
+    fn get_or_create_keypair(&self, name: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        if wallet.get_did_document(&name.to_string()).is_none() {
+            wallet.generate_keypair(name.to_string());
+        }
+        Ok(())
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -524,23 +542,37 @@ const SHARED_WALLET_CACHE_TTL_SECS: u64 = 300;
 /// but the actual Ed25519 sign operation runs in this process.
 pub struct SharedWallet {
     base_url: String,
+    token: String,
     client: reqwest::blocking::Client,
     cache: RwLock<std::collections::HashMap<String, CachedKey>>,
 }
 
 impl SharedWallet {
-    pub fn new(base_url: String) -> Self {
+    pub fn new(base_url: String, token: String) -> Self {
         SharedWallet {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: reqwest::blocking::Client::new(),
+            token,
+            client: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to build SharedWallet HTTP client"),
             cache: RwLock::new(std::collections::HashMap::new()),
         }
+    }
+
+    fn auth_header(&self) -> String {
+        format!("Bearer {}", self.token)
     }
 
     /// Fetch key material from the backend, populating the cache on success.
     fn fetch_and_cache(&self, name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
         let url = format!("{}/keys/{}", self.base_url, name);
-        let resp = self.client.get(&url).send().ok()?;
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .ok()?;
         if !resp.status().is_success() {
             return None;
         }
@@ -590,6 +622,7 @@ impl WalletBackend for SharedWallet {
         let resp = self
             .client
             .post(&url)
+            .header("Authorization", self.auth_header())
             .send()
             .map_err(|e| anyhow!("shared wallet: generate_keypair failed: {}", e))?;
         if !resp.status().is_success() {
@@ -625,7 +658,12 @@ impl WalletBackend for SharedWallet {
 
     fn list_key_names(&self) -> Vec<String> {
         let url = format!("{}/keys", self.base_url);
-        let resp = match self.client.get(&url).send() {
+        let resp = match self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+        {
             Ok(r) if r.status().is_success() => r,
             _ => return vec![],
         };
@@ -645,6 +683,7 @@ impl WalletBackend for SharedWallet {
         let url = format!("{}/keys/{}/exists", self.base_url, name);
         self.client
             .get(&url)
+            .header("Authorization", self.auth_header())
             .send()
             .map(|r| r.status().is_success())
             .unwrap_or(false)

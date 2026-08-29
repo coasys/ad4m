@@ -388,7 +388,7 @@ impl AgentService {
             "🔧 ensure_user_key_exists() called for user: '{}'",
             user_email
         );
-        log::debug!("🔧 Available keys before check: {:?}", available_keys);
+        log::debug!("🔧 Keys in wallet: {} total", available_keys.len());
 
         if backend.get_did_document(user_email).is_some() {
             log::debug!("✅ Key already exists for user: '{}'", user_email);
@@ -400,10 +400,10 @@ impl AgentService {
             user_email
         );
         log::warn!(
-            "⚠️  This will create a NEW DID! Available keys were: {:?}",
-            available_keys
+            "⚠️  This will create a NEW DID! {} keys in wallet",
+            available_keys.len()
         );
-        backend.generate_keypair(user_email)?;
+        backend.get_or_create_keypair(user_email)?;
 
         Ok(())
     }
@@ -414,13 +414,13 @@ impl AgentService {
 
         let available_keys = backend.list_key_names();
         log::trace!("🔍 get_user_agent_data() called for user: '{}'", user_email);
-        log::trace!("🔍 Available keys in wallet: {:?}", available_keys);
+        log::trace!("🔍 Keys in wallet: {} total", available_keys.len());
 
         let did_document = backend.get_did_document(user_email).ok_or_else(|| {
             log::error!(
-                "❌ No key found for user '{}'. Available keys: {:?}",
+                "❌ No key found for user '{}'. {} keys in wallet",
                 user_email,
-                available_keys
+                available_keys.len()
             );
             anyhow!("No key found for user {}", user_email)
         })?;
