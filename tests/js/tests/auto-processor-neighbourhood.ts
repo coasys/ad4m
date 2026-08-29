@@ -251,7 +251,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           let lastCount = retired().length;
           let lastChangeAt = Date.now();
           while (Date.now() < deadline) {
-            await sleep(250);
+            await sleep(Math.min(250, remainingMs()));
             const cur = retired().length;
             if (cur !== lastCount) {
               lastCount = cur;
