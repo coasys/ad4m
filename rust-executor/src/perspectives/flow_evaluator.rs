@@ -2731,4 +2731,236 @@ mod e2e_tests {
              writing an empty scalar bloats the graph with a link carrying no signal",
         );
     }
+
+    // ---------------------------------------------------------------------
+    // Slice 10.7d — full-stack harness→engine end-to-end
+    //
+    // The 10.6c tests above prove `run_engine_proposal_pass` writes a
+    // rationale when handed a `LlmProposalHint` directly. The 10.7b tests
+    // (in `ai_service::harness::flow_propose`) prove the decorator turns a
+    // `_propose_transition` tool call into a buffered hint. This test
+    // stitches BOTH halves plus the harness runner (`run_with_tools`)
+    // together against a real perspective:
+    //
+    //   ScriptedLLM emits `Delivery_propose_transition`
+    //     → FlowTransitionProposeProvider.call() validates + buffers
+    //     → run_with_tools loop terminates on the follow-up plain answer
+    //     → flow_buffer.drain() → &llm_hints
+    //     → run_engine_proposal_pass matches (instance, toState)
+    //     → FlowTransitionProposal written on-graph with `rationale`
+    //
+    // The only unit-mocked seam is the LLM. Everything else — the buffer,
+    // the decorator, the harness loop, the SemanticCheck gate, the on-graph
+    // writer — is the real implementation the runner uses. Slice 10.7c
+    // (`run.rs`) wires these together identically; if this test passes and
+    // the strategy path's 10.6c test passes, the runner's wiring has no
+    // further seam to break.
+    // ---------------------------------------------------------------------
+
+    /// Scripted [`CompletionSource`] that returns a queued
+    /// [`HarnessCompletion`] per `complete()` call and records what the
+    /// harness advertised as tools on each round. Symmetric to the
+    /// `ScriptedLLM` fixture inside `ai_service::harness::mod::tests`, but
+    /// local to this test module so we don't have to make the harness's
+    /// test-only doubles `pub(crate)` for one cross-module test.
+    struct ScriptedLlm {
+        script: std::sync::Mutex<Vec<crate::ai_service::harness::HarnessCompletion>>,
+        calls: std::sync::Mutex<
+            Vec<(
+                Vec<serde_json::Value>,
+                Vec<crate::ai_service::harness::provider::ToolSchema>,
+            )>,
+        >,
+    }
+
+    impl ScriptedLlm {
+        fn new(script: Vec<crate::ai_service::harness::HarnessCompletion>) -> Self {
+            Self {
+                script: std::sync::Mutex::new(script),
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn tools_on_call(&self, n: usize) -> Vec<crate::ai_service::harness::provider::ToolSchema> {
+            self.calls.lock().unwrap()[n].1.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::ai_service::harness::CompletionSource for ScriptedLlm {
+        async fn complete(
+            &self,
+            _model_id: &str,
+            messages: &[serde_json::Value],
+            tools: Vec<crate::ai_service::harness::provider::ToolSchema>,
+        ) -> anyhow::Result<crate::ai_service::harness::HarnessCompletion> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((messages.to_vec(), tools.clone()));
+            let next = self.script.lock().unwrap().remove(0);
+            Ok(next)
+        }
+    }
+
+    /// Minimal inner [`ToolProvider`] — advertises no tools, errors on any
+    /// call. The whole point of this test is that the decorator (added
+    /// on top) is the one the LLM's `_propose_transition` call routes to;
+    /// the inner surface never comes into play. A real inner in production
+    /// would be `ProposeWritesProvider` wrapping `Ad4mToolProvider`, but
+    /// those would drag in an MCP context + AIService we don't need to
+    /// prove the flow-attribution pipeline.
+    struct EmptyInner;
+
+    #[async_trait::async_trait]
+    impl crate::ai_service::harness::provider::ToolProvider for EmptyInner {
+        async fn tools(&self) -> Vec<crate::ai_service::harness::provider::ToolSchema> {
+            Vec::new()
+        }
+        async fn call(&self, name: &str, _args: serde_json::Value) -> anyhow::Result<String> {
+            Err(anyhow::anyhow!(
+                "EmptyInner: no non-flow tools are advertised in this test; got call `{name}`"
+            ))
+        }
+    }
+
+    /// Scripted LLM emits `Delivery_propose_transition` on turn 1 with a
+    /// reason string, then a plain answer on turn 2. After the harness
+    /// loop terminates, the flow buffer holds one hint whose `instance` /
+    /// `toState` / `reason` round-tripped through the decorator; feeding
+    /// that hint into `run_engine_proposal_pass` produces a
+    /// FlowTransitionProposal whose on-graph `rationale` matches the LLM's
+    /// original `reason` verbatim. This is the load-bearing "harness
+    /// tool-call routes attribution all the way to the graph" property.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn harness_propose_transition_tool_call_routes_rationale_to_graph_e2e() {
+        use crate::ai_service::harness::flow_propose::{
+            propose_transition_tool_name, FlowProposalBuffer, FlowTransitionProposeProvider,
+        };
+        use crate::ai_service::harness::{
+            run_with_tools, HarnessCompletion, HarnessConfig, HarnessToolCall,
+        };
+        use crate::perspectives::flow_context::gather_active_flow_contexts;
+        use std::sync::Arc;
+
+        // 1) Seed a real perspective with the Delivery flow, a satisfying
+        //    Task, and one FlowInstance in `identified` — the same fixture
+        //    the 10.6c tests use, so any drift between hint-driven and
+        //    tool-call-driven attribution surfaces immediately.
+        let (mut perspective, ctx, inst_uri) =
+            seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
+
+        // 2) Build the FlowContext list exactly as `run.rs` does. Passing
+        //    `None` for `scope` matches how the auto-processor call site
+        //    was passing when this slice was written.
+        let active_flows = gather_active_flow_contexts(&perspective, None).await;
+        assert_eq!(
+            active_flows.len(),
+            1,
+            "fixture ⇒ one Delivery FlowInstance ⇒ one FlowContext, got {active_flows:?}",
+        );
+        assert_eq!(active_flows[0].flow_name, "Delivery");
+        assert_eq!(active_flows[0].instance_uri, inst_uri);
+
+        // 3) Compose the ToolProvider stack the same way the runner does:
+        //    inner (no-op here) → FlowTransitionProposeProvider wrapping
+        //    it with per-flow `_propose_transition` tools.
+        let flow_buffer = FlowProposalBuffer::new();
+        let provider: Arc<dyn crate::ai_service::harness::provider::ToolProvider> =
+            Arc::new(FlowTransitionProposeProvider::new(
+                Arc::new(EmptyInner),
+                active_flows.clone(),
+                flow_buffer.clone(),
+            ));
+
+        // 4) Script the LLM: one propose-transition turn, then a plain
+        //    answer to terminate the loop.
+        let expected_reason =
+            "Task `ad4m://task/1` (Onboard Ana) has been scoped; advancing to `scoped`.";
+        let script = vec![
+            HarnessCompletion {
+                content: String::new(),
+                tool_calls: vec![HarnessToolCall {
+                    id: "call-1".to_string(),
+                    name: propose_transition_tool_name("Delivery"),
+                    arguments: serde_json::json!({
+                        "instance": inst_uri.clone(),
+                        "toState": "scoped",
+                        "reason": expected_reason,
+                    }),
+                }],
+            },
+            HarnessCompletion {
+                content: "done".to_string(),
+                tool_calls: Vec::new(),
+            },
+        ];
+        let llm = Arc::new(ScriptedLlm::new(script));
+
+        // 5) Drive the harness loop. Empty initial_messages is fine —
+        //    this test's contract is "tool call routes to buffer,"
+        //    prompt-shaping is covered by slice 10.2 tests.
+        let _final_text = run_with_tools(
+            "test-model-42",
+            vec![serde_json::json!({"role": "user", "content": "extract"})],
+            provider,
+            llm.clone(),
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .expect("run_with_tools should terminate cleanly on the plain-answer turn");
+
+        // 6) The decorator must have advertised `Delivery_propose_transition`
+        //    on the first round's tools[] — proves the wire-through from
+        //    active_flows into the tool schema is live (not just the
+        //    dispatch path).
+        let advertised = llm.tools_on_call(0);
+        assert!(
+            advertised
+                .iter()
+                .any(|t| t.name == propose_transition_tool_name("Delivery")),
+            "first-round tools[] must advertise `Delivery_propose_transition`, got: {:?}",
+            advertised.iter().map(|t| &t.name).collect::<Vec<_>>(),
+        );
+
+        // 7) Buffer must hold exactly one hint carrying the LLM's args
+        //    verbatim (round-trip through JSON parsing + validation).
+        let llm_hints = flow_buffer.drain();
+        assert_eq!(
+            llm_hints.len(),
+            1,
+            "one tool call ⇒ one buffered LlmProposalHint, got {llm_hints:?}",
+        );
+        assert_eq!(llm_hints[0].instance_uri, inst_uri);
+        assert_eq!(llm_hints[0].to_state, "scoped");
+        assert_eq!(llm_hints[0].reason.as_deref(), Some(expected_reason));
+
+        // 8) Engine pass with a Pass-verdict semantic check ⇒ exactly one
+        //    FlowTransitionProposal, and its `rationale` matches the LLM's
+        //    original `reason` verbatim. This is the full-stack proof.
+        let semantic_check = CannedLlm::responding("YES");
+        let minted = run_engine_proposal_pass(
+            &mut perspective,
+            None,
+            &ctx,
+            Some((&semantic_check, "test-model-42")),
+            &llm_hints,
+        )
+        .await;
+        assert_eq!(
+            minted.len(),
+            1,
+            "matched hint + Pass verdict ⇒ 1 proposal, got {minted:?}",
+        );
+        let on_graph_rationale = read_rationale(&perspective, &minted[0])
+            .await
+            .expect("full-stack matched hint MUST write a rationale link on the proposal");
+        assert_eq!(
+            on_graph_rationale, expected_reason,
+            "on-graph rationale must round-trip the LLM's original `reason` verbatim through \
+             the tool-call → decorator → buffer → engine → writer pipeline",
+        );
+    }
 }
