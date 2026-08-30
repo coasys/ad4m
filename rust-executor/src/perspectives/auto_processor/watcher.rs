@@ -18,8 +18,8 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    run_interpretation_with_strategy_and_model, DedupStrategy, InterpretationRunCursor,
-    TranscriptTurn,
+    run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
+    DedupStrategy, InterpretationRunCursor, TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::model_query::types::Scope;
@@ -708,6 +708,16 @@ pub async fn run_one_pass(
         HashSet::new()
     };
 
+    let cursor = InterpretationRunCursor {
+        processor: super::config::processor_node(&cfg.processor_id),
+        sources: item_ids.clone(),
+    };
+    // Build the emit context once so both fork branches can share it.
+    // `cfg.emit_debug_events == true` enables the mid-pass `LlmRequestSent`
+    // / `LlmResponseReceived` events (dev PR #903) — for the classic path
+    // via `run_interpretation_with_strategy_and_model`, for the harness
+    // path we pass this into `run_with_tools` for per-tool-call events
+    // in a follow-up commit on this branch (Nico 2026-08-25).
     let emit_ctx = cfg
         .emit_debug_events
         .then(|| super::events::InterpretationEmitContext {
@@ -717,25 +727,78 @@ pub async fn run_one_pass(
             item_ids: item_ids.clone(),
             batch_key: batch_key_hex.clone(),
         });
-    let outcome = run_interpretation_with_strategy_and_model(
-        perspective,
-        &shapes,
-        &transcript,
-        &base_prefix,
-        context,
-        &dedup,
-        None,
-        cfg.existing_scope.as_ref(),
-        Some(&InterpretationRunCursor {
-            processor: super::config::processor_node(&cfg.processor_id),
-            sources: item_ids.clone(),
-        }),
-        cfg.emit_debug_events,
-        emit_ctx.as_ref(),
-    )
-    .await?;
-    let bases = outcome.bases;
-    let debug = outcome.debug;
+
+    // Fork: harness-dispatched pass when the operator opted in via
+    // `AutoProcessorConfig.max_tool_calls > 0`; otherwise the classic
+    // single-shot LLM+parse+plan pipeline. The two paths converge on the
+    // same overlay-writing gate (`apply_with_overlay`), so downstream
+    // provenance + processed signalling is identical.
+    //
+    // Debug carriage differs by path today:
+    // * classic → `InterpretationOutcome { bases, debug }` — `debug`
+    //   carries the raw prompt/response for persistence on the
+    //   InterpretationRun node.
+    // * harness → `Vec<String>` bases only. The harness path emits
+    //   per-tool-call events via its own logging surface (see harness/mod.rs
+    //   `harness: round=` prints); persisting the full transcript on
+    //   InterpretationRun is a follow-up (there's no single prompt/response
+    //   to snapshot — it's a multi-turn loop).
+    let (bases, debug) = match cfg.max_tool_calls {
+        Some(n) if n > 0 => {
+            let bases = run_interpretation_with_harness_and_model(
+                perspective,
+                &shapes,
+                &transcript,
+                &base_prefix,
+                context,
+                None,
+                cfg.existing_scope.as_ref(),
+                Some(&cursor),
+                n,
+                // Auto-processor is an internal caller — no per-pass user
+                // token to bill. MCP admin credential (if configured) is
+                // read from env inside the harness path.
+                None,
+                // `emit_debug_events` gates the same event stream the
+                // classic path uses; `None` when disabled means the
+                // per-tool-call events also stay silent.
+                emit_ctx.as_ref(),
+                // Dedup on drain: the auto-processor runs indefinitely, so
+                // re-proposed instances must collapse to updates (not
+                // unbounded duplicate creates). James Weir PR #911 review.
+                true,
+                // No per-pass credit gate on the auto-processor path:
+                // the watcher runs as an internal service (no user
+                // session to bill against) and each completion still
+                // fire-and-forgets bill_prompt_if_authed via AIService.
+                None,
+            )
+            .await?;
+            (bases, None)
+        }
+        _ => {
+            let outcome = run_interpretation_with_strategy_and_model(
+                perspective,
+                &shapes,
+                &transcript,
+                &base_prefix,
+                context,
+                &dedup,
+                None,
+                // Existing-instance scope: constrains dedup to a subtree
+                // when the processor config specifies one, e.g. "existing
+                // Task instances that live under project X." `None` keeps
+                // the whole-perspective existing set — the pre-scope-config
+                // behaviour.
+                cfg.existing_scope.as_ref(),
+                Some(&cursor),
+                cfg.emit_debug_events,
+                emit_ctx.as_ref(),
+            )
+            .await?;
+            (outcome.bases, outcome.debug)
+        }
+    };
 
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the
@@ -871,6 +934,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         }
     }

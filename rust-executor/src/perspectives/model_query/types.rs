@@ -40,6 +40,15 @@ pub struct WhereOps {
     pub gte: Option<f64>,
     #[serde(default)]
     pub contains: Option<Value>,
+    /// Relation quantifier: at least one linked target satisfies the nested
+    /// clause. `{ comments: { some: { author: "did:…" } } }`. An empty clause
+    /// means "has at least one".
+    #[serde(default)]
+    pub some: Option<BTreeMap<String, WhereCondition>>,
+    /// Relation quantifier: no linked target satisfies the nested clause.
+    /// `{ comments: { none: {} } }` is "has none at all".
+    #[serde(default)]
+    pub none: Option<BTreeMap<String, WhereCondition>>,
 }
 
 impl Default for WhereOps {
@@ -52,6 +61,8 @@ impl Default for WhereOps {
             gt: None,
             gte: None,
             contains: None,
+            some: None,
+            none: None,
         }
     }
 }

@@ -13,9 +13,10 @@
 
 use super::interpretation::{
     apply_interpretation_ops, class_local_name, existing_instance_context,
-    plan_interpretation_ops_with_context, run_interpretation, run_interpretation_with_strategy,
-    DedupStrategy, ExistingInstances, ExistingLinks, InstanceContext, InterpretationOp,
-    ProposedInstance, TranscriptTurn,
+    plan_interpretation_ops_with_context, run_interpretation,
+    run_interpretation_with_harness_and_model, run_interpretation_with_strategy, DedupStrategy,
+    ExistingInstances, ExistingLinks, InstanceContext, InterpretationOp, ProposedInstance,
+    TranscriptTurn,
 };
 use super::model_query::shape::load_shape;
 use super::model_query::types::{ModelShape, Scope};
@@ -81,6 +82,27 @@ pub(crate) const TASK_WITH_RELATION_SDNA: &str = r#"{
     {"path":"ns://type","name":"type","has_value":"ns://task","min_count":1,"max_count":1},
     {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Imperative summary of the task.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
     {"path":"ns://blocks","name":"blocks","relation_kind":"hasMany","target_class_name":"Task","class":"ns://TaskShape","interpretation_hint":"Other tasks this one blocks."}
+  ]
+}"#;
+
+/// Intention class carrying a `basedOn` hasMany relation to Belief — the
+/// relation-typed shape the harness path exercises in `interpretation_harness_e2e`.
+///
+/// Locally mirrors the harder TS integration test (3 seeded beliefs +
+/// basedOn back-linking) so failures can be reproduced against Marvin without
+/// waiting on the full JS suite in CI.
+///
+/// Class-level hint tells the LLM to `belief_query` first and link to the
+/// discovered URIs via `basedOn`, never to invent new belief URIs.
+pub(crate) const INTENTION_WITH_BASED_ON_SDNA: &str = r#"{
+  "target_class":"ns://Intention",
+  "interpretation_hint":"A first-person commitment to do something the speaker themselves will act on (e.g., 'I'll write X', 'I plan to do Y'). CRITICAL WORKFLOW: if the intention rests on existing beliefs already in the graph, you MUST first call belief_query to discover their URIs, then link the new intention via basedOn to those URIs using intention_propose_link_child. Never invent belief URIs and never recreate a belief that already exists.",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://intention"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://intention","min_count":1,"max_count":1},
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","interpretation_hint":"Imperative summary of the commitment.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+    {"path":"ns://owner","name":"owner","min_count":0,"max_count":1,"resolve_language":"literal","interpretation_hint":"Who committed to it, if stated.","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://owner","target":"value"}]},
+    {"path":"ns://basedOn","name":"basedOn","relation_kind":"hasMany","target_class_name":"Belief","class":"ns://BeliefShape","interpretation_hint":"Beliefs this intention rests on — link to existing belief URIs discovered via belief_query. Do not invent URIs and do not recreate beliefs that already exist."}
   ]
 }"#;
 
@@ -426,6 +448,113 @@ pub(crate) async fn run_interpretation_e2e_scoped(
     let placements = read_back_placements(perspective, &bases).await;
     print_placements(&placements);
     bases
+}
+
+/// Run the tool-calling harness interpretation path against the real LLM,
+/// returning affected bases with their written links (parallel to
+/// [`run_interpretation_e2e`], but through the harness dispatch — the LLM
+/// drives extraction by tool calls rather than one big JSON blob).
+pub(crate) async fn run_interpretation_harness_e2e(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    transcript: &[(&str, &str)],
+    ctx: &AgentContext,
+    max_tool_calls: u32,
+) -> Vec<(String, Vec<Link>)> {
+    let transcript: Vec<TranscriptTurn> = transcript
+        .iter()
+        .map(|(s, t)| TranscriptTurn::from_speaker_text(*s, *t))
+        .collect();
+    let bases = run_interpretation_with_harness_and_model(
+        perspective,
+        shapes,
+        &transcript,
+        "soa://ext/",
+        ctx,
+        None,
+        None,
+        None,
+        max_tool_calls,
+        None,
+        // Test helper: no auto-processor emit context (event stream is not
+        // asserted on here; scenario E's own tests would attach one if we
+        // add event-shape assertions in a follow-up).
+        None,
+        // Real-LLM test-support: matches the WS-RPC one-shot semantic,
+        // dedup-on-drain off (scenarios rely on the LLM's own `_query`
+        // discipline, which is exactly what the scenario asserts on).
+        false,
+        // No per-completion credit gate: local Ollama runs at rate=0 so
+        // the ledger deltas are zero regardless, and asserting on
+        // billing side-effects is not part of these scenarios.
+        None,
+    )
+    .await
+    .expect("run_interpretation_with_harness against real LLM to succeed");
+    let placements = read_back_placements(perspective, &bases).await;
+    print_placements(&placements);
+    placements
+}
+
+/// Set up + drive the harness path in one call. Same shape as [`run_e2e`], but
+/// the LLM sees the tool surface and writes via `_propose_*` calls buffered
+/// into an overlay-applied `InterpretationRun`.
+pub(crate) async fn run_harness_e2e(
+    class_sdnas: &[(&str, &str)],
+    transcript: &[(&str, &str)],
+    max_tool_calls: u32,
+) -> (
+    PerspectiveInstance,
+    Vec<ModelShape>,
+    Vec<(String, Vec<Link>)>,
+) {
+    // Surface the harness `log::warn!` diagnostics (round=, tool_calls=,
+    // content_preview=) added in commit 5c34ed868. Without an env_logger
+    // init, tests are blind to the LLM's per-round choices — observed
+    // 2026-08-24 when harness_intention_links_to_seeded_beliefs failed
+    // 8/8 and the placements list alone couldn't tell us which tool the
+    // model was reaching for. `try_init` makes this idempotent across
+    // scenarios, and defaulting RUST_LOG to `warn` if unset keeps output
+    // scoped to what the harness explicitly emits.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .is_test(false) // route to stderr so --nocapture shows it
+        .try_init();
+    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(class_sdnas).await;
+    let placements =
+        run_interpretation_harness_e2e(&mut perspective, &shapes, transcript, &ctx, max_tool_calls)
+            .await;
+    (perspective, shapes, placements)
+}
+
+/// [`run_harness_e2e`] with retry: LLM tool-calling is more variable than the
+/// single-shot path (occasionally emits an answer without ever calling
+/// `_propose_*`), so give it up to `attempts` fresh perspectives until the
+/// `ok` predicate holds on `graph_count_by_type`.
+pub(crate) async fn run_harness_e2e_until(
+    class_sdnas: &[(&str, &str)],
+    transcript: &[(&str, &str)],
+    max_tool_calls: u32,
+    attempts: u8,
+    ok: impl Fn(&HashMap<String, usize>) -> bool,
+) -> (
+    PerspectiveInstance,
+    Vec<ModelShape>,
+    Vec<(String, Vec<Link>)>,
+) {
+    let mut last = None;
+    for i in 1..=attempts {
+        let (p, shapes, placements) =
+            run_harness_e2e(class_sdnas, transcript, max_tool_calls).await;
+        let counts = graph_count_by_type(&p, &shapes).await;
+        if ok(&counts) {
+            return (p, shapes, placements);
+        }
+        eprintln!(
+            "[harness-e2e] attempt {i}/{attempts} did not satisfy retry guard (got {counts:?}); retrying"
+        );
+        last = Some((p, shapes, placements));
+    }
+    last.expect("run_harness_e2e_until: attempts must be >= 1")
 }
 
 /// Convenience for the simple single-shot tests: set up + run in one call.
