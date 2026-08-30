@@ -21,6 +21,7 @@ export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/FlowModels";
 export * from "./perspectives/FlowEvidenceHash";
 export * from "./perspectives/FlowVoteAggregator";
+export * from "./perspectives/FlowConsensusFire";
 export * from "./perspectives/SparqlBindings";
 export * from "./perspectives/WakerSubscriptionManager";
 export * from "./perspectives/PerspectiveDiff";
