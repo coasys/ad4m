@@ -1018,6 +1018,215 @@ describe("FlowInstance.currentProposals — 10.11 OO wrapper", function () {
   });
 });
 
+// ── FlowInstance.aggregateVotes — 10.12 OO wrapper (design doc §4.3 / §7) ──
+// Live-perspective proof that `instance.aggregateVotes(rule)` matches
+// `aggregateFlowVotes(await FlowTransitionProposal.listForInstance(p, instance.id), rule)`
+// byte-for-byte. Unit suite in `core/src/perspectives/FlowModels.test.ts`
+// locks the composition-argument shape via poison-perspective + jest.spyOn;
+// this suite proves the composition reaches the on-graph read path, the
+// tally shape hydrates identically for both call surfaces, and the fires
+// selection lines up with the client-side consensus loop (10.8f/g).
+
+describe("FlowInstance.aggregateVotes — 10.12 OO wrapper", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-instance-aggregate-votes");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-instance-aggregate-votes-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    await FlowTransitionProposal.register(p);
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    const identified: FlowState = {
+      name: "Identified",
+      value: 0,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
+    };
+    const inProgress: FlowState = {
+      name: "InProgress",
+      value: 1,
+      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
+    };
+    flow.addState(identified);
+    flow.addState(inProgress);
+    return flow;
+  }
+
+  it("returns the same result as aggregateFlowVotes(await listForInstance, rule) for the instance", async () => {
+    // Write 3 proposals from 3 distinct DIDs at n:2 — consensus fires,
+    // and the fires-candidate selection must match the static-composition
+    // path byte-for-byte (contributing[] identity, distinctProposers
+    // ordering, requiredCount, consensusReached).
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/agg-votes");
+
+    const p1 = await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:alice",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-30T10:00:00Z",
+    });
+    const p2 = await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:bob",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-30T11:00:00Z",
+    });
+    const p3 = await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:carol",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-30T12:00:00Z",
+    });
+
+    const rule = { n: 2 };
+    const viaWrapper = await instance.aggregateVotes(rule);
+    const bag = await FlowTransitionProposal.listForInstance(p, instance.id);
+    const viaStatic = aggregateFlowVotes(bag, rule);
+
+    // Same tally shape end-to-end. `contributing` carries hydrated
+    // FlowTransitionProposal instances; compare by id since two hydrated
+    // objects for the same node are not `===`.
+    expect(viaWrapper.tallies.length).to.equal(1);
+    expect(viaWrapper.tallies[0].fromState).to.equal(viaStatic.tallies[0].fromState);
+    expect(viaWrapper.tallies[0].toState).to.equal(viaStatic.tallies[0].toState);
+    expect(viaWrapper.tallies[0].distinctProposers).to.deep.equal(
+      viaStatic.tallies[0].distinctProposers,
+    );
+    expect(viaWrapper.tallies[0].eligibleProposers).to.deep.equal(
+      viaStatic.tallies[0].eligibleProposers,
+    );
+    expect(viaWrapper.tallies[0].requiredCount).to.equal(2);
+    expect(viaWrapper.tallies[0].consensusReached).to.equal(true);
+    expect(viaWrapper.tallies[0].contributing.map((x) => x.id)).to.deep.equal(
+      viaStatic.tallies[0].contributing.map((x) => x.id),
+    );
+
+    // fires selection reaches the same tally on both paths.
+    expect(viaWrapper.fires).to.not.equal(undefined);
+    expect(viaWrapper.fires!.fromState).to.equal(viaStatic.fires!.fromState);
+    expect(viaWrapper.fires!.toState).to.equal(viaStatic.fires!.toState);
+
+    // The 3 proposals actually landed and hydrated back through the
+    // listForInstance path in oldest-first order — sanity check the
+    // fixture the composition relies on.
+    expect(bag.length).to.equal(3);
+    expect(bag[0].id).to.equal(p1.id);
+    expect(bag[1].id).to.equal(p2.id);
+    expect(bag[2].id).to.equal(p3.id);
+  });
+
+  it("reports consensusReached=false when the bag falls below rule.n (fires undefined)", async () => {
+    // 1 proposal with n:2 → no fires. Prevents accidental fires when
+    // the wrapper silently defaults to n:1 (design §7.1 default is
+    // hardcoded in the helper, not the wrapper — this test locks that).
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/agg-below");
+
+    await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:solo",
+      evidence: [],
+      classNames: [],
+    });
+
+    const result = await instance.aggregateVotes({ n: 2 });
+    expect(result.tallies.length).to.equal(1);
+    expect(result.tallies[0].consensusReached).to.equal(false);
+    expect(result.fires).to.equal(undefined);
+  });
+
+  it("defaults to { n: 1 } when consensusRule omitted (matches helper contract)", async () => {
+    // Wrapper does not substitute — pass-through of undefined forces the
+    // helper's default to fire. 1 proposal + no rule → fires the sole
+    // tally. Regression here would surface if a maintainer added a
+    // "helpful" wrapper-level default that diverged from the helper's.
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/agg-default");
+
+    await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:alone",
+      evidence: [],
+      classNames: [],
+    });
+
+    const result = await instance.aggregateVotes();
+    expect(result.tallies.length).to.equal(1);
+    expect(result.tallies[0].requiredCount).to.equal(1);
+    expect(result.tallies[0].consensusReached).to.equal(true);
+    expect(result.fires).to.not.equal(undefined);
+    expect(result.fires!.toState).to.equal("InProgress");
+  });
+
+  it("isolates per-instance: a proposal on a sibling FlowInstance never appears in the aggregate", async () => {
+    // Two instances of the same flow on distinct bases. A proposal on B
+    // must not show up in A's aggregate — else consensus firing on A
+    // would move on B's evidence.
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instanceA = await p.startFlowInstance("Delivery", "ad4m://task/agg-iso-a");
+    const instanceB = await p.startFlowInstance("Delivery", "ad4m://task/agg-iso-b");
+
+    await instanceB.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:only-b",
+      evidence: [],
+      classNames: [],
+    });
+
+    const forA = await instanceA.aggregateVotes();
+    expect(forA.tallies).to.deep.equal([]);
+    expect(forA.fires).to.equal(undefined);
+
+    const forB = await instanceB.aggregateVotes();
+    expect(forB.tallies.length).to.equal(1);
+    expect(forB.fires).to.not.equal(undefined);
+  });
+
+  it("throws when this.id is empty (unhydrated instance) — defence fires before perspective touch", async () => {
+    // Guard proof — clear the Ad4mModel backing field, then call. If the
+    // guard regressed we'd silently return { tallies: [], fires: undefined }
+    // (looks like consensus not reached instead of "wrong operand").
+    const instance = new FlowInstance(p, "ad4m://flow/instance/never-saved");
+    (instance as any)._baseExpression = "";
+    let caught: unknown = null;
+    try {
+      await instance.aggregateVotes();
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).to.match(/instance has no id/);
+  });
+});
+
 // ── PerspectiveProxy.getFlowInstances — v5 read side (design doc §4.3 / §5) ──
 // Enumerates live FlowInstance records; optionally narrowed by flow-name
 // discriminator. Feeds §5 Model C prompt gathering and UI indicators. Class

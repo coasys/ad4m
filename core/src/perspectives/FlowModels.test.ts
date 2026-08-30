@@ -5,6 +5,7 @@ import {
   buildFlowTransitionProposalFields,
 } from "./FlowModels";
 import { computeFlowEvidenceHash } from "./FlowEvidenceHash";
+import * as FlowVoteAggregatorModule from "./FlowVoteAggregator";
 
 /**
  * Unit tests for the pure companion helper of
@@ -358,6 +359,133 @@ describe("FlowInstance.currentProposals (OO wrapper for FlowTransitionProposal.l
       expect(result).toBe(expected);
     } finally {
       spy.mockRestore();
+    }
+  });
+});
+
+describe("FlowInstance.aggregateVotes (OO composition of currentProposals + aggregateFlowVotes)", () => {
+  // Same poison-perspective pattern as .currentProposals: any property
+  // read throws, so the defence guard is proven to fire before the
+  // delegation would touch the perspective proxy.
+  const poison: any = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(
+          "FlowInstance.aggregateVotes leaked past its own defence guard onto the perspective proxy",
+        );
+      },
+    },
+  );
+
+  it("throws when this.id is empty (unhydrated instance)", async () => {
+    // Clear the Ad4mModel-backing `_baseExpression` field so `this.id`
+    // reads empty through the public getter. Mirrors the id-guard tests
+    // on .proposeTransition / .currentProposals.
+    const instance = new FlowInstance(poison, "ad4m://flow/instance/i-1");
+    (instance as any)._baseExpression = "";
+    await expect(instance.aggregateVotes()).rejects.toThrow(
+      /instance has no id/,
+    );
+  });
+
+  it("composes currentProposals() + aggregateFlowVotes: passes the loaded bag, rule, and eligibleDIDs to the helper", async () => {
+    // Spy on both the delegate that loads proposals and the pure helper
+    // that reduces them. Prove the wrapper wires the two together
+    // without transforming either input.
+    const sentinelA = new FlowTransitionProposal(poison, "ad4m://proposal/a");
+    const sentinelB = new FlowTransitionProposal(poison, "ad4m://proposal/b");
+    const loadedBag = [sentinelA, sentinelB];
+    const listSpy = jest
+      .spyOn(FlowTransitionProposal, "listForInstance")
+      .mockResolvedValue(loadedBag);
+
+    const sentinelResult: FlowVoteAggregatorModule.AggregateFlowVotesResult = {
+      tallies: [
+        {
+          fromState: "Identified",
+          toState: "Scoped",
+          distinctProposers: ["did:example:alice"],
+          eligibleProposers: ["did:example:alice"],
+          requiredCount: 2,
+          consensusReached: false,
+          contributing: [sentinelA],
+        },
+      ],
+      fires: undefined,
+    };
+    const aggSpy = jest
+      .spyOn(FlowVoteAggregatorModule, "aggregateFlowVotes")
+      .mockReturnValue(sentinelResult);
+
+    const rule = { n: 2 };
+    const eligibleDIDs = new Set(["did:example:alice", "did:example:bob"]);
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-42");
+      const result = await instance.aggregateVotes(rule, eligibleDIDs);
+
+      expect(listSpy).toHaveBeenCalledTimes(1);
+      const [listPerspective, listUri] = listSpy.mock.calls[0];
+      expect(listPerspective).toBe(poison);
+      expect(listUri).toBe("ad4m://flow/instance/i-42");
+
+      expect(aggSpy).toHaveBeenCalledTimes(1);
+      const [aggProposals, aggRule, aggEligible] = aggSpy.mock.calls[0];
+      // Reference equality: wrapper does not clone / re-sort the bag
+      // before handing it to the helper. Would surface as identity
+      // failures downstream if it did.
+      expect(aggProposals).toBe(loadedBag);
+      expect(aggRule).toBe(rule);
+      expect(aggEligible).toBe(eligibleDIDs);
+
+      // Return value is passed through untouched — reference equality
+      // proves no defensive re-wrap.
+      expect(result).toBe(sentinelResult);
+    } finally {
+      listSpy.mockRestore();
+      aggSpy.mockRestore();
+    }
+  });
+
+  it("passes undefined for both consensusRule and eligibleDIDs when the caller omits them", async () => {
+    // Verifies default-arg pass-through — the helper's own default of
+    // `{ n: 1 }` (design §7.1) must fire in the helper, not be silently
+    // substituted by the wrapper (else consensusRule surface would
+    // fork between OO and static paths).
+    const listSpy = jest
+      .spyOn(FlowTransitionProposal, "listForInstance")
+      .mockResolvedValue([]);
+    const aggSpy = jest
+      .spyOn(FlowVoteAggregatorModule, "aggregateFlowVotes")
+      .mockReturnValue({ tallies: [], fires: undefined });
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-9");
+      await instance.aggregateVotes();
+      expect(aggSpy).toHaveBeenCalledTimes(1);
+      const [, aggRule, aggEligible] = aggSpy.mock.calls[0];
+      expect(aggRule).toBeUndefined();
+      expect(aggEligible).toBeUndefined();
+    } finally {
+      listSpy.mockRestore();
+      aggSpy.mockRestore();
+    }
+  });
+
+  it("propagates aggregateFlowVotes errors verbatim (fromRole without eligibleDIDs)", async () => {
+    // Guard: the wrapper must not swallow the silent-default guard from
+    // aggregateFlowVotes. Feed it a bag + a rule that requires
+    // eligibleDIDs; caller omitted them, so the helper must throw and
+    // the wrapper must let the error surface.
+    const listSpy = jest
+      .spyOn(FlowTransitionProposal, "listForInstance")
+      .mockResolvedValue([]);
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-9");
+      await expect(
+        instance.aggregateVotes({ n: 1, fromRole: "some-role-query" as any }),
+      ).rejects.toThrow(/fromRole/);
+    } finally {
+      listSpy.mockRestore();
     }
   });
 });

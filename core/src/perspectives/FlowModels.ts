@@ -24,6 +24,11 @@ import { HasMany, Optional, Property } from "../model/decorators";
 import { Model } from "../model/decorators";
 import type { PerspectiveProxy } from "./PerspectiveProxy";
 import { computeFlowEvidenceHash } from "./FlowEvidenceHash";
+import {
+  aggregateFlowVotes,
+  type AggregateFlowVotesResult,
+} from "./FlowVoteAggregator";
+import type { ConsensusRule } from "../shacl/SHACLFlow";
 
 // ── FlowTransitionProposal ──────────────────────────────────────────────────
 // Mirrors the Rust hardwired `flow_transition_proposal.json` SDNA (once wired
@@ -340,5 +345,49 @@ export class FlowInstance extends Ad4mModel {
       );
     }
     return FlowTransitionProposal.listForInstance(this.perspective, this.id);
+  }
+
+  /**
+   * OO composition of {@link currentProposals} + {@link aggregateFlowVotes}:
+   * load every proposal on-graph targeting this instance, then reduce the
+   * bag to per-`(fromState, toState)` tallies and (optionally) the firing
+   * candidate.
+   *
+   * Two-line body — no counting logic lives here. `aggregateFlowVotes` owns
+   * the tally shape, the deterministic `fires` selection, and the silent-
+   * default guard on `fromRole`; a UI-level call and a consensus-firing
+   * call must reach the exact same verdict from the same on-graph bag,
+   * which is only true if both go through the pure helper.
+   *
+   * Defence guard (empty `this.id`) fires *before* the delegate call so an
+   * unhydrated instance can't silently return `{ tallies: [], fires:
+   * undefined }` — that would look like "consensus not reached" instead of
+   * "wrong operand".
+   *
+   * @param consensusRule Optional rule; defaults to `{ n: 1 }` per design
+   *   §7.1. Passed through to `aggregateFlowVotes`; the wrapper does not
+   *   read `.fromRole` — role resolution stays with the caller so this
+   *   helper composes with both client-side firing and the Rust auto-
+   *   processor port.
+   * @param eligibleDIDs Required only when `consensusRule.fromRole` is set;
+   *   see `aggregateFlowVotes` for the exact contract (omitting throws).
+   * @throws When `this.id` is empty (unhydrated / unsaved instance).
+   * @throws (via `aggregateFlowVotes`) When `consensusRule.n` is invalid or
+   *   when `fromRole` is present but `eligibleDIDs` is not supplied.
+   */
+  async aggregateVotes(
+    consensusRule?: ConsensusRule,
+    eligibleDIDs?: ReadonlySet<string>,
+  ): Promise<AggregateFlowVotesResult> {
+    if (!this.id) {
+      throw new Error(
+        "FlowInstance.aggregateVotes: instance has no id (call on a hydrated / saved instance)",
+      );
+    }
+    const proposals = await FlowTransitionProposal.listForInstance(
+      this.perspective,
+      this.id,
+    );
+    return aggregateFlowVotes(proposals, consensusRule, eligibleDIDs);
   }
 }
