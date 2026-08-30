@@ -249,6 +249,60 @@ pub(crate) async fn write_flow_transition_proposal(
     Ok(uri)
 }
 
+/// Slice 10.9b1 — writer primitive: advance a `FlowInstance`'s
+/// `currentState` to `to_state` on-graph. Byte-atomic via the SDNA's
+/// `setSingleTarget` setter, which replaces the single existing target
+/// under one `batch_id` (no read-then-write race, no double-link
+/// residue).
+///
+/// **Pure w.r.t. side-effects the caller controls** — `batch_id` is
+/// caller-supplied so the fire path (slice 10.9b2) can bundle the
+/// state-advance with any consumer's follow-on writes (e.g. audit
+/// event, `FlowInstanceAdvance` record) into one atomic commit. Mirrors
+/// [`mint_flow_instance`] and [`write_flow_transition_proposal`].
+///
+/// No stale-state guard here — this is the raw writer. The consensus
+/// fire path (slice 10.9b2) is what checks `expected_from_state` before
+/// calling, so a post-advance vote can't cause a double-fire. Split
+/// this way so the writer stays composable with any other future
+/// caller (e.g. an admin `advanceFlow` WS-RPC) that has its own
+/// pre-condition logic.
+pub(crate) async fn advance_flow_instance_state(
+    perspective: &mut PerspectiveInstance,
+    flow_instance_uri: &str,
+    to_state: &str,
+    batch_id: Option<String>,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    if to_state.is_empty() {
+        return Err(anyhow::anyhow!(
+            "advance_flow_instance_state: to_state must not be empty (would violate FlowInstance.currentState min_count=1)"
+        ));
+    }
+    ensure_flow_model_classes(perspective, context).await?;
+
+    // Property key must exactly match the SDNA `name` field, not the
+    // wire predicate path. `currentState` (not `current_state`) —
+    // 2026-08-20-bug shape.
+    let values = serde_json::json!({ "currentState": to_state });
+    perspective
+        .update_subject(
+            SubjectClassOption {
+                class_name: Some(FLOW_INSTANCE_CLASS.to_string()),
+                query: None,
+            },
+            flow_instance_uri.to_string(),
+            values,
+            batch_id,
+            context,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("advance_flow_instance_state: update_subject failed: {e:#}")
+        })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +492,55 @@ mod tests {
             setter_actions,
             vec!["addLink"],
             "evidence collection setter must be `addLink` — `setSingleTarget` would clobber",
+        );
+    }
+
+    #[test]
+    fn advance_flow_instance_state_values_align_with_sdna_property_name() {
+        // Same 2026-08-20-bug guard as `mint_flow_instance_values_align_with_sdna_property_names`
+        // and `write_flow_transition_proposal_values_align_with_sdna_property_names`:
+        // the writer sends `{ "currentState": to_state }` — a silent SDNA rename
+        // (e.g. `currentState` → `state`) would return Ok while never writing.
+        let v = parse(FLOW_INSTANCE_SDNA);
+        let props: Vec<&str> = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        assert!(
+            props.contains(&"currentState"),
+            "advance_flow_instance_state writes `currentState` but SDNA does not declare it \
+             (found {props:?})",
+        );
+    }
+
+    #[test]
+    fn current_state_setter_is_set_single_target() {
+        // The fire path relies on `update_subject({currentState})` doing an
+        // atomic overwrite (no read-then-write race). That only holds if
+        // the SDNA setter is `setSingleTarget` — an `addLink` here would
+        // leave the old state as a dangling link and put the instance in
+        // two states at once. Lock the shape so a well-meaning SDNA edit
+        // that switches setters breaks this test instead of silently
+        // corrupting state at runtime.
+        let v = parse(FLOW_INSTANCE_SDNA);
+        let current_state = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"].as_str() == Some("currentState"))
+            .expect("currentState property must exist");
+        let setter_actions: Vec<&str> = current_state["setter"]
+            .as_array()
+            .expect("currentState must declare a setter array")
+            .iter()
+            .filter_map(|s| s["action"].as_str())
+            .collect();
+        assert_eq!(
+            setter_actions,
+            vec!["setSingleTarget"],
+            "currentState setter must be `setSingleTarget` — `addLink` would leave old state hanging",
         );
     }
 
