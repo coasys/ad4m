@@ -135,6 +135,35 @@ impl Ad4mConfig {
     }
 
     pub fn prepare(&mut self) {
+        // Read shared-backend config from environment variables when not set
+        // programmatically. This allows Docker containers to configure the
+        // executor via standard `environment:` directives without CLI flags.
+        if self.wallet_backend.is_none() {
+            self.wallet_backend = std::env::var("WALLET_BACKEND").ok();
+        }
+        if self.wallet_backend_url.is_none() {
+            self.wallet_backend_url = std::env::var("WALLET_BACKEND_URL").ok();
+        }
+        if self.wallet_signing_key_name.is_none() {
+            self.wallet_signing_key_name = std::env::var("WALLET_SIGNING_KEY_NAME").ok();
+        }
+        if self.db_backend.is_none() {
+            self.db_backend = std::env::var("DB_BACKEND").ok();
+        }
+        if self.db_backend_url.is_none() {
+            self.db_backend_url = std::env::var("DB_BACKEND_URL").ok();
+        }
+        if self.perspective_store_backend.is_none() {
+            self.perspective_store_backend =
+                std::env::var("PERSPECTIVE_STORE_BACKEND").ok();
+        }
+        if self.perspective_store_url.is_none() {
+            self.perspective_store_url = std::env::var("PERSPECTIVE_STORE_URL").ok();
+        }
+        if self.internal_api_token.is_none() {
+            self.internal_api_token = std::env::var("INTERNAL_API_TOKEN").ok();
+        }
+
         if self.app_data_path.is_none() {
             self.app_data_path = Some(
                 utils::ad4m_data_directory()
