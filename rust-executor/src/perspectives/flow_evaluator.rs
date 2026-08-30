@@ -801,6 +801,203 @@ pub async fn run_engine_proposal_pass(
 }
 
 // ============================================================================
+// Slice 10.10a — engine-side consensus firing pass
+// ============================================================================
+
+/// Slice 10.10a — engine-side auto-processor entry point for consensus
+/// firing. Walks every active `FlowInstance` on `scope`, loads its
+/// on-graph `FlowTransitionProposal` bag, aggregates the votes against
+/// the flow's `ConsensusRule`, and fires the earliest tally whose
+/// `fromState` matches the instance's live `currentState`. Byte-for-byte
+/// symmetric with the TS `fireIfConsensus` composition
+/// (`core/src/perspectives/FlowConsensusFire.ts`): same loader, same
+/// aggregator, same stale-`fromState` guard, same writer.
+///
+/// Intended call site: the extraction pass (`interpretation::run`),
+/// invoked AFTER [`run_engine_proposal_pass`] so a proposal minted on
+/// this pass can immediately participate in consensus if the on-graph
+/// bag already carries enough peer votes to reach the rule's `n`. That
+/// wiring lands in slice 10.10b; this fn is standalone in 10.10a so
+/// tests can prove the composition end-to-end without touching
+/// `run.rs`.
+///
+/// Consensus rule resolution mirrors TS `FlowInstance.consensusRule`:
+///   1. state-level `consensus_rule` on the current `FlowState` (if any)
+///   2. flow-level `consensus_rule` on the `SHACLFlow` (if any)
+///   3. otherwise `None` — [`crate::perspectives::flow_consensus::aggregate_flow_votes`]
+///      then falls back to its `DEFAULT_N` (currently 1) so a
+///      single-proposer neighbourhood still fires.
+///
+/// `from_role` eligibility gating is DEFERRED — the auto-processor does
+/// not yet resolve "who is eligible to vote from role X" against the
+/// live perspective. Instances whose resolved rule carries `from_role`
+/// are logged (`warn!`) and skipped: firing without a real eligibility
+/// answer would silently misreport (mirrors the `aggregate_flow_votes`
+/// silent-default guard). A future slice will resolve DIDs via
+/// `didProperty`-style class queries and drop this branch.
+///
+/// Silent-fallback throughout — the extraction pass MUST NOT break
+/// because a downstream flow layer stumbled. Every loader error, every
+/// aggregator error, every writer error is logged and the offending
+/// instance is skipped; the pass returns whatever it did manage to fire.
+///
+/// `scope`, when `Some`, narrows the FlowInstance load to the pass's
+/// anchor URI — same policy as
+/// [`crate::perspectives::flow_context::gather_active_flow_contexts`]
+/// and [`run_engine_proposal_pass`].
+///
+/// Returns one [`crate::perspectives::flow_consensus::FireOutcome`] per
+/// instance whose `currentState` this pass advanced. The extraction pass
+/// threads these into
+/// [`crate::perspectives::interpretation::run::InterpretationOutcome`]
+/// so tests / callers can observe which flows moved.
+pub async fn run_flow_consensus_pass(
+    perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
+    scope: Option<&crate::perspectives::model_query::types::Scope>,
+    context: &crate::agent::AgentContext,
+) -> Vec<crate::perspectives::flow_consensus::FireOutcome> {
+    // Same absent-catalogue silent return as `run_engine_proposal_pass`
+    // — an empty perspective has no flows to fire.
+    let flows_by_name = match crate::perspectives::flow_context::load_shacl_flows(perspective).await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            log::warn!("run_flow_consensus_pass: load_shacl_flows failed: {e:#}");
+            return Vec::new();
+        }
+    };
+    if flows_by_name.is_empty() {
+        return Vec::new();
+    }
+
+    let subject = scope.map(crate::perspectives::flow_context::scope_subject);
+    let records =
+        match crate::perspectives::flow_context::load_flow_instances(perspective, subject).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("run_flow_consensus_pass: load_flow_instances failed: {e:#}");
+                return Vec::new();
+            }
+        };
+    if records.is_empty() {
+        return Vec::new();
+    }
+
+    let mut fired = Vec::new();
+    for instance in &records {
+        // Resolve flow → state → consensus rule. Unknown-flow, unknown-
+        // state, and unresolved-rule cases all `continue` (with a
+        // `debug!` note) since none of them are consensus-firing errors:
+        // an instance for a flow definition that hasn't been synced yet
+        // is normal; a state name that drifted is a definition-vs-
+        // instance mismatch worth logging but not worth aborting the
+        // whole pass over.
+        let Some(flow) = flows_by_name.get(&instance.flow_name) else {
+            log::debug!(
+                "run_flow_consensus_pass: no SHACLFlow for '{}' (instance {}); skipping",
+                instance.flow_name,
+                instance.instance_uri,
+            );
+            continue;
+        };
+        let state_rule = flow
+            .states
+            .iter()
+            .find(|s| s.name == instance.current_state)
+            .and_then(|s| s.consensus_rule.clone());
+        let rule = state_rule.or_else(|| flow.consensus_rule.clone());
+
+        // `from_role` gating deferred (see fn doc). Log + skip so a
+        // future slice can lift the guard without changing the write
+        // shape (fired-outcomes contract stays stable).
+        if let Some(r) = rule.as_ref() {
+            if r.from_role.is_some() {
+                log::debug!(
+                    "run_flow_consensus_pass: consensus rule for {}.{} has from_role — deferring until eligibility resolution ships; skipping instance {}",
+                    instance.flow_name,
+                    instance.current_state,
+                    instance.instance_uri,
+                );
+                continue;
+            }
+        }
+
+        let loaded = match crate::perspectives::flow_consensus::load_flow_transition_proposals(
+            perspective,
+            &instance.instance_uri,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                log::debug!(
+                    "run_flow_consensus_pass: load_flow_transition_proposals({}) failed: {e:#}",
+                    instance.instance_uri,
+                );
+                continue;
+            }
+        };
+        if loaded.is_empty() {
+            continue;
+        }
+
+        let aggregate = match crate::perspectives::flow_consensus::aggregate_flow_votes(
+            &loaded,
+            rule.as_ref(),
+            None,
+        ) {
+            Ok(a) => a,
+            Err(e) => {
+                log::debug!(
+                    "run_flow_consensus_pass: aggregate_flow_votes({}) failed: {e:#}",
+                    instance.instance_uri,
+                );
+                continue;
+            }
+        };
+
+        let Some(picked) = crate::perspectives::flow_consensus::select_fire_candidate(
+            &instance.current_state,
+            &aggregate,
+        ) else {
+            continue;
+        };
+
+        let batch_id = perspective.create_batch().await;
+        match crate::perspectives::flow_consensus::fire_flow_consensus(
+            perspective,
+            instance,
+            picked,
+            Some(batch_id.clone()),
+            context,
+        )
+        .await
+        {
+            Ok(outcome) => match perspective.commit_batch(batch_id.clone(), context).await {
+                Ok(_) => fired.push(outcome),
+                Err(e) => {
+                    let _ = perspective.discard_batch(&batch_id).await;
+                    log::debug!(
+                        "run_flow_consensus_pass: commit_batch for {} ({}→{}) failed: {e:#}",
+                        instance.instance_uri,
+                        picked.from_state,
+                        picked.to_state,
+                    );
+                }
+            },
+            Err(e) => {
+                let _ = perspective.discard_batch(&batch_id).await;
+                log::debug!(
+                    "run_flow_consensus_pass: fire_flow_consensus({}) failed: {e:#}",
+                    instance.instance_uri,
+                );
+            }
+        }
+    }
+    fired
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -3331,6 +3528,400 @@ mod e2e_tests {
         assert!(
             err.to_string().contains("must not be empty"),
             "guard message must state the failure clearly, got {err}",
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Slice 10.10a — engine-side consensus firing pass
+    //
+    // These e2e tests exercise `run_flow_consensus_pass` end-to-end
+    // against a live perspective: seeded Delivery flow, one or more
+    // minted `FlowInstance`s, distinct-DID proposals via the same
+    // writer the client-side factory uses. The composition under test
+    // is the ONLY thing that changed between slice 10.9b2's
+    // `fire_flow_consensus_advances_instance_e2e` and these tests —
+    // if the aggregator + writer stay green but this pass does not,
+    // the failure is inside the composition.
+    // ------------------------------------------------------------------
+
+    /// Slice 10.10a — happy path. Three proposals against a Delivery
+    /// flow with a top-level `ConsensusRule { n: 2 }` ⇒
+    /// `run_flow_consensus_pass` returns exactly one `FireOutcome`,
+    /// the on-graph `currentState` advances to `scoped`, and a
+    /// SECOND call returns an empty vec (idempotent — proposals for
+    /// the now-stale `fromState` no longer match `select_fire_candidate`).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_flow_consensus_pass_fires_and_is_idempotent_e2e() {
+        use crate::perspectives::flow_classes::write_flow_transition_proposal;
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        // Delivery flow with a `ConsensusRule { n: 2 }` at flow-level so
+        // the pass's rule-resolution walk (state → flow) picks it up.
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        let rule_json = serde_json::to_string(&ConsensusRule {
+            n: 2,
+            from_role: None,
+        })
+        .unwrap();
+        perspective
+            .add_link(
+                Link {
+                    source: "delivery://Delivery".to_string(),
+                    predicate: Some("ad4m://consensusRule".to_string()),
+                    target: lit(&rule_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(flow.consensusRule)");
+
+        let base_uri = "ad4m://task/onboarding-10.10a-happy";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.10a-happy-inst",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        let evidence_ids = vec!["ad4m://task/1".to_string()];
+        let evidence_hash = "sha256:dummy-10.10a-happy";
+        let proposers = [
+            ("did:key:alice", "p-alice", "2026-08-30T10:05:00Z"),
+            ("did:key:bob", "p-bob", "2026-08-30T10:05:01Z"),
+            ("did:key:cara", "p-cara", "2026-08-30T10:05:02Z"),
+        ];
+        for (did, pid, ts) in &proposers {
+            write_flow_transition_proposal(
+                &mut perspective,
+                pid,
+                did,
+                ts,
+                &inst_uri,
+                "identified",
+                "scoped",
+                &evidence_ids,
+                evidence_hash,
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("write_flow_transition_proposal");
+        }
+
+        // First run — consensus reached, single instance advances.
+        let fired = run_flow_consensus_pass(&mut perspective, None, &ctx).await;
+        assert_eq!(
+            fired.len(),
+            1,
+            "1 instance × consensus reached ⇒ 1 FireOutcome, got {fired:?}",
+        );
+        let outcome = &fired[0];
+        assert_eq!(outcome.instance_uri, inst_uri);
+        assert_eq!(outcome.from_state, "identified");
+        assert_eq!(outcome.to_state, "scoped");
+        assert_eq!(outcome.fired_by_proposers.len(), 3);
+        assert_eq!(outcome.contributing_proposal_uris.len(), 3);
+
+        // Rehydrated on-graph — currentState actually advanced. A
+        // silently-dropped writer batch would leave `identified`.
+        let records = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after fire");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].current_state, "scoped");
+
+        // Second run — same proposals still on-graph, but they all
+        // target `identified → scoped`; select_fire_candidate rejects
+        // them against the new `scoped` current state. Empty vec, no
+        // panic, no accidental re-fire.
+        let refired = run_flow_consensus_pass(&mut perspective, None, &ctx).await;
+        assert!(
+            refired.is_empty(),
+            "post-fire pass must be idempotent — proposals target stale from_state, got {refired:?}",
+        );
+        let records_after = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after idempotency check");
+        assert_eq!(records_after[0].current_state, "scoped");
+    }
+
+    /// Slice 10.10a — scope narrowing. Two FlowInstances on different
+    /// `subject` anchors, each with 3-of-2 consensus. Pass a scope
+    /// naming only the first ⇒ exactly one fires, and the on-graph
+    /// state of the untargeted instance stays `identified`. Proves
+    /// the scope arg is threaded through `load_flow_instances` (a
+    /// regression here would mint proposals but fire the wrong
+    /// instance on the wrong extraction pass).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_flow_consensus_pass_respects_scope_e2e() {
+        use crate::perspectives::flow_classes::write_flow_transition_proposal;
+        use crate::perspectives::model_query::types::Scope;
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        let rule_json = serde_json::to_string(&ConsensusRule {
+            n: 2,
+            from_role: None,
+        })
+        .unwrap();
+        perspective
+            .add_link(
+                Link {
+                    source: "delivery://Delivery".to_string(),
+                    predicate: Some("ad4m://consensusRule".to_string()),
+                    target: lit(&rule_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(flow.consensusRule)");
+
+        let base_a = "ad4m://task/scope-A";
+        let base_b = "ad4m://task/scope-B";
+        let inst_a = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_a,
+            "identified",
+            "e2e-10.10a-scope-A",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance(A)");
+        let inst_b = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_b,
+            "identified",
+            "e2e-10.10a-scope-B",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance(B)");
+
+        let evidence_ids = vec!["ad4m://task/1".to_string()];
+        let evidence_hash = "sha256:dummy-10.10a-scope";
+        let proposers = [
+            ("did:key:alice", "2026-08-30T10:05:00Z"),
+            ("did:key:bob", "2026-08-30T10:05:01Z"),
+            ("did:key:cara", "2026-08-30T10:05:02Z"),
+        ];
+        for (i, (did, ts)) in proposers.iter().enumerate() {
+            write_flow_transition_proposal(
+                &mut perspective,
+                &format!("p-A-{i}"),
+                did,
+                ts,
+                &inst_a,
+                "identified",
+                "scoped",
+                &evidence_ids,
+                evidence_hash,
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("write proposal(A)");
+            write_flow_transition_proposal(
+                &mut perspective,
+                &format!("p-B-{i}"),
+                did,
+                ts,
+                &inst_b,
+                "identified",
+                "scoped",
+                &evidence_ids,
+                evidence_hash,
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("write proposal(B)");
+        }
+
+        // Scope narrows to base_a — only instance A fires, B stays put.
+        // `Scope::Raw { id, predicate }`'s `id` is what
+        // `scope_subject` returns, so a Raw scope pointing at base_a
+        // filters `load_flow_instances(subject=Some(base_a))`. The
+        // predicate is unused by the flow-layer filter.
+        let scope_a = Scope::Raw {
+            id: base_a.to_string(),
+            predicate: "ad4m://has_child".to_string(),
+        };
+        let fired = run_flow_consensus_pass(&mut perspective, Some(&scope_a), &ctx).await;
+        assert_eq!(
+            fired.len(),
+            1,
+            "scope narrowed to base_a ⇒ 1 FireOutcome (instance A), got {fired:?}",
+        );
+        assert_eq!(fired[0].instance_uri, inst_a);
+
+        // Rehydrate both: A advanced, B untouched.
+        let all = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances(None)");
+        let a = all
+            .iter()
+            .find(|r| r.instance_uri == inst_a)
+            .expect("instance A must load");
+        let b = all
+            .iter()
+            .find(|r| r.instance_uri == inst_b)
+            .expect("instance B must load");
+        assert_eq!(a.current_state, "scoped", "A must have advanced");
+        assert_eq!(
+            b.current_state, "identified",
+            "B must stay put — scope narrowing gate",
+        );
+
+        // No-scope run picks up B and fires it.
+        let fired_b = run_flow_consensus_pass(&mut perspective, None, &ctx).await;
+        assert_eq!(
+            fired_b.len(),
+            1,
+            "second pass with no scope ⇒ 1 FireOutcome (only B remains fireable), got {fired_b:?}",
+        );
+        assert_eq!(fired_b[0].instance_uri, inst_b);
+    }
+
+    /// Slice 10.10a — `from_role` deferred branch. Consensus rule at
+    /// state-level carries a `from_role`; the pass logs+skips, on-graph
+    /// state does NOT advance even though the proposal count meets `n`.
+    /// This locks the "no silent auto-fire without eligibility
+    /// resolution" contract until a future slice ships DID resolution.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_flow_consensus_pass_skips_when_from_role_set_e2e() {
+        use crate::perspectives::flow_classes::write_flow_transition_proposal;
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        // State-level rule with from_role — resolution walk picks the
+        // state's rule over the (absent) flow-level one, then the pass
+        // skips because we can't answer "who is eligible?" yet.
+        // `ConsensusRule::from_role` is a `ModelQuery` (per §7); the
+        // exact shape doesn't matter for this test — the pass short-
+        // circuits on `is_some()` before it would ever run the query.
+        let rule_json = serde_json::to_string(&ConsensusRule {
+            n: 2,
+            from_role: Some(crate::perspectives::shacl_parser::ModelQuery {
+                class_name: "ns://Assignee".to_string(),
+                r#where: None,
+                count: None,
+                linked_to: None,
+                did_property: Some("did".to_string()),
+                or: None,
+            }),
+        })
+        .unwrap();
+        perspective
+            .add_link(
+                Link {
+                    source: "delivery://Delivery.identified".to_string(),
+                    predicate: Some("ad4m://consensusRule".to_string()),
+                    target: lit(&rule_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(state.consensusRule with from_role)");
+
+        let base_uri = "ad4m://task/from-role-defer";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.10a-from-role-inst",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        let evidence_ids = vec!["ad4m://task/1".to_string()];
+        let evidence_hash = "sha256:dummy-10.10a-from-role";
+        for (did, pid, ts) in &[
+            ("did:key:alice", "p-fr-alice", "2026-08-30T10:05:00Z"),
+            ("did:key:bob", "p-fr-bob", "2026-08-30T10:05:01Z"),
+            ("did:key:cara", "p-fr-cara", "2026-08-30T10:05:02Z"),
+        ] {
+            write_flow_transition_proposal(
+                &mut perspective,
+                pid,
+                did,
+                ts,
+                &inst_uri,
+                "identified",
+                "scoped",
+                &evidence_ids,
+                evidence_hash,
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("write_flow_transition_proposal");
+        }
+
+        let fired = run_flow_consensus_pass(&mut perspective, None, &ctx).await;
+        assert!(
+            fired.is_empty(),
+            "from_role set + eligibility deferral ⇒ empty FireOutcome, got {fired:?}",
+        );
+        let records = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after skip");
+        assert_eq!(
+            records[0].current_state, "identified",
+            "on-graph state must NOT have advanced when from_role is set",
         );
     }
 }
