@@ -27,9 +27,11 @@ import { computeFlowEvidenceHash } from "./FlowEvidenceHash";
 import {
   aggregateFlowVotes,
   type AggregateFlowVotesResult,
+  type FlowVoteTally,
 } from "./FlowVoteAggregator";
 import {
   fireIfConsensus as fireIfConsensusHelper,
+  selectFireCandidate as selectFireCandidateHelper,
   type FireOutcome,
 } from "./FlowConsensusFire";
 import type { ConsensusRule } from "../shacl/SHACLFlow";
@@ -447,5 +449,54 @@ export class FlowInstance extends Ad4mModel {
     }
     const aggregate = await this.aggregateVotes(consensusRule, eligibleDIDs);
     return fireIfConsensusHelper(this.perspective, this, aggregate);
+  }
+
+  /**
+   * OO composition of {@link aggregateVotes} + `selectFireCandidate`:
+   * load and reduce the current proposal bag, then — if a tally has met
+   * consensus and its `fromState` still matches `this.currentState` —
+   * return that {@link FlowVoteTally}. Returns `undefined` when no tally
+   * has consensus, or when the winning tally's `fromState` is stale.
+   *
+   * Report-only counterpart to {@link fireIfConsensus}: performs no
+   * on-graph write. Intended for UI paths that need to preview the firing
+   * tally (e.g. "3/5 votes for `Scoped → InProgress`, needs 2 more")
+   * before committing to a `.fireIfConsensus()` call.
+   *
+   * Three-line body — all defence, counting, and stale-vote handling
+   * live in the helpers. Delegates the aggregation step to
+   * `this.aggregateVotes(...)` (10.12 wrapper) rather than re-doing the
+   * `currentProposals` + `aggregateFlowVotes` pair inline, so any future
+   * refinement to per-instance aggregation flows through this wrapper too.
+   *
+   * OO/static parity contract: `instance.selectFireCandidate(rule)` and
+   * the static composition `selectFireCandidate(instance,
+   * await aggregateFlowVotes(await currentProposals(), rule))` MUST
+   * reach the same verdict from the same on-graph bag. Wrapper never
+   * substitutes an undefined `consensusRule` with an explicit default;
+   * the helper's own `{ n: 1 }` default (design §7.1) must reach the wire.
+   *
+   * Defence guard on empty `this.id` fires *before* the delegate chain,
+   * matching {@link fireIfConsensus}.
+   *
+   * @param consensusRule Optional rule; defaults to `{ n: 1 }` per design
+   *   §7.1. Passed through to `.aggregateVotes(...)`.
+   * @param eligibleDIDs Required only when `consensusRule.fromRole` is set;
+   *   contract inherited from `aggregateFlowVotes`.
+   * @throws When `this.id` is empty (unhydrated / unsaved instance).
+   * @throws (via `aggregateFlowVotes`) When `consensusRule.n` is invalid
+   *   or when `fromRole` is present but `eligibleDIDs` is not supplied.
+   */
+  async selectFireCandidate(
+    consensusRule?: ConsensusRule,
+    eligibleDIDs?: ReadonlySet<string>,
+  ): Promise<FlowVoteTally | undefined> {
+    if (!this.id) {
+      throw new Error(
+        "FlowInstance.selectFireCandidate: instance has no id (call on a hydrated / saved instance)",
+      );
+    }
+    const aggregate = await this.aggregateVotes(consensusRule, eligibleDIDs);
+    return selectFireCandidateHelper(this, aggregate);
   }
 }

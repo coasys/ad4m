@@ -649,3 +649,140 @@ describe("FlowInstance.fireIfConsensus (OO composition of aggregateVotes + FlowC
     }
   });
 });
+
+describe("FlowInstance.selectFireCandidate (OO composition of aggregateVotes + FlowConsensusFire.selectFireCandidate — report-only)", () => {
+  const poison: any = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(
+          "FlowInstance.selectFireCandidate leaked past its own defence guard onto the perspective proxy",
+        );
+      },
+    },
+  );
+
+  it("throws when this.id is empty (unhydrated instance)", async () => {
+    const instance = new FlowInstance(poison, "ad4m://flow/instance/i-1");
+    (instance as any)._baseExpression = "";
+    await expect(instance.selectFireCandidate()).rejects.toThrow(
+      /instance has no id/,
+    );
+  });
+
+  it("composes aggregateVotes() + selectFireCandidate(): passes this + aggregate through untouched and returns the tally verbatim", async () => {
+    const sentinelTally: FlowVoteAggregatorModule.FlowVoteTally = {
+      fromState: "Identified",
+      toState: "Scoped",
+      distinctProposers: ["did:example:alice", "did:example:bob"],
+      eligibleProposers: ["did:example:alice", "did:example:bob"],
+      requiredCount: 2,
+      consensusReached: true,
+      contributing: [],
+    };
+    const sentinelAggregate: FlowVoteAggregatorModule.AggregateFlowVotesResult = {
+      tallies: [sentinelTally],
+      fires: sentinelTally,
+    };
+    const aggSpy = jest
+      .spyOn(FlowInstance.prototype, "aggregateVotes")
+      .mockResolvedValue(sentinelAggregate);
+    const selectSpy = jest
+      .spyOn(FlowConsensusFireModule, "selectFireCandidate")
+      .mockReturnValue(sentinelTally);
+
+    const rule = { n: 2 };
+    const eligibleDIDs = new Set(["did:example:alice", "did:example:bob"]);
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-42");
+      const result = await instance.selectFireCandidate(rule, eligibleDIDs);
+
+      expect(aggSpy).toHaveBeenCalledTimes(1);
+      expect(aggSpy.mock.instances[0]).toBe(instance);
+      const [aggRule, aggEligible] = aggSpy.mock.calls[0];
+      expect(aggRule).toBe(rule);
+      expect(aggEligible).toBe(eligibleDIDs);
+
+      // Helper called with (this, aggregate) — reference equality proves no
+      // defensive clone.
+      expect(selectSpy).toHaveBeenCalledTimes(1);
+      const [selectInstance, selectAggregate] = selectSpy.mock.calls[0];
+      expect(selectInstance).toBe(instance);
+      expect(selectAggregate).toBe(sentinelAggregate);
+
+      expect(result).toBe(sentinelTally);
+    } finally {
+      aggSpy.mockRestore();
+      selectSpy.mockRestore();
+    }
+  });
+
+  it("passes undefined for both consensusRule and eligibleDIDs when the caller omits them", async () => {
+    // Same divergence-guard as .aggregateVotes / .fireIfConsensus: the
+    // wrapper must NOT substitute an explicit default. Helper's own
+    // `{ n: 1 }` default (design §7.1) must reach the wire.
+    const aggSpy = jest
+      .spyOn(FlowInstance.prototype, "aggregateVotes")
+      .mockResolvedValue({ tallies: [], fires: undefined });
+    const selectSpy = jest
+      .spyOn(FlowConsensusFireModule, "selectFireCandidate")
+      .mockReturnValue(undefined);
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-9");
+      await instance.selectFireCandidate();
+      expect(aggSpy).toHaveBeenCalledTimes(1);
+      const [aggRule, aggEligible] = aggSpy.mock.calls[0];
+      expect(aggRule).toBeUndefined();
+      expect(aggEligible).toBeUndefined();
+    } finally {
+      aggSpy.mockRestore();
+      selectSpy.mockRestore();
+    }
+  });
+
+  it("returns undefined when the helper returns undefined (no consensus / stale vote) — and does NOT touch the on-graph fire path", async () => {
+    // Report-only contract: even when a tally would fire, `.selectFireCandidate`
+    // must never call `fireFlowConsensus` / `fireIfConsensus`. Prove by
+    // spying on both fire entry points and asserting zero calls.
+    const aggSpy = jest
+      .spyOn(FlowInstance.prototype, "aggregateVotes")
+      .mockResolvedValue({ tallies: [], fires: undefined });
+    const selectSpy = jest
+      .spyOn(FlowConsensusFireModule, "selectFireCandidate")
+      .mockReturnValue(undefined);
+    const fireIfSpy = jest.spyOn(FlowConsensusFireModule, "fireIfConsensus");
+    const fireSpy = jest.spyOn(FlowConsensusFireModule, "fireFlowConsensus");
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-9");
+      const result = await instance.selectFireCandidate({ n: 5 });
+      expect(result).toBeUndefined();
+      expect(selectSpy).toHaveBeenCalledTimes(1);
+      expect(fireIfSpy).not.toHaveBeenCalled();
+      expect(fireSpy).not.toHaveBeenCalled();
+    } finally {
+      aggSpy.mockRestore();
+      selectSpy.mockRestore();
+      fireIfSpy.mockRestore();
+      fireSpy.mockRestore();
+    }
+  });
+
+  it("propagates aggregateVotes errors verbatim without calling the select helper", async () => {
+    const aggSpy = jest
+      .spyOn(FlowInstance.prototype, "aggregateVotes")
+      .mockRejectedValue(
+        new Error("aggregateFlowVotes: fromRole requires eligibleDIDs"),
+      );
+    const selectSpy = jest.spyOn(FlowConsensusFireModule, "selectFireCandidate");
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-9");
+      await expect(
+        instance.selectFireCandidate({ n: 1, fromRole: "some-role-query" as any }),
+      ).rejects.toThrow(/fromRole/);
+      expect(selectSpy).not.toHaveBeenCalled();
+    } finally {
+      aggSpy.mockRestore();
+      selectSpy.mockRestore();
+    }
+  });
+});

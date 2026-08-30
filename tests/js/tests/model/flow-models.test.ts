@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { Ad4mClient, Link, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
 import { FlowInstance, FlowTransitionProposal } from "@coasys/ad4m";
 import { computeFlowEvidenceHash } from "@coasys/ad4m";
-import { aggregateFlowVotes, fireIfConsensus } from "@coasys/ad4m";
+import { aggregateFlowVotes, fireIfConsensus, selectFireCandidate } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
 import { startAgent } from "../../helpers/index.js";
 
@@ -1489,6 +1489,198 @@ describe("FlowInstance.fireIfConsensus — 10.13 OO wrapper", function () {
     let caught: unknown = null;
     try {
       await instance.fireIfConsensus();
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).to.match(/instance has no id/);
+  });
+});
+
+// ── FlowInstance.selectFireCandidate — 10.15 OO wrapper (design doc §4.3 / §7) ──
+// Report-only preview counterpart to .fireIfConsensus. Same aggregate step, but
+// never writes on-graph — intended for UI paths that want to render the winning
+// tally without committing to the transition. Unit suite in
+// `core/src/perspectives/FlowModels.test.ts` locks the delegate wire-up via
+// poison-perspective + jest.spyOn; this suite proves the composition reaches
+// the same tally as `.fireIfConsensus` would fire, while leaving currentState
+// untouched on-graph.
+describe("FlowInstance.selectFireCandidate — 10.15 OO wrapper (report-only)", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-instance-select-fire-candidate");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add(
+      "flow-instance-select-fire-candidate-test",
+    );
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    await FlowTransitionProposal.register(p);
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    const identified: FlowState = {
+      name: "Identified",
+      value: 0,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
+    };
+    const inProgress: FlowState = {
+      name: "InProgress",
+      value: 1,
+      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
+    };
+    flow.addState(identified);
+    flow.addState(inProgress);
+    return flow;
+  }
+
+  it("returns the winning tally at n:2 with 2 distinct DIDs — currentState stays at Identified on-graph (report-only)", async () => {
+    // Contract: even when consensus is met and .fireIfConsensus would advance,
+    // .selectFireCandidate MUST leave currentState untouched (in-memory AND
+    // on-graph). Rehydrate proves no accidental .save() slipped through.
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance(
+      "Delivery",
+      "ad4m://task/select-golden",
+    );
+    expect(instance.currentState).to.equal("Identified");
+
+    await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:alice",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-30T10:00:00Z",
+    });
+    await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:bob",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-30T11:00:00Z",
+    });
+
+    const tally = await instance.selectFireCandidate({ n: 2 });
+    expect(tally, "wrapper must return a FlowVoteTally when consensus is met")
+      .to.exist;
+    expect(tally!.fromState).to.equal("Identified");
+    expect(tally!.toState).to.equal("InProgress");
+    expect(tally!.consensusReached).to.equal(true);
+    expect(tally!.eligibleProposers).to.deep.equal([
+      "did:example:alice",
+      "did:example:bob",
+    ]);
+
+    // In-memory currentState untouched.
+    expect(instance.currentState).to.equal("Identified");
+    // On-graph currentState untouched (proves no .save() ran).
+    const rehydrated = await p.getFlowInstances({
+      subject: "ad4m://task/select-golden",
+    });
+    expect(rehydrated.length).to.equal(1);
+    expect(rehydrated[0].currentState).to.equal("Identified");
+  });
+
+  it("returns undefined at n:2 with 1 proposal — currentState unchanged, no default substitution", async () => {
+    // Below-threshold: wrapper must NOT auto-default to { n: 1 } — the caller
+    // explicitly passed { n: 2 }, so falling back to a firing tally would be
+    // a silent OO/static divergence.
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance(
+      "Delivery",
+      "ad4m://task/select-below",
+    );
+
+    await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:solo",
+      evidence: [],
+      classNames: [],
+    });
+
+    const tally = await instance.selectFireCandidate({ n: 2 });
+    expect(tally).to.equal(undefined);
+    expect(instance.currentState).to.equal("Identified");
+  });
+
+  it("matches static composition byte-for-byte: instance.selectFireCandidate(rule) vs selectFireCandidate(instance, await aggregateFlowVotes(...))", async () => {
+    // Symmetric setup: identical proposal bag on one instance. Read tally via
+    // OO wrapper and via the static composition; both must reach the same
+    // FlowVoteTally shape (same fromState/toState/eligibleProposers/etc).
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance(
+      "Delivery",
+      "ad4m://task/select-parity",
+    );
+
+    await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:alice",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-30T10:00:00Z",
+    });
+    await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:bob",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-30T11:00:00Z",
+    });
+
+    const rule = { n: 2 };
+    const wrapperTally = await instance.selectFireCandidate(rule);
+    const staticAggregate = aggregateFlowVotes(
+      await FlowTransitionProposal.listForInstance(p, instance.id),
+      rule,
+    );
+    const staticTally = selectFireCandidate(instance, staticAggregate);
+
+    expect(wrapperTally, "wrapper must select tally").to.exist;
+    expect(staticTally, "static must select tally").to.exist;
+    expect(wrapperTally!.fromState).to.equal(staticTally!.fromState);
+    expect(wrapperTally!.toState).to.equal(staticTally!.toState);
+    expect(wrapperTally!.consensusReached).to.equal(staticTally!.consensusReached);
+    expect(wrapperTally!.eligibleProposers).to.deep.equal(
+      staticTally!.eligibleProposers,
+    );
+    expect(wrapperTally!.requiredCount).to.equal(staticTally!.requiredCount);
+
+    // Both call paths left currentState untouched on-graph.
+    const rehydrated = await p.getFlowInstances({
+      subject: "ad4m://task/select-parity",
+    });
+    expect(rehydrated[0].currentState).to.equal("Identified");
+  });
+
+  it("throws when this.id is empty (unhydrated instance) — defence fires before perspective touch", async () => {
+    const instance = new FlowInstance(p, "ad4m://flow/instance/never-saved");
+    (instance as any)._baseExpression = "";
+    let caught: unknown = null;
+    try {
+      await instance.selectFireCandidate();
     } catch (e) {
       caught = e;
     }
