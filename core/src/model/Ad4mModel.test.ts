@@ -2754,4 +2754,37 @@ describe("Polymorphic relations", () => {
 
     expect(JSON.parse(queryJson).include.children.polymorphic).toBe(false);
   });
+
+  it("applies the default at every depth of a nested include", () => {
+    // `sections` is a plain typed relation, so the nested `children` is read off
+    // PolyCollection rather than off the class being queried. Left to the top
+    // level, the default would never reach it and the include would arrive at
+    // the executor with no shape to resolve — the query fails outright.
+    @Model({ name: "PolyPage" })
+    class PolyPage extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPage as any).prepareModelQueryParams({
+      include: { sections: { include: { children: true } } },
+    });
+
+    const include = JSON.parse(queryJson).include;
+    expect(include.sections.include.children).toEqual({ polymorphic: true });
+  });
+
+  it("lets an explicit false win at depth too", () => {
+    @Model({ name: "PolyPageExplicit" })
+    class PolyPageExplicit extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPageExplicit as any).prepareModelQueryParams({
+      include: { sections: { include: { children: { polymorphic: false } } } },
+    });
+
+    expect(JSON.parse(queryJson).include.sections.include.children.polymorphic).toBe(false);
+  });
 });

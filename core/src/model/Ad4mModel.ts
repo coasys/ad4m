@@ -38,6 +38,62 @@ import type {
 /** Key under which the executor returns a polymorphically-hydrated instance's concrete class. */
 const SUBJECT_CLASS_KEY = '__subjectClass';
 
+/**
+ * Turn on `polymorphic` for every relation that declares it, at every depth of
+ * an include map.
+ *
+ * A relation being heterogeneous is a fact about the data, not about one query,
+ * so the declaration lives on the model and the call site writes
+ * `include: { children: true }`. That has to hold just as much one level down:
+ * in `include: { posts: { include: { children: true } } }`, `children` is a
+ * relation on `Post`, so the walk carries the class it is reading against down
+ * with it. Without that, a nested include of an untyped polymorphic relation
+ * reaches the executor with no shape to resolve and fails the query outright.
+ *
+ * An explicit `polymorphic: false` at any level still wins — `undefined` is the
+ * only state the default fills in.
+ *
+ * The walk stops descending *through* a polymorphic relation, because there is
+ * nothing to descend into: its targets are of several classes by definition, so
+ * no single class's metadata could say what a deeper include means. The
+ * executor resolves those nested includes against each concrete class instead.
+ */
+function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): void {
+  const relMeta = getRelationsMetadata(ctor);
+  for (const [relName, val] of Object.entries(includes)) {
+    // `$`-prefixed keys are projections, not relations.
+    if (relName.startsWith('$')) continue;
+    const meta = relMeta[relName];
+    if (!meta) continue;
+
+    let subQuery = val as any;
+    if (meta.polymorphic) {
+      if (val === true) {
+        subQuery = { polymorphic: true };
+        includes[relName] = subQuery;
+      } else if (typeof val === 'object' && val !== null && subQuery.polymorphic === undefined) {
+        subQuery.polymorphic = true;
+      }
+    }
+
+    if (typeof subQuery !== 'object' || subQuery === null) continue;
+    const nested = subQuery.include as IncludeMap | undefined;
+    if (!nested || subQuery.polymorphic) continue;
+
+    // The thunk is only evaluated here, at query time, so a self-referential or
+    // circularly-imported target that is not yet defined costs the nested
+    // default rather than the whole query.
+    let TargetClass: any;
+    try {
+      TargetClass = meta.target?.();
+    } catch (e) {
+      console.debug(`prepareModelQueryParams: target class unavailable for include '${relName}':`, e);
+      continue;
+    }
+    if (TargetClass) applyPolymorphicIncludeDefaults(nested, TargetClass);
+  }
+}
+
 function jsonToModelInstance<T extends Ad4mModel>(
   ModelClass: typeof Ad4mModel & (new (...args: any[]) => T),
   perspective: PerspectiveProxy,
@@ -867,17 +923,10 @@ export class Ad4mModel {
       // hydrated as the class it actually is. Declaring it on the model rather
       // than repeating it at every call site is the point — the relation being
       // heterogeneous is a fact about the data, not about one query — but an
-      // explicit `polymorphic: false` at the call site still wins.
+      // explicit `polymorphic: false` at the call site still wins. Applied at
+      // every depth, since a nested include is a fact about the data too.
       if (Object.keys(normalIncludes).length > 0) {
-        const allRelMeta = getRelationsMetadata(this as any);
-        for (const [relName, val] of Object.entries(normalIncludes)) {
-          if (!allRelMeta[relName]?.polymorphic) continue;
-          if (val === true) {
-            normalIncludes[relName] = { polymorphic: true } as any;
-          } else if (typeof val === 'object' && val !== null && (val as any).polymorphic === undefined) {
-            (val as any).polymorphic = true;
-          }
-        }
+        applyPolymorphicIncludeDefaults(normalIncludes, this as any);
         queryInput.include = normalIncludes;
       }
       if (Object.keys(projections).length > 0) {
