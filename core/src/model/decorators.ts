@@ -61,6 +61,15 @@ export interface RelationMetadataEntry {
     polymorphic?: boolean;
     /** Maps a concrete class name to its model class, for polymorphic hydration. */
     classResolver?: (className: string) => Ad4mModelLike | undefined;
+    /**
+     * Natural-language hint describing what this relation MEANS semantically.
+     * Emitted as an `ad4m://interpretation_hint` link on the SHACL property
+     * node; read back by the Rust harness and rendered into the
+     * `_propose_link_child` tool's `predicate` field description. Mirror of
+     * the same field on `RelationOptions` (the decorator arg); this is the
+     * memoized registry copy.
+     */
+    interpretationHint?: string;
 }
 
 /** Registry of property metadata keyed by constructor → { propName → metadata } */
@@ -810,15 +819,34 @@ export interface RelationOptions {
      */
     through?: string;
     /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations.
-     *  Cannot be combined with `getter`. */
+     *  Combines with `getter`, where it names the class the traversal's values hydrate into. */
     target?: () => Ad4mModelLike;
     /**
      * Custom getter to resolve the relation values. Use this for custom graph traversals.
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      * Example: "SELECT ?target WHERE { ?target <flux://has_reply> <Base> . }"
      *
-     * Mutually exclusive with `through` and `target`. When `getter` is provided the
-     * relation is read-only (no adder/remover actions are generated).
+     * Mutually exclusive with `through` — a getter replaces link-based resolution,
+     * so there is no predicate to add to or remove from. When `getter` is provided
+     * the relation is read-only (no adder/remover actions are generated).
+     *
+     * **Combines with `target`**, which names the class the traversal's values
+     * hydrate into — without it `include` has no shape to resolve and the relation
+     * can only return bare URIs. Also combines with `where`, applied as a
+     * post-getter filter against the target class.
+     *
+     * @example Traversing a reified edge — a connection stored as a record rather
+     * than a predicate, so no `through` can express it:
+     * ```typescript
+     * @HasMany({
+     *   getter: `SELECT ?target WHERE {
+     *     ?citation <paper://cites_from> <Base> .
+     *     ?citation <paper://cites_to> ?target .
+     *   }`,
+     *   target: () => Paper,
+     * })
+     * cited: Paper[] = [];
+     * ```
      */
     getter?: string;
     /** Whether the link is stored locally (not shared on the network) */
@@ -839,7 +867,8 @@ export interface RelationOptions {
      * auto-derived from the target shape (flags + required properties).
      * Providing `where` overrides this auto-derivation.
      *
-     * Mutually exclusive with `getter` and `filter: false`.
+     * Mutually exclusive with `filter: false`. Combines with `getter`, where it
+     * is applied as a post-getter filter against the target class.
      *
      * @example
      * ```typescript
@@ -905,6 +934,25 @@ export interface RelationOptions {
      * stay plain objects.
      */
     classResolver?: (className: string) => Ad4mModelLike | undefined;
+    /**
+     * Natural-language hint describing what this relation MEANS semantically —
+     * the sentence-level rationale for when to use it, not just its structural
+     * shape. Emitted as an `ad4m://interpretation_hint` link on the SHACL
+     * property node; read back by the Rust harness (`ClassProposeShape.
+     * relations[N].hint`) and rendered into the `_propose_link_child` tool's
+     * `predicate` field description so the LLM knows which relation applies
+     * to which situation instead of guessing from the predicate name alone.
+     *
+     * @example
+     * ```typescript
+     * @HasMany(() => Belief, {
+     *   through: "ns://basedOn",
+     *   interpretationHint: "The prior beliefs this intention derives from.",
+     * })
+     * basedOn: Belief[] = [];
+     * ```
+     */
+    interpretationHint?: string;
 }
 
 /**
@@ -939,7 +987,16 @@ function resolveRelationArgs(
         ? { ...(second || {}), target: first }
         : first;
 
-    // getter is mutually exclusive with through, target, and where
+    // `where` and `filter: false` contradict each other on every relation,
+    // getter-backed ones included — checked before the getter path returns.
+    if (opts.where && opts.filter === false) {
+        throw new Error(
+            'Relation decorator: `where` and `filter: false` are contradictory. ' +
+            '`where` adds filtering constraints; `filter: false` disables filtering.'
+        );
+    }
+
+    // getter is mutually exclusive with through
     if (opts.getter) {
         if (opts.through) {
             throw new Error(
@@ -948,35 +1005,44 @@ function resolveRelationArgs(
                 '(with optional `target`) for standard link-based relations.'
             );
         }
-        if (opts.target) {
-            throw new Error(
-                'Relation decorator: `getter` and `target` are mutually exclusive. ' +
-                '`target` auto-generates a conformance getter from the model shape; ' +
-                'providing both is contradictory.'
-            );
-        }
-        if (opts.where) {
-            throw new Error(
-                'Relation decorator: `where` and `getter` are mutually exclusive. ' +
-                'Use `where` for DSL-based filtering, or `getter` for raw getter expression.'
-            );
-        }
+        // `target` and `where` are NOT mutually exclusive with `getter`.
+        //
+        // `target` does two separable jobs: it auto-derives a conformance
+        // getter, and it names the class the relation's values hydrate into.
+        // Only the first conflicts with an explicit getter, and `buildSHACL`
+        // already resolves that on its own — an explicit getter wins the getter
+        // slot, while `sh:class` / `ad4m:targetClassName` are emitted from
+        // `target` independently.
+        //
+        // Refusing the pair cost the one thing a custom getter is for. A getter
+        // expresses a traversal the link-shaped DSL cannot — most usefully
+        // through a reified edge, where the connection is a record rather than
+        // a predicate:
+        //
+        //     @HasMany({
+        //       getter: "SELECT ?target WHERE { \
+        //                  ?citation <paper://cites_from> <Base> . \
+        //                  ?citation <paper://cites_to> ?target . }",
+        //       target: () => Paper,
+        //     })
+        //     cited: Paper[] = [];
+        //
+        // Without `target` the relation has no target class, so `include` on it
+        // resolves a shape named "" and fails — leaving a traversal that can
+        // only ever return bare URIs. With it, the values hydrate like any other
+        // relation, because getters are evaluated before include resolution.
+        //
+        // `where` is the same story: the executor applies post-getter where
+        // filters specifically to getter-backed relations
+        // (`apply_where_filter_to_relation`), and emitting `wherePredicates`
+        // needs `target` to resolve the target's metadata — so the runtime is
+        // built for all three together and only this check said otherwise.
         return opts;
     }
 
     // Default predicate when not provided
     if (!opts.through) {
         opts.through = 'ad4m://has_child';
-    }
-
-    // where validation
-    if (opts.where) {
-        if (opts.filter === false) {
-            throw new Error(
-                'Relation decorator: `where` and `filter: false` are contradictory. ' +
-                '`where` adds filtering constraints; `filter: false` disables filtering.'
-            );
-        }
     }
 
     return opts;
@@ -1034,6 +1100,7 @@ export function HasMany(
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
             ...(opts.classResolver && { classResolver: opts.classResolver }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         const relKey = key as string;
@@ -1100,6 +1167,7 @@ export function HasOne(
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
             ...(opts.classResolver && { classResolver: opts.classResolver }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         const relKey = key as string;
@@ -1181,6 +1249,7 @@ export function BelongsToOne(
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
             ...(opts.classResolver && { classResolver: opts.classResolver }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         if (opts.through) {
@@ -1242,6 +1311,7 @@ export function BelongsToMany(
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
             ...(opts.classResolver && { classResolver: opts.classResolver }),
+            ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
         // @BelongsToMany is the inverse/read-only side — do NOT generate add*/remove*/set*

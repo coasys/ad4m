@@ -106,6 +106,18 @@ export class AutoProcessorConfig extends Ad4mModel {
   mintScope?: string;
 
   /**
+   * Tool-call budget for the interpretation-pass harness. Absent (or `"0"`)
+   * = the original single-shot LLM path — one prompt, one parse, no tools.
+   * `"N"` (positive integer) = engage the tool-calling harness and let the
+   * LLM issue up to N tool calls per pass (query/list/get/propose_create/
+   * propose_link_child) before being forced to answer. Stored as a decimal
+   * string because SHACL properties carry no numeric type; the Rust
+   * watcher parses it back to `u32`.
+   */
+  @Optional({ through: "ad4m://max_tool_calls" })
+  maxToolCalls?: string;
+
+  /**
    * Enable full debug observability: persists the raw LLM prompt + response
    * on the pass's `InterpretationRun` AND emits `LlmRequestSent` /
    * `LlmResponseReceived` mid-pass events. `"true"` / `"false"` string.

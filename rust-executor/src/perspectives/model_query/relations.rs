@@ -176,13 +176,19 @@ async fn hydrate_polymorphic(
     ordered_ids: &mut Vec<String>,
 ) -> Result<(), Error> {
     let classes =
-        crate::perspectives::subject_class_of::subject_class_of(store, resolver, target_ids)?;
+        crate::perspectives::subject_classes_of::subject_classes_of(store, resolver, target_ids)?;
 
     // Group by class, keeping the ids of each group in the order they arrived so
     // a group's own results stay stable.
+    //
+    // Membership is structural and so not exclusive: a URI conforms to its
+    // parent classes as well as its own, and `subject_classes_of` returns all of
+    // them, most specific first. Hydration needs exactly one shape per target, so
+    // the first is taken — hydrating against a parent is what this whole
+    // function exists to avoid.
     let mut by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for id in target_ids {
-        if let Some(class_name) = classes.get(id) {
+        if let Some(class_name) = classes.get(id).and_then(|names| names.first()) {
             by_class
                 .entry(class_name.clone())
                 .or_default()

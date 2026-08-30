@@ -63,7 +63,7 @@ pub(super) fn escape_sparql_string(s: &str) -> String {
 /// `validate_iri`, has a `:`, and starts with an ASCII letter. Used to decide
 /// whether a where-value is safe to emit as a `<…>` IRIREF; rejects bare
 /// strings like `"active"` that would produce un-parseable SPARQL.
-pub(super) fn looks_like_absolute_iri(s: &str) -> bool {
+pub(crate) fn looks_like_absolute_iri(s: &str) -> bool {
     if validate_iri(s).is_err() {
         return false;
     }
@@ -97,7 +97,7 @@ pub fn is_safe_iri_target(s: &str) -> bool {
 /// would break or inject into a SPARQL IRI token, including all control and
 /// whitespace characters (e.g. `\n`, `\r`, `\t`, U+00A0) which `validate_iri`
 /// previously let through and which would emit malformed `<…>` IRIREFs.
-pub(crate) fn validate_iri(s: &str) -> Result<&str, Error> {
+pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
     if s.chars().any(|c| c.is_control() || c.is_whitespace())
         || s.contains('>')
         || s.contains('<')

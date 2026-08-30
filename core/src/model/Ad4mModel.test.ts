@@ -2514,10 +2514,22 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     target?: string;
   }
 
-  // No required property, no flag, no initial — so `save()` finds no SHACL
-  // constructor, skips `createSubject`, and calls `innerUpdate(true)`.
-  @Model({ name: "TestPlacement" })
-  class TestPlacement extends Ad4mModel {
+  // A coverage fixture for a branch that already exists in `save()`, not a
+  // modelling pattern being endorsed. No required property, no flag and no
+  // initial value means `buildSHACL` emits the node shape and its property
+  // shapes as normal but with an *empty* constructor-action list, which the
+  // Rust side rejects as "No SHACL constructor found" — so `save()` skips
+  // `createSubject` and calls `innerUpdate(true)` instead. The base expression
+  // exists either way: the `Ad4mModel` constructor mints one, and
+  // `createSubject` writes onto a base rather than creating it.
+  //
+  // Worth naming the real caveat, which is about conformance rather than
+  // writes: a class with no required property and no flag states no criteria,
+  // so nothing structurally distinguishes an instance of it from any other
+  // base expression. That makes it an overlay rather than a class, and it is a
+  // question about SDNA modelling generally rather than about this file.
+  @Model({ name: "TestNoConstructor" })
+  class TestNoConstructor extends Ad4mModel {
     @HasOne({ through: "we://placed_node" })
     node?: string;
   }
@@ -2601,7 +2613,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     it("still writes the relation when there is no SHACL constructor", async () => {
       const perspective = makePerspective();
 
-      await TestPlacement.create(
+      await TestNoConstructor.create(
         perspective,
         { node: "we://block/a" },
         { batchId: "batch-1" }

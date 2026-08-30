@@ -30,7 +30,7 @@
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::{Link, LinkStatus};
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 
 use super::scalar_string;
 use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
@@ -166,6 +166,13 @@ pub struct AutoProcessorConfig {
     /// May differ from [`Self::existing_scope`] — a watcher can read from a
     /// broader subtree than it writes into, or vice-versa.
     pub mint_scope: Option<Scope>,
+    /// Interpretation-pass tool-call budget. `None` or `Some(0)` = the
+    /// original single-shot LLM path (no tools). `Some(N)` with `N > 0` =
+    /// engage the tool-calling harness (see [`crate::ai_service::harness`])
+    /// and let the LLM make up to `N` tool calls per pass before being
+    /// forced to answer. The cap prevents a stuck or adversarial model
+    /// from DoS'ing the extraction pass.
+    pub max_tool_calls: Option<u32>,
     /// When `true`, enables full debug observability for this processor:
     /// 1. Persists the raw LLM prompt + response on the pass's
     ///    `InterpretationRun` node (`debugPrompt`/`debugResponse`) for
@@ -268,6 +275,9 @@ pub async fn write_processor(
             .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
         values["mintScope"] = json.into();
     }
+    if let Some(max_tool_calls) = cfg.max_tool_calls {
+        values["maxToolCalls"] = max_tool_calls.to_string().into();
+    }
     if let Some(v) = emit_debug_events_write {
         values["emitDebugEvents"] = v.to_string().into();
     }
@@ -359,6 +369,73 @@ pub async fn write_processor(
     Ok(())
 }
 
+/// Stop a processor by deleting its config instance. Returns whether there was one to delete.
+///
+/// The registration *is* data: [`load_processors`] reads the processor set out of the perspective's
+/// own graph on every watch tick, so deleting the instance is what stops the watch, and there is
+/// nothing else to unregister. Without this the only way to stop a processor was for a client to
+/// work out the node URI and delete the links itself — reaching around a subject class whose whole
+/// purpose is that a processor can be administered through the ordinary model API.
+///
+/// Idempotent, and it reports which case it was rather than treating one as a failure: a caller
+/// tidying up after a processor another peer has already removed is doing the right thing.
+///
+/// The processor's `InterpretationRun` nodes are deliberately left behind. They are both the record
+/// of what it did and the processed-turn cursor keyed on this node (see [`super::cursor`]), so
+/// deleting them would make a processor later registered under the same id re-interpret every turn
+/// the first one had already read.
+///
+/// One batch, so the instance goes away in a single commit. A partial removal would leave a node
+/// that no longer conforms to the class — invisible to [`load_processors`] and therefore stopped,
+/// but stopped by accident rather than by the write, and still carrying whichever links happened to
+/// survive.
+pub async fn remove_processor(
+    perspective: &mut PerspectiveInstance,
+    processor_id: &str,
+    context: &AgentContext,
+) -> anyhow::Result<bool> {
+    let node = processor_node(processor_id);
+    let links = perspective
+        .get_links(&LinkQuery {
+            source: Some(node.clone()),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("remove_processor(`{processor_id}`): get_links failed: {e:#}")
+        })?;
+
+    // Nothing here. Not an error: a processor that was never written and one another peer removed
+    // first are the same state, and neither is a failure of this call.
+    if links.is_empty() {
+        return Ok(false);
+    }
+
+    let batch_id = perspective.create_batch().await;
+    let removal = perspective
+        .remove_links(
+            links.into_iter().map(LinkExpression::from).collect(),
+            Some(batch_id.clone()),
+        )
+        .await;
+
+    if let Err(e) = removal {
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(anyhow::anyhow!(
+            "remove_processor(`{processor_id}`): remove_links failed: {e:#}"
+        ));
+    }
+
+    if let Err(e) = perspective.commit_batch(batch_id.clone(), context).await {
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(anyhow::anyhow!(
+            "remove_processor(`{processor_id}`): commit_batch failed: {e:#}"
+        ));
+    }
+
+    Ok(true)
+}
+
 fn class_option() -> SubjectClassOption {
     SubjectClassOption {
         class_name: Some(AUTO_PROCESSOR_CLASS.to_string()),
@@ -387,7 +464,7 @@ pub async fn load_processors(
             "processorId", "sourceScopeQuery", "basePrefix",
             "interpretationClasses", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
-            "existingScope", "mintScope", "emitDebugEvents",
+            "existingScope", "mintScope", "maxToolCalls", "emitDebugEvents",
         ]
     })
     .to_string();
@@ -520,6 +597,13 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         None => None,
     };
 
+    // `maxToolCalls`: absent → `None` (single-shot, no harness). Present but
+    // unparseable → bail like the other required-shape fields; silently
+    // defaulting to "no tool calls" on a typo would mask the config bug.
+    let max_tool_calls = match scalar("maxToolCalls") {
+        Some(s) => Some(s.parse::<u32>().ok()?),
+        None => None,
+    };
     let parse_bool = |name: &str| -> Option<Option<bool>> {
         match scalar(name) {
             Some(s) => match s.parse::<bool>() {
@@ -548,6 +632,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         source_window_ms,
         existing_scope,
         mint_scope,
+        max_tool_calls,
         emit_debug_events,
     })
 }
@@ -588,6 +673,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         }
     }
@@ -935,6 +1021,134 @@ mod tests {
         assert_eq!(
             loaded[0].interpretation_classes,
             vec!["ns://Question".to_string(), "ns://Task".to_string()]
+        );
+    }
+
+    /// Removing a processor takes it out of the loaded set — which is what stops its watch,
+    /// since the loop reads the set back out of the graph on every tick. Its neighbours are left
+    /// alone: one processor going away must not disturb another on the same perspective.
+    #[tokio::test]
+    async fn remove_processor_deletes_only_that_processor() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        for id in ["keep-me", "remove-me"] {
+            write_processor(&mut p, &sample_config(id), Some(false), &ctx)
+                .await
+                .expect("write");
+        }
+
+        let removed = remove_processor(&mut p, "remove-me", &ctx)
+            .await
+            .expect("remove");
+        assert!(removed, "there was a processor to remove");
+
+        let ids: Vec<String> = load_processors(&p)
+            .await
+            .expect("load")
+            .into_iter()
+            .map(|c| c.processor_id)
+            .collect();
+        assert_eq!(ids, vec!["keep-me"]);
+
+        let leftovers = p
+            .get_links(&LinkQuery {
+                source: Some(processor_node("remove-me")),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(
+            leftovers.is_empty(),
+            "the config node must carry no links, found {leftovers:?}"
+        );
+    }
+
+    /// Removing a processor that is not there answers `false` rather than erroring. A caller
+    /// tidying up after a processor a peer already removed has done the right thing, and a
+    /// teardown path is the worst place to raise an avoidable failure.
+    #[tokio::test]
+    async fn remove_processor_is_idempotent() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("once"), Some(false), &ctx)
+            .await
+            .expect("write");
+
+        assert!(remove_processor(&mut p, "once", &ctx).await.expect("first"));
+        assert!(!remove_processor(&mut p, "once", &ctx)
+            .await
+            .expect("second"));
+        assert!(
+            !remove_processor(&mut p, "never-existed", &ctx)
+                .await
+                .expect("unknown id"),
+            "an unknown processor id is not an error"
+        );
+    }
+
+    /// Removal really clears the node, so a processor registered again under the same id starts
+    /// from the new config rather than inheriting the old one's classes.
+    ///
+    /// Worth pinning precisely because `write_processor` *appends* to the class collection: the
+    /// only reason a re-registration does not accumulate the previous list is that removal left
+    /// nothing behind. A removal that missed a link would show up here and nowhere else.
+    #[tokio::test]
+    async fn a_removed_processor_can_be_registered_again() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let mut cfg = sample_config("recycled");
+        cfg.interpretation_classes = vec!["ns://Task".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write first");
+        remove_processor(&mut p, "recycled", &ctx)
+            .await
+            .expect("remove");
+
+        cfg.interpretation_classes = vec!["ns://Belief".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write again");
+
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].interpretation_classes,
+            vec!["ns://Belief".to_string()],
+            "a re-registered processor must not inherit the removed one's classes"
+        );
+    }
+
+    /// A processor written with an empty id is unloadable — `scalar_string` reads an empty scalar
+    /// as absent, so `config_from_instance` rejects it — and must still be removable.
+    ///
+    /// `perspective.addAutoProcessor` refuses an empty `processorId` precisely because of the
+    /// first half, but that is a validation on the way *in*: a config written before it existed,
+    /// or by a writer that is not that handler, is exactly the junk removal has to be able to
+    /// clear. Refusing the id on the way out would strand it with nothing able to take it away.
+    #[tokio::test]
+    async fn an_unloadable_empty_id_processor_is_still_removable() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config(""), Some(false), &ctx)
+            .await
+            .expect("write");
+
+        assert!(
+            load_processors(&p).await.expect("load").is_empty(),
+            "an empty processor_id is read as absent, so the config must not load"
+        );
+
+        assert!(
+            remove_processor(&mut p, "", &ctx).await.expect("remove"),
+            "the config's links are there to remove even though it never loaded"
+        );
+        let leftovers = p
+            .get_links(&LinkQuery {
+                source: Some(processor_node("")),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(
+            leftovers.is_empty(),
+            "nothing must be left behind, found {leftovers:?}"
         );
     }
 

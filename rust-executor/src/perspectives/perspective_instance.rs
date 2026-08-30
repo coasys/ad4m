@@ -3331,6 +3331,28 @@ impl PerspectiveInstance {
         self.sparql_store.query_arbitrary(&query)
     }
 
+    /// Resolve each URI to every subject class it is an instance of, most
+    /// specific first.
+    ///
+    /// The missing counterpart of `is_subject_instance`, which answers the same
+    /// question one class at a time. Callers wanting the class of an arbitrary
+    /// URI had to loop over every registered class asking that yes/no question —
+    /// one round trip per class, per URI. This answers a whole batch in two
+    /// queries.
+    ///
+    /// Membership is structural and therefore not exclusive — an instance
+    /// conforms to its parent classes too — so the answer is a list, ordered
+    /// most specific first. A caller that can only act on one takes the first.
+    ///
+    /// URIs that match no registered class are simply absent from the map.
+    pub fn subject_classes_of(
+        &self,
+        uris: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
+        let resolver = self.shape_resolver();
+        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
+    }
+
     /// Execute a model query — the executor-side replacement for
     /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
     ///
@@ -3339,24 +3361,6 @@ impl PerspectiveInstance {
     /// [`MODEL_QUERY_SHAPE_WAIT`] before erroring so cross-peer callers
     /// can query classes registered by another peer without racing
     /// p-diff-sync (see [`get_shape_or_wait`]).
-    /// Resolve each URI to the subject class it is an instance of.
-    ///
-    /// The missing counterpart of `is_subject_instance`, which answers the same
-    /// question one class at a time. Callers wanting the class of an arbitrary
-    /// URI had to loop over every registered class asking that yes/no question —
-    /// one round trip per class, per URI. This answers a whole batch in two
-    /// queries: one over every class's flags, and at most one per flagless class
-    /// for whatever the flags did not settle.
-    ///
-    /// URIs that match no registered class are simply absent from the map.
-    pub fn subject_class_of(
-        &self,
-        uris: &[String],
-    ) -> Result<std::collections::HashMap<String, String>, AnyError> {
-        let resolver = self.shape_resolver();
-        super::subject_class_of::subject_class_of(&self.sparql_store, &resolver, uris)
-    }
-
     pub async fn model_query(
         &self,
         class_name: &str,
