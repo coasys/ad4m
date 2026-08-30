@@ -1159,6 +1159,237 @@ pub async fn preview_fire_for_instance(
     .cloned())
 }
 
+/// Slice 10.14 — per-instance mutating counterpart of TS
+/// `FlowInstance.fireIfConsensus`
+/// (`core/src/perspectives/FlowModels.ts`).
+///
+/// Runs the same load-instance → resolve-rule → load-proposals →
+/// aggregate → `select_fire_candidate` chain as
+/// [`preview_fire_for_instance`], and, when the chain yields a
+/// consensus-reached tally, proceeds to
+/// [`crate::perspectives::flow_consensus::fire_flow_consensus`] under a
+/// fresh atomic batch. Returns `Ok(Some(outcome))` only after the
+/// commit lands; `Ok(None)` for every soft-fail case that would keep
+/// the on-graph state stationary; `Err` only on empty URI (the same
+/// caller-mistake shape as [`preview_fire_for_instance`]).
+///
+/// This is the single-instance counterpart to
+/// [`run_flow_consensus_pass`] (10.10a's scope-wide walker). Callers
+/// that already know *which* `FlowInstance` they want to advance
+/// (e.g. an auto-processor keyed off a specific inbound proposal, or
+/// a UI action that resolves to a known instance) should prefer this
+/// entry: it avoids the walker's `load_flow_instances(None)` sweep
+/// and reports back exactly one outcome instead of a `Vec` the caller
+/// then filters.
+///
+/// # Report-then-fire, not fire-then-report
+///
+/// The mutation only fires when `select_fire_candidate` returns
+/// `Some(tally)` with `tally.consensus_reached == true`. The
+/// [`crate::perspectives::flow_consensus::fire_flow_consensus`]
+/// primitive also enforces `consensus_reached` +
+/// `from_state == current_state` + non-noop `to_state`, so a
+/// programming error at this layer (calling `fire_flow_consensus` on
+/// a stale tally) surfaces as `Err` from the fire primitive; a
+/// commit failure after a successful fire discards the batch and
+/// surfaces as `Ok(None)` (soft-fail — the graph is intact and the
+/// next call can retry).
+///
+/// # Symmetry with TS
+///
+/// TS `FlowInstance.fireIfConsensus` composes
+/// `this.aggregateVotes(...)` (which loads its own proposal bag) +
+/// `FlowConsensusFire.fireIfConsensus(perspective, this, aggregate)`
+/// (which owns the stale-guard + `save()`). This Rust entry uses the
+/// same substrate (aggregate → select-candidate → fire → commit) with
+/// two engine-specific differences: (1) it re-derives the rule from
+/// the on-graph SHACLFlow catalogue on every call (vs. TS taking
+/// `consensusRule` as a call-time param), so an updated flow
+/// definition on the perspective takes effect immediately; (2) it
+/// batches the fire in its own commit unit so callers can call it
+/// inside a larger flow without leaking a caller batch. Consensus
+/// verifiers that walk the on-graph shape cannot distinguish an
+/// advance produced by this entry from one produced by
+/// [`run_flow_consensus_pass`] or the TS OO wrapper — same
+/// `FlowInstance.currentState` link replacement under `setSingleTarget`.
+///
+/// # Soft-fail contract
+///
+/// Returns `Ok(None)` (with `log::debug!`) for:
+///   - `load_flow_instances` transient error
+///   - unknown flow instance URI (no matching record on-graph)
+///   - `load_shacl_flows` transient error
+///   - no SHACLFlow catalogued for the instance's `flow_name`
+///   - `from_role` rule set (eligibility resolution deferred, same
+///     policy as `run_flow_consensus_pass` and
+///     `preview_fire_for_instance`)
+///   - `load_flow_transition_proposals` transient error
+///   - empty proposal bag
+///   - `aggregate_flow_votes` internal error
+///   - `select_fire_candidate` returns `None` (below-threshold or
+///     stale from_state)
+///   - `fire_flow_consensus` returns `Err` (batch discarded)
+///   - `commit_batch` returns `Err` after successful fire (batch
+///     discarded — the fire is buffered but not yet committed, so
+///     discarding rolls it back cleanly)
+///
+/// Returns `Err` only on empty `flow_instance_uri` — a caller
+/// programming error that would degenerate into a full-perspective
+/// scan through the load path.
+pub async fn fire_if_consensus_for_instance(
+    perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
+    flow_instance_uri: &str,
+    context: &crate::agent::AgentContext,
+) -> anyhow::Result<Option<crate::perspectives::flow_consensus::FireOutcome>> {
+    if flow_instance_uri.is_empty() {
+        return Err(anyhow::anyhow!(
+            "fire_if_consensus_for_instance: flow_instance_uri must not be empty"
+        ));
+    }
+
+    let records = match crate::perspectives::flow_context::load_flow_instances(perspective, None)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::debug!(
+                "fire_if_consensus_for_instance: load_flow_instances failed for {flow_instance_uri}: {e:#}"
+            );
+            return Ok(None);
+        }
+    };
+    let Some(instance) = records
+        .iter()
+        .find(|r| r.instance_uri == flow_instance_uri)
+        .cloned()
+    else {
+        log::debug!(
+            "fire_if_consensus_for_instance: no FlowInstance with URI {flow_instance_uri} on this perspective"
+        );
+        return Ok(None);
+    };
+
+    let flows_by_name = match crate::perspectives::flow_context::load_shacl_flows(perspective).await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            log::debug!("fire_if_consensus_for_instance: load_shacl_flows failed: {e:#}");
+            return Ok(None);
+        }
+    };
+    let Some(flow) = flows_by_name.get(&instance.flow_name) else {
+        log::debug!(
+            "fire_if_consensus_for_instance: no SHACLFlow for '{}' (instance {})",
+            instance.flow_name,
+            instance.instance_uri,
+        );
+        return Ok(None);
+    };
+
+    // Rule resolution mirrors `run_flow_consensus_pass` +
+    // `preview_fire_for_instance`: state override wins, then flow
+    // default, then aggregator default (n = 1). `from_role` gating is
+    // DEFERRED — same policy as the walker. A per-instance entry that
+    // silently ignored `from_role` would drift out of parity with the
+    // walker's contract.
+    let state_rule = flow
+        .states
+        .iter()
+        .find(|s| s.name == instance.current_state)
+        .and_then(|s| s.consensus_rule.clone());
+    let rule = state_rule.or_else(|| flow.consensus_rule.clone());
+    if let Some(r) = rule.as_ref() {
+        if r.from_role.is_some() {
+            log::debug!(
+                "fire_if_consensus_for_instance: consensus rule for {}.{} has from_role — deferring until eligibility resolution ships; instance {}",
+                instance.flow_name,
+                instance.current_state,
+                instance.instance_uri,
+            );
+            return Ok(None);
+        }
+    }
+
+    let loaded = match crate::perspectives::flow_consensus::load_flow_transition_proposals(
+        perspective,
+        &instance.instance_uri,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::debug!(
+                "fire_if_consensus_for_instance: load_flow_transition_proposals({}) failed: {e:#}",
+                instance.instance_uri,
+            );
+            return Ok(None);
+        }
+    };
+    if loaded.is_empty() {
+        return Ok(None);
+    }
+
+    let aggregate = match crate::perspectives::flow_consensus::aggregate_flow_votes(
+        &loaded,
+        rule.as_ref(),
+        None,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            log::debug!(
+                "fire_if_consensus_for_instance: aggregate_flow_votes({}) failed: {e:#}",
+                instance.instance_uri,
+            );
+            return Ok(None);
+        }
+    };
+
+    let Some(picked) = crate::perspectives::flow_consensus::select_fire_candidate(
+        &instance.current_state,
+        &aggregate,
+    )
+    .cloned() else {
+        return Ok(None);
+    };
+
+    // Own the batch here so callers don't have to. Symmetric with
+    // `run_flow_consensus_pass`: each firing is one atomic commit
+    // unit; a commit failure discards the batch and yields Ok(None)
+    // so the graph state is unchanged and the caller can retry.
+    let batch_id = perspective.create_batch().await;
+    match crate::perspectives::flow_consensus::fire_flow_consensus(
+        perspective,
+        &instance,
+        &picked,
+        Some(batch_id.clone()),
+        context,
+    )
+    .await
+    {
+        Ok(outcome) => match perspective.commit_batch(batch_id.clone(), context).await {
+            Ok(_) => Ok(Some(outcome)),
+            Err(e) => {
+                let _ = perspective.discard_batch(&batch_id).await;
+                log::debug!(
+                    "fire_if_consensus_for_instance: commit_batch for {} ({}→{}) failed: {e:#}",
+                    instance.instance_uri,
+                    picked.from_state,
+                    picked.to_state,
+                );
+                Ok(None)
+            }
+        },
+        Err(e) => {
+            let _ = perspective.discard_batch(&batch_id).await;
+            log::debug!(
+                "fire_if_consensus_for_instance: fire_flow_consensus({}) failed: {e:#}",
+                instance.instance_uri,
+            );
+            Ok(None)
+        }
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -4580,6 +4811,285 @@ mod e2e_tests {
         let res = preview_fire_for_instance(&perspective, "ad4m://flow/instance/does-not-exist")
             .await
             .expect("unknown URI must not error, must return Ok(None)");
+        assert!(
+            res.is_none(),
+            "unknown instance URI ⇒ Ok(None), got {res:?}",
+        );
+    }
+
+    // ========================================================================
+    // Slice 10.14 — mutating fire_if_consensus_for_instance
+    // ========================================================================
+    //
+    // Mirror of the 10.16 preview e2e suite but proves the mutation
+    // path. Each test verifies the on-graph `currentState` shape via
+    // `load_flow_instances` post-call (the load-bearing regression
+    // guard: a fire that succeeds but doesn't advance is worse than a
+    // fire that visibly panics).
+
+    /// 10.14 — happy path: n=2 rule, 3 distinct proposers,
+    /// `fire_if_consensus_for_instance` advances the flow AND returns
+    /// a matching `FireOutcome` whose `contributing_proposal_uris`
+    /// come from the freshly-written proposals.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fire_if_consensus_for_instance_advances_and_returns_outcome_e2e() {
+        use crate::perspectives::flow_classes::write_flow_transition_proposal;
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition)");
+        }
+        // Same URI-correctness rationale as the 10.16 happy-path test —
+        // flow-level rule must attach to `delivery://DeliveryFlow`, not
+        // `delivery://Delivery`, for `parse_flow_from_links` to pick it
+        // up via `load_shacl_flows`.
+        let rule_json = serde_json::to_string(&ConsensusRule {
+            n: 2,
+            from_role: None,
+        })
+        .unwrap();
+        perspective
+            .add_link(
+                Link {
+                    source: "delivery://DeliveryFlow".to_string(),
+                    predicate: Some("ad4m://consensusRule".to_string()),
+                    target: lit(&rule_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(flow.consensusRule)");
+
+        let base_uri = "ad4m://task/fire-10.14-happy";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.14-happy-inst",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        let evidence_ids = vec!["ad4m://task/1".to_string()];
+        let evidence_hash = "sha256:dummy-10.14-happy";
+        let mut proposal_uris = Vec::new();
+        for (did, pid, ts) in &[
+            ("did:key:alice", "p-fire-alice", "2026-08-30T10:05:00Z"),
+            ("did:key:bob", "p-fire-bob", "2026-08-30T10:05:01Z"),
+            ("did:key:cara", "p-fire-cara", "2026-08-30T10:05:02Z"),
+        ] {
+            let uri = write_flow_transition_proposal(
+                &mut perspective,
+                pid,
+                did,
+                ts,
+                &inst_uri,
+                "identified",
+                "scoped",
+                &evidence_ids,
+                evidence_hash,
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("write_flow_transition_proposal");
+            proposal_uris.push(uri);
+        }
+
+        let outcome = fire_if_consensus_for_instance(&mut perspective, &inst_uri, &ctx)
+            .await
+            .expect("fire_if_consensus_for_instance ok")
+            .expect("consensus reached ⇒ Some(outcome)");
+        assert_eq!(outcome.instance_uri, inst_uri);
+        assert_eq!(outcome.from_state, "identified");
+        assert_eq!(outcome.to_state, "scoped");
+        assert_eq!(
+            outcome.fired_by_proposers.len(),
+            3,
+            "n=2 rule with 3 distinct proposers ⇒ 3 eligible proposers on the outcome",
+        );
+        // Contributing proposal URIs must be exactly the ones we wrote
+        // — proves the outcome is derived from the same bag the fire
+        // read, not a stale cache. Order-insensitive compare because
+        // aggregate_flow_votes bucketing doesn't guarantee input order.
+        let mut got: Vec<String> = outcome.contributing_proposal_uris.clone();
+        got.sort();
+        let mut want = proposal_uris.clone();
+        want.sort();
+        assert_eq!(
+            got, want,
+            "contributing_proposal_uris must equal the freshly-minted proposal URIs",
+        );
+
+        // Load-bearing assertion: on-graph state MUST be advanced.
+        // The complementary check to the 10.16 "MUST NOT advance"
+        // guard — a fire path that reports success but doesn't
+        // persist is silently broken.
+        let records = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after fire");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].current_state, "scoped",
+            "fire_if_consensus_for_instance MUST advance currentState on the same on-graph shape TS FlowInstance.fireIfConsensus writes",
+        );
+
+        // Idempotence-style follow-up: a second call on the now-advanced
+        // instance sees the same proposals but their fromState is now
+        // stale relative to currentState, so `select_fire_candidate`
+        // returns None ⇒ Ok(None). This proves the stale-guard fires
+        // from THIS path (not just from `preview_fire_for_instance`)
+        // and no double-advance to a third state can occur.
+        let follow_up = fire_if_consensus_for_instance(&mut perspective, &inst_uri, &ctx)
+            .await
+            .expect("follow-up call must not error");
+        assert!(
+            follow_up.is_none(),
+            "second fire on advanced instance MUST return Ok(None) (stale votes), got {follow_up:?}",
+        );
+        let records_after = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after follow-up");
+        assert_eq!(
+            records_after[0].current_state, "scoped",
+            "follow-up must NOT double-advance beyond 'scoped'",
+        );
+    }
+
+    /// 10.14 — below-threshold: 1 proposal vs `n=2` ⇒ `Ok(None)` AND
+    /// no on-graph mutation. Bundled with the "stale-fromState"
+    /// stress in the 10.16 preview suite; here we split them because
+    /// the mutating path has a distinct commit failure mode we don't
+    /// want to entangle with the stale-guard case.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fire_if_consensus_for_instance_below_threshold_returns_none_no_advance_e2e() {
+        use crate::perspectives::flow_classes::write_flow_transition_proposal;
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition)");
+        }
+        let rule_json = serde_json::to_string(&ConsensusRule {
+            n: 2,
+            from_role: None,
+        })
+        .unwrap();
+        perspective
+            .add_link(
+                Link {
+                    source: "delivery://DeliveryFlow".to_string(),
+                    predicate: Some("ad4m://consensusRule".to_string()),
+                    target: lit(&rule_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(flow.consensusRule)");
+
+        let base_uri = "ad4m://task/fire-10.14-below";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.14-below-inst",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        // Only one proposer vs n=2 — aggregate has no `fires` tally.
+        write_flow_transition_proposal(
+            &mut perspective,
+            "p-below-alice",
+            "did:key:alice",
+            "2026-08-30T10:05:00Z",
+            &inst_uri,
+            "identified",
+            "scoped",
+            &["ad4m://task/1".to_string()],
+            "sha256:dummy-10.14-below",
+            None,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("write_flow_transition_proposal");
+
+        let outcome = fire_if_consensus_for_instance(&mut perspective, &inst_uri, &ctx)
+            .await
+            .expect("fire_if_consensus_for_instance ok (below-threshold)");
+        assert!(
+            outcome.is_none(),
+            "1 vote vs n=2 ⇒ Ok(None), got {outcome:?}",
+        );
+
+        let records = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after below-threshold call");
+        assert_eq!(
+            records[0].current_state, "identified",
+            "below-threshold path MUST NOT touch on-graph currentState",
+        );
+    }
+
+    /// 10.14 — empty URI is a caller programming error, not a soft
+    /// fail. Mirrors [`preview_fire_for_instance_rejects_empty_uri_e2e`].
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fire_if_consensus_for_instance_rejects_empty_uri_e2e() {
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+        let err = fire_if_consensus_for_instance(&mut perspective, "", &ctx)
+            .await
+            .expect_err("empty URI must return Err before loading anything");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "guard message must state the failure clearly, got {err}",
+        );
+    }
+
+    /// 10.14 — an instance URI not present on this perspective
+    /// returns `Ok(None)` (not `Err`). Same silent-skip policy as
+    /// [`preview_fire_for_instance_unknown_uri_returns_none_e2e`] and
+    /// [`run_flow_consensus_pass`]'s absent-catalogue branch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fire_if_consensus_for_instance_unknown_uri_returns_none_e2e() {
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+        let res = fire_if_consensus_for_instance(
+            &mut perspective,
+            "ad4m://flow/instance/does-not-exist",
+            &ctx,
+        )
+        .await
+        .expect("unknown URI must not error, must return Ok(None)");
         assert!(
             res.is_none(),
             "unknown instance URI ⇒ Ok(None), got {res:?}",
