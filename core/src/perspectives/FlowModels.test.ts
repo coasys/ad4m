@@ -6,6 +6,7 @@ import {
 } from "./FlowModels";
 import { computeFlowEvidenceHash } from "./FlowEvidenceHash";
 import * as FlowVoteAggregatorModule from "./FlowVoteAggregator";
+import * as FlowConsensusFireModule from "./FlowConsensusFire";
 
 /**
  * Unit tests for the pure companion helper of
@@ -486,6 +487,165 @@ describe("FlowInstance.aggregateVotes (OO composition of currentProposals + aggr
       ).rejects.toThrow(/fromRole/);
     } finally {
       listSpy.mockRestore();
+    }
+  });
+});
+
+describe("FlowInstance.fireIfConsensus (OO composition of aggregateVotes + FlowConsensusFire.fireIfConsensus)", () => {
+  // Poison proxy: any property read explodes, so the defence guard is
+  // proven to fire before the delegate chain would touch the perspective.
+  const poison: any = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(
+          "FlowInstance.fireIfConsensus leaked past its own defence guard onto the perspective proxy",
+        );
+      },
+    },
+  );
+
+  it("throws when this.id is empty (unhydrated instance)", async () => {
+    // Clear the Ad4mModel-backing `_baseExpression` field so `this.id`
+    // reads empty through the public getter. Mirrors the id-guard tests
+    // on the other three OO wrappers (.proposeTransition / .currentProposals
+    // / .aggregateVotes) — same defence contract.
+    const instance = new FlowInstance(poison, "ad4m://flow/instance/i-1");
+    (instance as any)._baseExpression = "";
+    await expect(instance.fireIfConsensus()).rejects.toThrow(/instance has no id/);
+  });
+
+  it("composes aggregateVotes() + fireIfConsensus(): passes perspective, this, and aggregate through untouched", async () => {
+    // Spy on both delegates and prove the wrapper wires them together
+    // without transforming either input or the return value.
+    const sentinelAggregate: FlowVoteAggregatorModule.AggregateFlowVotesResult = {
+      tallies: [
+        {
+          fromState: "Identified",
+          toState: "Scoped",
+          distinctProposers: ["did:example:alice", "did:example:bob"],
+          eligibleProposers: ["did:example:alice", "did:example:bob"],
+          requiredCount: 2,
+          consensusReached: true,
+          contributing: [],
+        },
+      ],
+      fires: {
+        fromState: "Identified",
+        toState: "Scoped",
+        distinctProposers: ["did:example:alice", "did:example:bob"],
+        eligibleProposers: ["did:example:alice", "did:example:bob"],
+        requiredCount: 2,
+        consensusReached: true,
+        contributing: [],
+      },
+    };
+    const aggSpy = jest
+      .spyOn(FlowInstance.prototype, "aggregateVotes")
+      .mockResolvedValue(sentinelAggregate);
+
+    const sentinelOutcome: FlowConsensusFireModule.FireOutcome = {
+      instanceUri: "ad4m://flow/instance/i-42",
+      fromState: "Identified",
+      toState: "Scoped",
+      firedByProposers: ["did:example:alice", "did:example:bob"],
+      contributingProposalUris: ["ad4m://proposal/a", "ad4m://proposal/b"],
+    };
+    const fireSpy = jest
+      .spyOn(FlowConsensusFireModule, "fireIfConsensus")
+      .mockResolvedValue(sentinelOutcome);
+
+    const rule = { n: 2 };
+    const eligibleDIDs = new Set(["did:example:alice", "did:example:bob"]);
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-42");
+      const result = await instance.fireIfConsensus(rule, eligibleDIDs);
+
+      // aggregateVotes called on `this`, with both args threaded through.
+      expect(aggSpy).toHaveBeenCalledTimes(1);
+      expect(aggSpy.mock.instances[0]).toBe(instance);
+      const [aggRule, aggEligible] = aggSpy.mock.calls[0];
+      expect(aggRule).toBe(rule);
+      expect(aggEligible).toBe(eligibleDIDs);
+
+      // Helper called with (perspective, this, aggregate) — reference
+      // equality proves no defensive wrap / clone.
+      expect(fireSpy).toHaveBeenCalledTimes(1);
+      const [firePerspective, fireInstance, fireAggregate] = fireSpy.mock.calls[0];
+      expect(firePerspective).toBe(poison);
+      expect(fireInstance).toBe(instance);
+      expect(fireAggregate).toBe(sentinelAggregate);
+
+      // Return value passed through untouched.
+      expect(result).toBe(sentinelOutcome);
+    } finally {
+      aggSpy.mockRestore();
+      fireSpy.mockRestore();
+    }
+  });
+
+  it("passes undefined for both consensusRule and eligibleDIDs when the caller omits them", async () => {
+    // Same divergence-guard as .aggregateVotes: the wrapper must NOT
+    // silently substitute an explicit default. The helper's own default
+    // (design §7.1: `{ n: 1 }`) must fire from the helper, not from the
+    // wrapper — else consensusRule surface forks between OO and static.
+    const aggSpy = jest
+      .spyOn(FlowInstance.prototype, "aggregateVotes")
+      .mockResolvedValue({ tallies: [], fires: undefined });
+    const fireSpy = jest
+      .spyOn(FlowConsensusFireModule, "fireIfConsensus")
+      .mockResolvedValue(undefined);
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-9");
+      await instance.fireIfConsensus();
+      expect(aggSpy).toHaveBeenCalledTimes(1);
+      const [aggRule, aggEligible] = aggSpy.mock.calls[0];
+      expect(aggRule).toBeUndefined();
+      expect(aggEligible).toBeUndefined();
+    } finally {
+      aggSpy.mockRestore();
+      fireSpy.mockRestore();
+    }
+  });
+
+  it("returns undefined when the helper returns undefined (no consensus / stale vote)", async () => {
+    // Below-threshold path. Wrapper must pass through — must not conjure
+    // a synthetic outcome or throw.
+    const aggSpy = jest
+      .spyOn(FlowInstance.prototype, "aggregateVotes")
+      .mockResolvedValue({ tallies: [], fires: undefined });
+    const fireSpy = jest
+      .spyOn(FlowConsensusFireModule, "fireIfConsensus")
+      .mockResolvedValue(undefined);
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-9");
+      const result = await instance.fireIfConsensus({ n: 5 });
+      expect(result).toBeUndefined();
+      expect(fireSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      aggSpy.mockRestore();
+      fireSpy.mockRestore();
+    }
+  });
+
+  it("propagates aggregateVotes errors verbatim without calling the fire helper", async () => {
+    // Guard: an aggregation-layer failure (e.g. fromRole without
+    // eligibleDIDs) must surface AND must short-circuit the fire step.
+    // The fire helper should never see a bag that came out of a failed
+    // aggregation — else silent-default guard becomes silent-fire.
+    const aggSpy = jest
+      .spyOn(FlowInstance.prototype, "aggregateVotes")
+      .mockRejectedValue(new Error("aggregateFlowVotes: fromRole requires eligibleDIDs"));
+    const fireSpy = jest.spyOn(FlowConsensusFireModule, "fireIfConsensus");
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-9");
+      await expect(
+        instance.fireIfConsensus({ n: 1, fromRole: "some-role-query" as any }),
+      ).rejects.toThrow(/fromRole/);
+      expect(fireSpy).not.toHaveBeenCalled();
+    } finally {
+      aggSpy.mockRestore();
+      fireSpy.mockRestore();
     }
   });
 });

@@ -28,6 +28,10 @@ import {
   aggregateFlowVotes,
   type AggregateFlowVotesResult,
 } from "./FlowVoteAggregator";
+import {
+  fireIfConsensus as fireIfConsensusHelper,
+  type FireOutcome,
+} from "./FlowConsensusFire";
 import type { ConsensusRule } from "../shacl/SHACLFlow";
 
 // ── FlowTransitionProposal ──────────────────────────────────────────────────
@@ -389,5 +393,59 @@ export class FlowInstance extends Ad4mModel {
       this.id,
     );
     return aggregateFlowVotes(proposals, consensusRule, eligibleDIDs);
+  }
+
+  /**
+   * OO composition of {@link aggregateVotes} + `fireIfConsensus`: load and
+   * reduce the current proposal bag, then — if a tally has met consensus
+   * and its `fromState` still matches `this.currentState` — advance the
+   * flow to the winning `toState` on-graph and return a {@link FireOutcome}
+   * snapshot. Returns `undefined` when no tally has consensus, or when the
+   * winning tally's `fromState` is stale (a concurrent firing pass already
+   * advanced past it).
+   *
+   * Three-line body — all defence, counting, stale-vote handling, and the
+   * on-graph `.currentState = ...; .save()` write live in the helpers.
+   * Keeping the wrapper thin locks OO/static parity: `instance.fireIfConsensus(...)`
+   * and the static composition `fireIfConsensus(perspective, instance,
+   * await aggregateVotes(...))` MUST reach the same verdict from the same
+   * on-graph bag — the pure helper is the only place both paths agree on
+   * whether a tally fires.
+   *
+   * Delegates the aggregation step to `this.aggregateVotes(...)` (10.12
+   * wrapper) rather than re-doing the `currentProposals` + `aggregateFlowVotes`
+   * pair inline, so any future refinement to how a `FlowInstance` bag is
+   * aggregated (e.g. caching, per-instance filtering) applies to both the
+   * "aggregate only" and "aggregate → fire" paths.
+   *
+   * Defence guard on empty `this.id` fires *before* the delegate chain so
+   * an unhydrated instance can't silently return `undefined` — that would
+   * look like "consensus not reached" instead of "wrong operand".
+   *
+   * @param consensusRule Optional rule; defaults to `{ n: 1 }` per design
+   *   §7.1. Passed through to `.aggregateVotes(...)` (which passes through
+   *   to `aggregateFlowVotes`); wrapper never substitutes an undefined
+   *   value with an explicit default, to avoid OO/static divergence on
+   *   the consensusRule surface.
+   * @param eligibleDIDs Required only when `consensusRule.fromRole` is set;
+   *   contract inherited from `aggregateFlowVotes`.
+   * @throws When `this.id` is empty (unhydrated / unsaved instance).
+   * @throws (via `aggregateFlowVotes`) When `consensusRule.n` is invalid or
+   *   when `fromRole` is present but `eligibleDIDs` is not supplied.
+   * @throws (via `fireFlowConsensus`) When the winning tally somehow fails
+   *   its own preconditions (would be a bug in the helper — the wrapper
+   *   does not catch and swallow).
+   */
+  async fireIfConsensus(
+    consensusRule?: ConsensusRule,
+    eligibleDIDs?: ReadonlySet<string>,
+  ): Promise<FireOutcome | undefined> {
+    if (!this.id) {
+      throw new Error(
+        "FlowInstance.fireIfConsensus: instance has no id (call on a hydrated / saved instance)",
+      );
+    }
+    const aggregate = await this.aggregateVotes(consensusRule, eligibleDIDs);
+    return fireIfConsensusHelper(this.perspective, this, aggregate);
   }
 }
