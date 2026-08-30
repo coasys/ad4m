@@ -667,7 +667,14 @@ impl WalletBackend for SharedWallet {
             Ok(r) if r.status().is_success() => r,
             _ => return vec![],
         };
-        resp.json::<Vec<String>>().unwrap_or_default()
+        // Worker returns {"keys": ["name1", "name2", ...]}
+        #[derive(serde::Deserialize)]
+        struct KeysResp {
+            keys: Vec<String>,
+        }
+        resp.json::<KeysResp>()
+            .map(|r| r.keys)
+            .unwrap_or_default()
     }
 
     fn key_exists(&self, name: &str) -> bool {
@@ -679,13 +686,24 @@ impl WalletBackend for SharedWallet {
                 }
             }
         }
-        // Fall back to HTTP
+        // Fall back to HTTP — parse the JSON body, not just the status code.
+        // The endpoint returns 200 {"exists": false} for missing keys.
         let url = format!("{}/keys/{}/exists", self.base_url, name);
-        self.client
+        let resp = match self
+            .client
             .get(&url)
             .header("Authorization", self.auth_header())
             .send()
-            .map(|r| r.status().is_success())
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => return false,
+        };
+        #[derive(serde::Deserialize)]
+        struct ExistsResp {
+            exists: bool,
+        }
+        resp.json::<ExistsResp>()
+            .map(|r| r.exists)
             .unwrap_or(false)
     }
 
