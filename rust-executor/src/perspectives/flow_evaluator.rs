@@ -3924,4 +3924,145 @@ mod e2e_tests {
             "on-graph state must NOT have advanced when from_role is set",
         );
     }
+
+    /// Slice 10.10b — engine-proposal→consensus chained back-to-back,
+    /// the same sequence `interpretation::run` executes. Proves the two
+    /// passes compose correctly on a real perspective:
+    ///
+    ///   1. Seed a Delivery flow whose `scoped` state has `requires:
+    ///      count>=1 ns://Task` and a top-level `ConsensusRule { n: 1 }`
+    ///      (single-proposer neighbourhood — auto-processor advances
+    ///      on its own vote).
+    ///   2. Seed one Task so the deterministic evaluator finds a
+    ///      satisfied transition on the next `run_engine_proposal_pass`.
+    ///   3. `run_engine_proposal_pass` mints one `FlowTransitionProposal`
+    ///      on-graph, proposer = acting DID.
+    ///   4. `run_flow_consensus_pass` immediately aggregates against
+    ///      the on-graph bag and fires the freshly-minted proposal
+    ///      (n=1, no from_role). On-graph `currentState` advances
+    ///      `identified → scoped`.
+    ///
+    /// This is the composition run.rs owns: proposal pass, then
+    /// consensus pass. A regression that broke the wire-in (e.g.
+    /// consensus pass runs BEFORE proposal pass, or scope threading
+    /// drops) would show up here even without running the extraction
+    /// LLM path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn engine_proposal_then_consensus_fire_composition_e2e() {
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        // `requires` guard on `scoped` — the trigger for a satisfied
+        // transition once a Task is seeded.
+        let requires_json = r#"[{"className":"ns://Task","count":{"min":1}}]"#;
+        perspective
+            .add_link(
+                Link {
+                    source: "delivery://Delivery.scoped".to_string(),
+                    predicate: Some("ad4m://requires".to_string()),
+                    target: lit(requires_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(scoped.requires)");
+        // `ConsensusRule { n: 1 }` — single-proposer fires. Deferred
+        // `from_role` branch stays off (rule.from_role is None).
+        let rule_json = serde_json::to_string(&ConsensusRule {
+            n: 1,
+            from_role: None,
+        })
+        .unwrap();
+        perspective
+            .add_link(
+                Link {
+                    source: "delivery://Delivery".to_string(),
+                    predicate: Some("ad4m://consensusRule".to_string()),
+                    target: lit(&rule_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(flow.consensusRule)");
+
+        let base_uri = "ad4m://task/compose-10.10b";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.10b-inst",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+        // Seed one Task so the `requires` guard is satisfied.
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "ad4m://task/compose-1",
+            "Compose Test",
+        )
+        .await;
+
+        // Step 3 — engine-proposal pass mints a proposal. No LLM hints,
+        // no semantic-check gate (we're proving the composition, not
+        // the gate).
+        let minted = run_engine_proposal_pass(&mut perspective, None, &ctx, None, &[]).await;
+        assert_eq!(
+            minted.len(),
+            1,
+            "engine-proposal pass must mint exactly one proposal for the seeded satisfied transition, got {minted:?}",
+        );
+
+        // Step 4 — consensus firing pass immediately advances the
+        // instance. n=1 + one proposer (acting_did) ⇒ consensus met.
+        let fired = run_flow_consensus_pass(&mut perspective, None, &ctx).await;
+        assert_eq!(
+            fired.len(),
+            1,
+            "consensus firing pass must advance exactly one instance chained after the proposal pass, got {fired:?}",
+        );
+        assert_eq!(fired[0].instance_uri, inst_uri);
+        assert_eq!(fired[0].from_state, "identified");
+        assert_eq!(fired[0].to_state, "scoped");
+
+        // The single contributing proposal must be the one the engine
+        // pass just minted — proves the two passes see the SAME on-
+        // graph bag (a store-consistency bug between them would show
+        // as either 0 proposals loaded or a different URI).
+        assert_eq!(
+            fired[0].contributing_proposal_uris.len(),
+            1,
+            "n=1 fire ⇒ 1 contributing proposal",
+        );
+        assert_eq!(
+            fired[0].contributing_proposal_uris[0], minted[0],
+            "the consensus pass must have fired on the freshly-minted proposal",
+        );
+
+        // On-graph state actually advanced.
+        let records = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after chained composition");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].current_state, "scoped");
+    }
 }

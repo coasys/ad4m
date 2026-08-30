@@ -635,6 +635,16 @@ pub struct InterpretationOutcome {
     /// or the loader path silent-failed (see
     /// [`crate::perspectives::flow_evaluator::run_engine_proposal_pass`]).
     pub flow_proposals: Vec<String>,
+    /// Slice 10.10b — [`crate::perspectives::flow_consensus::FireOutcome`]s
+    /// for every `FlowInstance` whose `currentState` this pass advanced.
+    /// Populated by
+    /// [`crate::perspectives::flow_evaluator::run_flow_consensus_pass`],
+    /// which runs AFTER [`crate::perspectives::flow_evaluator::run_engine_proposal_pass`]
+    /// so a proposal minted on this pass can immediately fire if the
+    /// on-graph proposal bag already meets the flow's `ConsensusRule`.
+    /// Empty when no consensus fired (typical single-agent local case)
+    /// or when the pass silent-failed on a loader/writer error.
+    pub flow_fires: Vec<crate::perspectives::flow_consensus::FireOutcome>,
 }
 
 pub async fn run_interpretation_with_strategy_and_model(
@@ -866,12 +876,24 @@ pub async fn run_interpretation_with_strategy_and_model(
     )
     .await;
 
+    // Slice 10.10b — consensus firing pass. Runs immediately after the
+    // proposal pass so a proposal minted on THIS pass can already fire
+    // if the on-graph bag (fresh + prior peer votes) meets the flow's
+    // `ConsensusRule`. Silent-fallback throughout — see the fn doc.
+    // Same `scope` narrowing as the proposal pass so a
+    // subject-scoped extraction doesn't fire consensus on unrelated
+    // instances elsewhere on the perspective.
+    let flow_fires =
+        crate::perspectives::flow_evaluator::run_flow_consensus_pass(perspective, scope, context)
+            .await;
+
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
     Ok(InterpretationOutcome {
         bases,
         debug,
         flow_proposals,
+        flow_fires,
     })
 }
 
@@ -1159,6 +1181,24 @@ pub async fn run_interpretation_with_harness_and_model(
             "harness: engine-proposal pass minted {} FlowTransitionProposal(s): {:?}",
             flow_proposals.len(),
             flow_proposals
+        );
+    }
+
+    // Slice 10.10b — consensus firing pass, mirrors the strategy path.
+    // The harness return signature is `Vec<String>` (bases only), so
+    // fires are surfaced via `warn!` for now — matching how
+    // `flow_proposals` is surfaced above. Extending the harness return
+    // to a full `InterpretationOutcome` is a separate slice; the
+    // consensus firing itself lands on-graph regardless, which is the
+    // load-bearing property.
+    let flow_fires =
+        crate::perspectives::flow_evaluator::run_flow_consensus_pass(perspective, scope, context)
+            .await;
+    if !flow_fires.is_empty() {
+        log::warn!(
+            "harness: consensus firing pass advanced {} FlowInstance(s): {:?}",
+            flow_fires.len(),
+            flow_fires
         );
     }
 
