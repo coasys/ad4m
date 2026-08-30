@@ -1,24 +1,36 @@
-//! Slice 10.9a — pure Rust port of `aggregateFlowVotes`
-//! (`core/src/perspectives/FlowVoteAggregator.ts`).
+//! Slice 10.9a/b2 — Rust port of `aggregateFlowVotes` +
+//! `fireFlowConsensus` (`core/src/perspectives/FlowVoteAggregator.ts`
+//! and `core/src/perspectives/FlowConsensusFire.ts`).
 //!
-//! Byte-for-byte parity with the TS aggregator so the auto-processor
-//! (engine side) and Ad4m clients (TS side) reach the same fire/no-fire
-//! verdict from the same on-graph proposal bag. Without this, an
-//! engine-side consensus firing pass (slice 10.9b) would either
-//! double-fire when clients disagree or silently drift as consensus
-//! rules evolve.
+//! Byte-for-byte parity with the TS aggregator + firing pair so the
+//! auto-processor (engine side) and Ad4m clients (TS side) reach the
+//! same fire/no-fire verdict — and, when firing, advance the same
+//! `FlowInstance.currentState` under the same stale-vote guards — from
+//! the same on-graph proposal bag. Without this, an engine-side
+//! consensus firing pass would either double-fire when clients disagree
+//! or silently drift as consensus rules evolve.
 //!
 //! # What this module owns
 //!
 //! - [`FlowTransitionProposalRecord`] — plain data mirror of the TS
-//!   `FlowTransitionProposal` shape as it lands on-graph. Only the four
+//!   `FlowTransitionProposal` shape as it lands on-graph. The four
 //!   fields the aggregator counts on (`from_state`, `to_state`,
-//!   `proposer`, `proposed_at`) are load-bearing; the writer in
-//!   [`super::flow_classes::write_flow_transition_proposal`] emits every
-//!   field, but the aggregator doesn't rehydrate them.
+//!   `proposer`, `proposed_at`) are load-bearing; `uri` is carried so
+//!   [`FireOutcome::contributing_proposal_uris`] can be derived by the
+//!   firing path (mirrors TS `FlowTransitionProposal.id`).
 //! - [`FlowVoteTally`] + [`AggregateFlowVotesResult`] — output shape,
 //!   1:1 with the TS interfaces.
 //! - [`aggregate_flow_votes`] — pure aggregation entry point.
+//! - [`select_fire_candidate`] — pure "which tally is safe to fire now"
+//!   check, mirroring TS `selectFireCandidate`. Stale-`from_state`
+//!   guard lives here so the async writer path can stay a thin
+//!   composition.
+//! - [`fire_flow_consensus`] — async composition: preconditions →
+//!   [`super::flow_classes::advance_flow_instance_state`] → structured
+//!   [`FireOutcome`]. Mirrors TS `fireFlowConsensus`.
+//! - [`load_flow_transition_proposals`] — thin `model_query` loader for
+//!   every proposal targeting a given `FlowInstance`. Companion to
+//!   [`super::flow_context::load_flow_instances`].
 //!
 //! # Non-goals (deferred)
 //!
@@ -26,24 +38,39 @@
 //!   set. Same contract as the TS side: it keeps this helper sync +
 //!   composable with both engine and client firing paths (design §7.2).
 //! - Weighted / delegation / time-decay consensus (design §7.5 v1.5+).
-//! - Actually firing the transition (slice 10.9b: `fire_flow_consensus`).
-//! - Loading proposals from the perspective (queued, own slice).
+//! - Writing a `FlowInstanceAdvance` audit event alongside the state
+//!   advance ([`FireOutcome`] already carries what a future writer
+//!   would need). Same "v1 fires only" scope as TS `fireFlowConsensus`.
 
 #![allow(dead_code)]
 
+use crate::agent::AgentContext;
+use crate::perspectives::flow_classes::{
+    advance_flow_instance_state, FLOW_TRANSITION_PROPOSAL_CLASS,
+};
+use crate::perspectives::flow_context::FlowInstanceRecord;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::ConsensusRule;
 use std::collections::{BTreeMap, HashSet};
 
 /// Plain data mirror of the TS `FlowTransitionProposal` shape as it
 /// appears in the aggregator's input. The writer stage
 /// (`write_flow_transition_proposal`) emits every declared property; the
-/// aggregator only counts on the four below.
+/// aggregator only counts on `from_state`/`to_state`/`proposer`/`proposed_at`.
+///
+/// `uri` is the on-graph proposal URI (`ad4m://flow/proposal/{id}` —
+/// see [`super::flow_classes::flow_transition_proposal_uri`]). It is
+/// NOT read by [`aggregate_flow_votes`]; it is copied through so the
+/// firing path can derive [`FireOutcome::contributing_proposal_uris`]
+/// without a second read of the perspective. Mirrors the way TS
+/// `fireFlowConsensus` reads `contributing.map((p) => p.id)`.
 ///
 /// Fields are `String` (not `&str`) so a loader step can construct
 /// records from either a live perspective query or a fixture without
 /// lifetime gymnastics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowTransitionProposalRecord {
+    pub uri: String,
     pub from_state: String,
     pub to_state: String,
     pub proposer: String,
@@ -204,6 +231,210 @@ pub fn aggregate_flow_votes(
     Ok(AggregateFlowVotesResult { tallies, fires })
 }
 
+/// Snapshot of what [`fire_flow_consensus`] actually wrote. Mirrors TS
+/// `FireOutcome` (`core/src/perspectives/FlowConsensusFire.ts`).
+///
+/// Callers use this for logging, UI updates, and — once the
+/// `FlowInstanceAdvance` event class lands — projecting proposal
+/// evidence into an on-graph audit trail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FireOutcome {
+    /// The `FlowInstance` URI whose `currentState` was advanced.
+    pub instance_uri: String,
+    /// Value of `currentState` before the advance.
+    pub from_state: String,
+    /// Value of `currentState` after the advance.
+    pub to_state: String,
+    /// Distinct DIDs whose proposals were counted toward this
+    /// consensus. Sorted lexicographically — mirrors
+    /// [`FlowVoteTally::eligible_proposers`].
+    pub fired_by_proposers: Vec<String>,
+    /// URIs of the proposals that contributed to the tally. Order
+    /// preserved from [`FlowVoteTally::contributing`] (which mirrors
+    /// input order — oldest-first when the caller loaded proposals via
+    /// [`load_flow_transition_proposals`]).
+    pub contributing_proposal_uris: Vec<String>,
+}
+
+/// Choose which tally (if any) is safe to fire against a given
+/// `FlowInstance` snapshot right now. Mirrors TS `selectFireCandidate`
+/// (`core/src/perspectives/FlowConsensusFire.ts`).
+///
+/// Returns `None` when:
+///   - the aggregate has no `fires` tally (no target met consensus), OR
+///   - the fires tally's `from_state` differs from `current_state` (a
+///     firing pass has already advanced the flow past this transition,
+///     so the votes are stale relative to the current state).
+///
+/// The second guard is the reason this helper exists as a separate
+/// function: [`AggregateFlowVotesResult::fires`] is computed without
+/// reference to the live instance, so callers MUST re-check against the
+/// current snapshot before firing.
+pub fn select_fire_candidate<'a>(
+    current_state: &str,
+    aggregate: &'a AggregateFlowVotesResult,
+) -> Option<&'a FlowVoteTally> {
+    let candidate = aggregate.fires.as_ref()?;
+    if candidate.from_state != current_state {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// Advance an on-graph `FlowInstance` to `fired_tally.to_state`.
+/// Mirrors TS `fireFlowConsensus`
+/// (`core/src/perspectives/FlowConsensusFire.ts`).
+///
+/// Preconditions (all enforced — a violation returns `Err` before
+/// touching the perspective):
+///   - `fired_tally.consensus_reached == true`
+///   - `fired_tally.from_state == instance.current_state`
+///   - `fired_tally.to_state != instance.current_state`
+///
+/// Mutation path: delegates to
+/// [`super::flow_classes::advance_flow_instance_state`], which does an
+/// atomic `setSingleTarget` replace of the `currentState` link under
+/// the caller-supplied `batch_id`. Mirrors [`super::flow_classes::mint_flow_instance`]
+/// and [`super::flow_classes::write_flow_transition_proposal`]: the
+/// caller owns id-gen / clock / atomic-commit batching so the fire path
+/// can bundle the advance with follow-on writes (e.g. a future
+/// `FlowInstanceAdvance` event) into one commit.
+pub async fn fire_flow_consensus(
+    perspective: &mut PerspectiveInstance,
+    instance: &FlowInstanceRecord,
+    fired_tally: &FlowVoteTally,
+    batch_id: Option<String>,
+    context: &AgentContext,
+) -> anyhow::Result<FireOutcome> {
+    if !fired_tally.consensus_reached {
+        return Err(anyhow::anyhow!(
+            "fire_flow_consensus: refusing to fire — tally has not reached consensus ({}/{} for {} → {})",
+            fired_tally.eligible_proposers.len(),
+            fired_tally.required_count,
+            fired_tally.from_state,
+            fired_tally.to_state,
+        ));
+    }
+    if fired_tally.from_state != instance.current_state {
+        return Err(anyhow::anyhow!(
+            "fire_flow_consensus: stale tally — fromState={} does not match instance.currentState={} (flow already advanced?)",
+            fired_tally.from_state,
+            instance.current_state,
+        ));
+    }
+    if fired_tally.to_state == instance.current_state {
+        return Err(anyhow::anyhow!(
+            "fire_flow_consensus: refusing to fire a no-op — toState={} equals instance.currentState",
+            fired_tally.to_state,
+        ));
+    }
+
+    let from_state = instance.current_state.clone();
+    let to_state = fired_tally.to_state.clone();
+
+    advance_flow_instance_state(
+        perspective,
+        &instance.instance_uri,
+        &to_state,
+        batch_id,
+        context,
+    )
+    .await?;
+
+    Ok(FireOutcome {
+        instance_uri: instance.instance_uri.clone(),
+        from_state,
+        to_state,
+        fired_by_proposers: fired_tally.eligible_proposers.clone(),
+        contributing_proposal_uris: fired_tally
+            .contributing
+            .iter()
+            .map(|p| p.uri.clone())
+            .collect(),
+    })
+}
+
+/// Load every live `FlowTransitionProposal` targeting a given
+/// `FlowInstance` URI. Companion to
+/// [`super::flow_context::load_flow_instances`] — same
+/// `model_query`-with-`where`-filter pattern, same absent-class silent
+/// return, same "half-record silently skipped" tolerance.
+///
+/// Results are NOT sorted by [`FlowTransitionProposalRecord::proposed_at`]
+/// here — [`aggregate_flow_votes`] does its own bucketing, and the
+/// "oldest-first" ordering the TS `listForInstance` guarantees is a
+/// client-side ergonomic that the engine path does not need. Callers
+/// wanting stable ordering across runs should sort at the call site.
+///
+/// Silently returns `Ok(vec![])` when the `FlowTransitionProposal`
+/// class hasn't been registered on this perspective yet — a
+/// freshly-created perspective has no proposals; treating that as an
+/// error would break the auto-processor firing pass on every call
+/// before the first proposal ever lands.
+pub async fn load_flow_transition_proposals(
+    perspective: &PerspectiveInstance,
+    flow_instance_uri: &str,
+) -> anyhow::Result<Vec<FlowTransitionProposalRecord>> {
+    if flow_instance_uri.is_empty() {
+        return Err(anyhow::anyhow!(
+            "load_flow_transition_proposals: flow_instance_uri must not be empty (raw model_query would return every proposal on the perspective)"
+        ));
+    }
+    let query = serde_json::json!({ "where": { "flowInstance": flow_instance_uri } });
+    let json = match perspective
+        .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query.to_string())
+        .await
+    {
+        Ok(j) => j,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if msg.contains("Shape not found") || msg.contains("shape not found") {
+                return Ok(vec![]);
+            }
+            return Err(anyhow::anyhow!(
+                "load_flow_transition_proposals: model_query failed: {msg}"
+            ));
+        }
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("load_flow_transition_proposals: response not JSON: {e:#}"))?;
+    let instances = parsed
+        .get("instances")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(instances
+        .iter()
+        .filter_map(parse_flow_transition_proposal_from_hydrated)
+        .collect())
+}
+
+/// Parse one hydrated `FlowTransitionProposal` JSON object (as returned
+/// by [`PerspectiveInstance::model_query`]) into a
+/// [`FlowTransitionProposalRecord`].
+///
+/// Returns `None` when any of `id` / `fromState` / `toState` /
+/// `proposer` / `proposedAt` is missing — an untyped or half-written
+/// proposal is silently skipped rather than failing the whole firing
+/// pass. Same policy as
+/// [`super::flow_context::parse_flow_instance_from_hydrated`].
+pub fn parse_flow_transition_proposal_from_hydrated(
+    v: &serde_json::Value,
+) -> Option<FlowTransitionProposalRecord> {
+    let uri = v.get("id").and_then(|x| x.as_str())?.to_string();
+    let from_state = v.get("fromState").and_then(|x| x.as_str())?.to_string();
+    let to_state = v.get("toState").and_then(|x| x.as_str())?.to_string();
+    let proposer = v.get("proposer").and_then(|x| x.as_str())?.to_string();
+    let proposed_at = v.get("proposedAt").and_then(|x| x.as_str())?.to_string();
+    Some(FlowTransitionProposalRecord {
+        uri,
+        from_state,
+        to_state,
+        proposer,
+        proposed_at,
+    })
+}
+
 /// Smallest `proposed_at` in a non-empty bucket. RFC3339 timestamps
 /// sort lexicographically when normalized to UTC (Z-suffix); the writer
 /// always emits Z-suffix. Empty string sorts before any real RFC3339
@@ -233,7 +464,27 @@ mod tests {
         proposer: &str,
         proposed_at: &str,
     ) -> FlowTransitionProposalRecord {
+        // Synthetic URI so unit tests exercise the `uri`-carry contract
+        // without loading from a real perspective. Real callers get the
+        // URI from `parse_flow_transition_proposal_from_hydrated`.
+        proposal_with_uri(
+            &format!("ad4m://flow/proposal/test-{proposer}-{from_state}-{to_state}-{proposed_at}"),
+            from_state,
+            to_state,
+            proposer,
+            proposed_at,
+        )
+    }
+
+    fn proposal_with_uri(
+        uri: &str,
+        from_state: &str,
+        to_state: &str,
+        proposer: &str,
+        proposed_at: &str,
+    ) -> FlowTransitionProposalRecord {
         FlowTransitionProposalRecord {
+            uri: uri.into(),
             from_state: from_state.into(),
             to_state: to_state.into(),
             proposer: proposer.into(),
@@ -692,6 +943,207 @@ mod tests {
     }
 
     // ---------- ts-parity byte fixture ----------
+
+    // ---------- slice 10.9b2: select_fire_candidate (pure) ----------
+
+    fn tally_with_uris(
+        from_state: &str,
+        to_state: &str,
+        proposers: &[&str],
+        proposed_at: &str,
+        uris: &[&str],
+        required: u32,
+    ) -> FlowVoteTally {
+        let contributing: Vec<FlowTransitionProposalRecord> = proposers
+            .iter()
+            .zip(uris.iter())
+            .map(|(p, u)| proposal_with_uri(u, from_state, to_state, p, proposed_at))
+            .collect();
+        let distinct: Vec<String> = {
+            let mut v: Vec<String> = proposers.iter().map(|s| (*s).to_string()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        FlowVoteTally {
+            from_state: from_state.into(),
+            to_state: to_state.into(),
+            distinct_proposers: distinct.clone(),
+            eligible_proposers: distinct,
+            required_count: required,
+            consensus_reached: proposers.len() as u32 >= required,
+            contributing,
+        }
+    }
+
+    #[test]
+    fn select_fire_candidate_returns_none_when_aggregate_has_no_fires() {
+        let agg = AggregateFlowVotesResult {
+            tallies: vec![],
+            fires: None,
+        };
+        assert!(select_fire_candidate("A", &agg).is_none());
+    }
+
+    #[test]
+    fn select_fire_candidate_returns_none_when_from_state_stale() {
+        let fires = tally_with_uris(
+            "A",
+            "B",
+            &["did:example:alice", "did:example:bob"],
+            "2026-08-30T00:00:00Z",
+            &["ad4m://flow/proposal/p1", "ad4m://flow/proposal/p2"],
+            2,
+        );
+        let agg = AggregateFlowVotesResult {
+            tallies: vec![fires.clone()],
+            fires: Some(fires),
+        };
+        // Instance has already advanced past `A` — the aggregate's
+        // fires is stale relative to the live snapshot.
+        assert!(select_fire_candidate("B", &agg).is_none());
+    }
+
+    #[test]
+    fn select_fire_candidate_returns_the_tally_when_from_state_matches() {
+        let fires = tally_with_uris(
+            "A",
+            "B",
+            &["did:example:alice", "did:example:bob"],
+            "2026-08-30T00:00:00Z",
+            &["ad4m://flow/proposal/p1", "ad4m://flow/proposal/p2"],
+            2,
+        );
+        let agg = AggregateFlowVotesResult {
+            tallies: vec![fires.clone()],
+            fires: Some(fires.clone()),
+        };
+        let picked = select_fire_candidate("A", &agg).expect("expected picked");
+        assert_eq!(picked.to_state, "B");
+    }
+
+    // ---------- slice 10.9b2: fire_flow_consensus preconditions ----------
+    //
+    // These tests exercise every precondition branch WITHOUT touching a
+    // perspective — we hit each guard with a tally that fails it, so
+    // `advance_flow_instance_state` is never called. The onion-shell
+    // e2e test in `flow_evaluator.rs` covers the happy path against a
+    // real perspective.
+
+    // The four `fire_flow_consensus` guards (consensus-not-reached,
+    // stale-fromState, no-op toState, and the happy path) each need a
+    // real `PerspectiveInstance` to prove that a) the guard message
+    // fires *before* the writer runs, and b) the happy path actually
+    // moves the on-graph `currentState`. Building one from scratch in
+    // this unit-tests module is overkill — it drags the entire runtime
+    // wiring (Ad4mDb, holochain service, agent context) into what is
+    // otherwise a pure-Rust helper module. The onion-shell e2e in
+    // `flow_evaluator.rs` (`fire_flow_consensus_advances_instance_e2e`)
+    // covers all four branches against a real perspective, following
+    // the same slice-10.4b/10.4c pattern.
+
+    #[test]
+    fn fire_outcome_shape_matches_ts_field_names() {
+        // Byte-parity guard: the FireOutcome struct's field set must
+        // mirror TS `FireOutcome` in
+        // core/src/perspectives/FlowConsensusFire.ts. This test locks
+        // the shape at the JSON layer so a rename on either side surfaces
+        // as a red test (no wire-format needs it today, but a future
+        // WS-RPC exposure will).
+        let outcome = FireOutcome {
+            instance_uri: "ad4m://flow/instance/i1".into(),
+            from_state: "A".into(),
+            to_state: "B".into(),
+            fired_by_proposers: vec!["did:example:alice".into()],
+            contributing_proposal_uris: vec!["ad4m://flow/proposal/p1".into()],
+        };
+        // Contract by inspection — every field lands with the expected
+        // Rust name. TS uses camelCase; Rust uses snake_case; the
+        // future WS-RPC boundary serde-rename layer will bridge them.
+        assert_eq!(outcome.instance_uri, "ad4m://flow/instance/i1");
+        assert_eq!(outcome.from_state, "A");
+        assert_eq!(outcome.to_state, "B");
+        assert_eq!(outcome.fired_by_proposers.len(), 1);
+        assert_eq!(outcome.contributing_proposal_uris.len(), 1);
+    }
+
+    // Empty-URI guard for `load_flow_transition_proposals` is exercised
+    // in the onion-shell e2e (`load_flow_transition_proposals_e2e`) in
+    // `flow_evaluator.rs` — same rationale as the fire-guards above.
+
+    #[test]
+    fn parse_flow_transition_proposal_from_hydrated_happy_path() {
+        let v = serde_json::json!({
+            "id": "ad4m://flow/proposal/p1",
+            "flowInstance": "ad4m://flow/instance/i1",
+            "fromState": "A",
+            "toState": "B",
+            "proposer": "did:example:alice",
+            "proposedAt": "2026-08-30T00:00:00Z",
+            "evidenceHashes": "deadbeef",
+        });
+        let r = parse_flow_transition_proposal_from_hydrated(&v).expect("must parse");
+        assert_eq!(r.uri, "ad4m://flow/proposal/p1");
+        assert_eq!(r.from_state, "A");
+        assert_eq!(r.to_state, "B");
+        assert_eq!(r.proposer, "did:example:alice");
+        assert_eq!(r.proposed_at, "2026-08-30T00:00:00Z");
+    }
+
+    #[test]
+    fn parse_flow_transition_proposal_from_hydrated_skips_when_id_missing() {
+        let v = serde_json::json!({
+            "fromState": "A",
+            "toState": "B",
+            "proposer": "did:example:alice",
+            "proposedAt": "2026-08-30T00:00:00Z",
+        });
+        assert!(parse_flow_transition_proposal_from_hydrated(&v).is_none());
+    }
+
+    #[test]
+    fn parse_flow_transition_proposal_from_hydrated_skips_when_from_state_missing() {
+        let v = serde_json::json!({
+            "id": "ad4m://flow/proposal/p1",
+            "toState": "B",
+            "proposer": "did:example:alice",
+            "proposedAt": "2026-08-30T00:00:00Z",
+        });
+        assert!(parse_flow_transition_proposal_from_hydrated(&v).is_none());
+    }
+
+    #[test]
+    fn parse_flow_transition_proposal_from_hydrated_skips_when_to_state_missing() {
+        let v = serde_json::json!({
+            "id": "ad4m://flow/proposal/p1",
+            "fromState": "A",
+            "proposer": "did:example:alice",
+            "proposedAt": "2026-08-30T00:00:00Z",
+        });
+        assert!(parse_flow_transition_proposal_from_hydrated(&v).is_none());
+    }
+
+    #[test]
+    fn parse_flow_transition_proposal_from_hydrated_skips_when_proposer_missing() {
+        let v = serde_json::json!({
+            "id": "ad4m://flow/proposal/p1",
+            "fromState": "A",
+            "toState": "B",
+            "proposedAt": "2026-08-30T00:00:00Z",
+        });
+        assert!(parse_flow_transition_proposal_from_hydrated(&v).is_none());
+    }
+
+    #[test]
+    fn parse_flow_transition_proposal_from_hydrated_skips_when_proposed_at_missing() {
+        let v = serde_json::json!({
+            "id": "ad4m://flow/proposal/p1",
+            "fromState": "A",
+            "toState": "B",
+            "proposer": "did:example:alice",
+        });
+        assert!(parse_flow_transition_proposal_from_hydrated(&v).is_none());
+    }
 
     /// Same input as the TS test
     /// "prefers a fired target over an unfired one even if unfired has

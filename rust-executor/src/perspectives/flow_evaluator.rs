@@ -2993,4 +2993,344 @@ mod e2e_tests {
              the tool-call → decorator → buffer → engine → writer pipeline",
         );
     }
+
+    // ========================================================================
+    // Slice 10.9b2 — fire_flow_consensus onion-shell e2e
+    // ========================================================================
+    //
+    // Read + write proof for the engine-side consensus firing pass. The
+    // unit tests in `flow_consensus.rs` cover byte-parity of the pure
+    // primitives (`aggregate_flow_votes`, `select_fire_candidate`,
+    // parse helpers, guard message shapes); this test proves the whole
+    // loop against a real perspective — same 10.4b/10.4c substrate:
+    //
+    //   1. Seed Delivery flow + `requires` guard + FlowInstance in
+    //      `identified`, and one satisfying Task.
+    //   2. Write 3 distinct-DID FlowTransitionProposals for
+    //      `identified → scoped` directly via `write_engine_proposal`
+    //      (no LLM, no engine pass — this test scopes to firing).
+    //   3. Load them back via `load_flow_transition_proposals`.
+    //      Assert count + URI presence.
+    //   4. Aggregate with `n: 2`. Assert `fires` is populated and
+    //      targets the right transition.
+    //   5. `select_fire_candidate` against current state ⇒ Some.
+    //   6. `fire_flow_consensus` ⇒ FireOutcome shape correct AND the
+    //      on-graph `FlowInstance.currentState` is now `scoped`
+    //      (round-trip via `load_flow_instances`).
+    //   7. Second call to `select_fire_candidate` on the SAME aggregate
+    //      with the NEW current state (`scoped`) ⇒ None — the stale
+    //      guard prevents double-fire.
+    //   8. Direct `fire_flow_consensus` with the stale tally against
+    //      the advanced instance ⇒ Err (guard fires before writer).
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fire_flow_consensus_advances_instance_e2e() {
+        use crate::perspectives::flow_classes::write_flow_transition_proposal;
+        use crate::perspectives::flow_consensus::{
+            aggregate_flow_votes, fire_flow_consensus, load_flow_transition_proposals,
+            select_fire_candidate,
+        };
+        use crate::perspectives::flow_context::load_flow_instances;
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        // (1) Same substrate the 10.4b/10.5 fixtures use: real perspective,
+        //     no LLM, Task shape registered, Delivery flow seeded with a
+        //     `requires` guard on `scoped`. Seed one Task so the guard is
+        //     met — the writer path doesn't need it, but keeping the
+        //     shape identical means a future refactor that folds the
+        //     firing pass into the auto-processor will only have to
+        //     tweak the assertions, not rebuild the fixture.
+        let (mut perspective, shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+        let scoped_uri = "delivery://Delivery.scoped";
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        let requires_json = r#"[{"className":"ns://Task","count":{"min":1}}]"#;
+        perspective
+            .add_link(
+                Link {
+                    source: scoped_uri.to_string(),
+                    predicate: Some("ad4m://requires".to_string()),
+                    target: lit(requires_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(scoped.requires)");
+        let base_uri = "ad4m://task/onboarding-10.9b2";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.9b2-inst",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "ad4m://task/1",
+            "Onboard Ana",
+        )
+        .await;
+
+        // (2) Three distinct-DID proposals for `identified → scoped`.
+        //     We write directly via `write_flow_transition_proposal`
+        //     to isolate the firing loop from the engine pass. Each
+        //     proposal cites the seeded Task as evidence with the same
+        //     `evidence_hash` (so the aggregator's grouping key stays
+        //     honest even if a future change starts to key on hash).
+        let evidence_ids = vec!["ad4m://task/1".to_string()];
+        let evidence_hash = "sha256:dummy-e2e-hash";
+        let proposers = [
+            ("did:key:alice", "p-alice", "2026-08-30T10:05:00Z"),
+            ("did:key:bob", "p-bob", "2026-08-30T10:05:01Z"),
+            ("did:key:cara", "p-cara", "2026-08-30T10:05:02Z"),
+        ];
+        for (did, pid, ts) in &proposers {
+            write_flow_transition_proposal(
+                &mut perspective,
+                pid,
+                did,
+                ts,
+                &inst_uri,
+                "identified",
+                "scoped",
+                &evidence_ids,
+                evidence_hash,
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("write_flow_transition_proposal");
+        }
+
+        // (3) Loader — every proposal we wrote comes back, and every
+        //     URI is the one we handed to the writer. This is where a
+        //     silent parse-drop would surface: if the hydrated JSON
+        //     shape drifted, we'd see a shorter Vec.
+        let loaded = load_flow_transition_proposals(&perspective, &inst_uri)
+            .await
+            .expect("load_flow_transition_proposals");
+        assert_eq!(loaded.len(), 3, "3 written ⇒ 3 loaded, got {loaded:?}");
+        let mut uris: Vec<&str> = loaded.iter().map(|r| r.uri.as_str()).collect();
+        uris.sort();
+        assert_eq!(
+            uris,
+            vec![
+                "ad4m://flow/proposal/p-alice",
+                "ad4m://flow/proposal/p-bob",
+                "ad4m://flow/proposal/p-cara",
+            ],
+            "loaded proposal URIs must match the ones the writer minted",
+        );
+        for r in &loaded {
+            assert_eq!(r.from_state, "identified");
+            assert_eq!(r.to_state, "scoped");
+        }
+
+        // (4) Aggregate with `n: 2` ⇒ consensus met, fires populated.
+        let rule = ConsensusRule {
+            n: 2,
+            from_role: None,
+        };
+        let agg = aggregate_flow_votes(&loaded, Some(&rule), None).expect("aggregate_flow_votes");
+        let fires = agg.fires.as_ref().expect("agg.fires must be Some");
+        assert_eq!(fires.from_state, "identified");
+        assert_eq!(fires.to_state, "scoped");
+        assert!(fires.consensus_reached);
+        assert_eq!(fires.eligible_proposers.len(), 3);
+
+        // (5) select_fire_candidate against current on-graph state.
+        let records_before = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances before firing");
+        assert_eq!(records_before.len(), 1);
+        let instance_before = records_before[0].clone();
+        assert_eq!(instance_before.current_state, "identified");
+        let picked = select_fire_candidate(&instance_before.current_state, &agg)
+            .expect("select_fire_candidate must return Some for a matching current state");
+        assert_eq!(picked.to_state, "scoped");
+
+        // (6) Fire — the writer path advances currentState on-graph;
+        //     FireOutcome carries the outcome shape.
+        let outcome = fire_flow_consensus(&mut perspective, &instance_before, picked, None, &ctx)
+            .await
+            .expect("fire_flow_consensus must succeed");
+        assert_eq!(outcome.instance_uri, inst_uri);
+        assert_eq!(outcome.from_state, "identified");
+        assert_eq!(outcome.to_state, "scoped");
+        assert_eq!(
+            outcome.fired_by_proposers,
+            vec![
+                "did:key:alice".to_string(),
+                "did:key:bob".to_string(),
+                "did:key:cara".to_string(),
+            ],
+        );
+        let mut fired_uris = outcome.contributing_proposal_uris.clone();
+        fired_uris.sort();
+        assert_eq!(
+            fired_uris,
+            vec![
+                "ad4m://flow/proposal/p-alice".to_string(),
+                "ad4m://flow/proposal/p-bob".to_string(),
+                "ad4m://flow/proposal/p-cara".to_string(),
+            ],
+            "contributing_proposal_uris must round-trip the on-graph proposal URIs",
+        );
+
+        // (7) Rehydrated on-graph state must show `scoped`. Proves the
+        //     writer path actually wrote the link; a stub or a
+        //     silently-dropped `update_subject` would leave `identified`
+        //     on-graph.
+        let records_after = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after firing");
+        assert_eq!(records_after.len(), 1);
+        let instance_after = records_after[0].clone();
+        assert_eq!(instance_after.current_state, "scoped");
+
+        // (8a) Same aggregate against the NEW current state ⇒ stale
+        //      guard fires ⇒ select_fire_candidate returns None. This
+        //      is the concurrency-hazard case the guard exists for.
+        assert!(
+            select_fire_candidate(&instance_after.current_state, &agg).is_none(),
+            "select_fire_candidate must return None once the flow has advanced past the aggregate's from_state",
+        );
+
+        // (8b) Direct fire with the stale tally against the advanced
+        //      instance ⇒ Err. This proves the guard fires INSIDE the
+        //      async writer path too, not just the pre-selector — so a
+        //      caller that skips `select_fire_candidate` and hands the
+        //      raw `agg.fires` to `fire_flow_consensus` still can't
+        //      double-fire.
+        let stale_fire =
+            fire_flow_consensus(&mut perspective, &instance_after, picked, None, &ctx).await;
+        assert!(
+            stale_fire
+                .as_ref()
+                .err()
+                .map(|e| e.to_string().contains("stale tally"))
+                .unwrap_or(false),
+            "stale-fromState guard must fire — got {stale_fire:?}",
+        );
+
+        // Sanity: on-graph currentState still `scoped` — the stale-fire
+        // attempt must NOT have touched the instance.
+        let records_after_stale = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after stale-fire attempt");
+        assert_eq!(records_after_stale[0].current_state, "scoped");
+    }
+
+    /// Slice 10.9b2 — below-threshold aggregate ⇒ no fires ⇒ nothing
+    /// advances on-graph. Complements the happy-path e2e above by
+    /// proving the "no consensus" branch also hits real perspective
+    /// state without touching the writer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fire_flow_consensus_below_threshold_no_advance_e2e() {
+        use crate::perspectives::flow_classes::write_flow_transition_proposal;
+        use crate::perspectives::flow_consensus::{
+            aggregate_flow_votes, load_flow_transition_proposals, select_fire_candidate,
+        };
+        use crate::perspectives::flow_context::load_flow_instances;
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        let base_uri = "ad4m://task/onboarding-10.9b2-below";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.9b2-below-inst",
+            "2026-08-30T11:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        // Only one proposal against an n=2 rule.
+        write_flow_transition_proposal(
+            &mut perspective,
+            "p-only",
+            "did:key:solo",
+            "2026-08-30T11:05:00Z",
+            &inst_uri,
+            "identified",
+            "scoped",
+            &["ad4m://task/1".to_string()],
+            "sha256:below-hash",
+            None,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("write_flow_transition_proposal(solo)");
+
+        let loaded = load_flow_transition_proposals(&perspective, &inst_uri)
+            .await
+            .expect("load_flow_transition_proposals");
+        assert_eq!(loaded.len(), 1);
+        let rule = ConsensusRule {
+            n: 2,
+            from_role: None,
+        };
+        let agg = aggregate_flow_votes(&loaded, Some(&rule), None).expect("aggregate_flow_votes");
+        assert!(
+            agg.fires.is_none(),
+            "1 vote < n=2 ⇒ agg.fires must be None, got {:?}",
+            agg.fires,
+        );
+        assert!(
+            select_fire_candidate("identified", &agg).is_none(),
+            "no fires ⇒ select_fire_candidate must be None",
+        );
+
+        // On-graph state unchanged — writer path was never reached.
+        let records = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances");
+        assert_eq!(records[0].current_state, "identified");
+    }
+
+    /// Slice 10.9b2 — loader empty-URI guard against a real perspective.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn load_flow_transition_proposals_rejects_empty_uri_e2e() {
+        use crate::perspectives::flow_consensus::load_flow_transition_proposals;
+        let (perspective, _shapes, _ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+        let err = load_flow_transition_proposals(&perspective, "")
+            .await
+            .expect_err("empty URI must return Err before hitting model_query");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "guard message must state the failure clearly, got {err}",
+        );
+    }
 }
