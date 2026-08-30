@@ -30,6 +30,7 @@ import { fileURLToPath } from "node:url";
 import { Ad4mClient, Link, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
 import { FlowInstance, FlowTransitionProposal } from "@coasys/ad4m";
 import { computeFlowEvidenceHash } from "@coasys/ad4m";
+import { aggregateFlowVotes, fireIfConsensus } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
 import { startAgent } from "../../helpers/index.js";
 
@@ -804,5 +805,158 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
     expect(hydrated.currentState).to.equal("Identified");
     expect(hydrated.startedAt >= before && hydrated.startedAt <= after,
       `startedAt ${hydrated.startedAt} must fall in [${before}, ${after}]`).to.equal(true);
+  });
+});
+
+// ── Full-stack consensus loop — slice 10.8g ─────────────────────────────────
+// Stitches every 10.8 primitive against a real perspective (no mocks):
+//   startFlowInstance → N × FlowTransitionProposal.propose (distinct DIDs) →
+//   listForInstance → aggregateFlowVotes(rule) → fireIfConsensus →
+//   re-query FlowInstance.findAll → assert currentState advanced.
+//
+// Also proves the stale-fromState guard: a second fireIfConsensus with the
+// pre-fire aggregate must return undefined, not re-advance / no-op-throw.
+// (Direct integration proof that the design §5.4 concurrency hazard called
+// out in FlowConsensusFire.ts is actually caught by the shipped helper.)
+
+describe("Client-side flow consensus loop — 10.8g", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-consensus-loop");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-consensus-loop-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    await FlowTransitionProposal.register(p);
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    const identified: FlowState = {
+      name: "Identified",
+      value: 0,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
+    };
+    const inProgress: FlowState = {
+      name: "InProgress",
+      value: 1,
+      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
+    };
+    flow.addState(identified);
+    flow.addState(inProgress);
+    return flow;
+  }
+
+  async function propose(
+    instanceUri: string,
+    proposer: string,
+    proposedAt: string,
+  ): Promise<FlowTransitionProposal> {
+    return FlowTransitionProposal.propose(p, {
+      flowInstance: instanceUri,
+      fromState: "Identified",
+      toState: "InProgress",
+      proposer,
+      evidence: [],
+      classNames: ["ad4m://Task"],
+      proposedAt,
+    });
+  }
+
+  it("2-of-3 threshold: three proposals clear consensus, instance advances, second fire is a no-op", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/consensus-1");
+    expect(instance.currentState).to.equal("Identified");
+
+    await propose(instance.id, "did:example:alice", "2026-08-30T05:00:00Z");
+    await propose(instance.id, "did:example:bob",   "2026-08-30T05:01:00Z");
+    await propose(instance.id, "did:example:carol", "2026-08-30T05:02:00Z");
+
+    const proposals = await FlowTransitionProposal.listForInstance(p, instance.id);
+    expect(proposals).to.have.lengthOf(3);
+
+    const aggregate = aggregateFlowVotes(proposals, { n: 2 });
+    expect(aggregate.fires, "aggregate must surface a firing tally").to.exist;
+    expect(aggregate.fires!.fromState).to.equal("Identified");
+    expect(aggregate.fires!.toState).to.equal("InProgress");
+    expect(aggregate.fires!.eligibleProposers).to.deep.equal([
+      "did:example:alice",
+      "did:example:bob",
+      "did:example:carol",
+    ]);
+
+    const outcome = await fireIfConsensus(p, instance, aggregate);
+    expect(outcome, "fireIfConsensus must return a FireOutcome").to.exist;
+    expect(outcome!.instanceUri).to.equal(instance.id);
+    expect(outcome!.fromState).to.equal("Identified");
+    expect(outcome!.toState).to.equal("InProgress");
+    expect(outcome!.firedByProposers).to.deep.equal([
+      "did:example:alice",
+      "did:example:bob",
+      "did:example:carol",
+    ]);
+    expect(outcome!.contributingProposalUris).to.have.lengthOf(3);
+
+    // The on-graph currentState link must have been retired + rewritten —
+    // a fresh findAll (independent of the local `instance` object) proves it.
+    const [rehydrated] = await FlowInstance.findAll(p);
+    expect(rehydrated.currentState).to.equal("InProgress");
+    expect(rehydrated.subject).to.equal("ad4m://task/consensus-1");
+    expect(rehydrated.flow).to.equal("Delivery");
+
+    // Stale-fromState guard: `aggregate` was computed before the advance,
+    // so `aggregate.fires.fromState === "Identified"`, but the instance
+    // is now at "InProgress". Re-firing must be a no-op returning undefined,
+    // not throw and not re-advance.
+    const secondFire = await fireIfConsensus(p, instance, aggregate);
+    expect(secondFire, "second fire on stale aggregate must be no-op").to.equal(undefined);
+
+    // And no double-advance leaked into the graph.
+    const [afterSecondFire] = await FlowInstance.findAll(p);
+    expect(afterSecondFire.currentState).to.equal("InProgress");
+  });
+
+  it("below threshold: single proposal against {n:2} does not fire, instance stays put", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/consensus-below");
+
+    await propose(instance.id, "did:example:alice", "2026-08-30T05:10:00Z");
+
+    const proposals = await FlowTransitionProposal.listForInstance(p, instance.id);
+    expect(proposals).to.have.lengthOf(1);
+
+    const aggregate = aggregateFlowVotes(proposals, { n: 2 });
+    expect(aggregate.tallies).to.have.lengthOf(1);
+    expect(aggregate.tallies[0].consensusReached).to.equal(false);
+    expect(aggregate.fires, "no fires tally when consensus not reached").to.equal(undefined);
+
+    const outcome = await fireIfConsensus(p, instance, aggregate);
+    expect(outcome).to.equal(undefined);
+
+    // Graph unchanged — instance still at initial state.
+    const [rehydrated] = await FlowInstance.findAll(p);
+    expect(rehydrated.currentState).to.equal("Identified");
   });
 });
