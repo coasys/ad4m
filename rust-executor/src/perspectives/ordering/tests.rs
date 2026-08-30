@@ -236,6 +236,27 @@ fn generate_full_chains_the_array() {
 }
 
 #[test]
+fn a_pid_keeps_its_sequence_out_of_its_timestamp() {
+    // Folded into the timestamp, the last entry of a batch minted at t and the
+    // first of one minted a millisecond later would be the same pid — and
+    // `latest_per_item` resolves equal pids by arrival order, which is exactly
+    // the machine-dependent tiebreak the padding exists to rule out.
+    assert_ne!(
+        make_pid(1_000, 1, "did:x"),
+        make_pid(1_001, 0, "did:x"),
+        "different (timestamp, seq) pairs must never collide",
+    );
+    assert!(
+        make_pid(1_000, 1, "did:x") < make_pid(1_001, 0, "did:x"),
+        "and the later timestamp still sorts higher",
+    );
+    assert!(
+        make_pid(1_000, 2, "did:x") < make_pid(1_000, 10, "did:x"),
+        "seq is padded too, so its string order is numeric order",
+    );
+}
+
+#[test]
 fn diff_of_an_unchanged_array_writes_nothing() {
     let ordering = s().generate_full(&["a".into(), "b".into(), "c".into()], PRED, "did:x", 1_000);
     let m = members(&["a", "b", "c"]);

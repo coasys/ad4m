@@ -24,10 +24,10 @@ pub struct OrderingEntry {
     pub predicate: String,
     /// The item this entry positions.
     pub item: String,
-    /// `{timestamp}_{agentDid}`, timestamp zero-padded to 16 digits so that
-    /// **string comparison equals numeric comparison**. Without the padding,
-    /// tiebreaking would order differently on different machines, which is the
-    /// one thing a CRDT may not do.
+    /// `{timestamp}_{seq}_{agentDid}`, timestamp and seq each zero-padded to 16
+    /// digits so that **string comparison equals numeric comparison**. Without
+    /// the padding, tiebreaking would order differently on different machines,
+    /// which is the one thing a CRDT may not do.
     pub pid: String,
     /// The item this one follows, or [`LIST_HEAD`] for the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,6 +62,10 @@ pub struct OrderingConfig {
 ///
 /// `seq` disambiguates entries minted in the same millisecond by one agent —
 /// generating a whole collection's order happens well inside a clock tick.
+///
+/// It is its own zero-padded component rather than an addend on the timestamp:
+/// added in, `(t, 1)` and `(t + 1, 0)` would mint the same pid, and two entries
+/// that compare equal are resolved by arrival order, which peers do not share.
 pub fn make_pid(timestamp_ms: u64, seq: u64, agent_did: &str) -> String {
-    format!("{:016}_{}", timestamp_ms.saturating_add(seq), agent_did)
+    format!("{timestamp_ms:016}_{seq:016}_{agent_did}")
 }
