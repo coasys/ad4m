@@ -393,6 +393,11 @@ async fn resolve_forward_include(
 /// instance IDs, collects all source IDs, hydrates them via a sub-query,
 /// and attaches the results (scalar for `belongsToOne`, array for
 /// `belongsToMany`).
+///
+/// Honours `polymorphic` exactly as the forward path does. The inverse side of
+/// a heterogeneous relation is heterogeneous for the same reason: whatever
+/// points *at* this instance is whatever somebody linked, so a `parent` read
+/// backwards from a block can be any of several container classes.
 async fn resolve_reverse_include(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -450,56 +455,79 @@ async fn resolve_reverse_include(
         set.into_iter().collect()
     };
 
-    let has_sub_order = sub_query.order.is_some();
-    let hydrated: HashMap<String, Value>;
-    let ordered_result_ids: Vec<String>;
-    if all_source_ids.is_empty() {
-        hydrated = HashMap::new();
-        ordered_result_ids = Vec::new();
-    } else {
+    let polymorphic = sub_query.polymorphic.unwrap_or(false);
+    // Ordering a polymorphic set by a property is only meaningful within a
+    // concrete class — the classes need not share the property at all — so the
+    // link order is kept across classes, as on the forward path.
+    let has_sub_order = sub_query.order.is_some() && !polymorphic;
+    let mut hydrated: HashMap<String, Value> = HashMap::new();
+    let mut ordered_result_ids: Vec<String> = Vec::new();
+    if !all_source_ids.is_empty() {
         let mut query = sub_query.clone();
         let mut wc = query.where_clause.take().unwrap_or_default();
-        if let Some(existing_id) = wc.get("id") {
+        let target_ids: Vec<String> = if let Some(existing_id) = wc.get("id") {
             let filter_ids: Vec<String> = match existing_id {
                 WhereCondition::String(s) => vec![s.clone()],
                 WhereCondition::StringArray(arr) => arr.clone(),
                 _ => vec![],
             };
-            let filtered: Vec<String> = all_source_ids
+            all_source_ids
                 .into_iter()
                 .filter(|id| filter_ids.contains(id))
-                .collect();
-            wc.insert("id".to_string(), WhereCondition::StringArray(filtered));
+                .collect()
         } else {
-            wc.insert(
-                "id".to_string(),
-                WhereCondition::StringArray(all_source_ids),
-            );
-        }
+            all_source_ids
+        };
+        wc.insert(
+            "id".to_string(),
+            WhereCondition::StringArray(target_ids.clone()),
+        );
         query.where_clause = Some(wc);
 
-        let target_shape = resolver.get_shape(&rel.target_class_name)?;
-        let result = Box::pin(execute_model_query_inner(
-            store,
-            target_shape.as_ref(),
-            &query,
-            resolver,
-            depth + 1,
-        ))
-        .await?;
+        if polymorphic {
+            hydrate_polymorphic(
+                store,
+                &target_ids,
+                &query,
+                resolver,
+                depth,
+                &mut hydrated,
+                &mut ordered_result_ids,
+            )
+            .await?;
+        } else {
+            if rel.target_class_name.is_empty() {
+                // Same shape of failure as the forward path, and the same fix:
+                // an untyped relation names no class, so there is nothing to
+                // hydrate its sources against.
+                return Err(anyhow!(
+                    "include on relation '{}': the relation declares no target class, so its \
+                     targets cannot be hydrated. Either give it a target, or read it with \
+                     `polymorphic: true` to hydrate each target as the class it actually is.",
+                    rel.name
+                ));
+            }
+            let target_shape = resolver.get_shape(&rel.target_class_name)?;
+            let result = Box::pin(execute_model_query_inner(
+                store,
+                target_shape.as_ref(),
+                &query,
+                resolver,
+                depth + 1,
+            ))
+            .await?;
 
-        ordered_result_ids = result
-            .instances
-            .iter()
-            .filter_map(|inst| inst["id"].as_str().map(|s| s.to_string()))
-            .collect();
-        let mut map = HashMap::new();
-        for inst in result.instances {
-            if let Some(id) = inst["id"].as_str() {
-                map.insert(id.to_string(), inst);
+            ordered_result_ids = result
+                .instances
+                .iter()
+                .filter_map(|inst| inst["id"].as_str().map(|s| s.to_string()))
+                .collect();
+            for inst in result.instances {
+                if let Some(id) = inst["id"].as_str() {
+                    hydrated.insert(id.to_string(), inst);
+                }
             }
         }
-        hydrated = map;
     };
 
     for inst in instances.iter_mut() {

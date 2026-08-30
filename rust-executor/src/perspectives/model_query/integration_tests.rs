@@ -6558,3 +6558,184 @@ async fn test_untyped_include_without_polymorphic_explains_itself() {
     assert!(msg.contains("children"), "names the relation: {msg}");
     assert!(msg.contains("polymorphic"), "names the fix: {msg}");
 }
+
+/// The inverse side of a heterogeneous relation is heterogeneous too: whatever
+/// points *at* an instance is whatever somebody linked it into. A reverse
+/// include has to honour `polymorphic` for the same reason the forward one does.
+#[tokio::test]
+async fn test_polymorphic_reverse_include_hydrates_each_source_as_its_own_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/TextBlock",
+        "we://models/Collection",
+        "we://models/Board",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    // One block, held by two containers of different classes.
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "2",
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://title",
+            "literal:string:Reading list",
+            "3",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "4"))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://b/1", "we://flag", "we://board", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://label",
+            "literal:string:Sprint 3",
+            "5",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://b/1", "we://children", "we://t/1", "6"))
+        .unwrap();
+
+    // `containers` names no target class — a block does not know what kinds of
+    // thing may hold it, which is the case `polymorphic` exists for.
+    let block_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
+            "text": {"predicate":"we://text","resolveLanguage":"literal"}
+        },
+        "relations": {
+            "containers": {
+                "predicate": "we://children",
+                "kind": "belongsToMany",
+                "direction": "reverse",
+                "targetClassName": ""
+            }
+        }
+    }"#;
+    let (resolver, block_shape) = StaticShapeResolver::from_json("TextBlock", block_json).unwrap();
+    resolver.register(
+        "Collection",
+        parse_shape_from_json(
+            r#"{"className":"Collection","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"},
+                 "title":{"predicate":"we://title","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Collection",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Board",
+        parse_shape_from_json(
+            r#"{"className":"Board","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://board"},
+                 "label":{"predicate":"we://label","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Board",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "containers".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, block_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let containers = result.instances[0]["containers"].as_array().unwrap();
+    assert_eq!(containers.len(), 2, "both containers hydrate");
+
+    let collection = containers
+        .iter()
+        .find(|c| c["id"] == "we://c/1")
+        .expect("the collection");
+    let board = containers
+        .iter()
+        .find(|c| c["id"] == "we://b/1")
+        .expect("the board");
+
+    assert_eq!(collection["__subjectClass"].as_str(), Some("Collection"));
+    assert_eq!(board["__subjectClass"].as_str(), Some("Board"));
+    // The property that exists only on the concrete class — before this, both
+    // took the same path through the declared target class and arrived empty.
+    assert_eq!(collection["title"].as_str(), Some("Reading list"));
+    assert_eq!(board["label"].as_str(), Some("Sprint 3"));
+}
+
+/// An untyped *reverse* relation read without `polymorphic` gets the same
+/// actionable message the forward path gives, rather than a shape lookup for
+/// the empty string.
+#[tokio::test]
+async fn test_untyped_reverse_include_without_polymorphic_explains_itself() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    let block_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+        },
+        "relations": {
+            "containers": {
+                "predicate": "we://children",
+                "kind": "belongsToMany",
+                "direction": "reverse",
+                "targetClassName": ""
+            }
+        }
+    }"#;
+    let (resolver, shape) = StaticShapeResolver::from_json("TextBlock", block_json).unwrap();
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "containers".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("must not silently succeed");
+    let msg = err.to_string();
+    assert!(msg.contains("containers"), "names the relation: {msg}");
+    assert!(msg.contains("polymorphic"), "names the fix: {msg}");
+}
