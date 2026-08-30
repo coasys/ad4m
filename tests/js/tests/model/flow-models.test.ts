@@ -364,6 +364,113 @@ describe("FlowTransitionProposal.propose — v5 client factory", function () {
   });
 });
 
+describe("FlowTransitionProposal.listForInstance — v5 query helper", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-list-for-instance");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-list-for-instance-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    await FlowTransitionProposal.register(p);
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  it("returns only proposals targeting the requested FlowInstance, oldest first", async () => {
+    const instA = "ad4m://flow/instance/inst-A";
+    const instB = "ad4m://flow/instance/inst-B";
+
+    // Deliberately mint out of chronological order to prove the sort
+    // contract is enforced by listForInstance, not accidentally satisfied
+    // by insertion order.
+    await FlowTransitionProposal.propose(p, {
+      flowInstance: instA,
+      fromState: "Identified",
+      toState: "Scoped",
+      proposer: "did:example:alice",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-29T10:20:00Z",
+    });
+    await FlowTransitionProposal.propose(p, {
+      flowInstance: instA,
+      fromState: "Scoped",
+      toState: "InProgress",
+      proposer: "did:example:bob",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-29T10:00:00Z",
+    });
+    await FlowTransitionProposal.propose(p, {
+      flowInstance: instB,
+      fromState: "Identified",
+      toState: "Scoped",
+      proposer: "did:example:carol",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-29T10:10:00Z",
+    });
+
+    const forA = await FlowTransitionProposal.listForInstance(p, instA);
+    expect(forA).to.have.lengthOf(2);
+    // Oldest first — 10:00 before 10:20 — proves the sort contract.
+    expect(forA[0].proposedAt).to.equal("2026-08-29T10:00:00Z");
+    expect(forA[0].toState).to.equal("InProgress");
+    expect(forA[1].proposedAt).to.equal("2026-08-29T10:20:00Z");
+    expect(forA[1].toState).to.equal("Scoped");
+    // And the where-filter shape actually reached SPARQL — instB's
+    // proposal must NOT appear even though it was minted between them.
+    for (const proposal of forA) {
+      expect(proposal.flowInstance).to.equal(instA);
+    }
+
+    const forB = await FlowTransitionProposal.listForInstance(p, instB);
+    expect(forB).to.have.lengthOf(1);
+    expect(forB[0].proposer).to.equal("did:example:carol");
+  });
+
+  it("returns an empty array when no proposals target the instance", async () => {
+    // No proposals minted — empty perspective. Proves the query does
+    // not throw on the empty-result case (vote aggregation over a
+    // never-proposed-against instance must return 0, not error).
+    const forNone = await FlowTransitionProposal.listForInstance(
+      p,
+      "ad4m://flow/instance/inst-unknown",
+    );
+    expect(forNone).to.deep.equal([]);
+  });
+
+  it("rejects empty flowInstanceUri before touching the perspective", async () => {
+    let caught: unknown = null;
+    try {
+      await FlowTransitionProposal.listForInstance(p, "");
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).to.match(/flowInstanceUri is required/);
+  });
+});
+
 describe("FlowInstance — @Model", function () {
   this.timeout(120_000);
 

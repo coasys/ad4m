@@ -132,6 +132,42 @@ export class FlowTransitionProposal extends Ad4mModel {
     const fields = buildFlowTransitionProposalFields(opts);
     return FlowTransitionProposal.create(perspective, fields);
   }
+
+  /**
+   * List all proposals on-graph that target a given `FlowInstance` URI,
+   * oldest first.
+   *
+   * Thin, well-typed wrapper over `findAll({ where: { flowInstance } })` —
+   * exists so:
+   *   - the ordering is a documented contract (vote aggregation and
+   *     consensus firing iterate proposals deterministically);
+   *   - the empty-`flowInstanceUri` boundary is defended at the entry
+   *     point (raw `findAll({ where: { flowInstance: "" } })` would return
+   *     nothing silently — misleading to callers who meant "for this
+   *     instance" and passed a stale value);
+   *   - consensus/vote code has a grep target that names its intent
+   *     ("list proposals for instance"), not a generic `findAll` call.
+   *
+   * @throws When `flowInstanceUri` is empty.
+   */
+  static async listForInstance(
+    perspective: PerspectiveProxy,
+    flowInstanceUri: string,
+  ): Promise<FlowTransitionProposal[]> {
+    if (!flowInstanceUri) {
+      throw new Error(
+        "FlowTransitionProposal.listForInstance: flowInstanceUri is required",
+      );
+    }
+    const results = await FlowTransitionProposal.findAll(perspective, {
+      where: { flowInstance: flowInstanceUri },
+    });
+    return [...results].sort((a, b) => {
+      if (a.proposedAt < b.proposedAt) return -1;
+      if (a.proposedAt > b.proposedAt) return 1;
+      return 0;
+    });
+  }
 }
 
 /**

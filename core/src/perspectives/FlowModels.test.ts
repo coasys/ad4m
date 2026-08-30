@@ -170,3 +170,25 @@ describe("buildFlowTransitionProposalFields", () => {
     );
   });
 });
+
+describe("FlowTransitionProposal.listForInstance boundary defence", () => {
+  it("rejects empty flowInstanceUri before any perspective interaction", async () => {
+    // Poison-perspective stub: any call surface it exposes throws loudly,
+    // proving the defence guard fires BEFORE we would have hit
+    // `findAll`. If the guard regressed to `if (false)`, the test would
+    // instead surface the poison error and be easy to diagnose.
+    const poison: any = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(
+            "listForInstance leaked past the empty-URI guard onto the perspective proxy",
+          );
+        },
+      },
+    );
+    await expect(
+      FlowTransitionProposal.listForInstance(poison, ""),
+    ).rejects.toThrow(/flowInstanceUri is required/);
+  });
+});
