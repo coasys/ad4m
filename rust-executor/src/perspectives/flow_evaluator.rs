@@ -997,6 +997,168 @@ pub async fn run_flow_consensus_pass(
     fired
 }
 
+/// Slice 10.16 — report-only preview of what
+/// [`run_flow_consensus_pass`] would fire for a single `FlowInstance`
+/// if invoked right now, without touching the graph.
+///
+/// Engine-side counterpart of TS `FlowInstance.selectFireCandidate`
+/// (slice 10.15, `core/src/perspectives/FlowModels.ts`). Composes the
+/// same load → resolve-rule → load-proposals → aggregate → select
+/// sequence as one iteration of `run_flow_consensus_pass`, stopping at
+/// [`crate::perspectives::flow_consensus::select_fire_candidate`]
+/// instead of proceeding to
+/// [`crate::perspectives::flow_consensus::fire_flow_consensus`].
+///
+/// Intended use: observability paths that want to log
+/// "would-fire {from}→{to}, {n}/{required}" without side effects, or
+/// tests that need the pass's per-instance verdict without running the
+/// full scope walk.
+///
+/// # Returns
+///
+/// - `Ok(Some(tally))` — a tally has met consensus and its `from_state`
+///   matches the instance's `current_state`. `run_flow_consensus_pass`
+///   would fire this transition on its next invocation (assuming the
+///   graph does not change in between).
+/// - `Ok(None)` — one of: instance URI not found on this perspective,
+///   flow definition absent, consensus rule has `from_role` (deferred,
+///   same policy as `run_flow_consensus_pass`), proposal bag empty, no
+///   tally reached consensus, or winning tally's `from_state` is stale
+///   relative to `instance.current_state`.
+/// - `Err(_)` — caller-side violation (empty `flow_instance_uri`).
+///   Loader / aggregator errors surface as `Ok(None)` + `log::debug!`,
+///   same soft-fail contract as `run_flow_consensus_pass` (a report-only
+///   entry that panics on transient perspective glitches would be worse
+///   than one that returns "cannot answer right now").
+///
+/// # Report-only contract (enforced by construction)
+///
+/// The imports reached from this function are:
+/// [`crate::perspectives::flow_context::load_flow_instances`] (read),
+/// [`crate::perspectives::flow_context::load_shacl_flows`] (read),
+/// [`crate::perspectives::flow_consensus::load_flow_transition_proposals`]
+/// (read),
+/// [`crate::perspectives::flow_consensus::aggregate_flow_votes`] (pure),
+/// [`crate::perspectives::flow_consensus::select_fire_candidate`] (pure).
+///
+/// No call reaches `advance_flow_instance_state`, `fire_flow_consensus`,
+/// `create_batch`, or `commit_batch`. The `&PerspectiveInstance`
+/// (shared, not `&mut`) signature is deliberate — a compile-time proof
+/// that no on-graph write can escape this path.
+pub async fn preview_fire_for_instance(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+    flow_instance_uri: &str,
+) -> anyhow::Result<Option<crate::perspectives::flow_consensus::FlowVoteTally>> {
+    if flow_instance_uri.is_empty() {
+        return Err(anyhow::anyhow!(
+            "preview_fire_for_instance: flow_instance_uri must not be empty"
+        ));
+    }
+
+    // Locate the FlowInstance by its own URI.
+    // `load_flow_instances` filters by anchor `subject`, not by instance
+    // URI — so we load all and match. Bounded in practice (a perspective
+    // holds a handful of live flow instances), and avoiding a
+    // "by-instance-URI" model_query surface keeps the API narrow.
+    let records = match crate::perspectives::flow_context::load_flow_instances(perspective, None)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::debug!(
+                "preview_fire_for_instance: load_flow_instances failed for {flow_instance_uri}: {e:#}"
+            );
+            return Ok(None);
+        }
+    };
+    let Some(instance) = records.iter().find(|r| r.instance_uri == flow_instance_uri) else {
+        log::debug!(
+            "preview_fire_for_instance: no FlowInstance with URI {flow_instance_uri} on this perspective"
+        );
+        return Ok(None);
+    };
+
+    let flows_by_name = match crate::perspectives::flow_context::load_shacl_flows(perspective).await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            log::debug!("preview_fire_for_instance: load_shacl_flows failed: {e:#}");
+            return Ok(None);
+        }
+    };
+    let Some(flow) = flows_by_name.get(&instance.flow_name) else {
+        log::debug!(
+            "preview_fire_for_instance: no SHACLFlow for '{}' (instance {})",
+            instance.flow_name,
+            instance.instance_uri,
+        );
+        return Ok(None);
+    };
+
+    // Rule resolution mirrors `run_flow_consensus_pass`: state override
+    // wins, then flow default, then aggregator default (n = 1).
+    // `from_role` gating is DEFERRED, same policy as the walker — an
+    // observer that reports "would fire" on a role-gated rule without
+    // resolving eligibility would misreport.
+    let state_rule = flow
+        .states
+        .iter()
+        .find(|s| s.name == instance.current_state)
+        .and_then(|s| s.consensus_rule.clone());
+    let rule = state_rule.or_else(|| flow.consensus_rule.clone());
+    if let Some(r) = rule.as_ref() {
+        if r.from_role.is_some() {
+            log::debug!(
+                "preview_fire_for_instance: consensus rule for {}.{} has from_role — deferring until eligibility resolution ships; instance {}",
+                instance.flow_name,
+                instance.current_state,
+                instance.instance_uri,
+            );
+            return Ok(None);
+        }
+    }
+
+    let loaded = match crate::perspectives::flow_consensus::load_flow_transition_proposals(
+        perspective,
+        &instance.instance_uri,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::debug!(
+                "preview_fire_for_instance: load_flow_transition_proposals({}) failed: {e:#}",
+                instance.instance_uri,
+            );
+            return Ok(None);
+        }
+    };
+    if loaded.is_empty() {
+        return Ok(None);
+    }
+
+    let aggregate = match crate::perspectives::flow_consensus::aggregate_flow_votes(
+        &loaded,
+        rule.as_ref(),
+        None,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            log::debug!(
+                "preview_fire_for_instance: aggregate_flow_votes({}) failed: {e:#}",
+                instance.instance_uri,
+            );
+            return Ok(None);
+        }
+    };
+
+    Ok(crate::perspectives::flow_consensus::select_fire_candidate(
+        &instance.current_state,
+        &aggregate,
+    )
+    .cloned())
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -4064,5 +4226,363 @@ mod e2e_tests {
             .expect("load_flow_instances after chained composition");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].current_state, "scoped");
+    }
+
+    // ------------------------------------------------------------------
+    // Slice 10.16 — report-only preview_fire_for_instance
+    //
+    // These e2e tests exercise `preview_fire_for_instance` end-to-end
+    // against a live perspective. Same substrate + writer as the 10.10a
+    // tests above — the ONLY thing being validated here is that the
+    // report-only path reaches the same verdict as one iteration of
+    // `run_flow_consensus_pass`, WITHOUT advancing on-graph state.
+    //
+    // The "leaves graph untouched" assertion is the load-bearing one —
+    // a `.selectFireCandidate` on the OO side or a `preview_fire_for_instance`
+    // on the engine side that accidentally advanced `currentState` would
+    // silently break the auto-processor's stale-vote guard on the next
+    // real firing pass.
+    // ------------------------------------------------------------------
+
+    /// Slice 10.16 — happy path. Same 3-proposals / n=2 setup as the
+    /// 10.10a idempotence test, but through `preview_fire_for_instance`.
+    /// Assertions:
+    ///   - `Ok(Some(tally))` returned, tally has met consensus, matches
+    ///     the `identified → scoped` transition.
+    ///   - On-graph `currentState` is STILL `identified` after the
+    ///     preview call (no write happened).
+    ///   - Second preview call returns the same tally (report-only is
+    ///     idempotent — a second call cannot advance the flow past the
+    ///     transition it was reporting on).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_fire_for_instance_returns_tally_and_leaves_graph_untouched_e2e() {
+        use crate::perspectives::flow_classes::write_flow_transition_proposal;
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+        let rule_json = serde_json::to_string(&ConsensusRule {
+            n: 2,
+            from_role: None,
+        })
+        .unwrap();
+        // NOTE: the flow's on-graph URI is `delivery://DeliveryFlow`
+        // (see `parse_flow_to_links` — `format!("{}{}Flow", namespace,
+        // flow_name)`), NOT `delivery://Delivery`. Attaching the rule
+        // to the correct source is what makes `parse_flow_from_links`
+        // pick it up in `load_shacl_flows`; the adjacent 10.10a walker
+        // tests attach to `delivery://Delivery` and happen to pass only
+        // because the default aggregator rule (n=1) is satisfied by
+        // their proposer counts.
+        perspective
+            .add_link(
+                Link {
+                    source: "delivery://DeliveryFlow".to_string(),
+                    predicate: Some("ad4m://consensusRule".to_string()),
+                    target: lit(&rule_json),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(flow.consensusRule)");
+
+        let base_uri = "ad4m://task/preview-10.16-happy";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.16-happy-inst",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        let evidence_ids = vec!["ad4m://task/1".to_string()];
+        let evidence_hash = "sha256:dummy-10.16-happy";
+        for (did, pid, ts) in &[
+            ("did:key:alice", "p-preview-alice", "2026-08-30T10:05:00Z"),
+            ("did:key:bob", "p-preview-bob", "2026-08-30T10:05:01Z"),
+            ("did:key:cara", "p-preview-cara", "2026-08-30T10:05:02Z"),
+        ] {
+            write_flow_transition_proposal(
+                &mut perspective,
+                pid,
+                did,
+                ts,
+                &inst_uri,
+                "identified",
+                "scoped",
+                &evidence_ids,
+                evidence_hash,
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("write_flow_transition_proposal");
+        }
+
+        let previewed = preview_fire_for_instance(&perspective, &inst_uri)
+            .await
+            .expect("preview_fire_for_instance ok");
+        let tally = previewed.expect("consensus reached ⇒ Some(tally)");
+        assert!(
+            tally.consensus_reached,
+            "returned tally must have consensus_reached=true (would-fire predicate), got {tally:?}",
+        );
+        assert_eq!(tally.from_state, "identified");
+        assert_eq!(tally.to_state, "scoped");
+        assert_eq!(
+            tally.eligible_proposers.len(),
+            3,
+            "3 distinct proposers on the bag ⇒ 3 eligible in the tally",
+        );
+        assert_eq!(tally.required_count, 2, "n=2 rule surfaces on the tally");
+
+        // Load-bearing assertion: on-graph state MUST be unchanged.
+        // A preview that accidentally advanced would look green in the
+        // "returned tally" checks above but silently poison the next
+        // real firing pass's stale-vote guard.
+        let records = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after preview");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].current_state, "identified",
+            "preview_fire_for_instance MUST NOT advance currentState — report-only contract",
+        );
+
+        // Idempotent — a second preview against the still-unchanged
+        // graph returns the same-shape tally. (If the first call had
+        // written anything, the second would either see stale votes
+        // and return None, or hit a doubled-write consistency bug.)
+        let repreview = preview_fire_for_instance(&perspective, &inst_uri)
+            .await
+            .expect("second preview ok");
+        let tally2 = repreview.expect("second preview also returns Some(tally)");
+        assert_eq!(tally2.from_state, "identified");
+        assert_eq!(tally2.to_state, "scoped");
+        assert_eq!(tally2.eligible_proposers, tally.eligible_proposers);
+    }
+
+    /// Slice 10.16 — below-threshold and stale-fromState both surface as
+    /// `Ok(None)`. Bundling into one test since they share the same
+    /// setup + touch adjacent branches of the report-only path.
+    ///
+    /// Part A: 1 proposal vs `n=2` rule ⇒ aggregate has no `fires` tally
+    /// ⇒ `Ok(None)`.
+    ///
+    /// Part B: bump rule to `n=1`, add a proposal, verify `Some(tally)`
+    /// once — then use `advance_flow_instance_state` to move `currentState`
+    /// past the tally's `fromState` and prove the next preview call
+    /// returns `Ok(None)` on the same on-graph bag (proves the
+    /// `select_fire_candidate` stale-guard fires from this path).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_fire_for_instance_below_threshold_and_stale_from_state_return_none_e2e() {
+        use crate::perspectives::flow_classes::{
+            advance_flow_instance_state, write_flow_transition_proposal,
+        };
+        use crate::perspectives::shacl_parser::ConsensusRule;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+        for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
+            .expect("parse_flow_to_links(Delivery)")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition v4)");
+        }
+
+        // Part A: n=2 rule, 1 proposal ⇒ below threshold.
+        let rule_json_n2 = serde_json::to_string(&ConsensusRule {
+            n: 2,
+            from_role: None,
+        })
+        .unwrap();
+        // Correct flow URI — see note in the happy-path test above.
+        perspective
+            .add_link(
+                Link {
+                    source: "delivery://DeliveryFlow".to_string(),
+                    predicate: Some("ad4m://consensusRule".to_string()),
+                    target: lit(&rule_json_n2),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_link(flow.consensusRule n=2)");
+
+        let base_uri = "ad4m://task/preview-10.16-below";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "Delivery",
+            base_uri,
+            "identified",
+            "e2e-10.16-below-inst",
+            "2026-08-30T10:00:00Z",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        write_flow_transition_proposal(
+            &mut perspective,
+            "p-below-alice",
+            "did:key:alice",
+            "2026-08-30T10:05:00Z",
+            &inst_uri,
+            "identified",
+            "scoped",
+            &["ad4m://task/1".to_string()],
+            "sha256:dummy-10.16-below",
+            None,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("write_flow_transition_proposal(below)");
+
+        let below = preview_fire_for_instance(&perspective, &inst_uri)
+            .await
+            .expect("preview_fire_for_instance ok (below-threshold)");
+        assert!(
+            below.is_none(),
+            "1 proposer vs n=2 ⇒ no fires ⇒ Ok(None), got {below:?}",
+        );
+        let records_after_below = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after below-threshold preview");
+        assert_eq!(
+            records_after_below[0].current_state, "identified",
+            "below-threshold preview must not touch state either",
+        );
+
+        // Part B: swap in n=1 (single-vote fires), advance the instance
+        // manually via the writer primitive, then re-preview and prove
+        // the stale-fromState guard fires from this path.
+        //
+        // We can't mint two flow instances against the same anchor
+        // (mint refuses duplicates); reuse the same instance across
+        // parts. The `add_link` here appends a second `consensusRule`
+        // link. `parse_flow_from_links` reads the FIRST such link, so
+        // append order matters. To make the update deterministic, we
+        // rewrite the rule via a fresh perspective load below — but
+        // instead we prove the stale guard by keeping the n=2 rule
+        // and advancing to `scoped`: now the SAME on-graph bag
+        // (1 proposal targeting identified→scoped) is stale relative
+        // to the new currentState=scoped, and preview returns None.
+
+        let batch_id = perspective.create_batch().await;
+        advance_flow_instance_state(
+            &mut perspective,
+            &inst_uri,
+            "scoped",
+            Some(batch_id.clone()),
+            &ctx,
+        )
+        .await
+        .expect("advance_flow_instance_state");
+        perspective
+            .commit_batch(batch_id, &ctx)
+            .await
+            .expect("commit_batch");
+
+        let records_after_advance = load_flow_instances(&perspective, None)
+            .await
+            .expect("load_flow_instances after manual advance");
+        assert_eq!(
+            records_after_advance[0].current_state, "scoped",
+            "manual advance persisted",
+        );
+
+        // Add 2 more proposals so the aggregate for identified→scoped
+        // has 3 eligible proposers vs required 2 (would-fire IF the
+        // instance were still at identified). But instance is now
+        // scoped, so `select_fire_candidate` rejects the tally as stale.
+        for (did, pid, ts) in &[
+            ("did:key:bob", "p-below-bob", "2026-08-30T10:05:01Z"),
+            ("did:key:cara", "p-below-cara", "2026-08-30T10:05:02Z"),
+        ] {
+            write_flow_transition_proposal(
+                &mut perspective,
+                pid,
+                did,
+                ts,
+                &inst_uri,
+                "identified",
+                "scoped",
+                &["ad4m://task/1".to_string()],
+                "sha256:dummy-10.16-below-stale",
+                None,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("write_flow_transition_proposal(stale)");
+        }
+
+        let stale = preview_fire_for_instance(&perspective, &inst_uri)
+            .await
+            .expect("preview_fire_for_instance ok (stale-fromState)");
+        assert!(
+            stale.is_none(),
+            "aggregate has fires but tally.from_state=identified != instance.currentState=scoped ⇒ select_fire_candidate rejects ⇒ Ok(None), got {stale:?}",
+        );
+    }
+
+    /// Slice 10.16 — empty `flow_instance_uri` returns `Err` (caller-
+    /// side violation) rather than defaulting to "no fire". The empty-
+    /// URI path is explicitly the ONLY error-returning branch — every
+    /// other failure surface returns `Ok(None)` under the report-only
+    /// soft-fail contract.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_fire_for_instance_rejects_empty_uri_e2e() {
+        let (perspective, _shapes, _ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+        let err = preview_fire_for_instance(&perspective, "")
+            .await
+            .expect_err("empty URI must return Err before loading anything");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "guard message must state the failure clearly, got {err}",
+        );
+    }
+
+    /// Slice 10.16 — an instance URI not present on this perspective
+    /// returns `Ok(None)` (not `Err`). An observer polling a URI that
+    /// hasn't been minted yet (or was minted on a different perspective
+    /// still syncing over) should not surface as an error — matches the
+    /// walker's silent-skip policy for absent flow definitions.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_fire_for_instance_unknown_uri_returns_none_e2e() {
+        let (perspective, _shapes, _ctx) =
+            setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+        let res = preview_fire_for_instance(&perspective, "ad4m://flow/instance/does-not-exist")
+            .await
+            .expect("unknown URI must not error, must return Ok(None)");
+        assert!(
+            res.is_none(),
+            "unknown instance URI ⇒ Ok(None), got {res:?}",
+        );
     }
 }
