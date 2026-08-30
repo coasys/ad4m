@@ -1,5 +1,6 @@
 import {
   BuildFlowTransitionProposalOpts,
+  FlowInstance,
   FlowTransitionProposal,
   buildFlowTransitionProposalFields,
 } from "./FlowModels";
@@ -190,5 +191,106 @@ describe("FlowTransitionProposal.listForInstance boundary defence", () => {
     await expect(
       FlowTransitionProposal.listForInstance(poison, ""),
     ).rejects.toThrow(/flowInstanceUri is required/);
+  });
+});
+
+describe("FlowInstance.proposeTransition (OO wrapper for FlowTransitionProposal.propose)", () => {
+  // A poison perspective — any property read throws. Used to prove the
+  // OO wrapper's own defence guards fire BEFORE the delegation would
+  // have touched the perspective (i.e. the guards don't leak past their
+  // conditional).
+  const poison: any = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(
+          "FlowInstance.proposeTransition leaked past its own defence guards onto the perspective proxy",
+        );
+      },
+    },
+  );
+
+  const validOpts = {
+    toState: "Scoped",
+    proposer: "did:example:alice",
+    evidence: ["ad4m://task/1"],
+    classNames: ["ad4m://Task"],
+  };
+
+  it("throws when this.id is empty (unhydrated instance)", async () => {
+    // Ad4mModel's constructor auto-generates an id when none is passed —
+    // so simulate the "no id" case by clearing the private backing field
+    // after construction. The guard reads through the public getter, so
+    // this exercises exactly the runtime path a caller would hit if
+    // they called .proposeTransition() on an unsaved instance whose id
+    // resolution failed.
+    const instance = new FlowInstance(poison, "ad4m://flow/instance/i-1");
+    (instance as any)._baseExpression = "";
+    instance.currentState = "Identified";
+    await expect(instance.proposeTransition(validOpts)).rejects.toThrow(
+      /instance has no id/,
+    );
+  });
+
+  it("throws when this.currentState is empty (would allow silently stale fromState)", async () => {
+    const instance = new FlowInstance(poison, "ad4m://flow/instance/i-1");
+    instance.currentState = "";
+    await expect(instance.proposeTransition(validOpts)).rejects.toThrow(
+      /currentState is empty/,
+    );
+  });
+
+  it("derives flowInstance = this.id and fromState = this.currentState, everything else passes through", async () => {
+    // Spy on the static factory — proves the wrapper is *just* delegation.
+    // Any field-derivation regression (evidence hashing, timestamp default,
+    // optional pruning) is caught by the buildFlowTransitionProposalFields
+    // suite above; here we only lock the two derived fields the wrapper
+    // owns.
+    const sentinel = new FlowTransitionProposal(poison, "ad4m://proposal/sentinel");
+    const spy = jest
+      .spyOn(FlowTransitionProposal, "propose")
+      .mockResolvedValue(sentinel);
+    try {
+      // We pass poison for the perspective too — the spy's mock never
+      // touches it, so the delegation path stays perspective-free.
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-42");
+      instance.currentState = "Identified";
+      const result = await instance.proposeTransition({
+        toState: "Scoped",
+        proposer: "did:example:alice",
+        evidence: ["ad4m://task/1", "ad4m://task/2"],
+        classNames: ["ad4m://Task"],
+        rationale: "req satisfied",
+        runUri: "ad4m://run/r-7",
+        proposedAt: "2026-08-30T10:00:00Z",
+      });
+      expect(result).toBe(sentinel);
+      expect(spy).toHaveBeenCalledTimes(1);
+      const [passedPerspective, passedOpts] = spy.mock.calls[0];
+      expect(passedPerspective).toBe(poison);
+      expect(passedOpts).toEqual({
+        flowInstance: "ad4m://flow/instance/i-42",
+        fromState: "Identified",
+        toState: "Scoped",
+        proposer: "did:example:alice",
+        evidence: ["ad4m://task/1", "ad4m://task/2"],
+        classNames: ["ad4m://Task"],
+        rationale: "req satisfied",
+        runUri: "ad4m://run/r-7",
+        proposedAt: "2026-08-30T10:00:00Z",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("caller-supplied flowInstance / fromState in opts would be a type error at compile time", () => {
+    // The wrapper's Omit<..., "flowInstance" | "fromState"> parameter
+    // shape forbids callers from smuggling values that would fight the
+    // this-derived ones. This test is a documentation aid — the check
+    // is a compile-time TS constraint, not a runtime one; a regression
+    // that widens the type would surface as a tests/js type-check
+    // failure. Here we just note the invariant.
+    expect(true).toBe(true);
   });
 });

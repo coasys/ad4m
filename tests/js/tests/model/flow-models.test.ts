@@ -677,6 +677,211 @@ describe("PerspectiveProxy.startFlowInstance — v5 API", function () {
   });
 });
 
+// ── FlowInstance.proposeTransition — 10.8b2 OO wrapper (design doc §4.3 / §5.4) ──
+// Live-perspective proof that `instance.proposeTransition({ ... })` writes the
+// same on-graph shape as the static `FlowTransitionProposal.propose(...)`
+// factory, with `flowInstance` and `fromState` derived from `this`. The unit
+// suite in `core/src/perspectives/FlowModels.test.ts` locks the delegation
+// argument shape via a poison-perspective + spy; here we prove the delegation
+// actually reaches the on-graph writer and its output is hydratable through
+// the same `findAll` path any UI would use.
+
+describe("FlowInstance.proposeTransition — 10.8b2 OO wrapper", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-instance-propose");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-instance-propose-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    await FlowTransitionProposal.register(p);
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    const identified: FlowState = {
+      name: "Identified",
+      value: 0,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
+    };
+    const inProgress: FlowState = {
+      name: "InProgress",
+      value: 1,
+      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
+    };
+    flow.addState(identified);
+    flow.addState(inProgress);
+    return flow;
+  }
+
+  it("wrapper output is byte-equivalent to a static-factory call for the same instance / current state", async () => {
+    // Two paths (wrapper vs static) must write proposals that a downstream
+    // consensus verifier cannot tell apart. That's the whole reason `.propose`
+    // is the single field-derivation seam; the wrapper only injects the two
+    // derived fields.
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/wrapper-parity");
+
+    const classNames = ["ad4m://Task"];
+    const evidence = ["ad4m://task/wrapper-parity"];
+    const proposedAt = "2026-08-30T11:15:00Z";
+
+    // Wrapper path — flowInstance / fromState derived from `this`.
+    const viaWrapper = await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:alice",
+      evidence,
+      classNames,
+      rationale: "seed satisfied",
+      runUri: "ad4m://interp/run/w-1",
+      proposedAt,
+    });
+
+    // Static path — caller supplies identical opts explicitly.
+    const viaStatic = await FlowTransitionProposal.propose(p, {
+      flowInstance: instance.id,
+      fromState: instance.currentState,
+      toState: "InProgress",
+      proposer: "did:example:alice",
+      evidence,
+      classNames,
+      rationale: "seed satisfied",
+      runUri: "ad4m://interp/run/w-1",
+      proposedAt,
+    });
+
+    expect(viaWrapper).to.be.instanceOf(FlowTransitionProposal);
+    expect(viaWrapper.flowInstance).to.equal(instance.id);
+    expect(viaWrapper.fromState).to.equal("Identified");
+    expect(viaWrapper.toState).to.equal("InProgress");
+
+    // Two proposals on-graph, one from each path. On the hash-relevant
+    // fields they must agree — that's the parity contract.
+    const all = await FlowTransitionProposal.findAll(p);
+    expect(all.length).to.equal(2);
+    const byId: Record<string, FlowTransitionProposal> = {};
+    for (const proposal of all) byId[proposal.id] = proposal;
+    const hydratedWrapper = byId[viaWrapper.id];
+    const hydratedStatic = byId[viaStatic.id];
+    expect(hydratedWrapper, "wrapper proposal must round-trip via findAll").to.not.equal(
+      undefined,
+    );
+    expect(hydratedStatic, "static proposal must round-trip via findAll").to.not.equal(
+      undefined,
+    );
+    expect(hydratedWrapper.flowInstance).to.equal(hydratedStatic.flowInstance);
+    expect(hydratedWrapper.fromState).to.equal(hydratedStatic.fromState);
+    expect(hydratedWrapper.toState).to.equal(hydratedStatic.toState);
+    expect(hydratedWrapper.proposer).to.equal(hydratedStatic.proposer);
+    expect(hydratedWrapper.rationale).to.equal(hydratedStatic.rationale);
+    expect(hydratedWrapper.runUri).to.equal(hydratedStatic.runUri);
+    expect(hydratedWrapper.proposedAt).to.equal(hydratedStatic.proposedAt);
+    expect(hydratedWrapper.evidence).to.have.members([...(hydratedStatic.evidence ?? [])]);
+    // Same evidence hash — the consensus-verification contract.
+    expect(hydratedWrapper.evidenceHashes).to.equal(hydratedStatic.evidenceHashes);
+    expect(hydratedWrapper.evidenceHashes).to.equal(
+      computeFlowEvidenceHash(classNames, evidence),
+    );
+  });
+
+  it("derives fromState from currentState AT CALL TIME (post-advance re-call reflects the new state)", async () => {
+    // If a caller advances the instance's currentState (e.g. after
+    // consensus fires) and then calls proposeTransition again, the
+    // wrapper must read `this.currentState` fresh — not cache the value
+    // from the first call. Same-object re-use is the common case
+    // (a UI holds an instance handle, keeps proposing, keeps advancing).
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/re-call");
+
+    const firstProposal = await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:bob",
+      evidence: [],
+      classNames: [],
+    });
+    expect(firstProposal.fromState).to.equal("Identified");
+
+    // Simulate a post-consensus advance — write directly to the field the
+    // real advance path (fireIfConsensus / advance_flow_instance_state)
+    // would set on the perspective. Refetch to prove the read went through
+    // hydration, not just an in-memory field on the JS object.
+    instance.currentState = "InProgress";
+    await instance.save();
+    const rehydrated = (await FlowInstance.findAll(p)).find(
+      (i) => i.id === instance.id,
+    );
+    expect(rehydrated, "instance must survive save + findAll").to.not.equal(undefined);
+    expect(rehydrated!.currentState).to.equal("InProgress");
+
+    const secondProposal = await rehydrated!.proposeTransition({
+      toState: "Review",
+      proposer: "did:example:bob",
+      evidence: [],
+      classNames: [],
+    });
+    // The wrapper read the *new* currentState — not the initial "Identified".
+    expect(secondProposal.fromState).to.equal("InProgress");
+    expect(secondProposal.toState).to.equal("Review");
+  });
+
+  it("boundary defence: empty toState / proposer raise before any on-graph write", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/defence");
+
+    let caughtToState: unknown = null;
+    try {
+      await instance.proposeTransition({
+        toState: "",
+        proposer: "did:example:c",
+        evidence: [],
+        classNames: [],
+      });
+    } catch (e) {
+      caughtToState = e;
+    }
+    expect(String(caughtToState)).to.match(/toState is required/);
+
+    let caughtProposer: unknown = null;
+    try {
+      await instance.proposeTransition({
+        toState: "InProgress",
+        proposer: "",
+        evidence: [],
+        classNames: [],
+      });
+    } catch (e) {
+      caughtProposer = e;
+    }
+    expect(String(caughtProposer)).to.match(/proposer is required/);
+
+    // Both defences run *before* the on-graph write path — no ghost proposals.
+    const all = await FlowTransitionProposal.findAll(p);
+    expect(all.length).to.equal(0);
+  });
+});
+
 // ── PerspectiveProxy.getFlowInstances — v5 read side (design doc §4.3 / §5) ──
 // Enumerates live FlowInstance records; optionally narrowed by flow-name
 // discriminator. Feeds §5 Model C prompt gathering and UI indicators. Class

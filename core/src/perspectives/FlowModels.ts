@@ -271,4 +271,49 @@ export class FlowInstance extends Ad4mModel {
    */
   @Property({ through: "ad4m://flow/created_at", required: true })
   startedAt: string = "";
+
+  /**
+   * OO wrapper for {@link FlowTransitionProposal.propose}: mint a
+   * `FlowTransitionProposal` targeting *this* instance and its current
+   * state, without the caller having to thread `flowInstance` /
+   * `fromState` through the opts.
+   *
+   * Two derived fields, everything else passes through untouched:
+   *   - `flowInstance` = `this.id` (the on-graph URI of this FlowInstance
+   *     node, set by Ad4mModel hydration or Ad4mModel.create).
+   *   - `fromState` = `this.currentState` (the state the instance is in
+   *     right now — a proposal on any other value would be stale by
+   *     construction).
+   *
+   * The pass-through preserves the design property that `.propose()` is
+   * the only place proposal fields get validated / hashed / stamped, so
+   * an OO-wrapper call and a static-factory call write the *same*
+   * on-graph shape (evidence hash, timestamp, optional-field pruning).
+   * Consensus verification cannot tell the two paths apart.
+   *
+   * @throws When `this.id` is empty (unhydrated / unsaved instance).
+   * @throws When `this.currentState` is empty (would allow a proposal
+   *   whose `fromState` is silently `""`, matching no tally bucket).
+   * @throws (via `.propose()`) When `opts.toState` or `opts.proposer`
+   *   are empty.
+   */
+  async proposeTransition(
+    opts: Omit<BuildFlowTransitionProposalOpts, "flowInstance" | "fromState">,
+  ): Promise<FlowTransitionProposal> {
+    if (!this.id) {
+      throw new Error(
+        "FlowInstance.proposeTransition: instance has no id (call on a hydrated / saved instance)",
+      );
+    }
+    if (!this.currentState) {
+      throw new Error(
+        "FlowInstance.proposeTransition: instance.currentState is empty",
+      );
+    }
+    return FlowTransitionProposal.propose(this.perspective, {
+      ...opts,
+      flowInstance: this.id,
+      fromState: this.currentState,
+    });
+  }
 }
