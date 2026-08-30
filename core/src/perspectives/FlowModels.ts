@@ -316,4 +316,29 @@ export class FlowInstance extends Ad4mModel {
       fromState: this.currentState,
     });
   }
+
+  /**
+   * OO wrapper for {@link FlowTransitionProposal.listForInstance}: return
+   * every proposal on-graph targeting *this* instance, oldest first.
+   *
+   * Two-line delegation. Same reason `.proposeTransition()` exists as an
+   * OO wrapper: consumers thinking in terms of "this flow instance's
+   * proposals" get a method whose name says that, instead of a
+   * `findAll({ where: { flowInstance } })` grep target that hides the
+   * intent.
+   *
+   * Ordering is inherited from `listForInstance`: `proposedAt` ascending.
+   * That contract is load-bearing for vote aggregation (10.8e) and
+   * consensus firing (10.8f) — both walk this bag deterministically.
+   *
+   * @throws When `this.id` is empty (unhydrated / unsaved instance).
+   */
+  async currentProposals(): Promise<FlowTransitionProposal[]> {
+    if (!this.id) {
+      throw new Error(
+        "FlowInstance.currentProposals: instance has no id (call on a hydrated / saved instance)",
+      );
+    }
+    return FlowTransitionProposal.listForInstance(this.perspective, this.id);
+  }
 }

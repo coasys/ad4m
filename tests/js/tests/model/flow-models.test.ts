@@ -882,6 +882,142 @@ describe("FlowInstance.proposeTransition — 10.8b2 OO wrapper", function () {
   });
 });
 
+// ── FlowInstance.currentProposals — 10.11 OO wrapper (design doc §5.4) ──
+// Live-perspective proof that `instance.currentProposals()` returns the same
+// bag as `FlowTransitionProposal.listForInstance(perspective, instance.id)`,
+// preserving the oldest-first ordering the consensus loop depends on.
+// Unit suite in `core/src/perspectives/FlowModels.test.ts` locks the
+// delegation-argument shape via poison-perspective + jest.spyOn; this suite
+// proves the delegation reaches the on-graph read path and hydration behaves
+// identically for both call surfaces.
+
+describe("FlowInstance.currentProposals — 10.11 OO wrapper", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-instance-current-proposals");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-instance-current-proposals-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    await FlowTransitionProposal.register(p);
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    const identified: FlowState = {
+      name: "Identified",
+      value: 0,
+      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
+    };
+    const inProgress: FlowState = {
+      name: "InProgress",
+      value: 1,
+      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
+    };
+    flow.addState(identified);
+    flow.addState(inProgress);
+    return flow;
+  }
+
+  it("returns the same bag as listForInstance (oldest first) for the instance", async () => {
+    // Two proposals with distinct proposedAt stamps written in reverse
+    // chronological order — proves the OO wrapper inherits listForInstance's
+    // oldest-first sort rather than mirroring insertion order.
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await p.startFlowInstance("Delivery", "ad4m://task/curr-proposals");
+
+    const later = await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:alice",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-30T12:00:00Z",
+    });
+    const earlier = await instance.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:bob",
+      evidence: [],
+      classNames: [],
+      proposedAt: "2026-08-30T10:00:00Z",
+    });
+
+    const viaWrapper = await instance.currentProposals();
+    const viaStatic = await FlowTransitionProposal.listForInstance(p, instance.id);
+
+    // Same length, same URIs, same order — the wrapper is a pass-through.
+    expect(viaWrapper.length).to.equal(viaStatic.length);
+    expect(viaWrapper.length).to.equal(2);
+    expect(viaWrapper.map((x) => x.id)).to.deep.equal(viaStatic.map((x) => x.id));
+
+    // Oldest-first ordering confirmed by proposedAt.
+    expect(viaWrapper[0].id).to.equal(earlier.id);
+    expect(viaWrapper[1].id).to.equal(later.id);
+    expect(viaWrapper[0].proposedAt).to.equal("2026-08-30T10:00:00Z");
+    expect(viaWrapper[1].proposedAt).to.equal("2026-08-30T12:00:00Z");
+  });
+
+  it("returns an empty array when no proposals target this instance (even if others exist on the perspective)", async () => {
+    // A proposal exists on the perspective — but targets a DIFFERENT
+    // FlowInstance URI. The wrapper's filter must isolate its own instance.
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instanceA = await p.startFlowInstance("Delivery", "ad4m://task/isolation-a");
+    const instanceB = await p.startFlowInstance("Delivery", "ad4m://task/isolation-b");
+
+    await instanceB.proposeTransition({
+      toState: "InProgress",
+      proposer: "did:example:only-b",
+      evidence: [],
+      classNames: [],
+    });
+
+    const forA = await instanceA.currentProposals();
+    expect(forA).to.deep.equal([]);
+
+    // Sanity: B's bag has the one proposal — proves the emptiness on A
+    // isn't a global misconfiguration.
+    const forB = await instanceB.currentProposals();
+    expect(forB.length).to.equal(1);
+    expect(forB[0].flowInstance).to.equal(instanceB.id);
+  });
+
+  it("throws when this.id is empty (unhydrated instance) — defence fires before perspective touch", async () => {
+    // Simulate the unhydrated case by constructing a FlowInstance manually
+    // and clearing the Ad4mModel backing field. If the guard regressed to
+    // no-op, we'd hit listForInstance and get an empty array back silently.
+    const instance = new FlowInstance(p, "ad4m://flow/instance/never-saved");
+    (instance as any)._baseExpression = "";
+    let caught: unknown = null;
+    try {
+      await instance.currentProposals();
+    } catch (e) {
+      caught = e;
+    }
+    expect(String(caught)).to.match(/instance has no id/);
+  });
+});
+
 // ── PerspectiveProxy.getFlowInstances — v5 read side (design doc §4.3 / §5) ──
 // Enumerates live FlowInstance records; optionally narrowed by flow-name
 // discriminator. Feeds §5 Model C prompt gathering and UI indicators. Class

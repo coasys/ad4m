@@ -294,3 +294,70 @@ describe("FlowInstance.proposeTransition (OO wrapper for FlowTransitionProposal.
     expect(true).toBe(true);
   });
 });
+
+describe("FlowInstance.currentProposals (OO wrapper for FlowTransitionProposal.listForInstance)", () => {
+  // Same poison-perspective pattern as .proposeTransition tests: any
+  // property read throws, so the defence guard is proven to fire before
+  // the delegation would touch the perspective proxy.
+  const poison: any = new Proxy(
+    {},
+    {
+      get() {
+        throw new Error(
+          "FlowInstance.currentProposals leaked past its own defence guard onto the perspective proxy",
+        );
+      },
+    },
+  );
+
+  it("throws when this.id is empty (unhydrated instance)", async () => {
+    // Same setup as the proposeTransition id-guard test: clear the
+    // Ad4mModel-backing `_baseExpression` field so `this.id` reads empty
+    // through the public getter.
+    const instance = new FlowInstance(poison, "ad4m://flow/instance/i-1");
+    (instance as any)._baseExpression = "";
+    await expect(instance.currentProposals()).rejects.toThrow(
+      /instance has no id/,
+    );
+  });
+
+  it("delegates to FlowTransitionProposal.listForInstance with this.perspective and this.id", async () => {
+    const sentinelA = new FlowTransitionProposal(poison, "ad4m://proposal/a");
+    const sentinelB = new FlowTransitionProposal(poison, "ad4m://proposal/b");
+    const spy = jest
+      .spyOn(FlowTransitionProposal, "listForInstance")
+      .mockResolvedValue([sentinelA, sentinelB]);
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-42");
+      const result = await instance.currentProposals();
+      expect(result).toEqual([sentinelA, sentinelB]);
+      expect(spy).toHaveBeenCalledTimes(1);
+      const [passedPerspective, passedUri] = spy.mock.calls[0];
+      expect(passedPerspective).toBe(poison);
+      expect(passedUri).toBe("ad4m://flow/instance/i-42");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("returns the delegate's array as-is (no re-sorting, no defensive copy)", async () => {
+    // listForInstance owns the ordering contract (oldest-first). The
+    // wrapper must not re-order or clone — else identity-based equality
+    // tests downstream would fail and the ordering guarantee would
+    // split across two layers.
+    const sentinelA = new FlowTransitionProposal(poison, "ad4m://proposal/a");
+    const expected: FlowTransitionProposal[] = [sentinelA];
+    const spy = jest
+      .spyOn(FlowTransitionProposal, "listForInstance")
+      .mockResolvedValue(expected);
+    try {
+      const instance = new FlowInstance(poison, "ad4m://flow/instance/i-7");
+      const result = await instance.currentProposals();
+      // Reference equality: wrapper returns the very array the delegate
+      // produced (Promise.resolve unwraps but does not clone).
+      expect(result).toBe(expected);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
