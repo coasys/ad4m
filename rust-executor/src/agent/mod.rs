@@ -569,6 +569,18 @@ impl AgentService {
         backend
             .generate_keypair("main")
             .expect("failed to generate main keypair");
+
+        // In shared mode the JWT signing key name differs from "main"
+        // (defaults to "platform"). Create it once if it does not exist yet,
+        // so all executors sharing the wallet can sign tokens.
+        let signing_name = crate::config::get_global_config().signing_key_name();
+        if signing_name != "main" && !backend.key_exists(&signing_name) {
+            backend
+                .generate_keypair(&signing_name)
+                .expect("failed to generate signing keypair");
+            log::info!("Created shared signing key '{}'", signing_name);
+        }
+
         let did = backend
             .get_did_document("main")
             .expect("couldn't get DID document for keys that were just generated above")
@@ -591,6 +603,17 @@ impl AgentService {
             self.passphrase = Some(password);
             let key_names = backend.list_key_names();
             log::debug!("🔑 Wallet unlocked. Keys present: {:?}", key_names);
+
+            // Ensure the shared signing key exists (may have been created by
+            // another executor; create only if missing).
+            let signing_name = crate::config::get_global_config().signing_key_name();
+            if signing_name != "main" && !backend.key_exists(&signing_name) {
+                if let Err(e) = backend.generate_keypair(&signing_name) {
+                    log::error!("Failed to create signing key '{}': {}", signing_name, e);
+                } else {
+                    log::info!("Created shared signing key '{}'", signing_name);
+                }
+            }
         }
         result
     }
