@@ -142,8 +142,17 @@ pub fn parse_ordering_entries(targets: &[String], predicate: &str) -> Vec<Orderi
 }
 
 /// Render an entry as the link target it is stored under.
+///
+/// The JSON is percent-encoded, because that is what every other reader of a
+/// `literal:json:` target assumes — [`parse_ordering_entries`] decodes, and so
+/// does the store on the way in. Written raw, an item URI containing `%20`
+/// would come back holding a space and stop matching the membership link it
+/// positions.
 pub fn encode_ordering_entry(entry: &OrderingEntry) -> Result<String, Error> {
-    Ok(format!("literal:json:{}", serde_json::to_string(entry)?))
+    Ok(format!(
+        "literal:json:{}",
+        urlencoding::encode(&serde_json::to_string(entry)?)
+    ))
 }
 
 #[cfg(test)]

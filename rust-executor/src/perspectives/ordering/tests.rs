@@ -403,6 +403,20 @@ fn entries_round_trip_through_their_link_target() {
 }
 
 #[test]
+fn an_item_uri_holding_a_percent_sequence_survives_the_round_trip() {
+    // The reader percent-decodes, so an unencoded payload would hand back
+    // "ad4m://item one" — an item that matches no membership link, silently
+    // demoting it to the by-timestamp tail.
+    let e = entry(
+        "ad4m://item%20one",
+        "ad4m://after%2Fslash",
+        "0000000000000001_did:x",
+    );
+    let encoded = encode_ordering_entry(&e).unwrap();
+    assert_eq!(parse_ordering_entries(&[encoded], PRED), vec![e]);
+}
+
+#[test]
 fn fractional_index_is_reserved_but_refused() {
     assert!(create_strategy("linkedList").is_ok());
     let err = match create_strategy("fractionalIndex") {
