@@ -286,6 +286,56 @@ impl AgentService {
     }
 
     pub fn init_global_test_instance() {
+        // Ensure a wallet backend exists before create_new_keys() tries to
+        // call wallet_backend(). Tests run in arbitrary order so the backend
+        // may already be initialised by a prior test — try_init is idempotent.
+        let local = Arc::new(crate::wallet::LocalWallet::new());
+        let _ =
+            crate::wallet::try_init_wallet_backend(local as Arc<dyn crate::wallet::WalletBackend>);
+
+        // Ensure a global config exists (create_new_keys reads signing_key_name).
+        {
+            let cfg = crate::config::GLOBAL_AD4M_CONFIG.lock().unwrap();
+            if cfg.is_none() {
+                drop(cfg);
+                crate::config::set_global_config(crate::config::Ad4mConfig {
+                    app_data_path: Some("test".to_string()),
+                    network_bootstrap_seed: None,
+                    language_language_only: None,
+                    run_dapp_server: None,
+                    port: None,
+                    hc_admin_port: None,
+                    hc_app_port: None,
+                    hc_use_local_proxy: None,
+                    hc_use_mdns: None,
+                    hc_use_proxy: None,
+                    hc_use_bootstrap: None,
+                    hc_proxy_url: None,
+                    hc_bootstrap_url: None,
+                    hc_relay_url: None,
+                    connect_holochain: None,
+                    admin_credential: None,
+                    localhost: None,
+                    auto_permit_cap_requests: None,
+                    tls: None,
+                    log_holochain_metrics: None,
+                    enable_multi_user: None,
+                    smtp_config: None,
+                    enable_mcp: None,
+                    mcp_port: None,
+                    pid_file: None,
+                    wallet_backend: None,
+                    wallet_backend_url: None,
+                    wallet_signing_key_name: None,
+                    db_backend: None,
+                    db_backend_url: None,
+                    perspective_store_backend: None,
+                    perspective_store_url: None,
+                    internal_api_token: None,
+                });
+            }
+        }
+
         let mut agent_instance = AGENT_SERVICE.lock().unwrap();
 
         *agent_instance = Some(AgentService {
