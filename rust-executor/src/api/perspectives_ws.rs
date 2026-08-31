@@ -1887,6 +1887,16 @@ async fn interpretation_overlays_handler(
 // generated ~261 WS-RPC round trips now resolves in a single call to
 // `perspective.getAllShacl`.
 
+/// Hard cap on the number of shapes `perspective.getAllShacl` will serialise
+/// in a single response. The endpoint returns the entire shape corpus in one
+/// WS message with no pagination — fine for the 26-shape WE dataset that
+/// motivates this PR, but a perspective with a few hundred shapes at ~10
+/// properties each is a multi-MB response inside one WS frame that either
+/// fails at the transport limit or (worse) silently truncates on some
+/// clients. Fail loudly at this ceiling until a paginated variant lands.
+/// See PR #935 review comment r3897752009.
+pub(crate) const MAX_SHACL_SHAPES_PER_RESPONSE: usize = 500;
+
 /// Helper: build a LinkQuery with only `source` and optionally `predicate` set.
 pub(crate) fn shacl_link_query(source: &str, predicate: Option<&str>) -> LinkQuery {
     LinkQuery {
@@ -2177,6 +2187,19 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     // them race and preserve original name order after joining. Recovers
     // the concurrency the old TS client had via `Promise.all` (review
     // r3897752002).
+    // Cheap fail-loud gate before the fan-out: if the name enumeration
+    // already exceeds the response cap there's no point resolving every
+    // shape only to reject the serialisation. Post-walk check below
+    // catches the race where extra names arrive between enumeration and
+    // response (e.g. via subscription).
+    if names.len() > MAX_SHACL_SHAPES_PER_RESPONSE {
+        return Err(WsRpcError::bad_request(format!(
+            "getAllShacl exceeds MAX_SHACL_SHAPES_PER_RESPONSE ({} > {}), use paginated variant (TODO: not yet implemented)",
+            names.len(),
+            MAX_SHACL_SHAPES_PER_RESPONSE,
+        )));
+    }
+
     let resolved = futures::future::try_join_all(
         names
             .iter()
@@ -2184,19 +2207,30 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     )
     .await?;
 
-    let results: Vec<Value> = names
-        .iter()
-        .zip(resolved.into_iter())
-        .filter_map(|(name, maybe)| {
-            maybe.map(|(shape_uri, links)| {
-                serde_json::json!({
-                    "name": name,
-                    "shapeUri": shape_uri,
-                    "links": links,
-                })
-            })
-        })
-        .collect();
+    let mut results: Vec<Value> = Vec::with_capacity(names.len());
+    for (name, maybe) in names.iter().zip(resolved.into_iter()) {
+        match maybe {
+            Some((shape_uri, links)) => results.push(serde_json::json!({
+                "name": name,
+                "shapeUri": shape_uri,
+                "links": links,
+            })),
+            None => {
+                // `resolve_shacl_links` already logged the specific
+                // per-name drop at debug level; nothing to add here —
+                // this arm is just the filter that keeps the bulk
+                // response array clean.
+            }
+        }
+    }
+
+    if results.len() > MAX_SHACL_SHAPES_PER_RESPONSE {
+        return Err(WsRpcError::bad_request(format!(
+            "getAllShacl exceeds MAX_SHACL_SHAPES_PER_RESPONSE ({} > {}), use paginated variant (TODO: not yet implemented)",
+            results.len(),
+            MAX_SHACL_SHAPES_PER_RESPONSE,
+        )));
+    }
 
     Ok(Value::Array(results))
 }
