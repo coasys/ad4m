@@ -1375,6 +1375,11 @@ impl AIService {
     /// Streaming variant of [`Self::prompt_messages`].  Returns a token
     /// stream + a oneshot for the final [`PromptResult`] (carries the
     /// full text + token counts for the closing SSE event).
+    ///
+    /// Billing happens when the stream completes: the worker's final
+    /// result is billed (on success only, matching
+    /// [`Self::prompt_messages`]) in a forwarder task before it reaches
+    /// the caller's `done_rx`.
     pub async fn prompt_messages_stream(
         &self,
         model_id: String,
@@ -1403,6 +1408,10 @@ impl AIService {
         spawn_rx.await??;
 
         let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
+        // worker -> forwarder -> caller: the billing hook runs between the
+        // worker's final result and the caller's done_rx, so stream:true
+        // requests are charged like the non-stream path (success only).
+        let (worker_done_tx, worker_done_rx) = oneshot::channel::<Result<PromptResult>>();
         let (done_tx, done_rx) = oneshot::channel::<Result<PromptResult>>();
         {
             let llm_channel = self.llm_channel.lock().await;
@@ -1414,9 +1423,21 @@ impl AIService {
                 prompt: final_prompt,
                 constraint,
                 token_sender: token_tx,
-                done_sender: done_tx,
+                done_sender: worker_done_tx,
             }))?;
         }
+
+        let billing_model_id = resolved.clone();
+        tokio::spawn(async move {
+            // The worker always sends Ok/Err; the Err arm only covers a
+            // dropped sender (worker panic).
+            let result = match worker_done_rx.await {
+                Ok(inner) => inner,
+                Err(_) => Err(anyhow!("LLM stream ended without a final result")),
+            };
+            Self::bill_and_forward_stream_result(auth_token, &billing_model_id, result, done_tx)
+                .await;
+        });
 
         // Schedule a Remove for after the prompt completes — best-effort
         // background cleanup so the caller doesn't have to await it.
@@ -1494,6 +1515,30 @@ impl AIService {
             completion_tokens,
             model_id,
         })
+    }
+
+    /// Bill a completed stream result (on success only, matching
+    /// [`Self::prompt_messages`]) and relay it to the caller's oneshot.
+    ///
+    /// Runs inside the forwarder spawned by
+    /// [`Self::prompt_messages_stream`]; exposed as an associated function
+    /// so the streaming billing behaviour is unit-testable without a live
+    /// LLM channel.
+    pub(crate) async fn bill_and_forward_stream_result(
+        auth_token: Option<String>,
+        model_id: &str,
+        result: Result<PromptResult>,
+        done_tx: oneshot::Sender<Result<PromptResult>>,
+    ) {
+        if let Ok(pr) = &result {
+            Self::bill_prompt_if_authed(
+                auth_token.as_deref(),
+                model_id,
+                pr.prompt_tokens,
+                pr.completion_tokens,
+            );
+        }
+        let _ = done_tx.send(result);
     }
 
     /// Shared post-compute billing hook for prompt paths.

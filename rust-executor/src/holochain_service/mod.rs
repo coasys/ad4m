@@ -13,8 +13,8 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
-    AppManifest, DnaHash, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest,
-    Signal, Signature, Timestamp, ZomeCallParams, ZomeCallResponse,
+    AppManifest, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest, Signal,
+    Signature, Timestamp, ZomeCallParams, ZomeCallResponse,
 };
 use holochain::test_utils::itertools::Either;
 
