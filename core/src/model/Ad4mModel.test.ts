@@ -2666,11 +2666,6 @@ describe("Polymorphic relations", () => {
     src: string = "";
   }
 
-  const blockModels: Record<string, any> = {
-    PolyTextBlock,
-    PolyImageBlock,
-  };
-
   @Model({ name: "PolyCollection" })
   class PolyCollection extends Ad4mModel {
     // No target class — the members are of genuinely different types, which is
@@ -2678,7 +2673,7 @@ describe("Polymorphic relations", () => {
     @HasMany({
       through: "we://children",
       polymorphic: true,
-      classResolver: (name: string) => blockModels[name],
+      instantiateAs: () => [PolyTextBlock, PolyImageBlock],
     })
     children: string[] = [];
   }
@@ -2710,9 +2705,30 @@ describe("Polymorphic relations", () => {
     expect(collection.children[1].src).toBe("cat.png");
   });
 
-  it("leaves children as data when no classResolver is given", () => {
-    @Model({ name: "PolyCollectionNoResolver" })
-    class PolyCollectionNoResolver extends Ad4mModel {
+  it("maps a child to its class by the name the class itself declares", () => {
+    // The mapping is derived from `@Model({ name })`, not restated beside the
+    // class list — the two cannot drift apart because there is only one of them.
+    expect((PolyTextBlock as any).className).toBe("PolyTextBlock");
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+  });
+
+  it("leaves children as data when no instantiateAs is given", () => {
+    @Model({ name: "PolyCollectionNoClasses" })
+    class PolyCollectionNoClasses extends Ad4mModel {
       @HasMany({ through: "we://children", polymorphic: true })
       children: string[] = [];
     }
@@ -2726,7 +2742,7 @@ describe("Polymorphic relations", () => {
       ],
     };
 
-    const [collection] = PolyCollectionNoResolver.parseModelResult(mockPerspective, raw, {
+    const [collection] = PolyCollectionNoClasses.parseModelResult(mockPerspective, raw, {
       children: true,
     }) as any[];
 
@@ -2734,6 +2750,68 @@ describe("Polymorphic relations", () => {
     // a caller that wants to do its own dispatch.
     expect(collection.children[0].text).toBe("hello");
     expect(collection.children[0].__subjectClass).toBe("PolyTextBlock");
+  });
+
+  it("keeps a child whose class is not listed, rather than dropping it", () => {
+    // `instantiateAs` says what this call site can construct, not what the
+    // relation may contain. A heterogeneous relation is open by definition, so
+    // an unlisted class must arrive as data — narrowing a read to particular
+    // classes is a thing to ask for in the query, never a side effect of
+    // declaring which constructors happen to be in scope.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children).toHaveLength(2);
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1].done).toBe(true);
+    expect(collection.children[1].__subjectClass).toBe("PolyTaskBlock");
+  });
+
+  it("calls instantiateAs late, so a circular import can still resolve", () => {
+    let defined = false;
+    @Model({ name: "PolyLateCollection" })
+    class PolyLateCollection extends Ad4mModel {
+      // Evaluated at decoration time this would throw, the way an array literal
+      // naming a class from further round an import cycle would.
+      @HasMany({
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => {
+          if (!defined) throw new ReferenceError("class not defined yet");
+          return [PolyTextBlock];
+        },
+      })
+      children: string[] = [];
+    }
+
+    defined = true;
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyLateCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
   });
 
   it("asks the executor for polymorphic hydration without the caller repeating it", () => {

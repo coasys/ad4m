@@ -59,8 +59,8 @@ export interface RelationMetadataEntry {
     datatype?: string;
     /** Hydrate targets as the class each one actually is — see `RelationOptions.polymorphic`. */
     polymorphic?: boolean;
-    /** Maps a concrete class name to its model class, for polymorphic hydration. */
-    classResolver?: (className: string) => Ad4mModelLike | undefined;
+    /** Model classes this relation's polymorphic results can be constructed as. */
+    instantiateAs?: () => Ad4mModelLike[];
     /**
      * Natural-language hint describing what this relation MEANS semantically.
      * Emitted as an `ad4m://interpretation_hint` link on the SHACL property
@@ -908,7 +908,7 @@ export interface RelationOptions {
      * hydrated against their own shapes — one query per distinct class present,
      * not per instance.
      *
-     * Pair with `classResolver` so the results become instances of the right
+     * Pair with `instantiateAs` so the results become instances of the right
      * model class rather than plain objects.
      *
      * @example
@@ -916,24 +916,38 @@ export interface RelationOptions {
      * @HasMany({
      *   through: "we://children",
      *   polymorphic: true,
-     *   classResolver: (name) => blockModels[name],
+     *   instantiateAs: () => [TextBlock, ImageBlock],
      * })
      * children: Post[] = [];
      * ```
      */
     polymorphic?: boolean;
     /**
-     * Maps a concrete class name to its model class, for `polymorphic` reads.
+     * The model classes a `polymorphic` result may be constructed as.
      *
-     * Taken as a resolver rather than resolved through a global registry, for
-     * the same reason `fromSHACL` does: the caller knows its own classes, and a
-     * process-wide mutable registry is awkward across several perspectives and
-     * outright wrong across a hot reload.
+     * Classification happens in the executor, structurally — there is no
+     * `rdf:type` triple to read, so a target's class is derived from the flags
+     * and required properties it carries. What cannot cross the wire is the
+     * TypeScript constructor, so this names the classes this side can build.
+     * `@Model` already records each class's name on the class itself, so the
+     * name → class mapping is derived from the list rather than restated
+     * alongside it.
      *
-     * Without one, polymorphic results still carry their concrete class name but
-     * stay plain objects.
+     * **This is advisory, not a constraint.** It never narrows what the query
+     * returns and never excludes a target: a class missing from the list arrives
+     * as plain JSON carrying its class name, so partial knowledge degrades
+     * instead of failing. Declaring what this call site can *construct* is a
+     * different statement from declaring what the relation may *contain* — a
+     * heterogeneous relation is open by definition, and a list that silently
+     * dropped unrecognised members would defeat the point of reading it
+     * polymorphically at all. Constraining a read to particular classes belongs
+     * in the query, not here.
+     *
+     * A thunk rather than an array, for the same reason `target` is one: it is
+     * evaluated at query time, so a class defined later in a circular import
+     * graph still resolves.
      */
-    classResolver?: (className: string) => Ad4mModelLike | undefined;
+    instantiateAs?: () => Ad4mModelLike[];
     /**
      * Natural-language hint describing what this relation MEANS semantically —
      * the sentence-level rationale for when to use it, not just its structural
@@ -1099,7 +1113,7 @@ export function HasMany(
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
-            ...(opts.classResolver && { classResolver: opts.classResolver }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
@@ -1166,7 +1180,7 @@ export function HasOne(
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
-            ...(opts.classResolver && { classResolver: opts.classResolver }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
@@ -1248,7 +1262,7 @@ export function BelongsToOne(
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
-            ...(opts.classResolver && { classResolver: opts.classResolver }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
@@ -1310,7 +1324,7 @@ export function BelongsToMany(
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
-            ...(opts.classResolver && { classResolver: opts.classResolver }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 

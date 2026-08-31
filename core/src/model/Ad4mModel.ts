@@ -153,19 +153,34 @@ function jsonToModelInstance<T extends Ad4mModel>(
       const TargetClass = meta.target?.() as any;
       // For a polymorphic relation the executor sends each child's concrete
       // class back on the instance, because it had to know it in order to
-      // hydrate against the right shape at all. `classResolver` turns that name
-      // into a class; without one the data is still correct, just untyped.
+      // hydrate against the right shape at all. What it cannot send is the
+      // constructor, so `instantiateAs` names the classes this side can build
+      // and the name → class map is derived from them: `@Model` records each
+      // class's name on the class itself, so listing the classes and listing
+      // their names would be the same list written twice, free to disagree.
       //
+      // Built on first use rather than at decoration time, because the thunk
+      // exists to be called late: a class defined further round a circular
+      // import graph is not there yet when the decorator runs.
+      let byClassName: Record<string, any> | undefined;
       // May resolve to nothing: a polymorphic relation is allowed to declare no
-      // target at all, and its resolver may not recognise a class. The item then
-      // stays plain JSON — correct data, carrying its class name for a caller
-      // that wants to dispatch on it — rather than being forced through a
-      // constructor that does not exist.
+      // target at all, and the list may not name the class that arrived — it
+      // says what this call site can construct, not what the relation may hold.
+      // The item then stays plain JSON — correct data, carrying its class name
+      // for a caller that wants to dispatch on it — rather than being forced
+      // through a constructor that does not exist.
       const resolveChildClass = (item: any): any => {
-        if (!meta.polymorphic || !meta.classResolver) return TargetClass;
+        if (!meta.polymorphic || !meta.instantiateAs) return TargetClass;
         const concrete = item?.[SUBJECT_CLASS_KEY];
         if (typeof concrete !== 'string') return TargetClass;
-        return meta.classResolver(concrete) ?? TargetClass;
+        if (!byClassName) {
+          byClassName = {};
+          for (const cls of meta.instantiateAs() ?? []) {
+            const name = (cls as any)?.className;
+            if (typeof name === 'string') byClassName[name] = cls;
+          }
+        }
+        return byClassName[concrete] ?? TargetClass;
       };
       const nestedInclude =
         typeof includeVal === 'object' && includeVal !== null
