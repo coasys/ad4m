@@ -477,6 +477,13 @@ pub async fn run_one_pass(
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
     let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
+    let pass_started = std::time::Instant::now();
+    log::info!(
+        "⚙️ auto-processor picked task processor={} items={} perspective={}",
+        cfg.processor_id,
+        item_ids.len(),
+        uuid
+    );
     /*
        Derived once, up here, rather than at the claim below where it used to be.
 
@@ -532,7 +539,7 @@ pub async fn run_one_pass(
     //    author that is online but never actually claims.
     if escalate_past_election {
         log::info!(
-            "auto_processor `{}`: escalating past election (elected author stalled > claim_ttl_ms); claiming anyway",
+            "⚙️ auto_processor `{}`: escalating past election (elected author stalled > claim_ttl_ms); claiming anyway",
             cfg.processor_id
         );
     } else {
@@ -558,18 +565,19 @@ pub async fn run_one_pass(
                     match elect_author(&authors, &online, &me) {
                         AuthorElection::Me => { /* elected — fall through to claim */ }
                         AuthorElection::Other(winner) => {
-                            log::info!(
-                                "auto_processor `{}`: standing down — online author `{winner}` \
-                             precedes us in message order",
+                            // Steady-state passive branch — debug per Nico's
+                            // level policy (fires every tick while another
+                            // peer is elected).
+                            log::debug!(
+                                "⚙️ auto_processor `{}`: standing down — online author `{winner}` precedes us in message order",
                                 cfg.processor_id
                             );
                             signal!(AutoProcessorStep::NotCandidate, detail = winner.clone());
                             return Ok(PassOutcome::NotCandidate { winner });
                         }
                         AuthorElection::NoneOnline => {
-                            log::info!(
-                                "auto_processor `{}`: no batch author online — waiting for a \
-                             participant to return before processing",
+                            log::debug!(
+                                "⚙️ auto_processor `{}`: no batch author online — waiting for a participant to return before processing",
                                 cfg.processor_id
                             );
                             signal!(AutoProcessorStep::AwaitingAuthor);
@@ -601,8 +609,10 @@ pub async fn run_one_pass(
     )
     .await?;
     if let ClaimOutcome::BackedOff { holder } = claim {
-        log::info!(
-            "auto_processor `{}`: backed off — holder `{holder}` has the claim",
+        // Steady-state passive branch — debug per Nico's level policy
+        // (fires every tick while another peer holds the claim).
+        log::debug!(
+            "⚙️ auto_processor `{}`: backed off — holder `{holder}` has the claim",
             cfg.processor_id
         );
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
@@ -662,8 +672,9 @@ pub async fn run_one_pass(
     // 3. Interpret the drained batch — no second SPARQL.
     signal!(AutoProcessorStep::GatheringTranscript);
     if turns.is_empty() {
-        log::info!(
-            "auto_processor `{}`: drained batch is empty; nothing to interpret",
+        // Steady-state passive branch — debug per Nico's level policy.
+        log::debug!(
+            "⚙️ auto_processor `{}`: drained batch is empty; nothing to interpret",
             cfg.processor_id
         );
         signal!(AutoProcessorStep::EmptyTranscript);
@@ -848,6 +859,13 @@ pub async fn run_one_pass(
     ))
     .await;
 
+    log::info!(
+        "✅ ⚙️ auto-processor task completed processor={} items={} bases={} latency={}ms",
+        cfg.processor_id,
+        item_ids.len(),
+        bases.len(),
+        pass_started.elapsed().as_millis()
+    );
     Ok(PassOutcome::Won { bases })
 }
 

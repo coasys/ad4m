@@ -596,6 +596,18 @@ pub async fn run_interpretation_with_strategy_and_model(
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
     let task = ensure_interpretation_task_for_model(model_override).await?;
+    let interpretation_started = std::time::Instant::now();
+    let class_names: Vec<String> = shapes
+        .iter()
+        .map(|s| class_label(&s.target_class, shapes))
+        .collect();
+    log::info!(
+        "🧠 interpretation start strategy={:?} model={} classes={:?} transcript_turns={}",
+        dedup_strategy,
+        model_override.unwrap_or("<default>"),
+        class_names,
+        transcript.len()
+    );
     // Existing-instance snapshot: gives the model both the `id` handle to
     // upsert/reference (so it can refine or link an existing node instead of
     // duplicating) and the identity value to recognise it by. This one
@@ -758,6 +770,12 @@ pub async fn run_interpretation_with_strategy_and_model(
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
+    log::info!(
+        "✅ 🧠 interpretation done model={} latency={}ms bases_written={}",
+        model_override.unwrap_or("<default>"),
+        interpretation_started.elapsed().as_millis(),
+        bases.len()
+    );
     Ok(InterpretationOutcome { bases, debug })
 }
 
