@@ -1621,7 +1621,11 @@ impl AIService {
     ) -> Result<EmbedResult> {
         let token_count = estimate_token_count(&text);
         let text_chars = text.chars().count();
-        log::info!(
+        // Per-call embed lines are debug: both real callers (dedup +
+        // openai_compat/embeddings) loop one embed() per input, so a
+        // batch of N would double N info lines. Batch-level info is
+        // emitted by the caller. See rust-executor/LOGGING.md.
+        log::debug!(
             "🤖 embed start model={} chars={} tokens_in={}",
             model_id,
             text_chars,
@@ -1644,7 +1648,7 @@ impl AIService {
         }
 
         let embeddings = rx.await??;
-        log::info!(
+        log::debug!(
             "✅ 🤖 embed done model={} latency={}ms tokens_in={} dims={}",
             model_id,
             started.elapsed().as_millis(),
