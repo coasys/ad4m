@@ -385,6 +385,66 @@ fn diff_positions_a_new_item() {
 }
 
 #[test]
+fn diff_projects_a_new_item_the_way_its_link_will_read_back() {
+    // The projection stands in for members whose links do not exist yet, and it
+    // is what decides whether an entry can be skipped — so it has to be in the
+    // format `reconstruct` will actually compare, RFC3339 milliseconds. As a
+    // zero-padded number it sorted *ahead* of every real timestamp, so a new
+    // item was projected at the head of the unpositioned tail.
+    //
+    // `n` is asked for last, which is where its link will read back. Projected
+    // first, `projected != desired` and diff writes entries that pin an order
+    // the data already gives — and, worse, the mirror case (`n` asked for
+    // first) compared equal and wrote nothing, leaving the save to hydrate as
+    // [a, b, n].
+    let existing = vec![
+        ("a".to_string(), "2026-08-31T10:00:00.000Z".to_string()),
+        ("b".to_string(), "2026-08-31T10:00:01.000Z".to_string()),
+    ];
+    // The save happens after both of them. Its RFC3339 form is spelled out
+    // rather than derived, so this test pins the format `diff` must project in
+    // — the one `agent::create_signed_expression` stamps on every link.
+    let now_ms = 1_788_220_800_000;
+    let now_rfc3339 = "2026-09-01T00:00:00.000Z";
+
+    let appended = s().diff(
+        &[],
+        &existing,
+        &["a".into(), "b".into(), "n".into()],
+        PRED,
+        "did:x",
+        now_ms,
+    );
+    assert!(
+        appended.add.is_empty(),
+        "appending to an unordered collection is already what hydration gives, \
+         so it costs nothing: {:?}",
+        appended.add,
+    );
+
+    let prepended = s().diff(
+        &[],
+        &existing,
+        &["n".into(), "a".into(), "b".into()],
+        PRED,
+        "did:x",
+        now_ms,
+    );
+    assert!(
+        !prepended.add.is_empty(),
+        "but putting the new item first contradicts its link timestamp, so that \
+         has to be written down",
+    );
+    let mut members_after: Vec<(String, String)> = existing.clone();
+    members_after.push(("n".to_string(), now_rfc3339.to_string()));
+    assert_eq!(
+        s().reconstruct(&members_after, &prepended.add),
+        vec!["n", "a", "b"],
+        "and the entries produce the requested order once the link is stored",
+    );
+}
+
+#[test]
 fn diff_needs_no_entry_to_remove_an_item() {
     let ordering = s().generate_full(&["a".into(), "b".into(), "c".into()], PRED, "did:x", 1_000);
     let diff = s().diff(

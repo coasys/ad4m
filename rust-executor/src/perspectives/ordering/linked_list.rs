@@ -183,19 +183,38 @@ impl OrderingStrategy for LinkedListStrategy {
         // What the order *would* be after this save if no new entry were
         // written: the existing entries, read against the membership the save
         // is establishing. Items being added have no link timestamp yet, so
-        // they sort to the tail — which is where an unpositioned item goes.
+        // they are given the one their links are about to get, which sorts them
+        // to the tail — where an unpositioned item goes.
+        //
+        // Two things about that stand-in matter, because this projection is
+        // what decides whether an entry can be *skipped*, and a projection that
+        // errs optimistically ships a wrong order in silence.
+        //
+        // It is in the link format. `reconstruct` orders the unpositioned tail
+        // by string comparison and links carry RFC3339 milliseconds, so a
+        // zero-padded number sorts before every existing member ('0' < '2')
+        // rather than after them — projecting a new item at the head of the
+        // tail instead of the end of it.
+        //
+        // And every new item gets the *same* value rather than a spread, so the
+        // tail sort falls through to its target-URI tiebreak. That is the worst
+        // case the real write can produce: its links may land on distinct
+        // milliseconds and read back in array order, or collide onto one and
+        // read back by URI. Projecting the collision can write an entry that
+        // turns out to have been unnecessary, which is inert. Projecting the
+        // spread would skip one that turns out to be needed, which is not.
+        let new_item_ts = rfc3339_millis(now_ms);
         let known_ts: HashMap<&str, &str> = current_members
             .iter()
             .map(|(t, ts)| (t.as_str(), ts.as_str()))
             .collect();
         let projected_members: Vec<(String, String)> = desired_items
             .iter()
-            .enumerate()
-            .map(|(i, item)| {
+            .map(|item| {
                 let ts = known_ts
                     .get(item.as_str())
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("{:016}", now_ms.saturating_add(i as u64)));
+                    .unwrap_or_else(|| new_item_ts.clone());
                 (item.clone(), ts)
             })
             .collect();
@@ -272,6 +291,18 @@ impl OrderingStrategy for LinkedListStrategy {
             position: None,
         }
     }
+}
+
+/// A millisecond epoch in the format link timestamps are written in.
+///
+/// Must stay in step with `agent::create_signed_expression`, which stamps every
+/// link with `to_rfc3339_opts(SecondsFormat::Millis, true)`. `diff` compares
+/// projected members against stored ones by string, so a projection in any
+/// other format is not comparable with the data it is standing in for.
+fn rfc3339_millis(ms: u64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms as i64)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Each item mapped to the item before it in `order` (or the head).
