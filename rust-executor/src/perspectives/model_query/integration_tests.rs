@@ -6836,6 +6836,64 @@ async fn test_limit_on_a_polymorphic_include_is_rejected() {
     assert!(msg.contains("limit"), "names what was refused: {msg}");
 }
 
+/// The same refusal on a relation that happens to hold nothing.
+///
+/// Both resolvers return early once they find no targets, so a check made during
+/// hydration would accept `limit: 5` on an empty collection and reject it on a
+/// full one — the query's validity decided by the data it is asking about.
+/// Whether a request can be answered is a property of the request.
+#[tokio::test]
+async fn test_limit_on_a_polymorphic_include_is_rejected_even_with_no_targets() {
+    let store = SparqlStore::new(None).unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://models/Collection",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+    // A collection, and deliberately no `children` links at all.
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" },
+            "markedBy": { "predicate": "we://marks", "kind": "belongsToMany", "targetClassName": "", "direction": "reverse" }
+        }
+    }"#;
+
+    for relation in ["children", "markedBy"] {
+        let (resolver, shape) =
+            StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+        let query = ModelQueryInput {
+            include: Some(HashMap::from([(
+                relation.to_string(),
+                super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                    polymorphic: Some(true),
+                    offset: Some(2),
+                    ..Default::default()
+                })),
+            )])),
+            ..Default::default()
+        };
+
+        let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+            .await
+            .expect_err("an empty relation must not make an unanswerable query answerable");
+        let msg = err.to_string();
+        assert!(msg.contains(relation), "names the relation: {msg}");
+        assert!(msg.contains("offset"), "names what was refused: {msg}");
+    }
+}
+
 /// An untyped relation read without `polymorphic` fails with an actionable
 /// message rather than a shape lookup for the empty string.
 #[tokio::test]

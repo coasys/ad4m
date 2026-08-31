@@ -2858,6 +2858,46 @@ describe("Polymorphic relations", () => {
     expect(declared.base).toBe("declared");
   });
 
+  it("does not use the declared target for another class when no classes are named", () => {
+    // Naming no classes to build is not the same as authorising the declared
+    // target to stand in for all of them. Without `instantiateAs` there is
+    // simply nothing this side can construct for a class it was not told about.
+    @Model({ name: "PolyBaseOnlyBlock" })
+    class PolyBaseOnlyBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedNoClasses" })
+    class PolyTypedNoClasses extends Ad4mModel {
+      @HasMany(() => PolyBaseOnlyBlock, { through: "we://children", polymorphic: true })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseOnlyBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedNoClasses.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).not.toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(declared).toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(declared.base).toBe("declared");
+  });
+
   it("calls instantiateAs late, so a circular import can still resolve", () => {
     let defined = false;
     @Model({ name: "PolyLateCollection" })

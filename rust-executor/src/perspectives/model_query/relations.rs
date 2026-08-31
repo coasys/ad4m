@@ -137,11 +137,48 @@ pub(super) async fn resolve_includes_recursive(
             _ => continue,
         };
 
+        // Checked here, where the include is recognised, rather than down in
+        // hydration: both resolvers return early when the relation holds no
+        // targets, so validating later would accept the query on an empty
+        // collection and reject the same query on a full one. Whether a request
+        // is answerable must not depend on the data it is asking about.
+        reject_pagination_on_polymorphic(rel_name, &sub_query)?;
+
         if rel.direction == "reverse" {
             resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth).await?;
         } else {
             resolve_forward_include(store, instances, rel, &sub_query, resolver, depth).await?;
         }
+    }
+    Ok(())
+}
+
+/// Refuse `limit`/`offset` on a polymorphic include.
+///
+/// A polymorphic read runs one sub-query per class present, so a limit would
+/// apply to each group separately: the same `limit: 5` returns five rows or
+/// fifteen depending on how many classes the data happens to contain, which the
+/// caller cannot see. Nor can it be applied afterwards without deciding which
+/// classes lose their members.
+///
+/// Refused rather than dropped. Silently returning every row to a caller who
+/// asked for five is wrong in a way that surfaces much later and only as
+/// slowness, and an untyped include without `polymorphic` already fails loudly
+/// rather than degrading.
+fn reject_pagination_on_polymorphic(
+    rel_name: &str,
+    sub_query: &ModelQueryInput,
+) -> Result<(), Error> {
+    if !sub_query.polymorphic.unwrap_or(false) {
+        return Ok(());
+    }
+    if sub_query.limit.is_some() || sub_query.offset.is_some() {
+        return Err(anyhow!(
+            "include on relation '{rel_name}': `limit`/`offset` are not supported on a \
+             polymorphic include, because the read runs one query per class present and a \
+             limit would apply to each of them separately. Drop them and the relation's own \
+             link order decides what survives, or read one class at a time."
+        ));
     }
     Ok(())
 }
@@ -219,25 +256,8 @@ async fn hydrate_polymorphic(
     hydrated: &mut HashMap<String, Value>,
     ordered_ids: &mut Vec<String>,
 ) -> Result<(), Error> {
-    // `limit` cannot mean here what it means everywhere else. The read is one
-    // sub-query per class, so a limit would apply per group: `limit: 5` over
-    // three classes would return fifteen, and over one class five — an answer
-    // that depends on data the caller cannot see. Nor can it be applied after
-    // the fact without deciding which classes lose their members.
-    //
-    // Rejected rather than dropped. Silently returning every row to a caller who
-    // asked for five is the kind of wrong that surfaces later as a performance
-    // problem rather than an error, and the same query written against an
-    // untyped include already fails loudly rather than degrading.
-    if sub_query.limit.is_some() || sub_query.offset.is_some() {
-        return Err(anyhow!(
-            "include on relation '{relation_name}': `limit`/`offset` are not supported on a \
-             polymorphic include, because the read runs one query per class present and a \
-             limit would apply to each of them separately. Drop them and the relation's own \
-             link order decides what survives, or read one class at a time."
-        ));
-    }
-
+    // `limit`/`offset` were refused before either resolver ran — see
+    // `reject_pagination_on_polymorphic`. Nothing to check here.
     let classes =
         crate::perspectives::subject_classes_of::subject_classes_of(store, resolver, target_ids)?;
 

@@ -192,25 +192,28 @@ function jsonToModelInstance<T extends Ad4mModel>(
       // for a caller that wants to dispatch on it — rather than being forced
       // through a constructor that does not exist.
       const resolveChildClass = (item: any): any => {
-        if (!meta.polymorphic || !meta.instantiateAs) return TargetClass;
+        if (!meta.polymorphic) return TargetClass;
         const concrete = item?.[SUBJECT_CLASS_KEY];
         // No concrete class means this was not read polymorphically after all —
         // an explicit `polymorphic: false` at the call site — so the relation's
         // own declared target is the right shape.
         if (typeof concrete !== 'string') return TargetClass;
-        if (!byClassName) {
-          byClassName = {};
-          for (const cls of meta.instantiateAs() ?? []) {
-            const name = (cls as any)?.className;
-            if (typeof name === 'string') byClassName[name] = cls;
+        if (meta.instantiateAs) {
+          if (!byClassName) {
+            byClassName = {};
+            for (const cls of meta.instantiateAs() ?? []) {
+              const name = (cls as any)?.className;
+              if (typeof name === 'string') byClassName[name] = cls;
+            }
           }
+          if (byClassName[concrete]) return byClassName[concrete];
         }
-        if (byClassName[concrete]) return byClassName[concrete];
-        // The declared target is not a fallback. Where a relation both declares
-        // a target and reads polymorphically, a child of some third class was
-        // hydrated against *its own* shape, so constructing the declared class
-        // over that JSON produces an instance that answers `instanceof` for a
-        // class it is not, carrying fields that class never declared — the exact
+        // The declared target is not a fallback, and having named no classes to
+        // build does not make it one. Where a relation both declares a target
+        // and reads polymorphically, a child of some third class was hydrated
+        // against *its own* shape, so constructing the declared class over that
+        // JSON produces an instance that answers `instanceof` for a class it is
+        // not, carrying fields that class never declared — the exact
         // mislabelling polymorphic reads exist to prevent. It fits only when it
         // is the class the executor named.
         return (TargetClass as any)?.className === concrete ? TargetClass : undefined;
