@@ -120,6 +120,60 @@ fn concurrent_moves_of_one_item_resolve_last_write_wins() {
     assert_eq!(s().reconstruct(&m, &peer1), vec!["a", "c", "d", "b"]);
 }
 
+#[test]
+fn two_moves_sharing_a_pid_still_converge() {
+    // The same agent moving one item twice inside a millisecond. `seq` restarts
+    // at zero on every call, so the two entries carry an identical pid — the
+    // one case a pid cannot separate, and the case that used to leave the
+    // winner to whichever entry arrived first.
+    let base = vec![
+        entry("a", LIST_HEAD, "0000000000000001_0000000000000000_did:x"),
+        entry("c", "a", "0000000000000002_0000000000000000_did:x"),
+        entry("d", "c", "0000000000000003_0000000000000000_did:x"),
+        entry("b", "a", "0000000000000004_0000000000000000_did:x"),
+    ];
+    let same_pid = "0000000000000010_0000000000000000_did:A";
+    let move_after_c = entry("b", "c", same_pid);
+    let move_after_d = entry("b", "d", same_pid);
+
+    let mut peer1 = base.clone();
+    peer1.push(move_after_c.clone());
+    peer1.push(move_after_d.clone());
+
+    let mut peer2 = base.clone();
+    // Same entries, opposite arrival order.
+    peer2.push(move_after_d);
+    peer2.push(move_after_c);
+
+    let m = members(&["a", "b", "c", "d"]);
+    assert_eq!(
+        s().reconstruct(&m, &peer1),
+        s().reconstruct(&m, &peer2),
+        "equal pids must resolve the same way on every peer — which entry wins \
+         is arbitrary, agreement is not",
+    );
+}
+
+#[test]
+fn two_items_sharing_a_pid_at_one_predecessor_still_converge() {
+    // The same collision one level down: two *different* items forked off `a`
+    // with the same pid. This one already held before the tiebreak went in —
+    // `latest_per_item` sorts its output by item, so the fork arrives at the
+    // sort in a deterministic order and a stable sort keeps it. Pinned because
+    // that is an invariant established two functions away from the sort that
+    // depends on it.
+    let same_pid = "0000000000000010_0000000000000000_did:A";
+    let b = entry("b", "a", same_pid);
+    let c = entry("c", "a", same_pid);
+
+    let head = entry("a", LIST_HEAD, "0000000000000001_0000000000000000_did:x");
+    let peer1 = vec![head.clone(), b.clone(), c.clone()];
+    let peer2 = vec![head, c, b];
+
+    let m = members(&["a", "b", "c"]);
+    assert_eq!(s().reconstruct(&m, &peer1), s().reconstruct(&m, &peer2));
+}
+
 // ---- deletion, without tombstones ----------------------------------------
 
 mod deletion {

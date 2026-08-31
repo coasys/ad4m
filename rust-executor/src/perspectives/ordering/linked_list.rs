@@ -33,6 +33,26 @@ impl Default for LinkedListStrategy {
     }
 }
 
+/// Rank two entries for the same item.
+///
+/// `pid` decides it, and `after` is the tiebreak that makes the comparison a
+/// **total** order. A pid is `{timestamp}_{seq}_{did}`, so two agents can never
+/// mint the same one — but one agent can: `seq` restarts at zero on every call,
+/// so two separate saves landing in the same millisecond produce equal pids. On
+/// a `>`-only comparison equal pids are resolved by whichever entry the loop
+/// reaches first, i.e. by link arrival order, and peers do not share that. Two
+/// peers would seat the same item differently and stay that way.
+///
+/// Which of the two wins is arbitrary — equal pids carry no information about
+/// which came first — but *every peer choosing the same one* is the invariant
+/// that matters, and it is the one a pid alone does not give.
+fn resolution_key(entry: &OrderingEntry) -> (&str, &str) {
+    (
+        entry.pid.as_str(),
+        entry.after.as_deref().unwrap_or(LIST_HEAD),
+    )
+}
+
 /// Keep one entry per item — the highest `pid` wins.
 ///
 /// This is what resolves a concurrent move: two agents each add an entry for the
@@ -44,7 +64,7 @@ fn latest_per_item(ordering: &[OrderingEntry]) -> Vec<&OrderingEntry> {
         winners
             .entry(entry.item.as_str())
             .and_modify(|best| {
-                if entry.pid > best.pid {
+                if resolution_key(entry) > resolution_key(best) {
                     *best = entry;
                 }
             })
@@ -72,9 +92,14 @@ impl OrderingStrategy for LinkedListStrategy {
             after_map.entry(key).or_default().push(entry);
         }
         // Concurrent inserts at one predecessor are a fork; higher pid first, so
-        // every peer linearises it the same way.
+        // every peer linearises it the same way. `item` breaks a pid tie, which
+        // makes this sort total on its own rather than leaning on
+        // `latest_per_item` having already sorted its output by item — that
+        // holds today, but it is a guarantee established two functions away,
+        // and a tie falling through to a stable sort would resolve by input
+        // order, which here is link arrival order.
         for followers in after_map.values_mut() {
-            followers.sort_by(|a, b| b.pid.cmp(&a.pid));
+            followers.sort_by(|a, b| b.pid.cmp(&a.pid).then_with(|| b.item.cmp(&a.item)));
         }
 
         let mut out: Vec<String> = Vec::new();
