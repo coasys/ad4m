@@ -339,8 +339,14 @@ export class AgentClient {
     this.#unsubscribers.push(unsub);
   }
 
-  async requestCapability(authInfo: AuthInfoInput): Promise<string> {
-    return this.#apiClient.call<string>('agent.requestCapability', { authInfo });
+  async requestCapability(authInfo: AuthInfoInput): Promise<string | { requestId: string; rand: string }> {
+    // The executor returns either a bare requestId (normal path) or
+    // `{ requestId, rand }` when it was started with
+    // `--auto-permit-cap-requests` (dev workflow). In the latter case the
+    // caller can skip the manual `permitCapability` roundtrip and hand
+    // `rand` straight to `generateJwt`. Callers that only need the id can
+    // do `typeof res === 'string' ? res : res.requestId`.
+    return this.#apiClient.call<string | { requestId: string; rand: string }>('agent.requestCapability', { authInfo });
   }
 
   async permitCapability(auth: string): Promise<string> {

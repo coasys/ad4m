@@ -518,16 +518,39 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
             request_id,
             auth_info.app_name
         );
-        let _random_number_challenge =
+        let random_number_challenge =
             crate::agent::capabilities::permit_capability(AuthInfoExtended {
                 request_id: request_id.clone(),
                 auth: auth_info,
             })
             .map_err(|e| WsRpcError::internal(e))?;
+        // Redact by default; opt in with AD4M_LOG_SECRETS=1 for dev
+        // debugging. See rust-executor/LOGGING.md — unified with the
+        // gate used by email_service, mcp/tools/auth, and other secret
+        // paths.
+        let challenge_repr = if std::env::var("AD4M_LOG_SECRETS")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            random_number_challenge.clone()
+        } else {
+            "<redacted; set AD4M_LOG_SECRETS=1 to log>".to_string()
+        };
         log::debug!(
-            "🔐 capability request auto-permitted (request_id={}, challenge=<redacted>)",
-            request_id
+            "🔐 capability request auto-permitted (request_id={}, challenge={})",
+            request_id,
+            challenge_repr
         );
+        // Structured response replaces the removed `println!` leak: a
+        // dev running `--auto-permit-cap-requests` needs the `rand` to
+        // call `agent.generateJwt(requestId, rand)`. Return it in the
+        // response body (auto-permit path only). Non-auto-permit path
+        // preserves the historical `Value::String(request_id)` shape,
+        // so tests and normal clients are unaffected. See PR #942.
+        return Ok(serde_json::json!({
+            "requestId": request_id,
+            "rand": random_number_challenge,
+        }));
     }
 
     Ok(Value::String(request_id))
