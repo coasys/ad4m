@@ -343,8 +343,14 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+        // KEEP AT warn (Nico + CodeRabbit, PR #942 round 2): money-losing
+        // credit-ledger failures at debug hide ledger inconsistency. The
+        // link write already committed, so this is not fatal to the
+        // request — but the missed deduction is a real accounting drift
+        // that ops needs to see. Do not downgrade in future cleanups.
+        // See rust-executor/LOGGING.md.
         log::warn!(
-            "Credit deduction failed (operation already committed): {}",
+            "⚠️ 💳 credit deduction failed (link write already committed): {}",
             e
         );
     }

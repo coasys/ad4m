@@ -114,6 +114,7 @@ pub(crate) async fn embed_via_ai_service(
         .await
         .map_err(|e| anyhow::anyhow!("semantic dedup: AIService not ready: {e:#}"))?;
     let mut out = Vec::with_capacity(texts.len());
+    let batch_started = std::time::Instant::now();
     for text in texts {
         let embedded = service
             // Internal caller (SHACL dedup) — no user auth context; billing skipped.
@@ -122,6 +123,14 @@ pub(crate) async fn embed_via_ai_service(
             .map_err(|e| anyhow::anyhow!("semantic dedup: embed('{model_id}') failed: {e:#}"))?;
         out.push(embedded.embeddings);
     }
+    // Batch-level info replaces the per-call info in AIService::embed (now
+    // debug). One line per dedup pass; see rust-executor/LOGGING.md.
+    log::info!(
+        "🤖 embed batch model={} n={} latency_total={}ms (semantic-dedup)",
+        model_id,
+        texts.len(),
+        batch_started.elapsed().as_millis()
+    );
     Ok(out)
 }
 
