@@ -253,6 +253,28 @@ jobs:
     machine: true
     resource_class: coasys/marvin
     steps:
+      # Skip-if-unchanged: only run the expensive suite when dev has moved
+      # since the last successful nightly. `circleci-agent step halt` ends
+      # the job cleanly (green) so the workflow shows no wasted GPU cycles
+      # on quiet days. `CIRCLECI_API_TOKEN` comes from the `nightly-llm-e2e`
+      # context — set once via the API, org-scoped, read-only calls only.
+      - checkout
+      - run:
+          name: Skip if dev SHA unchanged since last successful llm-e2e
+          command: |
+            LAST_SHA=$(curl -sL -H "Circle-Token: $CIRCLECI_API_TOKEN" \
+              "https://circleci.com/api/v2/insights/gh/coasys/ad4m/workflows/nightly-llm-e2e/jobs?branch=dev" \
+              | jq -r '.items[]? | select(.status=="success") | .commit_id' \
+              | head -1)
+            if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" = "$CIRCLE_SHA1" ]; then
+              echo "dev @ $CIRCLE_SHA1 already tested by last nightly — halting"
+              circleci-agent step halt
+            fi
+            if [ -z "$LAST_SHA" ]; then
+              echo "no previous successful llm-e2e run found — proceeding"
+            else
+              echo "dev @ $CIRCLE_SHA1, last tested $LAST_SHA — proceeding"
+            fi
       - setup_integration_test_environment
       - run:
           name: Rust LLM-E2E (interpretation + harness suites)
@@ -348,4 +370,7 @@ workflows:
               only:
                 - dev
     jobs:
-      - llm-e2e
+      - llm-e2e:
+          # Provides `CIRCLECI_API_TOKEN` for the skip-if-unchanged preflight.
+          context:
+            - nightly-llm-e2e
