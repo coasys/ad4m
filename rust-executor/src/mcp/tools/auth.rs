@@ -126,9 +126,23 @@ impl Ad4mMcpHandler {
             auth: auth_info,
         }) {
             Ok(code) => {
+                // Unified secret-log gate (rust-executor/LOGGING.md):
+                // AD4M_LOG_SECRETS=1 opts in to the raw capability code;
+                // otherwise redacted. Consistent with agent_ws
+                // auto-permit challenge and email_service verification
+                // code.
+                let code_repr = if std::env::var("AD4M_LOG_SECRETS")
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+                {
+                    code.clone()
+                } else {
+                    "<redacted; set AD4M_LOG_SECRETS=1 to log>".to_string()
+                };
                 log::debug!(
-                    "🔐 MCP capability request permitted (request_id={}, code=<redacted>)",
-                    request_id
+                    "🔐 MCP capability request permitted (request_id={}, code={})",
+                    request_id,
+                    code_repr
                 );
                 json!({
                     "request_id": request_id,

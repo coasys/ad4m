@@ -121,18 +121,18 @@ impl EmailService {
             if let Ok(mut codes) = TEST_MODE_EMAILS.lock() {
                 codes.insert(email.to_string(), code.to_string());
                 log::info!("📧 TEST MODE: captured verification code for {}", email);
-                // Verification codes must never appear at info-level. Only
-                // emitted in debug builds or when AD4M_LOG_SECRETS=1 is set
-                // (never in release logs).
-                #[cfg(debug_assertions)]
-                {
-                    if std::env::var("AD4M_LOG_SECRETS").ok().as_deref() == Some("1") {
-                        log::debug!(
-                            "📧 TEST MODE code for {} = {} (AD4M_LOG_SECRETS=1)",
-                            email,
-                            code
-                        );
-                    }
+                // Verification codes are opt-in-only. Unified secret-log
+                // gate (rust-executor/LOGGING.md): AD4M_LOG_SECRETS=1
+                // enables the raw log; unset means <redacted>. Dropped
+                // the extra `cfg(debug_assertions)` layer so dev-in-
+                // release-build workflows behave the same as everywhere
+                // else.
+                if std::env::var("AD4M_LOG_SECRETS").ok().as_deref() == Some("1") {
+                    log::debug!(
+                        "📧 TEST MODE code for {} = {} (AD4M_LOG_SECRETS=1)",
+                        email,
+                        code
+                    );
                 }
             }
             return Ok(());
