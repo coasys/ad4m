@@ -1888,7 +1888,7 @@ async fn interpretation_overlays_handler(
 // `perspective.getAllShacl`.
 
 /// Helper: build a LinkQuery with only `source` and optionally `predicate` set.
-fn shacl_link_query(source: &str, predicate: Option<&str>) -> LinkQuery {
+pub(crate) fn shacl_link_query(source: &str, predicate: Option<&str>) -> LinkQuery {
     LinkQuery {
         source: Some(source.to_string()),
         predicate: predicate.map(|p| p.to_string()),
@@ -1899,11 +1899,95 @@ fn shacl_link_query(source: &str, predicate: Option<&str>) -> LinkQuery {
 /// Simplified link triple returned by SHACL resolution endpoints.
 /// Matches the `{source, predicate, target}` shape that
 /// `SHACLShape.fromLinks()` in the TypeScript SDK expects.
-#[derive(Debug, Serialize)]
-struct ShaclLinkTriple {
-    source: String,
-    predicate: String,
-    target: String,
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub(crate) struct ShaclLinkTriple {
+    pub source: String,
+    pub predicate: String,
+    pub target: String,
+}
+
+/// Extract a SHACL shape name from a `has_shacl` link target.
+///
+/// The `has_shacl` target is a `literal:string:` URL. The TypeScript SDK
+/// writes it as `literal:string:shacl://<Name>` verbatim (via
+/// `Literal.fromUrl(...).toUrl()`), but the SPARQL store canonicalises
+/// every `literal:string:` target through the typed-literal round-trip
+/// — the payload lands as a URL-decoded `xsd:string` and is re-encoded
+/// on read (`storage_term_to_target_string`). That flips the wire form
+/// to `literal:string:shacl%3A%2F%2F<Name>`, so a plain
+/// `strip_prefix("literal:string:shacl://")` misses every entry.
+///
+/// Accept both shapes so this helper survives store canonicalisation and
+/// any future SDK write path that uses the un-encoded form directly.
+pub(crate) fn shape_name_from_has_shacl_target(target: &str) -> Option<String> {
+    let body = target.strip_prefix("literal:string:")?;
+    // Fast path: raw form, no encoding.
+    if let Some(name) = body.strip_prefix("shacl://") {
+        return Some(name.to_string());
+    }
+    // Canonicalised form: percent-decode then re-check the scheme prefix.
+    let decoded = percent_encoding::percent_decode_str(body)
+        .decode_utf8()
+        .ok()?;
+    decoded
+        .strip_prefix("shacl://")
+        .map(|name| name.to_string())
+}
+
+/// Enumerate every SHACL shape name registered on `ad4m://self` via
+/// `ad4m://has_shacl` links. Extracted so both the WS handler and the
+/// in-crate integration tests exercise the exact same walk.
+pub(crate) async fn resolve_shacl_names(
+    perspective: &PerspectiveInstance,
+) -> Result<Vec<String>, WsRpcError> {
+    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
+    let links = perspective
+        .get_links(&query)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let mut seen = std::collections::HashSet::new();
+    let names: Vec<String> = links
+        .iter()
+        .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
+        .filter(|name| seen.insert(name.clone()))
+        .collect();
+    Ok(names)
+}
+
+/// Resolve a shape name to its `sh://targetClass` URI (or `None` when the
+/// name is unknown, or the shape has no target class). Returned as
+/// `Option` so callers can pin the wire representation (JSON `null` vs
+/// absent) at their own boundary.
+pub(crate) async fn resolve_shacl_target_class(
+    perspective: &PerspectiveInstance,
+    name: &str,
+) -> Result<Option<String>, WsRpcError> {
+    let literal_url = format!("literal:string:shacl://{}", name);
+    let uri_links = perspective
+        .get_links(&shacl_link_query(
+            &literal_url,
+            Some("ad4m://shacl_shape_uri"),
+        ))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let shape_uri = match uri_links.first() {
+        Some(link) => link.data.target.clone(),
+        None => return Ok(None),
+    };
+
+    let shape_links = perspective
+        .get_links(&shacl_link_query(&shape_uri, None))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let target_class = shape_links
+        .iter()
+        .find(|l| l.data.predicate.as_deref() == Some("sh://targetClass"))
+        .map(|l| l.data.target.clone());
+
+    Ok(target_class)
 }
 
 /// List the names of every SHACL shape stored in a perspective.
@@ -1919,27 +2003,7 @@ async fn get_shacl_names(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-
-    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
-    let links = perspective
-        .get_links(&query)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    // Extract names from literal URL targets: "literal:string:shacl://Name" → "Name"
-    let mut seen = std::collections::HashSet::new();
-    let names: Vec<String> = links
-        .iter()
-        .filter_map(|link| {
-            let target = &link.data.target;
-            // Strip "literal:string:shacl://" prefix to get the bare name
-            target
-                .strip_prefix("literal:string:shacl://")
-                .map(|name| name.to_string())
-        })
-        .filter(|name| seen.insert(name.clone()))
-        .collect();
-
+    let names = resolve_shacl_names(&perspective).await?;
     Ok(serde_json::to_value(names)?)
 }
 
@@ -1959,40 +2023,18 @@ async fn get_shacl_target_class(
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-
-    // Step 1: name → shapeUri
-    let literal_url = format!("literal:string:shacl://{}", name);
-    let uri_links = perspective
-        .get_links(&shacl_link_query(
-            &literal_url,
-            Some("ad4m://shacl_shape_uri"),
-        ))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let shape_uri = match uri_links.first() {
-        Some(link) => &link.data.target,
-        None => return Ok(Value::Null),
-    };
-
-    // Step 2: shapeUri → all direct links → find sh://targetClass
-    let shape_links = perspective
-        .get_links(&shacl_link_query(shape_uri, None))
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    let target_class = shape_links
-        .iter()
-        .find(|l| l.data.predicate.as_deref() == Some("sh://targetClass"))
-        .map(|l| l.data.target.clone());
-
+    let target_class = resolve_shacl_target_class(&perspective, &name).await?;
+    // `null` when the shape (or its `sh://targetClass`) is absent — pins
+    // the wire contract the TS client already relies on
+    // (`PerspectiveProxy.getShaclTargetClass` maps this null to
+    // `undefined` at the proxy boundary).
     Ok(serde_json::to_value(target_class)?)
 }
 
 /// Collect all link triples that define a shape and its property sub-shapes.
 /// Used by both `get_shacl` and `get_all_shacl` to avoid duplicating the
 /// multi-step resolution logic.
-async fn resolve_shacl_links(
+pub(crate) async fn resolve_shacl_links(
     perspective: &PerspectiveInstance,
     name: &str,
 ) -> Result<Option<(String, Vec<ShaclLinkTriple>)>, WsRpcError> {
@@ -2102,12 +2144,7 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     let mut seen_names = std::collections::HashSet::new();
     let names: Vec<String> = name_links
         .iter()
-        .filter_map(|link| {
-            link.data
-                .target
-                .strip_prefix("literal:string:shacl://")
-                .map(|n| n.to_string())
-        })
+        .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
         .filter(|name| seen_names.insert(name.clone()))
         .collect();
 
