@@ -133,7 +133,7 @@ describe('SHACLFlow', () => {
     it('sorts states by value so states[0] is the lowest-value (initial) state after a graph round-trip', () => {
       // Perspective link storage does not preserve insertion order — `hasState`
       // links come back arbitrarily, which used to break the "initial state
-      // = states[0]" convention that `PerspectiveProxy.startFlowInstance`
+      // = states[0]" convention that `FlowInstance.start`
       // relies on to mint the first state of a fresh instance.
       const original = new SHACLFlow('Delivery', 'ns://');
       original.addState({ name: 'Identified', value: 0 });
