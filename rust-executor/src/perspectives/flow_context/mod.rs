@@ -47,6 +47,7 @@ pub use loader::{
 };
 pub use render::{
     reachable_next_states, render_consensus_rule, render_model_query,
-    render_requires_human_readable, summarize_flow_instance, summarize_next_state,
+    render_requires_human_readable, summarize_flow_instance, summarize_next_state, FlowTokens,
+    FLOW_BASE_TOKEN, FLOW_INSTANCE_TOKEN,
 };
 pub use types::{FlowContext, FlowInstanceRecord, NextStateSummary};

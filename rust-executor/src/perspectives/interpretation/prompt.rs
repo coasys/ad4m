@@ -2,7 +2,7 @@ use super::{
     class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
 };
 use crate::db::Ad4mDb;
-use crate::perspectives::flow_context::{render_consensus_rule, FlowContext};
+use crate::perspectives::flow_context::{render_consensus_rule, FlowContext, FlowTokens};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
 use std::collections::HashMap;
@@ -217,6 +217,12 @@ pub fn build_interpretation_input(
 /// alone" signal (distinct from the field being absent, which shouldn't happen
 /// for a well-formed FlowContext).
 fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
+    // Tokens for this specific flow instance — substitute `$flow.base` /
+    // `$flow.instance` in consensus-rule role-gates (J#4). Note:
+    // `requires_human_readable` on each next-state has already been
+    // substituted by `summarize_next_state` when the FlowContext was
+    // built, so we don't touch it again here.
+    let tokens = FlowTokens::from_context(fc);
     let mut obj = serde_json::Map::new();
     obj.insert("instance".into(), serde_json::json!(fc.instance_uri));
     obj.insert("subject".into(), serde_json::json!(fc.subject));
@@ -230,7 +236,7 @@ fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
     if let Some(rule) = fc.consensus_rule.as_ref() {
         obj.insert(
             "consensus".into(),
-            serde_json::json!(render_consensus_rule(rule)),
+            serde_json::json!(render_consensus_rule(rule, &tokens)),
         );
     }
     let next: Vec<serde_json::Value> = fc
@@ -256,7 +262,7 @@ fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
             if let Some(rule) = ns.consensus_rule.as_ref() {
                 o.insert(
                     "consensus".into(),
-                    serde_json::json!(render_consensus_rule(rule)),
+                    serde_json::json!(render_consensus_rule(rule, &tokens)),
                 );
             }
             serde_json::Value::Object(o)
