@@ -505,16 +505,14 @@ impl AIService {
             let non_accelerated_message =
                 "Could not get accelerated CUDA device. Defaulting to CPU.";
             Device::new_cuda(0).unwrap_or_else(|e| {
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else if cfg!(feature = "metal") {
             Device::new_metal(0).unwrap_or_else(|e| {
                 let non_accelerated_message =
                     "Could not get accelerated Metal device. Defaulting to CPU.";
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else {
@@ -1482,24 +1480,60 @@ impl AIService {
         let model_id = Self::replace_model_variables(&task.model_id)?;
 
         let prompt_tokens = estimate_token_count(&prompt);
+        let prompt_chars = prompt.chars().count();
+        log::info!(
+            "🤖 prompt start model={} chars={} tokens_in={}",
+            model_id,
+            prompt_chars,
+            prompt_tokens
+        );
+        let started = std::time::Instant::now();
 
-        let llm_channel = self.llm_channel.lock().await;
-        if let Some(sender) = llm_channel.get(&model_id) {
-            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                task_id,
-                prompt,
-                result_sender,
-                constraint: None,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in LLM channel",
-                model_id
-            ));
+        // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
+        // line gets exactly one companion — either `done` on success or a
+        // `failed` line on error. Wrap the fallible section so we can log
+        // the failure before propagating.
+        let text_result: Result<String> = async {
+            let llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.get(&model_id) {
+                sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
+                    task_id,
+                    prompt,
+                    result_sender,
+                    constraint: None,
+                }))?;
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found in LLM channel",
+                    model_id
+                ));
+            }
+            drop(llm_channel);
+            Ok(rx.await??)
         }
+        .await;
 
-        let text = rx.await??;
+        let text = match text_result {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!(
+                    "❌ 🤖 prompt failed model={} latency={}ms tokens_in={} err={}",
+                    model_id,
+                    started.elapsed().as_millis(),
+                    prompt_tokens,
+                    e
+                );
+                return Err(e);
+            }
+        };
         let completion_tokens = estimate_token_count(&text);
+        log::info!(
+            "✅ 🤖 prompt done model={} latency={}ms tokens_in={} tokens_out={}",
+            model_id,
+            started.elapsed().as_millis(),
+            prompt_tokens,
+            completion_tokens
+        );
 
         // Bill via the shared host_rates helper. See prompt_messages.
         Self::bill_prompt_if_authed(
@@ -1652,6 +1686,18 @@ impl AIService {
         auth_token: Option<String>,
     ) -> Result<EmbedResult> {
         let token_count = estimate_token_count(&text);
+        let text_chars = text.chars().count();
+        // Per-call embed lines are debug: both real callers (dedup +
+        // openai_compat/embeddings) loop one embed() per input, so a
+        // batch of N would double N info lines. Batch-level info is
+        // emitted by the caller. See rust-executor/LOGGING.md.
+        log::debug!(
+            "🤖 embed start model={} chars={} tokens_in={}",
+            model_id,
+            text_chars,
+            token_count
+        );
+        let started = std::time::Instant::now();
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get(&model_id) {
@@ -1668,6 +1714,13 @@ impl AIService {
         }
 
         let embeddings = rx.await??;
+        log::debug!(
+            "✅ 🤖 embed done model={} latency={}ms tokens_in={} dims={}",
+            model_id,
+            started.elapsed().as_millis(),
+            token_count,
+            embeddings.len()
+        );
 
         // Bill via the shared host_rates helper.
         Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count);
@@ -1875,16 +1928,16 @@ impl AIService {
                             };
 
                             if speech_ratio < 0.33 {
-                                log::info!(
-                                    "VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
+                                log::trace!(
+                                    "🤖 VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
                                     stream_id_clone,
                                     speech_ratio
                                 );
                                 continue;
                             }
 
-                            log::info!(
-                                "VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
+                            log::trace!(
+                                "🤖 VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
                                 stream_id_clone,
                                 audio_chunk.len(),
                                 speech_ratio
@@ -1895,11 +1948,17 @@ impl AIService {
                                 Ok(mut segments) => {
                                     while let Some(segment) = segments.next().await {
                             let text = segment.text().to_string();
-                            log::info!(
-                                "Transcription text for stream {}: {:?}",
-                                stream_id_clone,
-                                text
-                            );
+                            {
+                                let preview: String = text.chars().take(40).collect();
+                                let ellipsis = if text.chars().count() > 40 { "…" } else { "" };
+                                log::debug!(
+                                    "🤖 transcription segment stream={} chars={} preview={:?}{}",
+                                    stream_id_clone,
+                                    text.chars().count(),
+                                    preview,
+                                    ellipsis
+                                );
+                            }
 
                             // Bill for transcribed words
                             let word_count = text.split_whitespace().count();
