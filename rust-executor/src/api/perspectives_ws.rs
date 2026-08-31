@@ -2050,7 +2050,18 @@ pub(crate) async fn resolve_shacl_links(
 
     let shape_uri = match uri_links.first() {
         Some(link) => link.data.target.clone(),
-        None => return Ok(None),
+        None => {
+            // Diagnostic for the race Nico flagged in review r3897752007:
+            // the caller enumerated this name from `has_shacl` but the
+            // `shacl_shape_uri` edge is gone by the time we resolve it
+            // (concurrent unlink between the two reads). Debug-level:
+            // expected-in-race behaviour, not a bug — the caller's
+            // returned list simply omits the vanished shape.
+            log::debug!(
+                "🔎 🔗 shacl: name={name} resolved to no shape uri, skipping (concurrent unlink?)"
+            );
+            return Ok(None);
+        }
     };
 
     // Step 2: get all links from the shape node (targetClass, properties, etc.)
