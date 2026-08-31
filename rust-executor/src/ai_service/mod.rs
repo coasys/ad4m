@@ -1468,22 +1468,43 @@ impl AIService {
         );
         let started = std::time::Instant::now();
 
-        let llm_channel = self.llm_channel.lock().await;
-        if let Some(sender) = llm_channel.get(&model_id) {
-            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                task_id,
-                prompt,
-                result_sender,
-                constraint: None,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in LLM channel",
-                model_id
-            ));
+        // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
+        // line gets exactly one companion — either `done` on success or a
+        // `failed` line on error. Wrap the fallible section so we can log
+        // the failure before propagating.
+        let text_result: Result<String> = async {
+            let llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.get(&model_id) {
+                sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
+                    task_id,
+                    prompt,
+                    result_sender,
+                    constraint: None,
+                }))?;
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found in LLM channel",
+                    model_id
+                ));
+            }
+            drop(llm_channel);
+            Ok(rx.await??)
         }
+        .await;
 
-        let text = rx.await??;
+        let text = match text_result {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!(
+                    "❌ 🤖 prompt failed model={} latency={}ms tokens_in={} err={}",
+                    model_id,
+                    started.elapsed().as_millis(),
+                    prompt_tokens,
+                    e
+                );
+                return Err(e);
+            }
+        };
         let completion_tokens = estimate_token_count(&text);
         log::info!(
             "✅ 🤖 prompt done model={} latency={}ms tokens_in={} tokens_out={}",
