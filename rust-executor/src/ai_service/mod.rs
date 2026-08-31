@@ -505,16 +505,14 @@ impl AIService {
             let non_accelerated_message =
                 "Could not get accelerated CUDA device. Defaulting to CPU.";
             Device::new_cuda(0).unwrap_or_else(|e| {
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else if cfg!(feature = "metal") {
             Device::new_metal(0).unwrap_or_else(|e| {
                 let non_accelerated_message =
                     "Could not get accelerated Metal device. Defaulting to CPU.";
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else {
@@ -1850,11 +1848,17 @@ impl AIService {
                                 Ok(mut segments) => {
                                     while let Some(segment) = segments.next().await {
                             let text = segment.text().to_string();
-                            log::info!(
-                                "Transcription text for stream {}: {:?}",
-                                stream_id_clone,
-                                text
-                            );
+                            {
+                                let preview: String = text.chars().take(40).collect();
+                                let ellipsis = if text.chars().count() > 40 { "…" } else { "" };
+                                log::debug!(
+                                    "🤖 transcription segment stream={} chars={} preview={:?}{}",
+                                    stream_id_clone,
+                                    text.chars().count(),
+                                    preview,
+                                    ellipsis
+                                );
+                            }
 
                             // Bill for transcribed words
                             let word_count = text.split_whitespace().count();

@@ -225,7 +225,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         sigemptyset(&mut action.sa_mask);
 
         if libc::sigaction(SIGURG, &action, ptr::null_mut()) != 0 {
-            eprintln!("Failed to set up SIGURG signal handler");
+            error!("Failed to set up SIGURG signal handler");
         }
     }
 

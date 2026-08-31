@@ -513,17 +513,21 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone()).await;
 
     if ctx.auto_permit_cap_requests {
-        println!("======================================");
-        println!("Got capability request: \n{:?}", auth_info);
-        let random_number_challenge =
+        log::debug!(
+            "🔐 auto-permitting capability request (request_id={}, app_name={:?})",
+            request_id,
+            auth_info.app_name
+        );
+        let _random_number_challenge =
             crate::agent::capabilities::permit_capability(AuthInfoExtended {
                 request_id: request_id.clone(),
                 auth: auth_info,
             })
             .map_err(|e| WsRpcError::internal(e))?;
-        println!("--------------------------------------");
-        println!("Random number challenge: {}", random_number_challenge);
-        println!("======================================");
+        log::debug!(
+            "🔐 capability request auto-permitted (request_id={}, challenge=<redacted>)",
+            request_id
+        );
     }
 
     Ok(Value::String(request_id))

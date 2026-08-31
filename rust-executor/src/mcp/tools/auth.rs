@@ -126,7 +126,10 @@ impl Ad4mMcpHandler {
             auth: auth_info,
         }) {
             Ok(code) => {
-                println!("MCP capability request - code: {}", code);
+                log::debug!(
+                    "🔐 MCP capability request permitted (request_id={}, code=<redacted>)",
+                    request_id
+                );
                 json!({
                     "request_id": request_id,
                     "code": code,
