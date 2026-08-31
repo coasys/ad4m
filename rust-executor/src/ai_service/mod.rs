@@ -1858,16 +1858,16 @@ impl AIService {
                             };
 
                             if speech_ratio < 0.33 {
-                                log::info!(
-                                    "VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
+                                log::trace!(
+                                    "🤖 VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
                                     stream_id_clone,
                                     speech_ratio
                                 );
                                 continue;
                             }
 
-                            log::info!(
-                                "VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
+                            log::trace!(
+                                "🤖 VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
                                 stream_id_clone,
                                 audio_chunk.len(),
                                 speech_ratio

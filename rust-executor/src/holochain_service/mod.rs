@@ -1090,10 +1090,10 @@ impl HolochainService {
                 include_dht_summary: true,
             })
             .await?;
-        info!("Network metrics: {:?}", metrics);
+        log::debug!("🐝 network metrics: {:?}", metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
-        info!("Network stats: {:?}", stats);
+        log::debug!("🐝 network stats: {:?}", stats);
 
         Ok(())
     }
