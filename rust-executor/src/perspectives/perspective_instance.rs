@@ -1088,20 +1088,20 @@ impl PerspectiveInstance {
                 if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
                     if self.commit_pending_diffs().await.is_ok() {
                         last_diff_time = None;
-                        log::info!("Committed diffs after reaching 10s maximum wait time");
+                        log::debug!("💾 committed diffs after reaching 10s maximum wait time");
                     }
                 // 2. It's been > 1s since last new diff (burst is over)
                 } else if !self.has_new_diffs_in_last_second().await {
                     if self.commit_pending_diffs().await.is_ok() {
                         last_diff_time = None;
-                        log::info!("Committed diffs after 1s of inactivity");
+                        log::debug!("💾 committed diffs after 1s of inactivity");
                     }
                 // 3. We have collected more than 100 diffs
                 } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
                     && self.commit_pending_diffs().await.is_ok()
                 {
                     last_diff_time = None;
-                    log::info!("Committed diffs after collecting 100");
+                    log::debug!("💾 committed diffs after collecting 100");
                 }
             }
         }
@@ -1133,7 +1133,7 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
-                log::info!("Committing {} pending diffs...", pending_ids.len());
+                log::debug!("💾 committing {} pending diffs...", pending_ids.len());
                 let commit_result = link_language.commit(pending_diffs).await;
                 match commit_result {
                     // Spec §5.2 splits perspective-commit (write) from
@@ -1151,7 +1151,7 @@ impl PerspectiveInstance {
                         })?;
                         // Reset immediate commits counter after successful commit
                         self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
-                        log::info!("Successfully committed pending diffs");
+                        log::debug!("✅ 💾 successfully committed pending diffs");
                         Ok(())
                     }
                     Err(e) => Err(e),
@@ -1432,7 +1432,7 @@ impl PerspectiveInstance {
                     log::warn!("LinkLanguage.commit returned an empty revision string; treating as success");
                     true
                 } else {
-                    log::info!("Committed to revision: {}", rev);
+                    log::debug!("💾 committed to revision: {}", rev);
                     true
                 }
             }
@@ -3015,8 +3015,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
+                log::debug!(
+                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
                 // Return empty result instead of error to allow SHACL-based SDNA to work
@@ -3051,8 +3051,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
+                log::debug!(
+                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
                 // Return empty result instead of error to allow SHACL-based SDNA to work
@@ -3810,7 +3810,8 @@ impl PerspectiveInstance {
                         .body(message.clone())
                         .send()
                         .await;
-                    log::info!("Notification webhook response: {:?}", res);
+                    // Response body can be large / contain PII — debug only.
+                    log::debug!("🪝 notification webhook response: {:?}", res);
                 }
             }
         }
@@ -5325,7 +5326,7 @@ impl PerspectiveInstance {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("Model subscription query failed: {}", e);
+                            log::error!("❌ 🔗 🧠 model-based subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -5333,7 +5334,7 @@ impl PerspectiveInstance {
                     match self_clone.sparql_query(query_string) {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("SPARQL subscription query failed: {}", e);
+                            log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -5344,7 +5345,7 @@ impl PerspectiveInstance {
                     {
                         Ok(result) => prolog_resolution_to_string(result),
                         Err(e) => {
-                            log::error!("Prolog subscription query failed: {}", e);
+                            log::error!("❌ 🔗 📜 Prolog subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -5369,7 +5370,7 @@ impl PerspectiveInstance {
                         let old_len = stored_query.last_result.len();
                         let new_len = result_string.len();
                         log::debug!(
-                            "📤 Subscription {} result changed (old_len={}, new_len={})",
+                            "📤 🔗 subscription {} result changed (old_len={}, new_len={})",
                             id,
                             old_len,
                             new_len
@@ -5378,7 +5379,7 @@ impl PerspectiveInstance {
                         updates_to_send.push((id, result_string));
                     } else {
                         log::trace!(
-                            "📭 Subscription {} result unchanged (len={})",
+                            "📭 🔗 subscription {} result unchanged (len={})",
                             id,
                             result_string.len()
                         );
@@ -5459,7 +5460,7 @@ impl PerspectiveInstance {
                 );
 
                 log::debug!(
-                    "🔔 Subscription check triggered for perspective {} with changed_preds: {:?}",
+                    "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
                     self.uuid,
                     changed_preds
                 );
@@ -5493,7 +5494,7 @@ impl PerspectiveInstance {
 
                 if !removed_queries.is_empty() {
                     log::info!(
-                        "🧹 Cleaned up {} timed-out subscription(s) for perspective {}",
+                        "🧹 🔗 cleaned up {} timed-out subscription(s) for perspective {}",
                         removed_queries.len(),
                         perspective_uuid
                     );
@@ -5517,8 +5518,11 @@ impl PerspectiveInstance {
                 let queries = self.subscribed_queries.lock().await;
 
                 if !queries.is_empty() {
-                    log::info!(
-                        "📊 Prolog subscriptions [{}]: {} active",
+                    // Heartbeat only — every ~60s per perspective. Kept at
+                    // debug to avoid steady-state noise; a subscription
+                    // register/dispose event is emitted at info instead.
+                    log::debug!(
+                        "📊 🔗 subscriptions [{}]: {} active",
                         perspective_uuid,
                         queries.len()
                     );
@@ -5528,7 +5532,7 @@ impl PerspectiveInstance {
                         } else {
                             query.query.clone()
                         };
-                        log::info!("   - [{}]: {}", id, query_preview);
+                        log::debug!("   - 🔗 [{}]: {}", id, query_preview);
                     }
                 }
             }
