@@ -1,4 +1,5 @@
 use crate::utils;
+use crate::wallet::{KEY_NAME_MAIN, KEY_NAME_PLATFORM};
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -116,8 +117,9 @@ pub struct Ad4mConfig {
     /// Base URL for the shared perspective store (required when perspective_store_backend = "shared").
     pub perspective_store_url: Option<String>,
 
-    /// Bearer token for internal API authentication.
-    /// Shared across all three backends (wallet, db, perspective store).
+    /// Bearer token for internal API authentication (outbound: executor → platform Worker).
+    /// MUST differ from `admin_credential` (inbound: client → executor) to maintain
+    /// trust boundary separation. See the assertion in lib.rs::run().
     pub internal_api_token: Option<String>,
 }
 
@@ -129,8 +131,8 @@ impl Ad4mConfig {
             return name.clone();
         }
         match self.wallet_backend.as_deref() {
-            Some("shared") => "platform".to_string(),
-            _ => "main".to_string(),
+            Some("shared") => KEY_NAME_PLATFORM.to_string(),
+            _ => KEY_NAME_MAIN.to_string(),
         }
     }
 
@@ -154,8 +156,7 @@ impl Ad4mConfig {
             self.db_backend_url = std::env::var("DB_BACKEND_URL").ok();
         }
         if self.perspective_store_backend.is_none() {
-            self.perspective_store_backend =
-                std::env::var("PERSPECTIVE_STORE_BACKEND").ok();
+            self.perspective_store_backend = std::env::var("PERSPECTIVE_STORE_BACKEND").ok();
         }
         if self.perspective_store_url.is_none() {
             self.perspective_store_url = std::env::var("PERSPECTIVE_STORE_URL").ok();

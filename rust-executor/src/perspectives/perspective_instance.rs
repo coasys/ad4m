@@ -9,6 +9,7 @@ use crate::agent::AgentContext;
 use crate::agent::{create_signed_expression, did_for_context};
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
+use crate::perspective_store_backend::{perspective_store_backend, SyncLink};
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::get_prolog_service;
 use crate::prolog_service::types::QueryResolution;

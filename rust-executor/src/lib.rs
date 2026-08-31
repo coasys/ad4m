@@ -389,6 +389,23 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         crate::perspective_store_backend::init_perspective_store_backend(backend);
     }
 
+    // ── Token separation assertion ──────────────────────────────────────
+    // internal_api_token (executor → Worker) must differ from admin_credential
+    // (client → executor) to maintain trust boundary separation. Same value
+    // means compromise of any admin-capable client leaks platform-internal auth.
+    if config.wallet_backend.as_deref() == Some("shared") {
+        if let (Some(internal), Some(admin)) =
+            (&config.internal_api_token, &config.admin_credential)
+        {
+            if internal == admin {
+                panic!(
+                    "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
+                     Using the same value collapses two trust boundaries."
+                );
+            }
+        }
+    }
+
     // Create data directories that were previously created by the JS executor's Config.init().
     // These must exist before any service tries to write to them.
     {

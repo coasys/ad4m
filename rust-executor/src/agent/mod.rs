@@ -65,7 +65,7 @@ impl AgentContext {
     pub fn wallet_key_name(&self) -> String {
         match &self.user_email {
             Some(email) => email.clone(),
-            None => "main".to_string(),
+            None => crate::wallet::KEY_NAME_MAIN.to_string(),
         }
     }
 }
@@ -158,9 +158,21 @@ pub fn sign(payload: &[u8]) -> Result<Vec<u8>, AnyError> {
 
 pub fn check_keys_and_create(did: String) -> did_key::Document {
     let backend = wallet_backend();
-    let name = "main";
+    let name = crate::wallet::KEY_NAME_MAIN;
     if backend.get_did_document(name).is_none() {
-        backend.initialize_keys(name, &did).unwrap()
+        // In shared mode initialize_keys returns None (keys live server-side,
+        // not importable from a DID string). Fall back to fetching the existing
+        // DID document — the platform Worker already holds the keypair.
+        match backend.initialize_keys(name, &did) {
+            Some(doc) => doc,
+            None => backend.get_did_document(name).unwrap_or_else(|| {
+                panic!(
+                    "Failed to initialise or retrieve DID document for key '{}'. \
+                         In shared mode, ensure the platform Worker has generated the keypair.",
+                    name
+                )
+            }),
+        }
     } else {
         did_document()
     }
@@ -444,13 +456,17 @@ impl AgentService {
         backend.key_exists(user_email)
     }
 
-    /// List all user emails that have keys in the wallet (excluding "main")
+    /// List all user emails that have keys in the wallet (excluding the
+    /// main agent key and platform signing key).
     pub fn list_user_emails() -> Result<Vec<String>, AnyError> {
         let backend = wallet_backend();
+        let signing_name = crate::config::get_global_config().signing_key_name();
         let all_keys = backend.list_key_names();
         let user_emails: Vec<String> = all_keys
             .into_iter()
-            .filter(|key_name| key_name != "main")
+            .filter(|key_name| {
+                key_name != crate::wallet::KEY_NAME_MAIN && key_name != &signing_name
+            })
             .collect();
         Ok(user_emails)
     }
@@ -567,14 +583,14 @@ impl AgentService {
     pub fn create_new_keys(&mut self) {
         let backend = wallet_backend();
         backend
-            .generate_keypair("main")
+            .generate_keypair(crate::wallet::KEY_NAME_MAIN)
             .expect("failed to generate main keypair");
 
         // In shared mode the JWT signing key name differs from "main"
         // (defaults to "platform"). Create it once if it does not exist yet,
         // so all executors sharing the wallet can sign tokens.
         let signing_name = crate::config::get_global_config().signing_key_name();
-        if signing_name != "main" && !backend.key_exists(&signing_name) {
+        if signing_name != crate::wallet::KEY_NAME_MAIN && !backend.key_exists(&signing_name) {
             backend
                 .generate_keypair(&signing_name)
                 .expect("failed to generate signing keypair");
@@ -582,7 +598,7 @@ impl AgentService {
         }
 
         let did = backend
-            .get_did_document("main")
+            .get_did_document(crate::wallet::KEY_NAME_MAIN)
             .expect("couldn't get DID document for keys that were just generated above")
             .id;
 
@@ -607,7 +623,7 @@ impl AgentService {
             // Ensure the shared signing key exists (may have been created by
             // another executor; create only if missing).
             let signing_name = crate::config::get_global_config().signing_key_name();
-            if signing_name != "main" && !backend.key_exists(&signing_name) {
+            if signing_name != crate::wallet::KEY_NAME_MAIN && !backend.key_exists(&signing_name) {
                 if let Err(e) = backend.generate_keypair(&signing_name) {
                     log::error!("Failed to create signing key '{}': {}", signing_name, e);
                 } else {
