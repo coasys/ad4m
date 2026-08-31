@@ -162,8 +162,14 @@ describe('PerspectiveProxy SHACL RPC delegation', () => {
       expect(shapes).toEqual([]);
     });
 
-    it('filters out shapes that fail reconstruction', async () => {
-      // A shape with no links should fail fromLinks gracefully
+    it('passes every entry through when SHACLShape.fromLinks succeeds', async () => {
+      // Named for what it actually asserts: `SHACLShape.fromLinks` always
+      // returns a shape (even for the empty-links case — an empty shape
+      // with no targetClass is still a shape), so the proxy's `s !== null`
+      // filter is only reachable if `fromLinks` itself is mocked to return
+      // null. The original name ("filters out shapes that fail
+      // reconstruction") described a case the production path can't
+      // produce; that was dead coverage.
       const client = createMockClient({
         getAllShacl: jest.fn().mockResolvedValue([
           { name: 'Good', shapeUri: 'app://GoodShape', links: buildShapeLinks('app://GoodShape', 'app://Good', [{ name: 'x', path: 'app://x' }]) },
@@ -174,10 +180,42 @@ describe('PerspectiveProxy SHACL RPC delegation', () => {
 
       const shapes = await proxy.getAllShacl();
 
-      // Both should appear since fromLinks always returns a SHACLShape
-      // (even with no targetClass), but the filter only drops null
       expect(shapes.length).toBe(2);
-      expect(shapes[0].name).toBe('Good');
+      expect(shapes.map(s => s.name).sort()).toEqual(['Empty', 'Good']);
+    });
+
+    it('drops entries when SHACLShape.fromLinks returns null', async () => {
+      // Exercises the actual filter in `PerspectiveProxy.getAllShacl`:
+      // `SHACLShape.fromLinks` doesn't currently return null for any
+      // input, but the filter is defensive against a future change (or a
+      // subclass override), so we pin it by mocking `fromLinks` to
+      // simulate that case for one of two entries.
+      const goodLinks = buildShapeLinks('app://GoodShape', 'app://Good', [{ name: 'x', path: 'app://x' }]);
+      const badLinks = buildShapeLinks('app://BadShape', 'app://Bad', [{ name: 'y', path: 'app://y' }]);
+
+      const client = createMockClient({
+        getAllShacl: jest.fn().mockResolvedValue([
+          { name: 'Good', shapeUri: 'app://GoodShape', links: goodLinks },
+          { name: 'Bad', shapeUri: 'app://BadShape', links: badLinks },
+        ]),
+      });
+      const proxy = createProxy(client);
+
+      const fromLinksSpy = jest
+        .spyOn(SHACLShape, 'fromLinks')
+        .mockImplementation((_links: any, shapeUri: string) => {
+          if (shapeUri === 'app://BadShape') return null as unknown as SHACLShape;
+          const shape = new SHACLShape(shapeUri, 'app://Good');
+          return shape;
+        });
+
+      try {
+        const shapes = await proxy.getAllShacl();
+        expect(shapes.length).toBe(1);
+        expect(shapes[0].name).toBe('Good');
+      } finally {
+        fromLinksSpy.mockRestore();
+      }
     });
   });
 });
