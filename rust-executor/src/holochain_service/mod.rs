@@ -343,7 +343,7 @@ impl HolochainService {
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
                                         },
                                         Err(err) => {
-                                            error!("GetNetworkMetrics timed out after 30s");
+                                            log::debug!("🐝 GetNetworkMetrics timed out after 30s (periodic maintenance call)");
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
                                         },
                                     }

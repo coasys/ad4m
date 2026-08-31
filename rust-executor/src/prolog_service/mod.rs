@@ -85,8 +85,11 @@ impl PrologService {
     fn check_pooled_mode_required(operation: &str, perspective_id: &str) -> Result<(), Error> {
         match PROLOG_MODE {
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ {} called but Prolog is DISABLED (perspective: {})",
+                // Config-driven: PROLOG_MODE=Disabled makes every pooled
+                // call take this branch on purpose. Debug so the config
+                // is discoverable without spamming the info stream.
+                log::debug!(
+                    "📜 {} called but Prolog is DISABLED (perspective: {})",
                     operation,
                     perspective_id
                 );
@@ -359,10 +362,11 @@ impl PrologService {
     ) -> Result<QueryResolution, Error> {
         use deno_core::anyhow::anyhow;
 
-        // Check if Prolog is disabled - return empty matches but log warning
+        // Check if Prolog is disabled - return empty matches but log at
+        // debug (config-driven; not an anomaly).
         if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
+            log::debug!(
+                "📜 Prolog query received but Prolog is DISABLED (perspective: {}, query: {})",
                 perspective_id,
                 query
             );
@@ -468,8 +472,8 @@ impl PrologService {
         // Check mode - return Ok (not error) for Simple/Disabled modes
         match PROLOG_MODE {
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ ensure_perspective_pool called but Prolog is DISABLED (perspective: {})",
+                log::debug!(
+                    "📜 ensure_perspective_pool called but Prolog is DISABLED (perspective: {})",
                     perspective_id
                 );
                 return Ok(());

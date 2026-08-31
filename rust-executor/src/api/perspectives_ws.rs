@@ -342,8 +342,11 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
-        log::warn!(
-            "Credit deduction failed (operation already committed): {}",
+        // Deliberately tolerated: link write already committed. Debug so
+        // the tolerated failure is still discoverable without polluting
+        // warn.
+        log::debug!(
+            "💳 credit deduction failed (link write already committed): {}",
             e
         );
     }
