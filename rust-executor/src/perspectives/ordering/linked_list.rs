@@ -305,8 +305,15 @@ impl OrderingStrategy for LinkedListStrategy {
 /// timestamp the caller did not ask for, which would show up as a projection
 /// that silently disagrees with the links it stands in for. Say so if it ever
 /// fires.
+///
+/// The conversion is checked rather than an `as` cast for the same reason: a
+/// `u64` past `i64::MAX` wraps to a negative epoch, which chrono accepts as a
+/// pre-1970 date, so the cast would hand back a plausible timestamp for exactly
+/// the input the fallback is here to catch.
 fn rfc3339_millis(ms: u64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms as i64)
+    i64::try_from(ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
         .unwrap_or_else(|| {
             log::error!(
                 "ordering: timestamp {ms} is out of range for RFC3339 rendering; \
