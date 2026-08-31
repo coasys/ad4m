@@ -206,25 +206,18 @@ pub fn render_consensus_rule(rule: &ConsensusRule) -> String {
 mod tests {
     use super::*;
     use crate::perspectives::shacl_parser::{
-        AD4MAction, FlowTransition, LinkPattern, ModelQueryCount,
+        AD4MAction, FlowTransition, ModelQueryCount,
     };
     use std::collections::BTreeMap;
 
     // ------------- fixture builders -------------
 
-    fn empty_link_pattern() -> LinkPattern {
-        LinkPattern {
-            source: None,
-            predicate: String::new(),
-            target: String::new(),
-        }
-    }
-
     fn state_named(name: &str) -> FlowState {
+        // v5-shape flow — no `state_check` (J#2 disjointness contract).
         FlowState {
             name: name.to_string(),
             value: 0.0,
-            state_check: empty_link_pattern(),
+            state_check: None,
             interpretation_hint: None,
             requires: None,
             semantic_check: None,

@@ -484,17 +484,14 @@ mod tests {
     // joining, not the rendering surface.
     fn delivery_flow() -> SHACLFlow {
         use crate::perspectives::shacl_parser::{
-            AD4MAction, ConsensusRule, FlowState, FlowTransition, LinkPattern,
+            AD4MAction, ConsensusRule, FlowState, FlowTransition,
         };
-        let empty_pattern = LinkPattern {
-            source: None,
-            predicate: String::new(),
-            target: String::new(),
-        };
+        // v5-shape flow — no `state_check` on any state. State lives on the
+        // on-graph `FlowInstanceRecord` (J#2 disjointness contract).
         let state_named = |name: &str| FlowState {
             name: name.to_string(),
             value: 0.0,
-            state_check: empty_pattern.clone(),
+            state_check: None,
             interpretation_hint: None,
             requires: None,
             semantic_check: None,

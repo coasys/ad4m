@@ -137,12 +137,23 @@ export interface FlowState {
   /**
    * Link pattern that indicates this state.
    *
-   * Legacy field kept for existing consumers; v1+ flows should express
-   * "am I in this state?" via `requires` (design §4.1), which talks
-   * about subject-class instances rather than raw links. `stateCheck`
-   * will be retired once no production perspective still writes it.
+   * **Optional.** A flow is either **legacy** (every state declares a
+   * `stateCheck` — read/written by `PerspectiveProxy.startFlow` /
+   * `flowState` / `runFlowAction` / `expressionsInFlowState` via link
+   * markers) or **v5** (no state declares one — read/written by
+   * `startFlowInstance` / `FlowInstance.currentState` via the
+   * on-graph `FlowInstanceRecord`). The two API paths are made
+   * disjoint at the entry points to guarantee a single source of
+   * truth for state: no dual representation, and therefore no drift
+   * between "record says ready" and "markers say doing" — see James
+   * PR #929 J#2.
+   *
+   * v1+ flows should express "am I in this state?" via `requires`
+   * (design §4.1), which talks about subject-class instances rather
+   * than raw links. `stateCheck` will be removed entirely once no
+   * production perspective still writes it.
    */
-  stateCheck: LinkPattern;
+  stateCheck?: LinkPattern;
   /**
    * Natural-language description of what puts a flow instance IN this state.
    * Used by AI-driven state suggestion (`suggestFlowState`) — the same
@@ -249,6 +260,34 @@ export interface FlowTransition {
   toState: string;
   /** Actions to execute for this transition */
   actions: AD4MAction[];
+}
+
+/**
+ * True iff every declared state carries a `stateCheck`.
+ *
+ * Legacy flows read/write state through link markers via the
+ * `stateCheck` pattern — that is what `PerspectiveProxy.startFlow`,
+ * `flowState`, `runFlowAction`, and `expressionsInFlowState` all use.
+ * v5 flows omit `stateCheck` entirely; their state lives on the
+ * on-graph `FlowInstanceRecord.currentState` and is read/written
+ * through the `FlowInstance` wrapper.
+ *
+ * The two paths are made disjoint at the entry points so no flow can
+ * be simultaneously in both representations — see James PR #929 J#2.
+ * A flow with zero states is treated as v5 (a zero-state flow is an
+ * atomic action, design §6.3; nothing to legacy-mark).
+ */
+export function isLegacyStateCheckFlow(flow: { states: FlowState[] }): boolean {
+  return flow.states.length > 0 && flow.states.every(s => !!s.stateCheck);
+}
+
+/**
+ * Inverse of {@link isLegacyStateCheckFlow}. A v5 flow declares no
+ * `stateCheck` on any state; its state lives on the on-graph
+ * `FlowInstanceRecord`. Also true for zero-state (action) flows.
+ */
+export function isV5Flow(flow: { states: FlowState[] }): boolean {
+  return flow.states.every(s => !s.stateCheck);
 }
 
 /**
@@ -586,8 +625,10 @@ export class SHACLFlow {
         target: Literal.from(state.value).toUrl()
       });
 
-      // State check pattern
-      links.push({
+      // State check pattern — only emitted for legacy flows that declare
+      // one. v5 flows omit it entirely; the on-graph `FlowInstanceRecord`
+      // carries state instead.
+      if (state.stateCheck) links.push({
         source: stateUri,
         predicate: "ad4m://stateCheck",
         target: `literal:string:${encodeURIComponent(JSON.stringify(state.stateCheck))}`
@@ -870,11 +911,14 @@ export class SHACLFlow {
       );
       const stateValue = valueLink ? Literal.fromUrl(valueLink.target).get() as number : 0;
       
-      // Get state check
+      // Get state check — absent on v5 flows (design §4.1 / J#2). Parsed to
+      // `undefined` when no link is present so `isV5Flow()` sees the shape as
+      // v5; the empty-pattern default the parser used to inject would have
+      // read as "declared but empty", which is neither legacy nor v5.
       const checkLink = links.find(l =>
         l.source === stateUri && l.predicate === "ad4m://stateCheck"
       );
-      let stateCheck: LinkPattern = { predicate: "", target: "" };
+      let stateCheck: LinkPattern | undefined = undefined;
       if (checkLink) {
         try {
           const jsonStr = checkLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
@@ -1039,7 +1083,7 @@ export class SHACLFlow {
     const sanitizedStates = this._states.map(s => ({
       name: s.name,
       value: s.value,
-      stateCheck: s.stateCheck,
+      ...(s.stateCheck ? { stateCheck: s.stateCheck } : {}),
       ...(s.interpretationHint ? { interpretationHint: s.interpretationHint } : {}),
       ...(s.requires && s.requires.length > 0 ? { requires: s.requires } : {}),
       ...(s.semanticCheck ? { semanticCheck: s.semanticCheck } : {}),
@@ -1101,7 +1145,7 @@ export class SHACLFlow {
       const sanitized: FlowState = {
         name: state.name,
         value: state.value,
-        stateCheck: state.stateCheck,
+        ...(state.stateCheck ? { stateCheck: state.stateCheck } : {}),
       };
       if (typeof state.interpretationHint === "string" && state.interpretationHint.length > 0) {
         sanitized.interpretationHint = state.interpretationHint;

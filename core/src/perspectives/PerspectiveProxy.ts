@@ -15,7 +15,7 @@ import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
-import { SHACLFlow } from "../shacl/SHACLFlow";
+import { SHACLFlow, isLegacyStateCheckFlow, isV5Flow } from "../shacl/SHACLFlow";
 import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { FlowInstance } from "./FlowInstance";
 import { Ad4mModel } from "../model/Ad4mModel";
@@ -375,6 +375,25 @@ interface Parameter {
  * });
  * ```
  */
+
+/**
+ * Throw an actionable error when a legacy `stateCheck`-based flow API is
+ * called on a v5-shape flow. Guarantees the two representations
+ * (link-marker state via `stateCheck` vs. on-graph `FlowInstanceRecord`)
+ * stay disjoint — no flow can be in both simultaneously, so `startFlow` /
+ * `runFlowAction` writing one representation while `FlowInstance.currentState`
+ * reads the other is structurally impossible (James PR #929 J#2).
+ *
+ * `methodName` is the caller's name; it goes into the message so the fix is
+ * obvious. Zero-state (action) flows are v5 too — they have no state to
+ * legacy-mark.
+ */
+function rejectV5Flow(flow: SHACLFlow, methodName: string): void {
+    if (isV5Flow(flow)) {
+        throw `Flow "${flow.name}" is a v5-shape flow (no stateCheck on any state) — its state lives on the on-graph FlowInstanceRecord and is read/written through the FlowInstance wrapper. Call startFlowInstance(...) / getFlowInstances({ flowName, subject }) instead of ${methodName}(...). Legacy stateCheck-based methods only work on flows where every state declares a stateCheck link pattern.`;
+    }
+}
+
 export class PerspectiveProxy {
     /** Unique identifier of this perspective */
     uuid: string;
@@ -1186,10 +1205,20 @@ export class PerspectiveProxy {
         return available;
     }
 
-    /**  Starts the Social DNA flow @param flowName on the expression @param exprAddr */
+    /**
+     * Starts the Social DNA flow @param flowName on the expression @param exprAddr.
+     *
+     * **Legacy `stateCheck`-based path.** Requires every state on the flow to
+     * declare a `stateCheck` link pattern. A v5-shape flow (no `stateCheck`
+     * on any state) is rejected with an actionable error — use
+     * {@link startFlowInstance} instead. The two APIs are made disjoint at
+     * their entry points so no flow can be simultaneously in both
+     * representations (James PR #929 J#2).
+     */
     async startFlow(flowName: string, exprAddr: string) {
         const flow = await this.getFlow(flowName);
         if (!flow) throw `Flow "${flowName}" not found`;
+        rejectV5Flow(flow, "startFlow");
         if (flow.startAction.length === 0) throw `Flow "${flowName}" has no start action`;
         await this.executeAction(flow.startAction, exprAddr, undefined)
     }
@@ -1221,6 +1250,13 @@ export class PerspectiveProxy {
         if (!flow) throw `Flow "${flowName}" not found`;
         if (flow.states.length === 0) {
             throw `Flow "${flowName}" has no states — startFlowInstance is for stateful flows only; zero-state flows fire via runFlowAction (§6.3)`;
+        }
+        // Reject legacy-shape flows so no flow can live in both the on-graph
+        // record AND the link-marker representation simultaneously (J#2). A
+        // legacy flow's state is written by `startFlow` / `runFlowAction`
+        // via `stateCheck` markers; the two paths are made disjoint here.
+        if (isLegacyStateCheckFlow(flow)) {
+            throw `Flow "${flowName}" is a legacy stateCheck-based flow — use startFlow(...) / flowState(...) / runFlowAction(...) instead. startFlowInstance is for v5-shape flows (no stateCheck on any state), whose state lives on the on-graph FlowInstanceRecord.`;
         }
         // Register the hardwired runtime classes if this is the first flow
         // instance on the perspective. registerAll is a single batched RPC and
@@ -1335,15 +1371,23 @@ export class PerspectiveProxy {
         return wrappers;
     }
 
-    /** Returns all expressions in the given state of given Social DNA flow */
+    /**
+     * Returns all expressions in the given state of given Social DNA flow.
+     *
+     * **Legacy `stateCheck`-based path** — see {@link startFlow}. Rejects
+     * v5-shape flows; use {@link getFlowInstances}({ flowName }) and inspect
+     * each returned instance's `currentStateName` instead.
+     */
     async expressionsInFlowState(flowName: string, flowState: number): Promise<string[]> {
         const flow = await this.getFlow(flowName);
         if (!flow) return [];
+        rejectV5Flow(flow, "expressionsInFlowState");
         // Find the state with the matching value
         const state = flow.states.find(s => s.value === flowState);
         if (!state) return [];
-        // Query for expressions matching this state's check pattern
-        const pattern = state.stateCheck;
+        // Query for expressions matching this state's check pattern —
+        // guaranteed present because `rejectV5Flow` accepted the flow.
+        const pattern = state.stateCheck!;
         const links = await this.get(new LinkQuery({
             predicate: pattern.predicate,
             target: pattern.target
@@ -1352,13 +1396,21 @@ export class PerspectiveProxy {
         return links.map(l => pattern.source ? l.data.target : l.data.source);
     }
 
-    /** Returns the given expression's flow state with regard to given Social DNA flow */
+    /**
+     * Returns the given expression's flow state with regard to given Social DNA flow.
+     *
+     * **Legacy `stateCheck`-based path** — see {@link startFlow}. Rejects
+     * v5-shape flows; use {@link getFlowInstances}({ flowName, subject: exprAddr })
+     * and read the instance's `currentStateName` / `currentState.value` instead.
+     */
     async flowState(flowName: string, exprAddr: string): Promise<number> {
         const flow = await this.getFlow(flowName);
         if (!flow) throw `Flow "${flowName}" not found`;
-        // Check each state to find which one the expression is in
+        rejectV5Flow(flow, "flowState");
+        // Check each state to find which one the expression is in — every
+        // state carries `stateCheck` because `rejectV5Flow` accepted the flow.
         for (const state of flow.states) {
-            const pattern = state.stateCheck;
+            const pattern = state.stateCheck!;
             const source = pattern.source || exprAddr;
             const links = await this.get(new LinkQuery({
                 source,
@@ -1370,14 +1422,22 @@ export class PerspectiveProxy {
         throw `Expression "${exprAddr}" is not in any state of flow "${flowName}"`;
     }
 
-    /** Returns available action names, with regard to Social DNA flow and expression's flow state */
+    /**
+     * Returns available action names, with regard to Social DNA flow and
+     * expression's flow state.
+     *
+     * **Legacy `stateCheck`-based path** — see {@link startFlow}. Rejects
+     * v5-shape flows; use `flowInstance.availableTransitions` on a wrapper
+     * from {@link getFlowInstances} instead.
+     */
     async flowActions(flowName: string, exprAddr: string): Promise<string[]> {
         const flow = await this.getFlow(flowName);
         if (!flow) return [];
+        rejectV5Flow(flow, "flowActions");
         // Determine current state
         let currentStateName: string | null = null;
         for (const state of flow.states) {
-            const pattern = state.stateCheck;
+            const pattern = state.stateCheck!;
             const source = pattern.source || exprAddr;
             const links = await this.get(new LinkQuery({
                 source,
@@ -1396,10 +1456,17 @@ export class PerspectiveProxy {
             .map(t => t.actionName);
     }
 
-    /** Runs given Social DNA flow action */
+    /**
+     * Runs given Social DNA flow action.
+     *
+     * **Legacy `stateCheck`-based path** — see {@link startFlow}. Rejects
+     * v5-shape flows; use the forthcoming `FlowInstance.proposeTransition`
+     * (slice 10.6 consensus engine) instead.
+     */
     async runFlowAction(flowName: string, exprAddr: string, actionName: string) {
         const flow = await this.getFlow(flowName);
         if (!flow) throw `Flow "${flowName}" not found`;
+        rejectV5Flow(flow, "runFlowAction");
         const transition = flow.transitions.find(t => t.actionName === actionName);
         if (!transition) throw `Action "${actionName}" not found in flow "${flowName}"`;
         await this.executeAction(transition.actions, exprAddr, undefined)
