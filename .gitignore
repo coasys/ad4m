@@ -1,5 +1,8 @@
 /src/**/*.js
 *.js.map
+# Per-workspace Holochain CLI toolchain built by scripts/install-hc-toolchain.sh
+# Isolated per repo so it doesn't clobber ~/.cargo/bin/hc on shared CI runners.
+.hc-toolchain/
 *.js
 !executor/scripts/*.js
 !skills/ad4m/waker/*.js
@@ -78,5 +81,13 @@ benchmarks/results/
 ui/src-tauri/gen/schemas/macOS-schema.json
 
 .claude
+# Residual lazy-loaded ESM/JS sources emitted alongside the deno snapshot.
+# See rust-executor/src/js_core/residual_lazy.rs for the include contract.
+# Regenerate via: cargo run --release --features generate_snapshot --bin generate_snapshot
+CUSTOM_DENO_SNAPSHOT.residual_esm.rs
+CUSTOM_DENO_SNAPSHOT.residual_js.rs
+rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs
+rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
+
 # Overnight watchdog scratch — logs and repro scripts, not source
 .overnight-status/

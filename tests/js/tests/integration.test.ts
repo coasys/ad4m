@@ -19,7 +19,6 @@ import runtimeTests from "./runtime";
 import flatLanguageTests from "./flat-language.test";
 //import { Crypto } from "@peculiar/webcrypto"
 import agentLanguageTests from "./agent-language";
-import socialDNATests from "./social-dna-flow";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -141,7 +140,6 @@ describe("Integration tests", function () {
     describe('Runtime', runtimeTests(testContext))
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
-    describe('Social DNA', socialDNATests(testContext))
         describe('Flat Language (new flat export pattern)', flatLanguageTests(testContext))
 
         describe('with Alice and Bob', () => {

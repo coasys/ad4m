@@ -90,25 +90,34 @@ export class FlowTransitionProposal extends Ad4mModel {
   @Optional({ through: "ad4m://flow/rationale" })
   rationale?: string;
 
-  /**
-   * RFC3339 timestamp when the proposal was written.
-   * Named `proposedAt` (not `createdAt`) because `Ad4mModel` reserves
-   * `createdAt` / `updatedAt` / `baseExpression` as synthetic hydration
-   * fields — a subclass property with those names is silently overwritten
-   * by the earliest / latest link timestamp on hydration, and the TS-side
-   * `jsonToModelInstance` converts any `createdAt` value to epoch millis.
-   */
-  @Property({ through: "ad4m://flow/created_at", required: true })
-  proposedAt: string = "";
+  // "When was this proposal written?" is answered by `Ad4mModel`'s built-in
+  // `createdAt`, synthesized on hydration from the earliest link timestamp
+  // of the proposal's own links (all written together during create_subject).
 }
 
-// ── FlowInstance ────────────────────────────────────────────────────────────
+// ── FlowInstanceRecord ──────────────────────────────────────────────────────
 // On-graph node minted by the engine when a flow is started on a specific
 // base expression. Its URI is the value that `FlowTransitionProposal.flowInstance`
 // references. Mirrors `rust-executor/src/perspectives/hardwired_sdna/flow_instance.json`.
+//
+// Design authority: `docs/flow-interpretation-hints-design.md` §4.3.
+//
+// This class is the raw on-graph record (@Model over the SDNA shape). The
+// object-oriented handle callers work with is `FlowInstance` in
+// `./FlowInstance.ts` — it wraps `FlowInstanceRecord + SHACLFlow definition`
+// and exposes `currentState`, `availableTransitions`, `proposals`, etc.
+// Renamed from `FlowInstance` → `FlowInstanceRecord` on 2026-08-27 per
+// Nico's PR #929 review R2 (the `FlowInstance` name is reserved for the
+// wrapper the design has always specified in §4.3).
+//
+// The SDNA name (`@Model({ name: "FlowInstance" })`) stays unchanged — that
+// keys the on-graph class, not the TS export. Renaming the TS class only
+// changes the JS import surface; the graph shape is identical, and Rust
+// hardwired_sdna/flow_instance.json + all the parity tests still lock down
+// the same `ad4m://FlowInstance` target class.
 
 @Model({ name: "FlowInstance" })
-export class FlowInstance extends Ad4mModel {
+export class FlowInstanceRecord extends Ad4mModel {
   /**
    * Name of the `SHACLFlow` this instance runs. First-declared property so
    * `buildSHACL` derives the shape namespace from its `through` prefix —
@@ -134,14 +143,7 @@ export class FlowInstance extends Ad4mModel {
   @Property({ through: "ad4m://flow/current_state", required: true })
   currentState: string = "";
 
-  /**
-   * RFC3339 timestamp when the flow was started on this base.
-   * Named `startedAt` (not `createdAt`) because `Ad4mModel` reserves
-   * `createdAt` / `updatedAt` as synthetic hydration fields — a subclass
-   * property with those names is silently overwritten by the earliest /
-   * latest link timestamp, and the TS-side `jsonToModelInstance` converts
-   * any `createdAt` value to epoch millis.
-   */
-  @Property({ through: "ad4m://flow/created_at", required: true })
-  startedAt: string = "";
+  // "When was this flow started?" is answered by `Ad4mModel`'s built-in
+  // `createdAt`, synthesized on hydration from the earliest link timestamp
+  // of the instance's own links (all written together during `mint_flow_instance`).
 }

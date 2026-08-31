@@ -174,7 +174,6 @@ enum Domain {
         #[arg(long)]
         pid_file: Option<String>,
     },
-    RunLocalHcServices {},
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -287,11 +286,6 @@ async fn main() -> Result<()> {
             sleep(Duration::from_secs(2)).await;
         }
     };
-
-    if let Domain::RunLocalHcServices {} = args.domain {
-        rust_executor::run_local_hc_services().await?;
-        return Ok(());
-    }
 
     Ok(())
 }

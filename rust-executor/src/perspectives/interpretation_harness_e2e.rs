@@ -22,9 +22,13 @@
 //!      indiscriminately. Locks in the "graph-navigation not graph-flooding"
 //!      contract Nico surfaced in the 2026-08-24 review
 //!
-//! Run just this suite:
+//! Gated behind `#[ignore = "llm-e2e"]` — regular CI skips them; the nightly
+//! `llm-e2e` workflow on `dev` runs them all against Marvin's local Ollama.
+//!
+//! Run this suite locally:
 //!   cargo test --release --lib perspectives::interpretation_harness_e2e \
-//!     -- --test-threads=1 --nocapture
+//!     -- --ignored --test-threads=1 --nocapture
+//! or the umbrella `scripts/run-llm-e2e.sh`.
 
 #![cfg(test)]
 
@@ -50,6 +54,7 @@ use crate::types::LinkQuery;
 /// scenario A is that the harness *can* return zero writes, not that it
 /// does so with 100% stochastic certainty on every attempt.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_read_only_transcript_produces_no_writes() {
     let (p, shapes, placements) = run_harness_e2e_until(
         &[("Task", TASK_SDNA)],
@@ -88,6 +93,7 @@ async fn harness_read_only_transcript_produces_no_writes() {
 /// Uses the same 2-4 tolerance as the single-shot equivalent (LLM may
 /// merge/split slightly). Retries a small budget of times for LLM flake.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_propose_writes_land_typed_tasks() {
     let (p, shapes, placements) = run_harness_e2e_until(
         &[("Task", TASK_SDNA)],
@@ -146,6 +152,7 @@ async fn harness_propose_writes_land_typed_tasks() {
 /// mid-loop, and any writes that DID happen must apply cleanly through the
 /// overlay (no half-applied state).
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_tight_budget_exits_cleanly_no_crash() {
     // Deliberately don't wrap in `run_harness_e2e_until` — the whole point is
     // to exercise the budget-exhausted return path, not to iterate until we
@@ -202,6 +209,7 @@ async fn harness_tight_budget_exits_cleanly_no_crash() {
 /// — simpler than delete-between-attempts and structurally identical to how
 /// production would look on each fresh pass.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_intention_links_to_seeded_beliefs() {
     use crate::perspectives::interpretation_test_support::{
         graph_count_by_type, graph_titles_lower, seed_instance, setup_interpretation_e2e,
@@ -224,6 +232,11 @@ async fn harness_intention_links_to_seeded_beliefs() {
         Vec<crate::perspectives::model_query::types::ModelShape>,
         Vec<(String, Vec<crate::types::Link>)>,
     )> = None;
+
+    let seeded_lower: Vec<String> = SEEDED_BELIEF_TITLES
+        .iter()
+        .map(|t| t.to_lowercase())
+        .collect();
 
     for attempt in 1..=MAX_ATTEMPTS {
         let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[
@@ -282,9 +295,45 @@ async fn harness_intention_links_to_seeded_beliefs() {
             }
         }
 
+        // Also check for the "no seeded belief recreated by title"
+        // invariant *inside* the retry — otherwise the loop can exit
+        // early on `linked_to_seeded=true` while the same attempt
+        // ALSO recreated a seeded title, and the panic at the outer
+        // assertion (job 24186) becomes non-retryable. Gemma3-12B
+        // sometimes back-links AND creates a new belief in the same
+        // pass; both outcomes are LLM non-determinism, so both need
+        // to gate the exit.
+        let mut recreated_seeded_title = false;
+        for (base, _) in &placements {
+            if !base.starts_with("soa://ext/") {
+                continue;
+            }
+            let links = perspective
+                .get_links(&LinkQuery {
+                    source: Some(base.clone()),
+                    predicate: Some("ns://title".into()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links title (dup check inside retry)");
+            for l in &links {
+                if let serde_json::Value::String(t) =
+                    crate::perspectives::model_query::utils::parse_literal_value(&l.data.target)
+                {
+                    if seeded_lower.iter().any(|s| s == &t.to_lowercase()) {
+                        recreated_seeded_title = true;
+                        break;
+                    }
+                }
+            }
+            if recreated_seeded_title {
+                break;
+            }
+        }
+
         last = Some((perspective, shapes, placements));
 
-        if intentions >= 1 && linked_to_seeded {
+        if intentions >= 1 && linked_to_seeded && !recreated_seeded_title {
             if attempt > 1 {
                 eprintln!(
                     "[harness-e2e] relation-back-linking satisfied on attempt {attempt}/{MAX_ATTEMPTS}"
@@ -295,7 +344,7 @@ async fn harness_intention_links_to_seeded_beliefs() {
 
         eprintln!(
             "[harness-e2e] attempt {attempt}/{MAX_ATTEMPTS}: intentions={intentions} \
-             linked_to_seeded={linked_to_seeded}; retrying"
+             linked_to_seeded={linked_to_seeded} recreated_seeded_title={recreated_seeded_title}; retrying"
         );
     }
 
@@ -394,6 +443,7 @@ async fn harness_intention_links_to_seeded_beliefs() {
 /// tolerates the normal LLM stochasticity that already justifies retries in
 /// Scenarios B and D.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_intention_selects_only_relevant_beliefs() {
     use crate::perspectives::interpretation_test_support::{
         graph_count_by_type, persisted_ids, seed_instance, setup_interpretation_e2e,

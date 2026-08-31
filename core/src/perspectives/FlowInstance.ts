@@ -1,0 +1,290 @@
+/**
+ * `FlowInstance` — object-oriented wrapper for a running flow.
+ *
+ * Design authority: `docs/flow-interpretation-hints-design.md` §4.3.
+ *
+ * Wraps two on-graph objects:
+ *
+ *   - `FlowInstanceRecord` — the raw @Model row minted by
+ *     {@link FlowInstance.start}; carries `flow`, `subject`, `currentState`,
+ *     and Ad4mModel's synthesised `createdAt`.
+ *   - `SHACLFlow` — the flow definition the record is bound to. Held so
+ *     `availableTransitions` / `currentState` object lookups don't require
+ *     a per-call round-trip.
+ *
+ * Construct via the class factories — {@link FlowInstance.start} for the
+ * mint path and {@link FlowInstance.findAll} for the read path — rather
+ * than the `wrap` escape hatch, which exists for tests that already own
+ * a matched (record, shape) pair.
+ *
+ * # What's here vs. what's coming in §7 / slice 10.6
+ *
+ * Read surface (implemented today, PR #929):
+ * - `uri`, `subject`, `flowName`, `currentStateName`, `startedAtMillis`
+ *   accessors.
+ * - `currentState` — resolves the `FlowState` on the shape whose name
+ *   matches `record.currentState`.
+ * - `availableTransitions` — filters `shape.transitions` by `fromState`.
+ * - `proposals()` — queries `FlowTransitionProposal` records that
+ *   target this instance's URI.
+ *
+ * Mutations + subscriptions (`proposeTransition`, `accept`, `reject`,
+ * `fireAction`, `onStateChange`, `onProposalAdded`, `onProposalResolved`)
+ * land with the consensus-engine slice (§4.3 / slice 10.6). Rather than
+ * ship them as `throw new Error("not yet")` stubs — which is a type-level
+ * lie the caller only discovers at runtime — they are simply absent from
+ * this class until the engine is wired.
+ */
+
+import { PerspectiveProxy } from "./PerspectiveProxy";
+import { Ad4mModel } from "../model/Ad4mModel";
+import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
+import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
+
+export class FlowInstance {
+  /**
+   * Private constructor — construct via {@link FlowInstance.start} or
+   * {@link FlowInstance.findAll}. {@link FlowInstance.wrap} is the
+   * escape hatch for tests / direct construction cases.
+   */
+  private constructor(
+    private readonly perspective: PerspectiveProxy,
+    /** The flow definition this instance was minted against. */
+    public readonly shape: SHACLFlow,
+    /**
+     * The on-graph record — carries `flow`, `subject`, `currentState`
+     * and Ad4mModel's synthesised `createdAt`. Callers can reach into it
+     * for anything the wrapper doesn't expose directly, but should prefer
+     * the wrapper accessors so future refactors of the underlying shape
+     * don't ripple through their code.
+     */
+    public readonly record: FlowInstanceRecord,
+  ) {}
+
+  /**
+   * Escape hatch used by {@link FlowInstance.start} and
+   * {@link FlowInstance.findAll} — not meant for general use, but public
+   * so tests that already own a `FlowInstanceRecord + SHACLFlow` pair
+   * (e.g. from pre-populated fixtures) can build a wrapper without
+   * going through the mint path.
+   */
+  static wrap(
+    perspective: PerspectiveProxy,
+    shape: SHACLFlow,
+    record: FlowInstanceRecord,
+  ): FlowInstance {
+    return new FlowInstance(perspective, shape, record);
+  }
+
+  /**
+   * Mint a new `FlowInstance` on the given perspective (design doc §4.3).
+   *
+   * Idempotently registers the hardwired `FlowInstanceRecord` +
+   * `FlowTransitionProposal` @Model classes on first call — the on-graph
+   * shape matches the Rust-side hardwired SDNA (parity-locked in
+   * `flow-instance.test.ts` / `flow-transition-proposal.test.ts`).
+   *
+   * The returned wrapper carries the parsed `SHACLFlow` alongside the
+   * on-graph record, so `currentState` / `availableTransitions` /
+   * `proposals` accessors work without further round-trips. The consensus
+   * engine (slice 10.6) will read the record's `currentState` when it
+   * fires transitions.
+   *
+   * @param perspective - The perspective the flow instance lives on
+   * @param flowName - Name of a `SHACLFlow` already registered on the perspective
+   * @param baseExpression - URI of the subject expression the flow runs on
+   * @throws When the flow is unknown or has zero declared states (zero-state
+   *   flows fire via the forthcoming atomic-action path, §6.3).
+   */
+  static async start(
+    perspective: PerspectiveProxy,
+    flowName: string,
+    baseExpression: string,
+  ): Promise<FlowInstance> {
+    const flow = await perspective.getFlow(flowName);
+    if (!flow) throw `Flow "${flowName}" not found`;
+    if (flow.states.length === 0) {
+      throw `Flow "${flowName}" has no states — FlowInstance.start is for stateful flows only; zero-state flows fire via the forthcoming atomic-action path (§6.3)`;
+    }
+    // Register the hardwired runtime classes if this is the first flow
+    // instance on the perspective. registerAll is a single batched RPC and
+    // no-ops when both classes are already present.
+    await Ad4mModel.registerAll(perspective, [FlowInstanceRecord, FlowTransitionProposal]);
+    // Property keys must be the FlowInstanceRecord @Model field names —
+    // `subject` (not `baseExpression`, which collides with Ad4mModel's
+    // synthetic hydration field and would be silently shadowed on read).
+    // No explicit start-time field: Ad4mModel synthesises `createdAt` on
+    // hydration from the earliest link timestamp on the instance's URI.
+    const record = await FlowInstanceRecord.create(perspective, {
+      flow: flowName,
+      subject: baseExpression,
+      currentState: flow.states[0].name,
+    });
+    return FlowInstance.wrap(perspective, flow, record);
+  }
+
+  /**
+   * Return every live `FlowInstance` on the perspective (design doc §4.3).
+   *
+   * Idempotently registers the hardwired `FlowInstanceRecord` +
+   * `FlowTransitionProposal` @Model classes on first call — so callers can
+   * ask for instances before any {@link FlowInstance.start} has ever
+   * run without hitting a "class not registered" hydration error.
+   *
+   * Filter surface (all optional, all combinable):
+   * - **`flowName`** — narrows by flow-name discriminator (e.g. "Delivery")
+   * - **`subject`** — narrows by base-expression URI, i.e. "give me every
+   *   flow running on THIS expression"
+   *
+   * Both filters translate to a single SHACL `where`-filter round-trip
+   * (no client-side filtering); combining them AND-joins server-side.
+   * The string-arg shape (`FlowInstance.findAll(p, "Delivery")`) is
+   * shorthand for `{ flowName: "Delivery" }`.
+   *
+   * Records whose `flow` value has no matching `SHACLFlow` on the
+   * perspective (e.g. the flow was unregistered) are silently skipped —
+   * the wrapper can't answer `currentState` / `availableTransitions`
+   * without the shape, and callers routinely iterate the returned array
+   * without null-checks.
+   *
+   * @example
+   * ```typescript
+   * const all = await FlowInstance.findAll(perspective);
+   * const deliveries = await FlowInstance.findAll(perspective, "Delivery");
+   * const onThisTask = await FlowInstance.findAll(perspective, {
+   *   subject: "ad4m://task/1",
+   * });
+   * const deliveriesOnTask = await FlowInstance.findAll(perspective, {
+   *   flowName: "Delivery",
+   *   subject: "ad4m://task/1",
+   * });
+   * ```
+   */
+  static async findAll(
+    perspective: PerspectiveProxy,
+    filter?: string | { flowName?: string; subject?: string },
+  ): Promise<FlowInstance[]> {
+    await Ad4mModel.registerAll(perspective, [FlowInstanceRecord, FlowTransitionProposal]);
+
+    const { flowName, subject } =
+      typeof filter === "string"
+        ? { flowName: filter, subject: undefined }
+        : { flowName: filter?.flowName, subject: filter?.subject };
+
+    const where: Record<string, string> = {};
+    if (flowName !== undefined) where.flow = flowName;
+    if (subject !== undefined) where.subject = subject;
+
+    const records: FlowInstanceRecord[] =
+      Object.keys(where).length > 0
+        ? await FlowInstanceRecord.findAll(perspective, { where })
+        : await FlowInstanceRecord.findAll(perspective);
+
+    // Pair each record with its parsed SHACLFlow. Cache lookups by
+    // flow-name so `getFlow` fires at most once per distinct flow —
+    // matters when a perspective has hundreds of instances against
+    // one shape.
+    const shapesByName = new Map<string, SHACLFlow>();
+    const wrappers: FlowInstance[] = [];
+    for (const record of records) {
+      let shape = shapesByName.get(record.flow);
+      if (!shape) {
+        const loaded = await perspective.getFlow(record.flow);
+        if (!loaded) {
+          // Stale record — the flow it references was unregistered.
+          // Skip rather than return a half-wrapper.
+          continue;
+        }
+        shape = loaded;
+        shapesByName.set(record.flow, shape);
+      }
+      wrappers.push(FlowInstance.wrap(perspective, shape, record));
+    }
+    return wrappers;
+  }
+
+  // ── Read accessors ────────────────────────────────────────────────────
+
+  /**
+   * URI of the on-graph `FlowInstance` node — `ad4m://flow/instance/{id}`.
+   *
+   * Sourced from `Ad4mModel`'s synthesised `baseExpression`, which for
+   * `FlowInstanceRecord` *is* the instance's own URI (the value
+   * `FlowTransitionProposal.flowInstance` references).
+   */
+  get uri(): string {
+    return (this.record as any).baseExpression as string;
+  }
+
+  /**
+   * URI of the base expression this flow runs on — matches the
+   * `SHACLFlow.inputTypes` that {@link PerspectiveProxy.availableFlows}
+   * would greenlight for this expression.
+   */
+  get subject(): string {
+    return this.record.subject;
+  }
+
+  /** Flow name — matches `shape.name` and the on-graph discriminator. */
+  get flowName(): string {
+    return this.record.flow;
+  }
+
+  /** Name of the state this instance is currently in. */
+  get currentStateName(): string {
+    return this.record.currentState;
+  }
+
+  /**
+   * ISO-8601 (epoch millis after Ad4mModel hydration) start time.
+   * Returns `undefined` when hydration didn't produce a `createdAt`
+   * — rare, but not fatal.
+   */
+  get startedAtMillis(): number | undefined {
+    const v = (this.record as any).createdAt;
+    return typeof v === "number" ? v : undefined;
+  }
+
+  /**
+   * The `FlowState` object on the shape matching `currentStateName`.
+   * Throws when the record's state name is not declared on the flow —
+   * that's a "stale FlowInstance whose flow was edited under it" bug,
+   * not a silent-fail case.
+   */
+  get currentState(): FlowState {
+    const s = this.shape.states.find((x) => x.name === this.currentStateName);
+    if (!s) {
+      throw new Error(
+        `FlowInstance ${this.uri}: currentState "${this.currentStateName}" is not declared on flow "${this.flowName}". ` +
+          `Known states: ${this.shape.states.map((x) => x.name).join(", ") || "(none)"}`,
+      );
+    }
+    return s;
+  }
+
+  /**
+   * Every `FlowTransition` on the shape whose `fromState` matches
+   * `currentStateName`. Order preserved from the shape.
+   *
+   * Empty when the current state is terminal (no outgoing transitions).
+   */
+  get availableTransitions(): FlowTransition[] {
+    return this.shape.transitions.filter((t) => t.fromState === this.currentStateName);
+  }
+
+  /**
+   * All `FlowTransitionProposal` records targeting this instance's URI.
+   *
+   * Uses the SDNA identity discriminator (`ad4m://flow/instance` predicate)
+   * for the where-filter — one SPARQL round-trip, no client-side
+   * filtering.
+   *
+   * Note: the consensus engine (slice 10.6) will start writing these; today
+   * they only exist when a client wrote one directly (or a test seeded one).
+   */
+  async proposals(): Promise<FlowTransitionProposal[]> {
+    return FlowTransitionProposal.findAll(this.perspective, {
+      where: { flowInstance: this.uri },
+    });
+  }
+}

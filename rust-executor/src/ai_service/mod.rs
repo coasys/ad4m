@@ -505,16 +505,14 @@ impl AIService {
             let non_accelerated_message =
                 "Could not get accelerated CUDA device. Defaulting to CPU.";
             Device::new_cuda(0).unwrap_or_else(|e| {
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else if cfg!(feature = "metal") {
             Device::new_metal(0).unwrap_or_else(|e| {
                 let non_accelerated_message =
                     "Could not get accelerated Metal device. Defaulting to CPU.";
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else {
@@ -1375,6 +1373,11 @@ impl AIService {
     /// Streaming variant of [`Self::prompt_messages`].  Returns a token
     /// stream + a oneshot for the final [`PromptResult`] (carries the
     /// full text + token counts for the closing SSE event).
+    ///
+    /// Billing happens when the stream completes: the worker's final
+    /// result is billed (on success only, matching
+    /// [`Self::prompt_messages`]) in a forwarder task before it reaches
+    /// the caller's `done_rx`.
     pub async fn prompt_messages_stream(
         &self,
         model_id: String,
@@ -1403,6 +1406,10 @@ impl AIService {
         spawn_rx.await??;
 
         let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
+        // worker -> forwarder -> caller: the billing hook runs between the
+        // worker's final result and the caller's done_rx, so stream:true
+        // requests are charged like the non-stream path (success only).
+        let (worker_done_tx, worker_done_rx) = oneshot::channel::<Result<PromptResult>>();
         let (done_tx, done_rx) = oneshot::channel::<Result<PromptResult>>();
         {
             let llm_channel = self.llm_channel.lock().await;
@@ -1414,9 +1421,21 @@ impl AIService {
                 prompt: final_prompt,
                 constraint,
                 token_sender: token_tx,
-                done_sender: done_tx,
+                done_sender: worker_done_tx,
             }))?;
         }
+
+        let billing_model_id = resolved.clone();
+        tokio::spawn(async move {
+            // The worker always sends Ok/Err; the Err arm only covers a
+            // dropped sender (worker panic).
+            let result = match worker_done_rx.await {
+                Ok(inner) => inner,
+                Err(_) => Err(anyhow!("LLM stream ended without a final result")),
+            };
+            Self::bill_and_forward_stream_result(auth_token, &billing_model_id, result, done_tx)
+                .await;
+        });
 
         // Schedule a Remove for after the prompt completes — best-effort
         // background cleanup so the caller doesn't have to await it.
@@ -1461,24 +1480,60 @@ impl AIService {
         let model_id = Self::replace_model_variables(&task.model_id)?;
 
         let prompt_tokens = estimate_token_count(&prompt);
+        let prompt_chars = prompt.chars().count();
+        log::info!(
+            "🤖 prompt start model={} chars={} tokens_in={}",
+            model_id,
+            prompt_chars,
+            prompt_tokens
+        );
+        let started = std::time::Instant::now();
 
-        let llm_channel = self.llm_channel.lock().await;
-        if let Some(sender) = llm_channel.get(&model_id) {
-            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                task_id,
-                prompt,
-                result_sender,
-                constraint: None,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in LLM channel",
-                model_id
-            ));
+        // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
+        // line gets exactly one companion — either `done` on success or a
+        // `failed` line on error. Wrap the fallible section so we can log
+        // the failure before propagating.
+        let text_result: Result<String> = async {
+            let llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.get(&model_id) {
+                sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
+                    task_id,
+                    prompt,
+                    result_sender,
+                    constraint: None,
+                }))?;
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found in LLM channel",
+                    model_id
+                ));
+            }
+            drop(llm_channel);
+            Ok(rx.await??)
         }
+        .await;
 
-        let text = rx.await??;
+        let text = match text_result {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!(
+                    "❌ 🤖 prompt failed model={} latency={}ms tokens_in={} err={}",
+                    model_id,
+                    started.elapsed().as_millis(),
+                    prompt_tokens,
+                    e
+                );
+                return Err(e);
+            }
+        };
         let completion_tokens = estimate_token_count(&text);
+        log::info!(
+            "✅ 🤖 prompt done model={} latency={}ms tokens_in={} tokens_out={}",
+            model_id,
+            started.elapsed().as_millis(),
+            prompt_tokens,
+            completion_tokens
+        );
 
         // Bill via the shared host_rates helper. See prompt_messages.
         Self::bill_prompt_if_authed(
@@ -1494,6 +1549,30 @@ impl AIService {
             completion_tokens,
             model_id,
         })
+    }
+
+    /// Bill a completed stream result (on success only, matching
+    /// [`Self::prompt_messages`]) and relay it to the caller's oneshot.
+    ///
+    /// Runs inside the forwarder spawned by
+    /// [`Self::prompt_messages_stream`]; exposed as an associated function
+    /// so the streaming billing behaviour is unit-testable without a live
+    /// LLM channel.
+    pub(crate) async fn bill_and_forward_stream_result(
+        auth_token: Option<String>,
+        model_id: &str,
+        result: Result<PromptResult>,
+        done_tx: oneshot::Sender<Result<PromptResult>>,
+    ) {
+        if let Ok(pr) = &result {
+            Self::bill_prompt_if_authed(
+                auth_token.as_deref(),
+                model_id,
+                pr.prompt_tokens,
+                pr.completion_tokens,
+            );
+        }
+        let _ = done_tx.send(result);
     }
 
     /// Shared post-compute billing hook for prompt paths.
@@ -1607,6 +1686,18 @@ impl AIService {
         auth_token: Option<String>,
     ) -> Result<EmbedResult> {
         let token_count = estimate_token_count(&text);
+        let text_chars = text.chars().count();
+        // Per-call embed lines are debug: both real callers (dedup +
+        // openai_compat/embeddings) loop one embed() per input, so a
+        // batch of N would double N info lines. Batch-level info is
+        // emitted by the caller. See rust-executor/LOGGING.md.
+        log::debug!(
+            "🤖 embed start model={} chars={} tokens_in={}",
+            model_id,
+            text_chars,
+            token_count
+        );
+        let started = std::time::Instant::now();
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get(&model_id) {
@@ -1623,6 +1714,13 @@ impl AIService {
         }
 
         let embeddings = rx.await??;
+        log::debug!(
+            "✅ 🤖 embed done model={} latency={}ms tokens_in={} dims={}",
+            model_id,
+            started.elapsed().as_millis(),
+            token_count,
+            embeddings.len()
+        );
 
         // Bill via the shared host_rates helper.
         Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count);
@@ -1830,16 +1928,16 @@ impl AIService {
                             };
 
                             if speech_ratio < 0.33 {
-                                log::info!(
-                                    "VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
+                                log::trace!(
+                                    "🤖 VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
                                     stream_id_clone,
                                     speech_ratio
                                 );
                                 continue;
                             }
 
-                            log::info!(
-                                "VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
+                            log::trace!(
+                                "🤖 VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
                                 stream_id_clone,
                                 audio_chunk.len(),
                                 speech_ratio
@@ -1850,11 +1948,17 @@ impl AIService {
                                 Ok(mut segments) => {
                                     while let Some(segment) = segments.next().await {
                             let text = segment.text().to_string();
-                            log::info!(
-                                "Transcription text for stream {}: {:?}",
-                                stream_id_clone,
-                                text
-                            );
+                            {
+                                let preview: String = text.chars().take(40).collect();
+                                let ellipsis = if text.chars().count() > 40 { "…" } else { "" };
+                                log::debug!(
+                                    "🤖 transcription segment stream={} chars={} preview={:?}{}",
+                                    stream_id_clone,
+                                    text.chars().count(),
+                                    preview,
+                                    ellipsis
+                                );
+                            }
 
                             // Bill for transcribed words
                             let word_count = text.split_whitespace().count();

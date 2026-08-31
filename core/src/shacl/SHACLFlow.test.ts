@@ -30,13 +30,11 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'ready',
         value: 0,
-        stateCheck: { predicate: 'todo://state', target: 'todo://ready' }
       });
       
       flow.addState({
         name: 'done',
         value: 1,
-        stateCheck: { predicate: 'todo://state', target: 'todo://done' }
       });
       
       expect(flow.states.length).toBe(2);
@@ -68,14 +66,9 @@ describe('SHACLFlow', () => {
   describe('toLinks()', () => {
     it('serializes flow to links', () => {
       const flow = new SHACLFlow('TODO', 'todo://');
-      flow.startAction = [
-        { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
-      ];
-      
       flow.addState({
         name: 'ready',
         value: 0,
-        stateCheck: { predicate: 'todo://state', target: 'todo://ready' }
       });
       
       flow.addTransition({
@@ -97,11 +90,6 @@ describe('SHACLFlow', () => {
       // gets exercised separately.
       const flowableLink = links.find(l => l.predicate === 'ad4m://flowable');
       expect(flowableLink).toBeUndefined();
-
-      // Check start action link
-      const startActionLink = links.find(l => l.predicate === 'ad4m://startAction');
-      expect(startActionLink).toBeDefined();
-      expect(startActionLink!.target).toContain('addLink');
       
       // Check state link
       const stateLink = links.find(l => l.predicate === 'ad4m://hasState');
@@ -117,18 +105,13 @@ describe('SHACLFlow', () => {
   describe('fromLinks()', () => {
     it('reconstructs flow from links', () => {
       const original = new SHACLFlow('TODO', 'todo://');
-      original.startAction = [
-        { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
-      ];
       original.addState({
         name: 'ready',
         value: 0,
-        stateCheck: { predicate: 'todo://state', target: 'todo://ready' }
       });
       original.addState({
         name: 'done',
         value: 1,
-        stateCheck: { predicate: 'todo://state', target: 'todo://done' }
       });
       original.addTransition({
         actionName: 'Complete',
@@ -142,10 +125,33 @@ describe('SHACLFlow', () => {
       
       expect(reconstructed.name).toBe('TODO');
       expect(reconstructed.namespace).toBe('todo://');
-      expect(reconstructed.startAction.length).toBe(1);
       expect(reconstructed.states.length).toBe(2);
       expect(reconstructed.transitions.length).toBe(1);
       expect(reconstructed.transitions[0].actionName).toBe('Complete');
+    });
+
+    it('sorts states by value so states[0] is the lowest-value (initial) state after a graph round-trip', () => {
+      // Perspective link storage does not preserve insertion order — `hasState`
+      // links come back arbitrarily, which used to break the "initial state
+      // = states[0]" convention that `FlowInstance.start`
+      // relies on to mint the first state of a fresh instance.
+      const original = new SHACLFlow('Delivery', 'ns://');
+      original.addState({ name: 'Identified', value: 0 });
+      original.addState({ name: 'InProgress', value: 1 });
+      original.addState({ name: 'Done', value: 2 });
+
+      const links = original.toLinks();
+      // Simulate perspective returning `hasState` links out of order (reverse).
+      const hasStateLinks = links.filter(l => l.predicate === 'ad4m://hasState');
+      const otherLinks = links.filter(l => l.predicate !== 'ad4m://hasState');
+      const shuffled = [...otherLinks, ...hasStateLinks.slice().reverse()];
+
+      const reconstructed = SHACLFlow.fromLinks(shuffled, 'ns://DeliveryFlow');
+      expect(reconstructed.states.length).toBe(3);
+      expect(reconstructed.states[0].name).toBe('Identified');
+      expect(reconstructed.states[1].name).toBe('InProgress');
+      expect(reconstructed.states[2].name).toBe('Done');
+      expect(reconstructed.states[0].value).toBe(0);
     });
   });
 
@@ -155,7 +161,6 @@ describe('SHACLFlow', () => {
       original.addState({
         name: 'ready',
         value: 0,
-        stateCheck: { predicate: 'todo://state', target: 'todo://ready' }
       });
       original.addTransition({
         actionName: 'Start',
@@ -178,25 +183,18 @@ describe('SHACLFlow', () => {
       const flow = new SHACLFlow('TODO', 'todo://');
 
       // Start action - renders expression as TODO in 'ready' state
-      flow.startAction = [
-        { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
-      ];
-      
       // Three states
       flow.addState({
         name: 'ready',
         value: 0,
-        stateCheck: { predicate: 'todo://state', target: 'todo://ready' }
       });
       flow.addState({
         name: 'doing',
         value: 0.5,
-        stateCheck: { predicate: 'todo://state', target: 'todo://doing' }
       });
       flow.addState({
         name: 'done',
         value: 1,
-        stateCheck: { predicate: 'todo://state', target: 'todo://done' }
       });
       
       // Transitions
@@ -243,14 +241,12 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'Proposal',
         value: 0,
-        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/proposal' },
         interpretationHint:
           'The initial proposal or question has been raised. No distinct perspective or objection has been voiced yet.'
       });
       flow.addState({
         name: 'Tension',
         value: 1,
-        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/tension' },
         interpretationHint:
           'Participants have expressed opposing views or objections — a clear disagreement is on the table.'
       });
@@ -258,7 +254,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'Resolution',
         value: 2,
-        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/resolution' }
       });
 
       const links = flow.toLinks();
@@ -279,7 +274,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'Proposal',
         value: 0,
-        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/proposal' },
         interpretationHint: 'Per-state hint.'
       });
 
@@ -297,7 +291,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'ready',
         value: 0,
-        stateCheck: { predicate: 'todo://state', target: 'todo://ready' }
       });
 
       const json = flow.toJSON() as any;
@@ -313,7 +306,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'Tension',
         value: 1,
-        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/tension' },
         interpretationHint:
           'Participants have expressed opposing views or objections.',
         // Design §4.1: model-level guard replacing raw-link stateCheck.
@@ -363,7 +355,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'Done',
         value: 1,
-        stateCheck: { predicate: 'ns://delivery/state', target: 'ns://delivery/done' },
         requires: [
           {
             className: 'ns://CompletionEvidence',
@@ -388,12 +379,11 @@ describe('SHACLFlow', () => {
     });
 
     it('omits requires and semanticCheck from toLinks when unset (backwards-compatible)', () => {
-      // Legacy state — only stateCheck. No new predicates land on the state URI.
+      // Minimal state — no v1 predicates land on the state URI.
       const flow = new SHACLFlow('TODO', 'todo://');
       flow.addState({
         name: 'ready',
         value: 0,
-        stateCheck: { predicate: 'todo://state', target: 'todo://ready' },
       });
 
       const links = flow.toLinks();
@@ -419,7 +409,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'x',
         value: 0,
-        stateCheck: { predicate: 'ns://empty/state', target: 'ns://empty/x' },
         requires: [],
       });
 
@@ -444,7 +433,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'x',
         value: 0,
-        stateCheck: { predicate: 'ns://empty/state', target: 'ns://empty/x' },
         interpretationHint: '',
         semanticCheck: '',
         requires: [],
@@ -467,10 +455,6 @@ describe('SHACLFlow', () => {
       // Required fields still present.
       expect(json.states[0].name).toBe('x');
       expect(json.states[0].value).toBe(0);
-      expect(json.states[0].stateCheck).toEqual({
-        predicate: 'ns://empty/state',
-        target: 'ns://empty/x',
-      });
     });
 
     it('malformed decoded literals leave the field unset (fromLinks)', () => {
@@ -481,7 +465,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'Proposal',
         value: 0,
-        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/proposal' },
       });
 
       const links = flow.toLinks();
@@ -525,7 +508,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'Tension',
         value: 1,
-        stateCheck: { predicate: 'ns://deliberation/state', target: 'ns://deliberation/tension' },
       });
 
       const links = flow.toLinks();
@@ -570,13 +552,11 @@ describe('SHACLFlow', () => {
       const dodgyJson = {
         name: 'Bad',
         namespace: 'ns://bad/',
-        startAction: [],
         interpretationHint: '',
         states: [
           {
             name: 's',
             value: 0,
-            stateCheck: { predicate: 'ns://bad/state', target: 'ns://bad/s' },
             interpretationHint: '',
             requires: [null, {}, { className: 42 }],
             semanticCheck: '',
@@ -722,7 +702,6 @@ describe('SHACLFlow', () => {
       const dodgyJson = {
         name: 'BadFlow',
         namespace: 'ns://',
-        startAction: [],
         inputTypes: ['coasys://Task', null, 42],
         outputTypes: 'not-an-array',
         creationHint: '',
@@ -761,13 +740,11 @@ describe('SHACLFlow', () => {
       delib.addState({
         name: 'perspective',
         value: 0.25,
-        stateCheck: { predicate: 'coasys://state', target: 'coasys://perspective' },
         consensusRule: { n: 1 },
       });
       delib.addState({
         name: 'resolution',
         value: 1,
-        stateCheck: { predicate: 'coasys://state', target: 'coasys://resolution' },
         consensusRule: {
           n: 2,
           fromRole: {
@@ -797,7 +774,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'overlap',
         value: 0.75,
-        stateCheck: { predicate: 'coasys://state', target: 'coasys://overlap' },
         consensusRule: {
           n: 1,
           fromRole: {
@@ -824,7 +800,6 @@ describe('SHACLFlow', () => {
       flow.addState({
         name: 'ready',
         value: 0,
-        stateCheck: { predicate: 'ns://state', target: 'ns://ready' },
       });
 
       const links = flow.toLinks();
@@ -876,19 +851,16 @@ describe('SHACLFlow', () => {
       const dodgyJson = {
         name: 'BadFlow',
         namespace: 'ns://',
-        startAction: [],
         consensusRule: { n: 'many' },
         states: [
           {
             name: 'a',
             value: 0,
-            stateCheck: { predicate: 'p', target: 't' },
             consensusRule: { n: 1.5 },
           },
           {
             name: 'b',
             value: 1,
-            stateCheck: { predicate: 'p', target: 't' },
             consensusRule: { n: 1, fromRole: { where: { x: 1 } } },
           },
         ],
@@ -939,12 +911,10 @@ describe('SHACLFlow', () => {
       const flow = SHACLFlow.fromJSON({
         name: 'BadOrRole',
         namespace: 'ns://',
-        startAction: [],
         states: [
           {
             name: 'Gate',
             value: 0,
-            stateCheck: { predicate: 'p', target: 't' },
             consensusRule: {
               n: 1,
               fromRole: {
@@ -963,12 +933,10 @@ describe('SHACLFlow', () => {
       const flow = SHACLFlow.fromJSON({
         name: 'BadRequiresOr',
         namespace: 'ns://',
-        startAction: [],
         states: [
           {
             name: 'Gate',
             value: 0,
-            stateCheck: { predicate: 'p', target: 't' },
             requires: [{ className: 'ns://Root', or: [{ className: 'ns://Ok' }, null] }],
           },
         ],

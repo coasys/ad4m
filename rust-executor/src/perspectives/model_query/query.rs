@@ -70,8 +70,8 @@ pub(super) async fn execute_model_query_inner(
 
     // Fast path: COUNT-only
     let is_count_only = query_input.limit == Some(0);
-    if is_count_only && all_where_pushable(query_input, shape) {
-        if let Some(sparql) = build_count_sparql(shape, query_input) {
+    if is_count_only && all_where_pushable(query_input, shape, Some(resolver)) {
+        if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
@@ -101,7 +101,7 @@ pub(super) async fn execute_model_query_inner(
     //     property exists as a scalar on the target shape.
     // Anything else (or more than one key) falls back to the post-hydration
     // Rust sort.
-    let can_push_pagination = all_where_pushable(query_input, shape) && {
+    let can_push_pagination = all_where_pushable(query_input, shape, Some(resolver)) && {
         match &query_input.order {
             None => true,
             Some(order) => {
@@ -229,7 +229,12 @@ pub(super) async fn execute_model_query_inner(
             None
         };
 
-    let query_plan = build_instance_sparql(shape, query_input, sparql_pagination.as_ref());
+    let query_plan = build_instance_sparql(
+        shape,
+        query_input,
+        sparql_pagination.as_ref(),
+        Some(resolver),
+    );
 
     // Captures the source IRI order returned by the phase-1 pagination subquery
     // so we can restore it after hydration (which uses BTreeMap, alphabetical order).
@@ -324,14 +329,14 @@ pub(super) async fn execute_model_query_inner(
 
     // Apply post-hydration where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
-        if !all_where_pushable(query_input, shape) {
+        if !all_where_pushable(query_input, shape, Some(resolver)) {
             instances.retain(|inst| matches_where(inst, where_clause, shape));
         }
     }
 
     // Calculate total count
     let total_count = if sparql_pagination.is_some() {
-        if let Some(count_sparql) = build_count_sparql(shape, query_input) {
+        if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
