@@ -417,8 +417,8 @@ impl PrologService {
 
         // Check if Prolog is disabled - return empty matches but log warning
         if PROLOG_MODE == PrologMode::Disabled {
-            log::warn!(
-                "Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
+            log::debug!(
+                "📜 Prolog subscription query received but Prolog is DISABLED (perspective: {}, query: {})",
                 perspective_id,
                 query
             );
@@ -457,7 +457,7 @@ impl PrologService {
         let result = simple_engine.subscription_engine.run_query(query).await?;
 
         // Convert QueryResult to QueryResolution
-        result.map_err(|e| anyhow!("Prolog subscription query failed: {}", e))
+        result.map_err(|e| anyhow!("📜 Prolog subscription query failed: {}", e))
     }
 
     pub async fn ensure_perspective_pool(

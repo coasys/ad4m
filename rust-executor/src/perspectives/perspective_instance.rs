@@ -3015,8 +3015,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
+                log::debug!(
+                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
                 // Return empty result instead of error to allow SHACL-based SDNA to work
@@ -3051,8 +3051,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
+                log::debug!(
+                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
                 // Return empty result instead of error to allow SHACL-based SDNA to work
@@ -5325,7 +5325,7 @@ impl PerspectiveInstance {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("Model subscription query failed: {}", e);
+                            log::error!("❌ 🔗 🧠 model-based subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -5333,7 +5333,7 @@ impl PerspectiveInstance {
                     match self_clone.sparql_query(query_string) {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("SPARQL subscription query failed: {}", e);
+                            log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -5344,7 +5344,7 @@ impl PerspectiveInstance {
                     {
                         Ok(result) => prolog_resolution_to_string(result),
                         Err(e) => {
-                            log::error!("Prolog subscription query failed: {}", e);
+                            log::error!("❌ 🔗 📜 Prolog subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -5369,7 +5369,7 @@ impl PerspectiveInstance {
                         let old_len = stored_query.last_result.len();
                         let new_len = result_string.len();
                         log::debug!(
-                            "📤 Subscription {} result changed (old_len={}, new_len={})",
+                            "📤 🔗 subscription {} result changed (old_len={}, new_len={})",
                             id,
                             old_len,
                             new_len
@@ -5378,7 +5378,7 @@ impl PerspectiveInstance {
                         updates_to_send.push((id, result_string));
                     } else {
                         log::trace!(
-                            "📭 Subscription {} result unchanged (len={})",
+                            "📭 🔗 subscription {} result unchanged (len={})",
                             id,
                             result_string.len()
                         );
@@ -5459,7 +5459,7 @@ impl PerspectiveInstance {
                 );
 
                 log::debug!(
-                    "🔔 Subscription check triggered for perspective {} with changed_preds: {:?}",
+                    "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
                     self.uuid,
                     changed_preds
                 );
@@ -5493,7 +5493,7 @@ impl PerspectiveInstance {
 
                 if !removed_queries.is_empty() {
                     log::info!(
-                        "🧹 Cleaned up {} timed-out subscription(s) for perspective {}",
+                        "🧹 🔗 cleaned up {} timed-out subscription(s) for perspective {}",
                         removed_queries.len(),
                         perspective_uuid
                     );
@@ -5517,8 +5517,11 @@ impl PerspectiveInstance {
                 let queries = self.subscribed_queries.lock().await;
 
                 if !queries.is_empty() {
-                    log::info!(
-                        "📊 Prolog subscriptions [{}]: {} active",
+                    // Heartbeat only — every ~60s per perspective. Kept at
+                    // debug to avoid steady-state noise; a subscription
+                    // register/dispose event is emitted at info instead.
+                    log::debug!(
+                        "📊 🔗 subscriptions [{}]: {} active",
                         perspective_uuid,
                         queries.len()
                     );
@@ -5528,7 +5531,7 @@ impl PerspectiveInstance {
                         } else {
                             query.query.clone()
                         };
-                        log::info!("   - [{}]: {}", id, query_preview);
+                        log::debug!("   - 🔗 [{}]: {}", id, query_preview);
                     }
                 }
             }
