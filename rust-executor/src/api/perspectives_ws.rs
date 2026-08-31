@@ -2101,14 +2101,13 @@ pub(crate) async fn resolve_shacl_links(
         .iter()
         .map(|prop_uri| shacl_link_query(prop_uri, None))
         .collect();
-    let all_prop_links: Vec<DecoratedLinkExpression> = futures::future::try_join_all(
-        prop_queries.iter().map(|q| perspective.get_links(q)),
-    )
-    .await
-    .map_err(|e| WsRpcError::internal(e.to_string()))?
-    .into_iter()
-    .flatten()
-    .collect();
+    let all_prop_links: Vec<DecoratedLinkExpression> =
+        futures::future::try_join_all(prop_queries.iter().map(|q| perspective.get_links(q)))
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?
+            .into_iter()
+            .flatten()
+            .collect();
 
     // Step 5: merge shape links + property links, deduplicate
     let mut seen = std::collections::HashSet::new();

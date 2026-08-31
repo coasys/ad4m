@@ -10,7 +10,9 @@ function createMockClient(overrides: Record<string, jest.Mock> = {}): any {
     addPerspectiveLinkUpdatedListener: jest.fn(),
     addPerspectiveSyncStateChangeListener: jest.fn(),
     getShaclNames: jest.fn().mockResolvedValue([]),
-    getShaclTargetClass: jest.fn().mockResolvedValue(null),
+    // Client contract (post r3897752023): getShaclTargetClass returns
+    // `undefined` on "not found", not `null`. Mock the same shape.
+    getShaclTargetClass: jest.fn().mockResolvedValue(undefined),
     getShacl: jest.fn().mockResolvedValue(null),
     getAllShacl: jest.fn().mockResolvedValue([]),
     ...overrides,
@@ -90,7 +92,9 @@ describe('PerspectiveProxy SHACL RPC delegation', () => {
 
     it('returns undefined when the shape does not exist', async () => {
       const client = createMockClient({
-        getShaclTargetClass: jest.fn().mockResolvedValue(null),
+        // Post r3897752023 the client itself returns undefined on "not
+        // found", so the proxy passthrough must preserve that.
+        getShaclTargetClass: jest.fn().mockResolvedValue(undefined),
       });
       const proxy = createProxy(client);
 

@@ -506,9 +506,22 @@ export class PerspectiveClient {
         return this.#apiClient.call<string[]>('perspective.getShaclNames', { uuid })
     }
 
-    /** Resolve a shape's `sh:targetClass` by name (one RPC call). */
-    async getShaclTargetClass(uuid: string, name: string): Promise<string | null> {
-        return this.#apiClient.call<string | null>('perspective.getShaclTargetClass', { uuid, name })
+    /**
+     * Resolve a shape's `sh:targetClass` by name (one RPC call).
+     *
+     * Returns `undefined` when the shape (or its `sh://targetClass` edge) is
+     * absent — unified with `PerspectiveProxy.getShaclTargetClass` so callers
+     * see a single "not found" representation across both layers. The
+     * executor wire format is still `null` (see `perspective.getShaclTargetClass`
+     * in `perspectives_ws.rs`); this method maps that at the boundary rather
+     * than pushing the null one layer further up. PR #935 review r3897752023.
+     */
+    async getShaclTargetClass(uuid: string, name: string): Promise<string | undefined> {
+        const result = await this.#apiClient.call<string | null>(
+            'perspective.getShaclTargetClass',
+            { uuid, name },
+        )
+        return result ?? undefined
     }
 
     /**

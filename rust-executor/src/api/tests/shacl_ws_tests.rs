@@ -262,7 +262,10 @@ async fn shacl_names_returns_seeded_names() {
 
     let names = resolve_shacl_names(&perspective).await.expect("names");
     let got: HashSet<String> = names.into_iter().collect();
-    let want: HashSet<String> = ["Message", "Channel"].iter().map(|s| s.to_string()).collect();
+    let want: HashSet<String> = ["Message", "Channel"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     assert_eq!(got, want, "shape names should match the seeded set exactly");
 }
 
@@ -366,11 +369,7 @@ async fn shacl_get_returns_all_property_triples() {
     for p in &props {
         let prop_uri = format!("flux://MessageShape.{}", p.name);
         assert!(
-            ts.contains(&(
-                prop_uri.clone(),
-                "sh://path".into(),
-                p.path.to_string(),
-            )),
+            ts.contains(&(prop_uri.clone(), "sh://path".into(), p.path.to_string(),)),
             "missing sh://path for {}",
             p.name
         );
@@ -486,7 +485,10 @@ async fn shacl_get_all_returns_every_seeded_shape() {
     }
 
     let got: HashSet<String> = resolved.iter().map(|(n, _, _)| n.clone()).collect();
-    let want: HashSet<String> = ["Message", "Channel"].iter().map(|s| s.to_string()).collect();
+    let want: HashSet<String> = ["Message", "Channel"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     assert_eq!(got, want);
 
     for (name, uri, links) in &resolved {
@@ -559,7 +561,11 @@ async fn shacl_get_all_handles_target_class_unlinked_mid_walk() {
         })
         .await
         .expect("lookup targetClass");
-    assert_eq!(tc_links.len(), 1, "expected exactly one targetClass edge to unlink");
+    assert_eq!(
+        tc_links.len(),
+        1,
+        "expected exactly one targetClass edge to unlink"
+    );
     let tc_expr = LinkExpression::from(tc_links.into_iter().next().unwrap());
     perspective
         .remove_link(tc_expr, None)
@@ -574,9 +580,7 @@ async fn shacl_get_all_handles_target_class_unlinked_mid_walk() {
     assert_eq!(uri, "app://ShapeA");
 
     let ts = triple_set(&links);
-    let has_target_class = ts
-        .iter()
-        .any(|(_, p, _)| p == "sh://targetClass");
+    let has_target_class = ts.iter().any(|(_, p, _)| p == "sh://targetClass");
     assert!(
         !has_target_class,
         // documents current behaviour: silent drop on targetClass unlinked mid-walk

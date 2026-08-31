@@ -1483,10 +1483,14 @@ export class PerspectiveProxy {
 
     /**
      * Resolve a shape's `sh:targetClass` by name (one RPC call).
+     *
+     * `PerspectiveClient.getShaclTargetClass` now returns `undefined` on
+     * "not found" already (see review r3897752023 — the null→undefined
+     * coercion used to happen here and be duplicated one layer down),
+     * so this method is a pure passthrough.
      */
     async getShaclTargetClass(name: string): Promise<string | undefined> {
-        const result = await this.#client.getShaclTargetClass(this.#handle.uuid, name);
-        return result ?? undefined;
+        return this.#client.getShaclTargetClass(this.#handle.uuid, name);
     }
 
     /**
