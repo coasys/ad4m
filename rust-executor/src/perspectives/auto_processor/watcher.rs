@@ -478,12 +478,6 @@ pub async fn run_one_pass(
     let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
     let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
     let pass_started = std::time::Instant::now();
-    log::info!(
-        "⚙️ auto-processor picked task processor={} items={} perspective={}",
-        cfg.processor_id,
-        item_ids.len(),
-        uuid
-    );
     /*
        Derived once, up here, rather than at the claim below where it used to be.
 
@@ -618,6 +612,15 @@ pub async fn run_one_pass(
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
         return Ok(PassOutcome::BackedOff { holder });
     }
+    // Info line moved here (post-claim) per rust-executor/LOGGING.md — only
+    // the peer that actually holds the claim emits this, matching the
+    // downstream `✅ ⚙️ … completed` line one-to-one.
+    log::info!(
+        "⚙️ auto-processor picked task processor={} items={} perspective={}",
+        cfg.processor_id,
+        item_ids.len(),
+        uuid
+    );
     signal!(AutoProcessorStep::Claimed);
     // Neighbourhood-state (Nico 2026-08-19): a small perspective-scoped
     // event so a UI can render "someone is auto-processing here". Distinct
