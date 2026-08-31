@@ -63,14 +63,6 @@ pub async fn embeddings(
         });
     }
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        // Billing now happens inside AIService::embed via bill_ai_operation
-        // (host_rates-based, shared with WS-RPC ai.embed). Handler used to
-        // double-bill here; that path is gone.
-        let _ = data.len(); // silence unused-var if data was only used for billing
-    }
-
     Ok(Json(EmbeddingResponse {
         object: "list",
         data,
