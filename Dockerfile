@@ -79,7 +79,7 @@ ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 RUN git config --global advice.detachedHead false \
     && git config --global http.postBuffer 524288000 \
     && mkdir -p /home/builder/bin \
-    && printf '#!/bin/bash\nif [ "$1" = "fetch" ]; then\n  for arg in "$@"; do\n    case "$arg" in\n      *web-platform-tests*|*nicolo-ribaudo*|*nicol*test262*|*/user/nicol*|*chromium.googlesource.com*) exit 0 ;;\n    esac\n  done\nfi\nif [ "$1" = "submodule" ]; then exit 0; fi\nexec /usr/bin/git "$@"\n' > /home/builder/bin/git \
+    && printf '#!/bin/bash\nif [ "$1" = "fetch" ]; then\n  for arg in "$@"; do\n    case "$arg" in\n      *web-platform-tests*|*nicolo-ribaudo*|*nicol*test262*|*/user/nicol*|*chromium.googlesource.com*) echo "[docker-build] Skipping fetch: $*" >&2; exit 0 ;;\n    esac\n  done\nfi\nif [ "$1" = "submodule" ]; then echo "[docker-build] Skipping submodule command: $*" >&2; exit 0; fi\nexec /usr/bin/git "$@"\n' > /home/builder/bin/git \
     && chmod +x /home/builder/bin/git
 ENV PATH="/home/builder/bin:${PATH}"
 
@@ -161,6 +161,10 @@ ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # ── JS deps + dapp assets ──────────────────────────────────────────────
+# TODO(lockfile): --no-frozen-lockfile bypasses pnpm-lock.yaml integrity.
+# The Deno v2.9.5-coasys-4 migration shuffled workspace packages and the
+# lockfile hasn't been regenerated to match. Land an updated lockfile and
+# switch to `--frozen-lockfile` once the monorepo layout stabilises.
 RUN pnpm install --no-frozen-lockfile
 RUN pnpm build-dapp
 
@@ -171,6 +175,11 @@ WORKDIR /home/builder/ad4m
 
 # Patch rust-executor/Cargo.toml to use local deno monorepo clone.
 # All 7 deno crates now come from a single repo (v2.9.5-coasys-4).
+# NOTE: the [patch] section below ALSO redirects these crates. Both are
+# needed: sed rewrites the direct dependency lines (so Cargo sees path deps),
+# [patch] catches transitive references from other workspace crates. Either
+# alone would leave some crates resolving to the git URL, triggering
+# libgit2 submodule fetches that fail in the builder.
 RUN sed -i 's|deno_v8 = { version = "0.2.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_v8 = { version = "0.2.0", path = "/home/builder/deno-local/libs/deno_v8"|' rust-executor/Cargo.toml && \
     sed -i 's|deno_core = { version = "0.410.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_core = { version = "0.410.0", path = "/home/builder/deno-local/libs/core"|' rust-executor/Cargo.toml && \
     sed -i 's|deno_runtime = { version = "0.265.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_runtime = { version = "0.265.0", path = "/home/builder/deno-local/runtime"|' rust-executor/Cargo.toml && \
@@ -193,8 +202,11 @@ RUN if ! grep -q '\[patch."https://github.com/coasys/deno.git"\]' Cargo.toml; th
 # (it declares rusty_v8 as a git dep — redirect to local path).
 RUN sed -i 's|rusty_v8 = { package = "v8", version = "150.4.0", optional = true, default-features = false, git = "https://github.com/coasys/rusty_v8.git", tag = "v150.4.0-coasys"|rusty_v8 = { package = "v8", version = "150.4.0", optional = true, default-features = false, path = "/home/builder/rusty_v8-local"|' /home/builder/deno-local/libs/deno_v8/Cargo.toml
 
-# Strip git source lines from Cargo.lock so Cargo resolves from
-# local paths (avoids libgit2 submodule fetch attempts).
+# Strip git source lines for deno.git and rusty_v8.git from Cargo.lock.
+# This prevents Cargo's libgit2 from attempting recursive submodule fetches.
+# The [patch] sections and local path deps override resolution, so checksum
+# and dependency lines referencing these packages remain inert — Cargo
+# resolves them through the patches, not the (now-missing) git sources.
 RUN sed -i '/^source = "git+https:\/\/github\.com\/coasys\/deno\.git/d' Cargo.lock && \
     sed -i '/^source = "git+https:\/\/github\.com\/coasys\/rusty_v8\.git/d' Cargo.lock
 

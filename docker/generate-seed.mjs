@@ -16,6 +16,13 @@ import { readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 // --- CID / multibase encoding (no npm deps) ---
+// Hand-rolled to avoid npm dependencies in the Docker build context.
+// This script runs during `docker build` where node_modules may not be
+// available and adding a `pnpm install` would bust the cache layer.
+// The algorithm exactly mirrors rust-executor's calculate_language_hash():
+//   SHA-256 → multihash (0x12, 0x20) → CIDv1 (raw codec 0x00) →
+//   multibase base58btc ('z' prefix) → "Qm" prefix.
+// If the Rust implementation changes, this must change to match.
 
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 

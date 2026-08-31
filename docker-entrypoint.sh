@@ -150,6 +150,9 @@ extract_agent_flag() {
     local snake
     snake=$(printf '%s' "${flag_name}" | sed 's/\([A-Z]\)/_\L\1/g')
     local pattern="${snake}"
+    # HACK: the CLI's status output has a known typo: "is_initiliazed"
+    # (missing second 'i'). Match both correct and misspelled forms until
+    # the CLI is fixed upstream. Track: https://github.com/coasys/ad4m/issues/XXX
     [ "${flag_name}" = "isInitialized" ] && pattern="${pattern}|is_initiliazed|initiliazed"
 
     val=$(printf '%s' "${cleaned}" \
