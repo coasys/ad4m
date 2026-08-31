@@ -48,6 +48,81 @@ use tokio::time::{sleep, Instant};
 use tokio::{join, time};
 use urlencoding;
 
+/// Convert a LinkExpression into a SyncLink for D1 sync.
+fn link_expression_to_sync_link(link: &LinkExpression) -> SyncLink {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(link.author.as_bytes());
+    hasher.update(link.data.source.as_bytes());
+    hasher.update(link.data.predicate.as_deref().unwrap_or("").as_bytes());
+    hasher.update(link.data.target.as_bytes());
+    hasher.update(link.timestamp.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+
+    SyncLink {
+        link_hash: hash[..32].to_string(),
+        source: link.data.source.clone(),
+        predicate: link.data.predicate.clone().unwrap_or_default(),
+        target: link.data.target.clone(),
+        author: link.author.clone(),
+        timestamp: link.timestamp.clone(),
+        proof: Some(link.proof.signature.clone()),
+        status: link
+            .status
+            .as_ref()
+            .map(|s| serde_json::to_string(s).unwrap_or_default()),
+    }
+}
+
+/// Fire-and-forget sync of link additions to D1 via the perspective store backend.
+fn spawn_d1_push(uuid: String, links: Vec<LinkExpression>) {
+    if links.is_empty() {
+        return;
+    }
+    let sync_links: Vec<SyncLink> = links.iter().map(link_expression_to_sync_link).collect();
+    tokio::task::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || {
+            let agent_did = crate::agent::did();
+            let backend = perspective_store_backend();
+            if let Err(e) = backend.push_links(&agent_did, &uuid, &sync_links) {
+                log::warn!("D1 link push failed (perspective {}): {}", uuid, e);
+            }
+        })
+        .await;
+    });
+}
+
+/// Fire-and-forget sync of link removals to D1 via the perspective store backend.
+fn spawn_d1_remove(uuid: String, links: Vec<LinkExpression>) {
+    if links.is_empty() {
+        return;
+    }
+    let hashes: Vec<String> = links
+        .iter()
+        .map(|link| {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(link.author.as_bytes());
+            hasher.update(link.data.source.as_bytes());
+            hasher.update(link.data.predicate.as_deref().unwrap_or("").as_bytes());
+            hasher.update(link.data.target.as_bytes());
+            hasher.update(link.timestamp.as_bytes());
+            let hash = hex::encode(hasher.finalize());
+            hash[..32].to_string()
+        })
+        .collect();
+    tokio::task::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || {
+            let agent_did = crate::agent::did();
+            let backend = perspective_store_backend();
+            if let Err(e) = backend.remove_links(&agent_did, &uuid, &hashes) {
+                log::warn!("D1 link remove failed (perspective {}): {}", uuid, e);
+            }
+        })
+        .await;
+    });
+}
+
 /// Tracks which predicates have changed since the last subscription check.
 #[derive(Debug, Clone)]
 enum ChangedPredicates {
@@ -1650,6 +1725,9 @@ impl PerspectiveInstance {
                 // Remove from SPARQL store (primary storage)
                 self.persist_link_diff(&decorated_diff).await?;
 
+                // Sync removal to D1 (fire-and-forget)
+                spawn_d1_remove(self.uuid.clone(), vec![link_expression.clone()]);
+
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
 
@@ -1778,6 +1856,9 @@ impl PerspectiveInstance {
         // Write to SPARQL store (primary storage for links)
         self.persist_link_diff(&decorated_perspective_diff).await?;
 
+        // Sync to D1 (fire-and-forget, best-effort)
+        spawn_d1_push(self.uuid.clone(), vec![link_expression.clone()]);
+
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_perspective_diff.clone())
             .await;
@@ -1838,6 +1919,9 @@ impl PerspectiveInstance {
 
             // Write to SPARQL store (primary storage for links)
             self.persist_link_diff(&decorated_perspective_diff).await?;
+
+            // Sync to D1 (fire-and-forget, best-effort)
+            spawn_d1_push(self.uuid.clone(), link_expressions.clone());
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
@@ -2135,6 +2219,15 @@ impl PerspectiveInstance {
 
             // Remove from SPARQL store (primary storage)
             self.persist_link_diff(&decorated_diff).await?;
+
+            // Sync removals to D1 (fire-and-forget)
+            {
+                let removal_links: Vec<LinkExpression> = decorated_links
+                    .iter()
+                    .map(|dl| LinkExpression::from(dl.clone()))
+                    .collect();
+                spawn_d1_remove(self.uuid.clone(), removal_links);
+            }
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
