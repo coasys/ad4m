@@ -244,7 +244,10 @@ fn render_property_condition(cond: &PropertyCondition, tokens: &FlowTokens) -> S
             format!("= {}", value_to_prompt_str(equals, tokens))
         }
         PropertyCondition::In { one_of } => {
-            let items: Vec<String> = one_of.iter().map(|v| value_to_prompt_str(v, tokens)).collect();
+            let items: Vec<String> = one_of
+                .iter()
+                .map(|v| value_to_prompt_str(v, tokens))
+                .collect();
             format!("in [{}]", items.join(", "))
         }
         PropertyCondition::Exists { exists } => {
@@ -291,9 +294,7 @@ pub fn render_consensus_rule(rule: &ConsensusRule, tokens: &FlowTokens) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::shacl_parser::{
-        AD4MAction, FlowTransition, ModelQueryCount,
-    };
+    use crate::perspectives::shacl_parser::{AD4MAction, FlowTransition, ModelQueryCount};
     use std::collections::BTreeMap;
 
     // ------------- fixture builders -------------
@@ -724,7 +725,10 @@ mod tests {
 
     #[test]
     fn render_requires_none_is_empty_string() {
-        assert_eq!(render_requires_human_readable(None, &FlowTokens::none()), "");
+        assert_eq!(
+            render_requires_human_readable(None, &FlowTokens::none()),
+            ""
+        );
     }
 
     #[test]
@@ -766,7 +770,10 @@ mod tests {
             n: 1,
             from_role: None,
         };
-        assert_eq!(render_consensus_rule(&rule, &FlowTokens::none()), "1 signer");
+        assert_eq!(
+            render_consensus_rule(&rule, &FlowTokens::none()),
+            "1 signer"
+        );
     }
 
     #[test]
@@ -891,7 +898,9 @@ mod tests {
             .find(|s| s.name == "scoped")
             .expect("scoped is reachable from identified");
         assert!(
-            scoped.requires_human_readable.contains("forTask = \"ad4m://task/foo\""),
+            scoped
+                .requires_human_readable
+                .contains("forTask = \"ad4m://task/foo\""),
             "$flow.base substituted: {}",
             scoped.requires_human_readable,
         );

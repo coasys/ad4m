@@ -1795,7 +1795,10 @@ mod tests {
         assert_eq!(flow.states.len(), 2);
         assert_eq!(flow.states[0].name, "ready");
         assert!((flow.states[0].value - 0.0).abs() < f64::EPSILON);
-        let ready_check = flow.states[0].state_check.as_ref().expect("legacy TODO flow declares stateCheck on every state");
+        let ready_check = flow.states[0]
+            .state_check
+            .as_ref()
+            .expect("legacy TODO flow declares stateCheck on every state");
         assert_eq!(ready_check.predicate, "todo://state");
         assert_eq!(ready_check.target, "todo://ready");
         assert_eq!(flow.states[1].name, "done");
