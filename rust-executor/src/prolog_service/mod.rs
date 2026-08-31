@@ -460,8 +460,10 @@ impl PrologService {
         // Run query through the subscription engine (separate from regular queries)
         let result = simple_engine.subscription_engine.run_query(query).await?;
 
-        // Convert QueryResult to QueryResolution
-        result.map_err(|e| anyhow!("📜 Prolog subscription query failed: {}", e))
+        // Convert QueryResult to QueryResolution.
+        // Emoji lives in the caller's log! macro, not in error values
+        // (see rust-executor/LOGGING.md).
+        result.map_err(|e| anyhow!("Prolog subscription query failed: {}", e))
     }
 
     pub async fn ensure_perspective_pool(
