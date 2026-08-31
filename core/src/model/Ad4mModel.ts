@@ -194,6 +194,9 @@ function jsonToModelInstance<T extends Ad4mModel>(
       const resolveChildClass = (item: any): any => {
         if (!meta.polymorphic || !meta.instantiateAs) return TargetClass;
         const concrete = item?.[SUBJECT_CLASS_KEY];
+        // No concrete class means this was not read polymorphically after all —
+        // an explicit `polymorphic: false` at the call site — so the relation's
+        // own declared target is the right shape.
         if (typeof concrete !== 'string') return TargetClass;
         if (!byClassName) {
           byClassName = {};
@@ -202,7 +205,15 @@ function jsonToModelInstance<T extends Ad4mModel>(
             if (typeof name === 'string') byClassName[name] = cls;
           }
         }
-        return byClassName[concrete] ?? TargetClass;
+        if (byClassName[concrete]) return byClassName[concrete];
+        // The declared target is not a fallback. Where a relation both declares
+        // a target and reads polymorphically, a child of some third class was
+        // hydrated against *its own* shape, so constructing the declared class
+        // over that JSON produces an instance that answers `instanceof` for a
+        // class it is not, carrying fields that class never declared — the exact
+        // mislabelling polymorphic reads exist to prevent. It fits only when it
+        // is the class the executor named.
+        return (TargetClass as any)?.className === concrete ? TargetClass : undefined;
       };
       const nestedInclude =
         typeof includeVal === 'object' && includeVal !== null

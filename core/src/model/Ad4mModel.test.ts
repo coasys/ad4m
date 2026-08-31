@@ -2810,6 +2810,54 @@ describe("Polymorphic relations", () => {
     expect(collection.children[1].__subjectClass).toBe("PolyTaskBlock");
   });
 
+  it("does not construct an unlisted child as the relation's declared target", () => {
+    // A relation may declare a target *and* read polymorphically — the target
+    // says what the members usually are, not what they must be. A child of some
+    // third class was hydrated against its own shape, so building the declared
+    // class over that JSON would answer `instanceof` for a class it is not,
+    // carrying fields that class never declares.
+    @Model({ name: "PolyBaseBlock" })
+    class PolyBaseBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedCollection" })
+    class PolyTypedCollection extends Ad4mModel {
+      @HasMany(() => PolyBaseBlock, {
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => [PolyTextBlock],
+      })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).toBeDefined();
+    expect(unlisted).not.toBeInstanceOf(PolyBaseBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    // The declared target is still right when it is the class the executor named.
+    expect(declared).toBeInstanceOf(PolyBaseBlock);
+    expect(declared.base).toBe("declared");
+  });
+
   it("calls instantiateAs late, so a circular import can still resolve", () => {
     let defined = false;
     @Model({ name: "PolyLateCollection" })
