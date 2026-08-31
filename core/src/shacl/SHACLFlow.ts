@@ -135,26 +135,6 @@ export interface FlowState {
   /** Numeric state value for ordering (e.g., 0, 0.5, 1) */
   value: number;
   /**
-   * Link pattern that indicates this state.
-   *
-   * **Optional.** A flow is either **legacy** (every state declares a
-   * `stateCheck` — read/written by `PerspectiveProxy.startFlow` /
-   * `flowState` / `runFlowAction` / `expressionsInFlowState` via link
-   * markers) or **v5** (no state declares one — read/written by
-   * `startFlowInstance` / `FlowInstance.currentState` via the
-   * on-graph `FlowInstanceRecord`). The two API paths are made
-   * disjoint at the entry points to guarantee a single source of
-   * truth for state: no dual representation, and therefore no drift
-   * between "record says ready" and "markers say doing" — see James
-   * PR #929 J#2.
-   *
-   * v1+ flows should express "am I in this state?" via `requires`
-   * (design §4.1), which talks about subject-class instances rather
-   * than raw links. `stateCheck` will be removed entirely once no
-   * production perspective still writes it.
-   */
-  stateCheck?: LinkPattern;
-  /**
    * Natural-language description of what puts a flow instance IN this state.
    * Used by AI-driven state suggestion (`suggestFlowState`) — the same
    * pattern subject classes use for `interpretationHint`. When set, the LLM
@@ -171,10 +151,10 @@ export interface FlowState {
    * (overlays do NOT count as evidence — design §3 principle 5).
    *
    * Array semantics: AND — every entry must match. Empty / unset =
-   * no model-level guard (falls back to `stateCheck`).
+   * no model-level guard.
    *
-   * Design doc §4.1: "replaces stateCheck+guardQuery; array of queries,
-   * ALL must match; each query's matches become evidence."
+   * Design doc §4.1: "an array of queries, ALL must match; each query's
+   * matches become evidence."
    */
   requires?: ModelQuery[];
   /**
@@ -263,40 +243,16 @@ export interface FlowTransition {
 }
 
 /**
- * True iff every declared state carries a `stateCheck`.
- *
- * Legacy flows read/write state through link markers via the
- * `stateCheck` pattern — that is what `PerspectiveProxy.startFlow`,
- * `flowState`, `runFlowAction`, and `expressionsInFlowState` all use.
- * v5 flows omit `stateCheck` entirely; their state lives on the
- * on-graph `FlowInstanceRecord.currentState` and is read/written
- * through the `FlowInstance` wrapper.
- *
- * The two paths are made disjoint at the entry points so no flow can
- * be simultaneously in both representations — see James PR #929 J#2.
- * A flow with zero states is treated as v5 (a zero-state flow is an
- * atomic action, design §6.3; nothing to legacy-mark).
- */
-export function isLegacyStateCheckFlow(flow: { states: FlowState[] }): boolean {
-  return flow.states.length > 0 && flow.states.every(s => !!s.stateCheck);
-}
-
-/**
- * Inverse of {@link isLegacyStateCheckFlow}. A v5 flow declares no
- * `stateCheck` on any state; its state lives on the on-graph
- * `FlowInstanceRecord`. Also true for zero-state (action) flows.
- */
-export function isV5Flow(flow: { states: FlowState[] }): boolean {
-  return flow.states.every(s => !s.stateCheck);
-}
-
-/**
  * SHACL Flow - represents a state machine for AD4M expressions
  *
  * Flows define:
  * - Which expressions can enter the flow (via `inputTypes`)
- * - What states exist and how to detect them (via link patterns)
- * - How to transition between states (via actions)
+ * - What states exist and their per-state guards (via `requires`)
+ * - How to transition between states (via transitions + consensus rules)
+ *
+ * State lives on the on-graph `FlowInstanceRecord.currentState` and is
+ * read/written through `PerspectiveProxy.startFlowInstance` /
+ * `getFlowInstances` / the `FlowInstance` wrapper — see design doc §4.3/§5.
  *
  * @example
  * ```typescript
@@ -304,45 +260,24 @@ export function isV5Flow(flow: { states: FlowState[] }): boolean {
  *
  * // Any expression can become a TODO
  * todoFlow.inputTypes = ['any'];
- * 
- * // Define states
- * todoFlow.addState({
- *   name: 'ready',
- *   value: 0,
- *   stateCheck: { predicate: 'todo://state', target: 'todo://ready' }
- * });
- * todoFlow.addState({
- *   name: 'doing', 
- *   value: 0.5,
- *   stateCheck: { predicate: 'todo://state', target: 'todo://doing' }
- * });
- * todoFlow.addState({
- *   name: 'done',
- *   value: 1,
- *   stateCheck: { predicate: 'todo://state', target: 'todo://done' }
- * });
- * 
- * // Define start action
- * todoFlow.startAction = [{
- *   action: 'addLink',
- *   source: 'this',
- *   predicate: 'todo://state',
- *   target: 'todo://ready'
- * }];
- * 
- * // Define transitions
+ *
+ * todoFlow.addState({ name: 'ready', value: 0 });
+ * todoFlow.addState({ name: 'doing', value: 0.5 });
+ * todoFlow.addState({ name: 'done',  value: 1 });
+ *
  * todoFlow.addTransition({
  *   actionName: 'Start',
  *   fromState: 'ready',
  *   toState: 'doing',
- *   actions: [
- *     { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://doing' },
- *     { action: 'removeLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
- *   ]
+ *   actions: [],
  * });
- * 
+ *
  * // Store in perspective
  * await perspective.addFlow('TODO', todoFlow);
+ *
+ * // Start an instance on a subject expression — state lives on the
+ * // returned FlowInstance wrapper's `currentState`.
+ * const instance = await perspective.startFlowInstance('TODO', 'expr://123');
  * ```
  */
 export class SHACLFlow {
@@ -351,9 +286,6 @@ export class SHACLFlow {
 
   /** Namespace for generated URIs */
   public namespace: string;
-
-  /** Actions to execute when starting the flow */
-  public startAction: AD4MAction[] = [];
 
   /**
    * Top-level natural-language description of what the flow is about — used
@@ -584,15 +516,6 @@ export class SHACLFlow {
       });
     }
 
-    // Start action
-    if (this.startAction.length > 0) {
-      links.push({
-        source: flowUri,
-        predicate: "ad4m://startAction",
-        target: `literal:string:${encodeURIComponent(JSON.stringify(this.startAction))}`
-      });
-    }
-
     // States
     for (const state of this._states) {
       const stateUri = this.stateUri(state.name);
@@ -623,15 +546,6 @@ export class SHACLFlow {
         source: stateUri,
         predicate: "ad4m://stateValue",
         target: Literal.from(state.value).toUrl()
-      });
-
-      // State check pattern — only emitted for legacy flows that declare
-      // one. v5 flows omit it entirely; the on-graph `FlowInstanceRecord`
-      // carries state instead.
-      if (state.stateCheck) links.push({
-        source: stateUri,
-        predicate: "ad4m://stateCheck",
-        target: `literal:string:${encodeURIComponent(JSON.stringify(state.stateCheck))}`
       });
 
       // Per-state interpretation hint (optional, drives AI state suggestion).
@@ -872,18 +786,6 @@ export class SHACLFlow {
       }
     }
 
-    // Find start action
-    const startActionLink = links.find(l =>
-      l.source === flowUri && l.predicate === "ad4m://startAction"
-    );
-    if (startActionLink) {
-      try {
-        const jsonStr = startActionLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-        flow.startAction = JSON.parse(decodeURIComponent(jsonStr));
-      } catch {
-        // Ignore parse errors
-      }
-    }
 
     // Find states
     const stateLinks = links.filter(l =>
@@ -910,23 +812,6 @@ export class SHACLFlow {
         l.source === stateUri && l.predicate === "ad4m://stateValue"
       );
       const stateValue = valueLink ? Literal.fromUrl(valueLink.target).get() as number : 0;
-      
-      // Get state check — absent on v5 flows (design §4.1 / J#2). Parsed to
-      // `undefined` when no link is present so `isV5Flow()` sees the shape as
-      // v5; the empty-pattern default the parser used to inject would have
-      // read as "declared but empty", which is neither legacy nor v5.
-      const checkLink = links.find(l =>
-        l.source === stateUri && l.predicate === "ad4m://stateCheck"
-      );
-      let stateCheck: LinkPattern | undefined = undefined;
-      if (checkLink) {
-        try {
-          const jsonStr = checkLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          stateCheck = JSON.parse(decodeURIComponent(jsonStr));
-        } catch {
-          // Ignore parse errors
-        }
-      }
       
       // Get per-state interpretation hint (optional). Same non-empty-string
       // guard as the flow-level hint.
@@ -1008,7 +893,6 @@ export class SHACLFlow {
       flow.addState({
         name: stateName,
         value: stateValue,
-        stateCheck,
         ...(interpretationHint !== undefined ? { interpretationHint } : {}),
         ...(requires !== undefined ? { requires } : {}),
         ...(semanticCheck !== undefined ? { semanticCheck } : {}),
@@ -1083,7 +967,6 @@ export class SHACLFlow {
     const sanitizedStates = this._states.map(s => ({
       name: s.name,
       value: s.value,
-      ...(s.stateCheck ? { stateCheck: s.stateCheck } : {}),
       ...(s.interpretationHint ? { interpretationHint: s.interpretationHint } : {}),
       ...(s.requires && s.requires.length > 0 ? { requires: s.requires } : {}),
       ...(s.semanticCheck ? { semanticCheck: s.semanticCheck } : {}),
@@ -1092,7 +975,6 @@ export class SHACLFlow {
     return {
       name: this.name,
       namespace: this.namespace,
-      startAction: this.startAction,
       states: sanitizedStates,
       transitions: this._transitions,
       // Empty strings / empty arrays treated as unset — same semantics
@@ -1111,7 +993,6 @@ export class SHACLFlow {
    */
   static fromJSON(json: any): SHACLFlow {
     const flow = new SHACLFlow(json.name, json.namespace);
-    flow.startAction = json.startAction || [];
     // Non-empty-string guard — mirrors the toLinks-side reader.
     if (typeof json.interpretationHint === "string" && json.interpretationHint.length > 0) {
       flow.interpretationHint = json.interpretationHint;
@@ -1145,7 +1026,6 @@ export class SHACLFlow {
       const sanitized: FlowState = {
         name: state.name,
         value: state.value,
-        ...(state.stateCheck ? { stateCheck: state.stateCheck } : {}),
       };
       if (typeof state.interpretationHint === "string" && state.interpretationHint.length > 0) {
         sanitized.interpretationHint = state.interpretationHint;

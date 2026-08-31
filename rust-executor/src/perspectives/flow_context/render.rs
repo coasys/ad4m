@@ -300,11 +300,9 @@ mod tests {
     // ------------- fixture builders -------------
 
     fn state_named(name: &str) -> FlowState {
-        // v5-shape flow — no `state_check` (J#2 disjointness contract).
         FlowState {
             name: name.to_string(),
             value: 0.0,
-            state_check: None,
             interpretation_hint: None,
             requires: None,
             semantic_check: None,
@@ -325,7 +323,6 @@ mod tests {
         SHACLFlow {
             name: "Delivery".to_string(),
             namespace: "ad4m://".to_string(),
-            start_action: vec![],
             states: vec![
                 state_named("identified"),
                 state_named("scoped"),

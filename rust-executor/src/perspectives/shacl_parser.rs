@@ -233,17 +233,6 @@ pub struct FlowState {
     pub name: String,
     /// Numeric state value for ordering (e.g., 0, 0.5, 1)
     pub value: f64,
-    /// Link pattern that indicates this state, **for legacy flows only**.
-    ///
-    /// A flow is either legacy (every state carries a `state_check` — read/
-    /// written by the TS `PerspectiveProxy.startFlow` / `flowState` /
-    /// `runFlowAction` / `expressionsInFlowState` free functions via link
-    /// markers) or v5 (no state carries one — state lives on the on-graph
-    /// `FlowInstanceRecord.currentState`). The two paths are made disjoint
-    /// at the TS entry points; on the Rust side, `state_check.is_none()`
-    /// is the v5 marker consumers can rely on (James PR #929 J#2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state_check: Option<LinkPattern>,
     /// English description of what puts a flow instance IN this state.
     /// Read by the extraction pass to steer the LLM's state-transition
     /// suggestions. Mirrors `FlowState.interpretationHint` on the TS side.
@@ -256,7 +245,7 @@ pub struct FlowState {
     /// Model-level guard: state is satisfied when every ModelQuery in
     /// the array returns at least one match on committed graph state.
     /// AND semantics across the array. Empty / unset = no model-level
-    /// guard (falls back to `state_check`).
+    /// guard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires: Option<Vec<ModelQuery>>,
     /// English hint for a targeted LLM confirmation after `requires`
@@ -297,9 +286,6 @@ pub struct SHACLFlow {
     pub name: String,
     /// Namespace for URIs (e.g., "todo://")
     pub namespace: String,
-    /// Actions to execute when starting the flow
-    #[serde(default)]
-    pub start_action: Vec<AD4MAction>,
     /// States in this flow
     #[serde(default)]
     pub states: Vec<FlowState>,
@@ -446,17 +432,6 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
         });
     }
 
-    // Start action
-    if !flow.start_action.is_empty() {
-        let actions_json = serde_json::to_string(&flow.start_action)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize start actions: {}", e))?;
-        links.push(Link {
-            source: flow_uri.clone(),
-            predicate: Some("ad4m://startAction".to_string()),
-            target: format!("literal:string:{}", urlencoding::encode(&actions_json)),
-        });
-    }
-
     // States
     for state in &flow.states {
         let state_uri = format!("{}{}.{}", flow.namespace, flow_name, state.name);
@@ -488,18 +463,6 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
             predicate: Some("ad4m://stateValue".to_string()),
             target: format!("literal:number:{}", state.value),
         });
-
-        // State check pattern — legacy flows only. v5 flows omit it entirely;
-        // their state lives on the on-graph `FlowInstanceRecord` (J#2).
-        if let Some(state_check) = &state.state_check {
-            let check_json = serde_json::to_string(state_check)
-                .map_err(|e| anyhow::anyhow!("Failed to serialize state check: {}", e))?;
-            links.push(Link {
-                source: state_uri.clone(),
-                predicate: Some("ad4m://stateCheck".to_string()),
-                target: format!("literal:string:{}", urlencoding::encode(&check_json)),
-            });
-        }
 
         // Per-state `interpretationHint` — the English hint the LLM sees
         // for each reachable next-state in the active-flow prompt block.
@@ -719,7 +682,6 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     let mut flow = SHACLFlow {
         name: name.to_string(),
         namespace: namespace.to_string(),
-        start_action: Vec::new(),
         states: Vec::new(),
         transitions: Vec::new(),
         interpretation_hint: None,
@@ -775,16 +737,6 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
         }
     }
 
-    // Start action — the legacy setter list that runs when a flow is
-    // started on an expression. Emitted as a single JSON literal when
-    // non-empty. Absent-link and empty-array wire shapes both read as
-    // `start_action = vec![]`.
-    if let Some(link) = find_link(links, flow_uri, "ad4m://startAction") {
-        if let Some(actions) = decode_json_literal::<Vec<AD4MAction>>(&link.target) {
-            flow.start_action = actions;
-        }
-    }
-
     // States — walk every `hasState` edge, gather each state's own
     // properties. Build a state-uri → state-name index so transition
     // parsing can resolve endpoints.
@@ -801,14 +753,6 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
             .and_then(|l| decode_literal_number(&l.target))
             .unwrap_or(0.0);
 
-        // v5 flows omit `stateCheck` entirely (J#2). `None` is the marker
-        // consumers use to know they are looking at a v5-shape flow; the
-        // empty-pattern default the parser used to inject would have read
-        // as "declared but empty", indistinguishable from a malformed legacy
-        // flow.
-        let state_check = find_link(links, state_uri, "ad4m://stateCheck")
-            .and_then(|l| decode_json_literal::<LinkPattern>(&l.target));
-
         let interpretation_hint = find_link(links, state_uri, "ad4m://interpretationHint")
             .and_then(|l| decode_literal_string(&l.target).filter(|s| !s.is_empty()));
 
@@ -824,7 +768,6 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
         flow.states.push(FlowState {
             name: state_name,
             value,
-            state_check,
             interpretation_hint,
             requires,
             semantic_check,
@@ -1481,20 +1424,9 @@ mod tests {
         let flow_json = r#"{
             "name": "TODO",
             "namespace": "todo://",
-            "start_action": [
-                {"action": "addLink", "source": "this", "predicate": "todo://state", "target": "todo://ready"}
-            ],
             "states": [
-                {
-                    "name": "ready",
-                    "value": 0.0,
-                    "state_check": {"predicate": "todo://state", "target": "todo://ready"}
-                },
-                {
-                    "name": "done",
-                    "value": 1.0,
-                    "state_check": {"predicate": "todo://state", "target": "todo://done"}
-                }
+                { "name": "ready", "value": 0.0 },
+                { "name": "done",  "value": 1.0 }
             ],
             "transitions": [
                 {
@@ -1517,15 +1449,6 @@ mod tests {
                 && l.predicate == Some("rdf://type".to_string())
                 && l.target == "ad4m://Flow"),
             "Missing flow type link"
-        );
-
-        // Check for start action link
-        assert!(
-            links.iter().any(|l| l.source == "todo://TODOFlow"
-                && l.predicate == Some("ad4m://startAction".to_string())
-                && l.target.starts_with("literal://string:")
-                || l.target.starts_with("literal:string:")),
-            "Missing start action link"
         );
 
         // Check for state links
@@ -1791,16 +1714,9 @@ mod tests {
 
         assert_eq!(flow.name, "TODO");
         assert_eq!(flow.namespace, "todo://");
-        assert_eq!(flow.start_action.len(), 1);
         assert_eq!(flow.states.len(), 2);
         assert_eq!(flow.states[0].name, "ready");
         assert!((flow.states[0].value - 0.0).abs() < f64::EPSILON);
-        let ready_check = flow.states[0]
-            .state_check
-            .as_ref()
-            .expect("legacy TODO flow declares stateCheck on every state");
-        assert_eq!(ready_check.predicate, "todo://state");
-        assert_eq!(ready_check.target, "todo://ready");
         assert_eq!(flow.states[1].name, "done");
         assert!((flow.states[1].value - 1.0).abs() < f64::EPSILON);
         assert_eq!(flow.transitions.len(), 1);
