@@ -251,8 +251,9 @@ export interface FlowTransition {
  * - How to transition between states (via transitions + consensus rules)
  *
  * State lives on the on-graph `FlowInstanceRecord.currentState` and is
- * read/written through `PerspectiveProxy.startFlowInstance` /
- * `getFlowInstances` / the `FlowInstance` wrapper — see design doc §4.3/§5.
+ * read/written through the `FlowInstance` wrapper class
+ * ({@link FlowInstance.start} / {@link FlowInstance.findAll}) — see design
+ * doc §4.3/§5.
  *
  * @example
  * ```typescript
@@ -272,12 +273,9 @@ export interface FlowTransition {
  *   actions: [],
  * });
  *
- * // Store in perspective
+ * // Register on the perspective and mint an instance on a subject.
  * await perspective.addFlow('TODO', todoFlow);
- *
- * // Start an instance on a subject expression — state lives on the
- * // returned FlowInstance wrapper's `currentState`.
- * const instance = await perspective.startFlowInstance('TODO', 'expr://123');
+ * const instance = await FlowInstance.start(perspective, 'TODO', 'expr://123');
  * ```
  */
 export class SHACLFlow {
@@ -904,7 +902,7 @@ export class SHACLFlow {
     // links come back in arbitrary order from the graph, so `flow.states[0]`
     // was randomly one of the round-tripped states. Sort by `value` ascending
     // so the "initial state = states[0]" convention (used by
-    // `PerspectiveProxy.startFlowInstance`) survives a fromGraph round trip.
+    // `FlowInstance.start`) survives a fromGraph round trip.
     // The `states` getter returns a defensive copy, so mutate `_states` directly.
     flow._states.sort((a, b) => a.value - b.value);
 
