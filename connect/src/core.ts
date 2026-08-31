@@ -524,12 +524,7 @@ export default class Ad4mConnect extends EventTarget {
       this.notifyConfigChange("token", this.token);
     }
 
-    // requestCapability returns either a bare requestId string (normal
-    // path) or `{ requestId, rand }` when the executor is running with
-    // `--auto-permit-cap-requests` (dev workflow). Connect only needs the
-    // id here — the auto-permit `rand` path is a dev shortcut for direct
-    // callers, not for the interactive Connect flow.
-    const res = await this.ad4mClient.agent.requestCapability({
+    this.requestId = await this.ad4mClient.agent.requestCapability({
       appName: this.options.appInfo.name,
       appDesc: this.options.appInfo.description,
       appUrl: this.options.appInfo.url,
@@ -537,7 +532,6 @@ export default class Ad4mConnect extends EventTarget {
       appIconPath: this.options.appInfo.iconPath,
       capabilities: this.options.capabilities,
     });
-    this.requestId = typeof res === 'string' ? res : res.requestId;
 
     return this.requestId;
   }
