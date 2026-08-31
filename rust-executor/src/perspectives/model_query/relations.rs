@@ -150,6 +150,15 @@ pub(super) async fn resolve_includes_recursive(
 /// class, so the TypeScript layer can construct the right model class for it.
 pub(crate) const SUBJECT_CLASS_KEY: &str = "__subjectClass";
 
+/// The JSON key carrying every class a polymorphically-hydrated instance
+/// conforms to, most specific first — the whole set [`SUBJECT_CLASS_KEY`] names
+/// only the head of.
+///
+/// Always present, even where it holds a single name. A key that appeared only
+/// when a target was ambiguous would be one every consumer had to guard, to
+/// learn something a one-element array says just as well.
+pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
+
 /// Hydrate a heterogeneous set of target URIs, each as the class it actually is.
 ///
 /// A relation whose targets are of mixed type cannot be hydrated against one
@@ -166,6 +175,31 @@ pub(crate) const SUBJECT_CLASS_KEY: &str = "__subjectClass";
 /// Each instance carries its class name back under [`SUBJECT_CLASS_KEY`], which
 /// is what lets the caller construct the matching model class rather than the
 /// one the relation declared.
+///
+/// # One entry per link
+///
+/// Membership is structural and therefore not exclusive, so a base expression
+/// can conform to two unrelated classes at once — a node carrying both classes'
+/// flags is idiomatic AD4M, not malformed data. Such a target is still hydrated
+/// **once**: links decide the relation's cardinality and classes decide only how
+/// a target is read, so one link is one member. Returning a member per class
+/// would make a three-link collection arrive with five entries, and every caller
+/// would have to know to collapse them.
+///
+/// Which reading wins is therefore a policy, and this is where it is applied.
+/// `subject_classes_of` ranks the set by specificity and declines to choose;
+/// hydration needs exactly one shape, so it takes the head. Within an
+/// inheritance chain that is genuinely the most derived class — a subclass
+/// requires everything its parent does and more. Between two unrelated classes
+/// the ranking ties and the alphabetical tie-break decides, which is arbitrary
+/// but identical on every peer reading the same data. There is no better answer
+/// available: with no `rdf:type` triple to appeal to, "which class is this
+/// really" has no fact underneath it, and agreement between peers is worth more
+/// than a locally plausible guess.
+///
+/// So that the discarded readings do not vanish without trace, every instance
+/// also carries the full set under [`SUBJECT_CLASSES_KEY`]. A caller that wants
+/// one of the others has its id and can query that class for it directly.
 async fn hydrate_polymorphic(
     store: &SparqlStore,
     target_ids: &[String],
@@ -181,11 +215,10 @@ async fn hydrate_polymorphic(
     // Group by class, keeping the ids of each group in the order they arrived so
     // a group's own results stay stable.
     //
-    // Membership is structural and so not exclusive: a URI conforms to its
-    // parent classes as well as its own, and `subject_classes_of` returns all of
-    // them, most specific first. Hydration needs exactly one shape per target, so
-    // the first is taken — hydrating against a parent is what this whole
-    // function exists to avoid.
+    // `subject_classes_of` returns every class a URI conforms to, most specific
+    // first. Hydration needs exactly one shape per target, so the first is taken
+    // — hydrating against a parent is what this whole function exists to avoid.
+    // The rest are not lost: they ride back on the instance below.
     let mut by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for id in target_ids {
         if let Some(class_name) = classes.get(id).and_then(|names| names.first()) {
@@ -234,6 +267,17 @@ async fn hydrate_polymorphic(
                     obj.insert(
                         SUBJECT_CLASS_KEY.to_string(),
                         Value::String(class_name.clone()),
+                    );
+                    // The readings this one was chosen over. Costs nothing to
+                    // return — the classification that picked the head had to
+                    // produce the whole set to rank it.
+                    let all = classes
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| vec![class_name.clone()]);
+                    obj.insert(
+                        SUBJECT_CLASSES_KEY.to_string(),
+                        Value::Array(all.into_iter().map(Value::String).collect()),
                     );
                 }
                 ordered_ids.push(id.clone());

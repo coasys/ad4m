@@ -6520,6 +6520,252 @@ async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
     assert_eq!(image["src"].as_str(), Some("cat.png"));
 }
 
+/// A target conforming to both a class and its parent hydrates as the class.
+///
+/// This is the case the specificity ranking exists for, and the one where it has
+/// a real answer rather than a convention: a subclass requires everything its
+/// parent requires and more, so "matched more triples" and "more derived" are the
+/// same ordering. Nothing exercised it end to end before — the sibling test's
+/// two classes match one shape each, so the head of the set was never contested.
+#[tokio::test]
+async fn test_polymorphic_include_hydrates_the_most_derived_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Collection",
+        "we://models/Block",
+        "we://models/TextBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    // The child carries `Block`'s flag *and* `TextBlock`'s, which is what being
+    // a subclass looks like when membership is structural: it satisfies both.
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://block", "4"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://kind", "we://text_block", "4"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "4",
+        ))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "Block",
+        parse_shape_from_json(
+            r#"{"className":"Block","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://block"}
+               },"relations":{}}"#,
+            "Block",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://block"},
+                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://text_block"},
+                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "one link, one child");
+
+    let child = &children[0];
+    assert_eq!(child["__subjectClass"].as_str(), Some("TextBlock"));
+    // `text` exists only on the subclass, so its presence is the proof that the
+    // subclass's shape did the hydrating and not the parent's.
+    assert_eq!(child["text"].as_str(), Some("hello"));
+    // Conforming to the parent as well is not an error to be hidden — it is
+    // simply true, and it is reported.
+    assert_eq!(
+        child["__subjectClasses"],
+        serde_json::json!(["TextBlock", "Block"]),
+        "the whole set, most specific first"
+    );
+}
+
+/// A target conforming to two *unrelated* classes is still one member.
+///
+/// Links decide how many children a collection has; classes decide only how each
+/// one is read. So a node carrying two classes' flags — idiomatic AD4M, since
+/// membership is structural and nothing stops an expression satisfying both —
+/// appears once, read as one of them, with the other reported rather than
+/// dropped.
+///
+/// Which one wins is a convention here, not a fact: the two classes require one
+/// triple each, so the specificity ranking ties and the alphabetical tie-break
+/// decides. Arbitrary, but the same arbitrary answer on every peer, which is the
+/// property worth having when there is no `rdf:type` triple to appeal to.
+#[tokio::test]
+async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_target() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Collection",
+        "we://models/Bookmark",
+        "we://models/TextBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://b/1", "3"))
+        .unwrap();
+
+    // One node, both classes' flags, both classes' properties. Neither reading is
+    // wrong.
+    store
+        .add_link(&make_link("we://b/1", "we://flag", "we://bookmark", "4"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://b/1", "we://flag", "we://text_block", "4"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://url",
+            "literal:string:https://ad4m.dev",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://text",
+            "literal:string:hello",
+            "4",
+        ))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "Bookmark",
+        parse_shape_from_json(
+            r#"{"className":"Bookmark","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://bookmark"},
+                 "url":{"predicate":"we://url","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Bookmark",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
+                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    // The point of the test: two readings, one link, one member. Hydrating the
+    // node once per class it matches would make a three-link collection arrive
+    // with more than three children.
+    assert_eq!(
+        children.len(),
+        1,
+        "two readings of one node is still one node"
+    );
+
+    let child = &children[0];
+    assert_eq!(child["id"].as_str(), Some("we://b/1"));
+    assert_eq!(
+        child["__subjectClass"].as_str(),
+        Some("Bookmark"),
+        "the ranking ties, so the tie-break decides — and decides the same way everywhere"
+    );
+    assert_eq!(child["url"].as_str(), Some("https://ad4m.dev"));
+    // The reading that lost. A caller wanting it has the id and can ask
+    // `TextBlock` for it directly.
+    assert_eq!(
+        child["__subjectClasses"],
+        serde_json::json!(["Bookmark", "TextBlock"])
+    );
+}
+
 /// An untyped relation read without `polymorphic` fails with an actionable
 /// message rather than a shape lookup for the empty string.
 #[tokio::test]

@@ -2726,6 +2726,36 @@ describe("Polymorphic relations", () => {
     expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
   });
 
+  it("carries the readings a child was chosen over onto the typed instance", () => {
+    // A base expression can conform to two unrelated classes at once, and the
+    // executor has to pick one to hydrate against. The set it picked from rides
+    // back with the child, so a caller can see there was a choice — and fetch
+    // the other reading by asking that class for this id.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            {
+              id: "we://b/1",
+              __subjectClass: "PolyTextBlock",
+              __subjectClasses: ["PolyTextBlock", "PolyBookmark"],
+              text: "hello",
+            },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const child = collection.children[0];
+    expect(child).toBeInstanceOf(PolyTextBlock);
+    expect(child.__subjectClasses).toEqual(["PolyTextBlock", "PolyBookmark"]);
+  });
+
   it("leaves children as data when no instantiateAs is given", () => {
     @Model({ name: "PolyCollectionNoClasses" })
     class PolyCollectionNoClasses extends Ad4mModel {
