@@ -245,6 +245,34 @@ jobs:
           command: cd ./tests/js && pnpm run test-model
           no_output_timeout: 30m
 
+  # Runs everything gated by #[ignore = "llm-e2e"] (Rust) or LLM_E2E=1 (JS).
+  # These hit Marvin's local Ollama; too slow + occasionally flaky for
+  # per-push CI, so they run once nightly against `dev`. Trigger:
+  # `workflows.nightly-llm-e2e` at the bottom of this file.
+  llm-e2e:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Rust LLM-E2E (interpretation + harness suites)
+          command: |
+            cargo test --release --lib \
+              perspectives::interpretation_e2e \
+              perspectives::interpretation_harness_e2e \
+              -- --ignored --test-threads=1 --nocapture
+          no_output_timeout: 60m
+      - run:
+          name: JS LLM-E2E (auto-processor + interpretation suites)
+          command: |
+            cd ./tests/js && LLM_E2E=1 pnpm run test-model
+          no_output_timeout: 60m
+      - run:
+          name: JS LLM-E2E (integration — includes auto-processor-neighbourhood)
+          command: |
+            cd ./tests/js && LLM_E2E=1 pnpm run test-integration
+          no_output_timeout: 60m
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin
@@ -305,3 +333,19 @@ workflows:
       - integration-tests-model:
           requires:
             - build-and-test
+
+  # Nightly at 03:00 UTC against dev. Runs the LLM-heavy suites that are
+  # skipped from the per-push workflow (Rust `#[ignore = "llm-e2e"]` +
+  # JS `LLM_E2E=1`). Same resource class (Marvin) so the Ollama endpoint
+  # is local. If it fails, look for a real regression against dev — the
+  # gate exists to keep per-push CI fast, not to hide breakage.
+  nightly-llm-e2e:
+    triggers:
+      - schedule:
+          cron: "0 3 * * *"
+          filters:
+            branches:
+              only:
+                - dev
+    jobs:
+      - llm-e2e
