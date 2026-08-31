@@ -281,6 +281,13 @@ impl Wallet {
     }
 }
 
+// ── Key name constants ─────────────────────────────────────────────────────
+
+/// Key name for the main agent keypair (local mode default).
+pub const KEY_NAME_MAIN: &str = "main";
+/// Key name for the platform JWT signing keypair (shared mode default).
+pub const KEY_NAME_PLATFORM: &str = "platform";
+
 // ── WalletBackend trait ─────────────────────────────────────────────────────
 
 /// Abstracts key operations so different wallet implementations can coexist.
@@ -329,8 +336,13 @@ pub trait WalletBackend: Send + Sync {
     }
 
     /// Decrypt the keystore with `passphrase`, making keys available.
-    /// Shared mode: no-op success (keys always accessible via API).
+    /// Shared mode: no-op — logs a warning. In platform-hosted deployments
+    /// the unlock operation belongs to the platform Worker, not the executor.
     fn unlock(&self, _passphrase: &str) -> Result<(), AnyError> {
+        log::warn!(
+            "unlock() called on a shared wallet backend — no-op. \
+                    Key management belongs to the platform Worker in shared mode."
+        );
         Ok(())
     }
 
@@ -530,14 +542,15 @@ struct CachedKey {
     fetched_at: std::time::Instant,
 }
 
-/// TTL for cached key material (5 minutes).
-const SHARED_WALLET_CACHE_TTL_SECS: u64 = 300;
+/// TTL for cached key material (30 seconds).
+/// Kept short to limit JWT-verification asymmetry during key rotation.
+const SHARED_WALLET_CACHE_TTL_SECS: u64 = 30;
 
 /// Wallet backend that delegates key operations to an external HTTP service.
 /// Used in the hosted platform where multiple executor instances share one
 /// identity store.
 ///
-/// Key material fetched over HTTP gets cached in-process with a 5-minute TTL.
+/// Key material fetched over HTTP gets cached in-process with a 30-second TTL.
 /// Signing always happens locally — the secret key bytes come over the wire
 /// but the actual Ed25519 sign operation runs in this process.
 pub struct SharedWallet {
@@ -631,8 +644,15 @@ impl WalletBackend for SharedWallet {
                 resp.status()
             ));
         }
-        // Write-through: fetch the newly generated key into cache
-        self.fetch_and_cache(name);
+        // Write-through: fetch the newly generated key into cache so subsequent
+        // reads in this process hit the local cache instead of an extra round-trip.
+        if self.fetch_and_cache(name).is_none() {
+            log::warn!(
+                "SharedWallet::generate_keypair: write-through cache miss for '{}' \
+                 — key was created but could not be fetched back immediately",
+                name
+            );
+        }
         Ok(())
     }
 
@@ -665,16 +685,25 @@ impl WalletBackend for SharedWallet {
             .send()
         {
             Ok(r) if r.status().is_success() => r,
-            _ => return vec![],
+            Ok(r) => {
+                log::warn!(
+                    "SharedWallet::list_key_names: HTTP {} from {}",
+                    r.status(),
+                    url
+                );
+                return vec![];
+            }
+            Err(e) => {
+                log::warn!("SharedWallet::list_key_names: request failed: {}", e);
+                return vec![];
+            }
         };
         // Worker returns {"keys": ["name1", "name2", ...]}
         #[derive(serde::Deserialize)]
         struct KeysResp {
             keys: Vec<String>,
         }
-        resp.json::<KeysResp>()
-            .map(|r| r.keys)
-            .unwrap_or_default()
+        resp.json::<KeysResp>().map(|r| r.keys).unwrap_or_default()
     }
 
     fn key_exists(&self, name: &str) -> bool {
@@ -702,9 +731,7 @@ impl WalletBackend for SharedWallet {
         struct ExistsResp {
             exists: bool,
         }
-        resp.json::<ExistsResp>()
-            .map(|r| r.exists)
-            .unwrap_or(false)
+        resp.json::<ExistsResp>().map(|r| r.exists).unwrap_or(false)
     }
 
     fn as_any(&self) -> &dyn Any {

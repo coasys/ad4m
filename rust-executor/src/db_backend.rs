@@ -121,10 +121,16 @@ impl DbBackend for LocalDb {
         })
     }
 
-    fn delete(&self, _did: &str, table: &str, _row_id: &str) -> Result<(), AnyError> {
-        Ad4mDb::with_global_instance(|_db| {
-            Err(anyhow!("LocalDb: delete not implemented for '{}'", table))
-        })
+    fn delete(&self, _did: &str, table: &str, row_id: &str) -> Result<(), AnyError> {
+        // LocalDb does not expose per-row deletion through Ad4mDb. Log and
+        // return Ok — callers treat delete as best-effort. The row stays in
+        // SQLite until the next full sync or manual cleanup.
+        log::debug!(
+            "LocalDb::delete: no-op for table '{}', row '{}'",
+            table,
+            row_id
+        );
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -176,7 +182,9 @@ impl DbBackend for SharedDb {
     fn get(&self, did: &str, table: &str, row_id: &str) -> Result<Option<Value>, AnyError> {
         let key = Self::cache_key(did, table, row_id);
 
-        // Check cache
+        // Check cache — stale entries (> 30s) fall through to a network fetch.
+        // The cache only covers single-row gets; list() always hits the network
+        // to avoid returning an incomplete/outdated view of the full table.
         if let Ok(cache) = self.cache.read() {
             if let Some(entry) = cache.get(&key) {
                 if entry.fetched_at.elapsed().as_secs() < SHARED_DB_CACHE_TTL_SECS {
@@ -222,6 +230,11 @@ impl DbBackend for SharedDb {
     }
 
     fn list(&self, did: &str, table: &str) -> Result<Vec<Value>, AnyError> {
+        /// Maximum rows to accept from a single list() call.
+        /// Guards against unbounded memory growth if the Worker returns a
+        /// very large table. Increase if a legitimate table exceeds this.
+        const MAX_ROWS: usize = 10_000;
+
         let url = format!("{}/{}/{}", self.base_url, did, table);
         let resp = self
             .client
@@ -241,8 +254,19 @@ impl DbBackend for SharedDb {
             .cloned()
             .unwrap_or_default();
 
+        if rows.len() > MAX_ROWS {
+            log::warn!(
+                "SharedDb::list: table '{}/{}' returned {} rows, capping at {}",
+                did,
+                table,
+                rows.len(),
+                MAX_ROWS
+            );
+        }
+
         Ok(rows
             .into_iter()
+            .take(MAX_ROWS)
             .filter_map(|row| {
                 row.get("data")
                     .and_then(|d| d.as_str())

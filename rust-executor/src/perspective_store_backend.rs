@@ -110,7 +110,10 @@ impl PerspectiveStoreBackend for LocalPerspectiveStore {
         _perspective_id: &str,
         links: &[SyncLink],
     ) -> Result<usize, AnyError> {
-        // Local mode — OxiGraph already persisted these. Return count for consistency.
+        // Local mode — OxiGraph already persisted these links in its RocksDB
+        // store. This method returns the count for API consistency but performs
+        // no additional I/O. In shared mode, SharedPerspectiveStore mirrors
+        // these mutations to the platform Worker's D1 for cross-device durability.
         Ok(links.len())
     }
 
@@ -250,8 +253,14 @@ impl PerspectiveStoreBackend for SharedPerspectiveStore {
         perspective_id: &str,
         since: Option<&str>,
     ) -> Result<Vec<SyncLink>, AnyError> {
+        /// Maximum pages to fetch before stopping. Prevents unbounded memory
+        /// growth if a perspective contains millions of links. At 1000 links
+        /// per page this caps hydration at 100k links per perspective.
+        const MAX_PAGES: usize = 100;
+
         let mut all_links = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut pages_fetched: usize = 0;
 
         loop {
             let url = format!("{}/{}/{}/links", self.base_url, did, perspective_id);
@@ -290,6 +299,21 @@ impl PerspectiveStoreBackend for SharedPerspectiveStore {
                     .filter_map(|v| serde_json::from_value(v.clone()).ok())
                     .collect();
                 all_links.extend(page);
+            }
+
+            pages_fetched += 1;
+
+            // OOM guard — stop after MAX_PAGES regardless of remaining data.
+            if pages_fetched >= MAX_PAGES {
+                log::warn!(
+                    "SharedPerspectiveStore::fetch_links: hit {} page cap for {}/{} \
+                     ({} links so far) — remaining links not fetched",
+                    MAX_PAGES,
+                    did,
+                    perspective_id,
+                    all_links.len()
+                );
+                break;
             }
 
             // Check for next cursor — if absent, null, or unchanged, stop
