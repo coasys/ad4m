@@ -267,7 +267,6 @@ async fn chat_stream(
     // receiver.  This avoids pulling in `async-stream` for the sole
     // sake of one `yield`-style generator.
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Result<Event, Infallible>>();
-    let auth_clone = auth.clone();
 
     // Initial role event.
     let role_chunk = ChatCompletionChunk {
