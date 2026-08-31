@@ -2,8 +2,8 @@
 
 Log-level policy and emoji legend for the `ad4m-executor` crate. Applies to
 every `log::{trace,debug,info,warn,error}!` (and the surviving `use log::…`
-shorthands) in `rust-executor/src/**`. See `ad4m-log-audit.md` for the audit
-that motivated this policy.
+shorthands) in `rust-executor/src/**`. See PR #942 for the motivating audit
+and review discussion.
 
 The crate does **not** use `tracing::*`; every log call resolves to the
 `log` crate.
@@ -70,9 +70,9 @@ most-specific tag on the left.
 | 👤 | Agent |
 | 🌐 | Network / websocket |
 | 🔐 | Auth / capabilities |
-| 💾 | Storage / db |
+| 💾 | Storage / db (also link-diff commits) |
 | 💳 | Billing / credits |
-| 📨 / 🪝 | pubsub / hooks |
+| 📨 | Pubsub |
 | 🪝 | Hooks |
 | ⏱️ | Latency / perf |
 | ✅ | Success |
@@ -80,7 +80,6 @@ most-specific tag on the left.
 | ❌ | Error |
 | 📡 | Signals |
 | 🧩 | Expression |
-| 💾 | Storage/db (also link-diff commits) |
 | 🎧 | Audio (whisper transcription) |
 | 📧 | Email |
 
