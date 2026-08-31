@@ -22,9 +22,13 @@
 //!      indiscriminately. Locks in the "graph-navigation not graph-flooding"
 //!      contract Nico surfaced in the 2026-08-24 review
 //!
-//! Run just this suite:
+//! Gated behind `#[ignore = "llm-e2e"]` — regular CI skips them; the nightly
+//! `llm-e2e` workflow on `dev` runs them all against Marvin's local Ollama.
+//!
+//! Run this suite locally:
 //!   cargo test --release --lib perspectives::interpretation_harness_e2e \
-//!     -- --test-threads=1 --nocapture
+//!     -- --ignored --test-threads=1 --nocapture
+//! or the umbrella `scripts/run-llm-e2e.sh`.
 
 #![cfg(test)]
 
@@ -50,6 +54,7 @@ use crate::types::LinkQuery;
 /// scenario A is that the harness *can* return zero writes, not that it
 /// does so with 100% stochastic certainty on every attempt.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_read_only_transcript_produces_no_writes() {
     let (p, shapes, placements) = run_harness_e2e_until(
         &[("Task", TASK_SDNA)],
@@ -88,6 +93,7 @@ async fn harness_read_only_transcript_produces_no_writes() {
 /// Uses the same 2-4 tolerance as the single-shot equivalent (LLM may
 /// merge/split slightly). Retries a small budget of times for LLM flake.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_propose_writes_land_typed_tasks() {
     let (p, shapes, placements) = run_harness_e2e_until(
         &[("Task", TASK_SDNA)],
@@ -146,6 +152,7 @@ async fn harness_propose_writes_land_typed_tasks() {
 /// mid-loop, and any writes that DID happen must apply cleanly through the
 /// overlay (no half-applied state).
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_tight_budget_exits_cleanly_no_crash() {
     // Deliberately don't wrap in `run_harness_e2e_until` — the whole point is
     // to exercise the budget-exhausted return path, not to iterate until we
@@ -202,6 +209,7 @@ async fn harness_tight_budget_exits_cleanly_no_crash() {
 /// — simpler than delete-between-attempts and structurally identical to how
 /// production would look on each fresh pass.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_intention_links_to_seeded_beliefs() {
     use crate::perspectives::interpretation_test_support::{
         graph_count_by_type, graph_titles_lower, seed_instance, setup_interpretation_e2e,
@@ -435,6 +443,7 @@ async fn harness_intention_links_to_seeded_beliefs() {
 /// tolerates the normal LLM stochasticity that already justifies retries in
 /// Scenarios B and D.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn harness_intention_selects_only_relevant_beliefs() {
     use crate::perspectives::interpretation_test_support::{
         graph_count_by_type, seed_instance, setup_interpretation_e2e,

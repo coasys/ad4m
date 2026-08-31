@@ -910,7 +910,7 @@ pub async fn create_proposal(
     };
 
     let result = call_zome("create_proposal", Some(encode_payload(&input)?)).await?;
-    info!("create_proposal raw result: {:?}", result);
+    log::trace!("🐝 create_proposal raw result: {:?}", result);
 
     // ActionHashB64 comes back as a string like "uhCkk..."
     match &result {
@@ -996,7 +996,7 @@ pub async fn accept_commitment(
     };
 
     let result = call_zome("create_accept", Some(encode_payload(&input)?)).await?;
-    info!("create_accept raw result: {:?}", result);
+    log::trace!("🐝 create_accept raw result: {:?}", result);
 
     match &result {
         JsonValue::String(hash) => Ok(hash.clone()),
