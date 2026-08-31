@@ -343,7 +343,14 @@ impl HolochainService {
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
                                         },
                                         Err(err) => {
-                                            log::debug!("🐝 GetNetworkMetrics timed out after 30s (periodic maintenance call)");
+                                            // KEEP AT warn (Nico + CodeRabbit, PR #942 round 2):
+                                            // this path is reachable from `runtime.networkMetrics`
+                                            // via WS-RPC, so a real user request just failed. Do not
+                                            // downgrade in future cleanups; if there's a caller-
+                                            // specific periodic path that wants debug, gate the
+                                            // downgrade behind that path only.
+                                            // See rust-executor/LOGGING.md.
+                                            log::warn!("⚠️ 🐝 GetNetworkMetrics timed out after 30s");
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
                                         },
                                     }
