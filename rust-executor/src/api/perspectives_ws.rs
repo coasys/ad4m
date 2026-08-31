@@ -2066,15 +2066,28 @@ pub(crate) async fn resolve_shacl_links(
         .map(|l| l.data.target.clone())
         .collect();
 
-    // Step 4: fetch links from each property sub-shape (all independent reads)
-    let mut all_prop_links = Vec::new();
-    for prop_uri in &prop_uris {
-        let prop_links = perspective
-            .get_links(&shacl_link_query(prop_uri, None))
-            .await
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-        all_prop_links.extend(prop_links);
-    }
+    // Step 4: fetch links from each property sub-shape. These reads are
+    // independent, so we drive them concurrently with `try_join_all` (the
+    // old TypeScript client used `Promise.all` for the same reason; the
+    // first cut of this handler regressed to sequential `.await`s and
+    // paid one round trip per property in serial). See PR #935 review
+    // (r3897752002).
+    //
+    // The queries are materialised into an owned Vec first so each future
+    // borrows a value that outlives the join; borrowing a temporary
+    // built inside `.map(|_| ...)` would fail E0515.
+    let prop_queries: Vec<LinkQuery> = prop_uris
+        .iter()
+        .map(|prop_uri| shacl_link_query(prop_uri, None))
+        .collect();
+    let all_prop_links: Vec<DecoratedLinkExpression> = futures::future::try_join_all(
+        prop_queries.iter().map(|q| perspective.get_links(q)),
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?
+    .into_iter()
+    .flatten()
+    .collect();
 
     // Step 5: merge shape links + property links, deduplicate
     let mut seen = std::collections::HashSet::new();
@@ -2148,17 +2161,31 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         .filter(|name| seen_names.insert(name.clone()))
         .collect();
 
-    // Step 2: resolve each shape's full link set
-    let mut results = Vec::new();
-    for name in &names {
-        if let Some((shape_uri, links)) = resolve_shacl_links(&perspective, name).await? {
-            results.push(serde_json::json!({
-                "name": name,
-                "shapeUri": shape_uri,
-                "links": links,
-            }));
-        }
-    }
+    // Step 2: resolve each shape's full link set. Concurrent per-shape
+    // walk — each `resolve_shacl_links` call is independent, so we let
+    // them race and preserve original name order after joining. Recovers
+    // the concurrency the old TS client had via `Promise.all` (review
+    // r3897752002).
+    let resolved = futures::future::try_join_all(
+        names
+            .iter()
+            .map(|name| resolve_shacl_links(&perspective, name)),
+    )
+    .await?;
+
+    let results: Vec<Value> = names
+        .iter()
+        .zip(resolved.into_iter())
+        .filter_map(|(name, maybe)| {
+            maybe.map(|(shape_uri, links)| {
+                serde_json::json!({
+                    "name": name,
+                    "shapeUri": shape_uri,
+                    "links": links,
+                })
+            })
+        })
+        .collect();
 
     Ok(Value::Array(results))
 }
