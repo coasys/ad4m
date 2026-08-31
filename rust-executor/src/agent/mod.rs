@@ -667,18 +667,21 @@ impl AgentService {
         let result = backend.unlock(&password);
         if result.is_ok() {
             self.passphrase = Some(password);
-            let key_names = backend.list_key_names();
-            log::debug!("🔑 Wallet unlocked. Keys present: {:?}", key_names);
+            let key_count = backend.list_key_names().len();
+            log::debug!("🔑 Wallet unlocked. {} key(s) present.", key_count);
 
             // Ensure the shared signing key exists (may have been created by
             // another executor; create only if missing).
             let signing_name = crate::config::get_global_config().signing_key_name();
             if signing_name != crate::wallet::KEY_NAME_MAIN && !backend.key_exists(&signing_name) {
-                if let Err(e) = backend.generate_keypair(&signing_name) {
-                    log::error!("Failed to create signing key '{}': {}", signing_name, e);
-                } else {
-                    log::info!("Created shared signing key '{}'", signing_name);
-                }
+                backend.generate_keypair(&signing_name).map_err(|e| {
+                    anyhow!(
+                        "Failed to create signing key '{}' during unlock: {}",
+                        signing_name,
+                        e
+                    )
+                })?;
+                log::info!("Created shared signing key '{}'", signing_name);
             }
         }
         result

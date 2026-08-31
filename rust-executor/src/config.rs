@@ -188,6 +188,29 @@ impl Ad4mConfig {
             }
         }
 
+        // Validate shared-backend URLs use HTTPS (or approved local addresses)
+        if self.wallet_backend.as_deref() == Some("shared") {
+            if let Some(ref url) = self.wallet_backend_url {
+                if let Err(msg) = validate_shared_backend_url(url, "WALLET_BACKEND_URL") {
+                    log::warn!("{}", msg);
+                }
+            }
+        }
+        if self.db_backend.as_deref() == Some("shared") {
+            if let Some(ref url) = self.db_backend_url {
+                if let Err(msg) = validate_shared_backend_url(url, "DB_BACKEND_URL") {
+                    log::warn!("{}", msg);
+                }
+            }
+        }
+        if self.perspective_store_backend.as_deref() == Some("shared") {
+            if let Some(ref url) = self.perspective_store_url {
+                if let Err(msg) = validate_shared_backend_url(url, "PERSPECTIVE_STORE_URL") {
+                    log::warn!("{}", msg);
+                }
+            }
+        }
+
         if self.app_data_path.is_none() {
             self.app_data_path = Some(
                 utils::ad4m_data_directory()
@@ -246,56 +269,61 @@ impl Ad4mConfig {
     }
 }
 
-/// Validate that a shared-backend URL uses HTTPS, unless the host
-/// resolves to a local/Docker-internal address.
+/// Validate that a shared-backend URL uses HTTPS for production security.
+/// Local development addresses (localhost, 127.0.0.1, [::1], host.docker.internal)
+/// are exempt — they run inside Docker networks or on loopback.
 ///
-/// Allowed HTTP hosts: `localhost`, `127.0.0.1`, `[::1]`,
-/// `host.docker.internal`, any host ending in `.internal` or `.local`.
-/// All other hosts require HTTPS.
-///
-/// Returns `Ok(())` for valid URLs and `Err(message)` for insecure ones.
-/// Callers should `log::warn!` the message — Cloudflare Tunnel may
-/// terminate TLS upstream, so a hard reject would break valid setups.
+/// Returns Ok(()) for valid URLs, Err(message) for invalid ones.
 pub fn validate_shared_backend_url(url: &str, label: &str) -> Result<(), String> {
-    let lower = url.to_ascii_lowercase();
+    // Parse the URL to extract scheme and host
+    let lower = url.to_lowercase();
 
-    // HTTPS always acceptable
+    // HTTPS always OK
     if lower.starts_with("https://") {
         return Ok(());
     }
 
-    // Must start with http:// to be parseable
-    if !lower.starts_with("http://") {
+    // HTTP only allowed for local/Docker addresses
+    if lower.starts_with("http://") {
+        let host_part = &lower["http://".len()..];
+        // Strip path, query, fragment to get host:port
+        let host = host_part
+            .split('/')
+            .next()
+            .unwrap_or(host_part)
+            .split(':')
+            .next()
+            .unwrap_or(host_part);
+
+        let allowed_hosts = [
+            "localhost",
+            "127.0.0.1",
+            "[::1]",
+            "::1",
+            "host.docker.internal",
+        ];
+
+        if allowed_hosts.contains(&host) {
+            return Ok(());
+        }
+
+        // Also allow any *.internal or *.local hostname (Docker service names)
+        if host.ends_with(".internal") || host.ends_with(".local") {
+            return Ok(());
+        }
+
         return Err(format!(
-            "{}: URL must start with http:// or https:// (got: {})",
+            "{} URL must use HTTPS for non-local hosts (got: {}). \
+             HTTP is only allowed for localhost, 127.0.0.1, [::1], \
+             host.docker.internal, and *.internal/*.local hostnames.",
             label, url
         ));
     }
 
-    // Extract the host portion (strip scheme, optional userinfo, port, path)
-    let after_scheme = &lower["http://".len()..];
-    let host_port = after_scheme.split('/').next().unwrap_or("");
-    let host = host_port
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(host_port);
-
-    // Allow known-local hosts over plain HTTP
-    let local = matches!(
-        host,
-        "localhost" | "127.0.0.1" | "[::1]" | "host.docker.internal"
-    ) || host.ends_with(".internal")
-        || host.ends_with(".local");
-
-    if local {
-        Ok(())
-    } else {
-        Err(format!(
-            "{}: shared-backend URL uses plain HTTP for remote host '{}'. \
-             Use HTTPS or a local address. (URL: {})",
-            label, host, url
-        ))
-    }
+    Err(format!(
+        "{} URL must start with http:// or https:// (got: {})",
+        label, url
+    ))
 }
 
 impl Default for Ad4mConfig {
@@ -345,57 +373,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_validate_https_accepted() {
-        assert!(validate_shared_backend_url("https://api.example.com/v1", "TEST").is_ok());
-    }
-
-    #[test]
-    fn test_validate_https_case_insensitive() {
-        assert!(validate_shared_backend_url("HTTPS://API.EXAMPLE.COM", "TEST").is_ok());
+    fn test_validate_https_url() {
+        assert!(
+            validate_shared_backend_url("https://api.coasys.org/internal/wallet", "TEST").is_ok()
+        );
     }
 
     #[test]
     fn test_validate_http_localhost() {
-        assert!(validate_shared_backend_url("http://localhost:8787", "TEST").is_ok());
-    }
-
-    #[test]
-    fn test_validate_http_127() {
-        assert!(validate_shared_backend_url("http://127.0.0.1:8787/api", "TEST").is_ok());
-    }
-
-    #[test]
-    fn test_validate_http_ipv6_loopback() {
-        assert!(validate_shared_backend_url("http://[::1]:8787", "TEST").is_ok());
+        assert!(
+            validate_shared_backend_url("http://localhost:8787/internal/wallet", "TEST").is_ok()
+        );
+        assert!(validate_shared_backend_url("http://127.0.0.1:8787/internal/db", "TEST").is_ok());
+        assert!(validate_shared_backend_url("http://[::1]:8787/internal/db", "TEST").is_ok());
     }
 
     #[test]
     fn test_validate_http_docker_internal() {
-        assert!(validate_shared_backend_url("http://host.docker.internal:8787", "TEST").is_ok());
+        assert!(validate_shared_backend_url(
+            "http://host.docker.internal:8787/internal/wallet",
+            "TEST"
+        )
+        .is_ok());
     }
 
     #[test]
-    fn test_validate_http_dot_internal() {
-        assert!(validate_shared_backend_url("http://wallet.internal:443", "TEST").is_ok());
+    fn test_validate_http_internal_suffix() {
+        assert!(validate_shared_backend_url("http://worker.internal:8787/api", "TEST").is_ok());
     }
 
     #[test]
-    fn test_validate_http_dot_local() {
-        assert!(validate_shared_backend_url("http://myhost.local:8080", "TEST").is_ok());
+    fn test_validate_http_local_suffix() {
+        assert!(validate_shared_backend_url("http://executor.local:12000/api", "TEST").is_ok());
     }
 
     #[test]
-    fn test_validate_http_remote_rejected() {
-        let result = validate_shared_backend_url("http://api.example.com", "WALLET_BACKEND_URL");
+    fn test_reject_http_remote() {
+        let result = validate_shared_backend_url("http://api.coasys.org/internal/wallet", "TEST");
         assert!(result.is_err());
-        let msg = result.unwrap_err();
-        assert!(msg.contains("WALLET_BACKEND_URL"));
-        assert!(msg.contains("api.example.com"));
+        assert!(result.unwrap_err().contains("HTTPS"));
     }
 
     #[test]
-    fn test_validate_garbage_scheme_rejected() {
-        let result = validate_shared_backend_url("ftp://files.example.com", "TEST");
+    fn test_reject_no_scheme() {
+        let result = validate_shared_backend_url("api.coasys.org/internal/wallet", "TEST");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_case_insensitive() {
+        assert!(validate_shared_backend_url("HTTP://LOCALHOST:8787/path", "TEST").is_ok());
+        assert!(validate_shared_backend_url("HTTPS://API.COASYS.ORG/path", "TEST").is_ok());
     }
 }
