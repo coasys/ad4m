@@ -797,7 +797,7 @@ describe("PerspectiveProxy.availableFlows — concrete-type matching", function 
     await p.addFlow("OtherFlow", makeTypedFlow("OtherFlow", ["OtherClass"]));
 
     const post = await (TestPostForFlows as any).create(p, { title: "T", body: "B" });
-    const found = await p.availableFlows(post.baseExpression);
+    const found = await p.availableFlows(post.id);
     expect(found).to.include("PostFlow");
     expect(found).to.not.include("OtherFlow");
   });
