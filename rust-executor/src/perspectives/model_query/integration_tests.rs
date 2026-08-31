@@ -6766,6 +6766,76 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
     );
 }
 
+/// `limit` on a polymorphic include is refused, not quietly ignored.
+///
+/// The read runs one sub-query per class present, so a limit would apply to each
+/// group separately: the same `limit: 5` returns five rows or fifteen depending
+/// on how many classes the data happens to contain, which the caller cannot see.
+/// Dropping it silently hands back every row to someone who asked for five —
+/// wrong in a way that surfaces much later, and only as slowness.
+#[tokio::test]
+async fn test_limit_on_a_polymorphic_include_is_rejected() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in ["we://models/Collection", "we://models/TextBlock"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "4"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                limit: Some(5),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let err =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .expect_err("a limit that cannot be honoured must not be dropped in silence");
+    let msg = err.to_string();
+    assert!(msg.contains("children"), "names the relation: {msg}");
+    assert!(msg.contains("limit"), "names what was refused: {msg}");
+}
+
 /// An untyped relation read without `polymorphic` fails with an actionable
 /// message rather than a shape lookup for the empty string.
 #[tokio::test]

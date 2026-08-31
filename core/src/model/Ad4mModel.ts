@@ -35,7 +35,22 @@ import type {
  * Rust endpoint.  Recursively converts included relation values (which come
  * back as plain JSON objects) into proper model class instances.
  */
-/** Key under which the executor returns a polymorphically-hydrated instance's concrete class. */
+/**
+ * Key under which the executor returns a polymorphically-hydrated instance's
+ * concrete class.
+ *
+ * Half of a wire contract: the writer is `SUBJECT_CLASS_KEY` in
+ * `rust-executor/src/perspectives/model_query/relations.rs`, and the two are
+ * separate literals in separate languages. Renaming one alone does not fail to
+ * compile — it degrades to every instance staying plain JSON, which looks
+ * identical to a relation that declared no classes to build.
+ * `tests/js/tests/model/model-polymorphic.test.ts` drives both ends against one
+ * executor, so the drift fails a test rather than a user's query.
+ *
+ * The executor also returns `__subjectClasses`, the whole set this one names the
+ * head of. Nothing here reads it — it rides onto the instance with every other
+ * JSON key, for a caller that wants to know a choice was made.
+ */
 const SUBJECT_CLASS_KEY = '__subjectClass';
 
 /**
@@ -87,7 +102,14 @@ function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): 
     try {
       TargetClass = meta.target?.();
     } catch (e) {
-      console.debug(`prepareModelQueryParams: target class unavailable for include '${relName}':`, e);
+      // A class not yet initialised throws `ReferenceError` from the temporal
+      // dead zone, which is the expected cost of an import cycle and not worth
+      // saying anything about. Anything else — a thunk closing over nothing,
+      // typically — is a broken declaration that would otherwise cost the nested
+      // default in silence, so it gets said out loud.
+      const circularImport = e instanceof ReferenceError;
+      const say = circularImport ? console.debug : console.warn;
+      say(`prepareModelQueryParams: target class unavailable for include '${relName}':`, e);
       continue;
     }
     if (TargetClass) applyPolymorphicIncludeDefaults(nested, TargetClass);

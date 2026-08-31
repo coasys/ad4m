@@ -148,6 +148,13 @@ pub(super) async fn resolve_includes_recursive(
 
 /// The JSON key carrying each polymorphically-hydrated instance's concrete
 /// class, so the TypeScript layer can construct the right model class for it.
+///
+/// Half of a wire contract: the reader is `SUBJECT_CLASS_KEY` in
+/// `core/src/model/Ad4mModel.ts`, and the two are separate literals in separate
+/// languages. Renaming one alone does not fail to compile — it degrades to
+/// "every instance stays plain JSON", which is the same shape as a caller having
+/// declared no classes. `tests/js/tests/model/model-polymorphic.test.ts` asserts
+/// both keys end to end, so the drift is caught there rather than in the field.
 pub(crate) const SUBJECT_CLASS_KEY: &str = "__subjectClass";
 
 /// The JSON key carrying every class a polymorphically-hydrated instance
@@ -157,6 +164,8 @@ pub(crate) const SUBJECT_CLASS_KEY: &str = "__subjectClass";
 /// Always present, even where it holds a single name. A key that appeared only
 /// when a target was ambiguous would be one every consumer had to guard, to
 /// learn something a one-element array says just as well.
+///
+/// Same wire contract as [`SUBJECT_CLASS_KEY`], and the same counterpart file.
 pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 
 /// Hydrate a heterogeneous set of target URIs, each as the class it actually is.
@@ -202,6 +211,7 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 /// one of the others has its id and can query that class for it directly.
 async fn hydrate_polymorphic(
     store: &SparqlStore,
+    relation_name: &str,
     target_ids: &[String],
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
@@ -209,6 +219,25 @@ async fn hydrate_polymorphic(
     hydrated: &mut HashMap<String, Value>,
     ordered_ids: &mut Vec<String>,
 ) -> Result<(), Error> {
+    // `limit` cannot mean here what it means everywhere else. The read is one
+    // sub-query per class, so a limit would apply per group: `limit: 5` over
+    // three classes would return fifteen, and over one class five — an answer
+    // that depends on data the caller cannot see. Nor can it be applied after
+    // the fact without deciding which classes lose their members.
+    //
+    // Rejected rather than dropped. Silently returning every row to a caller who
+    // asked for five is the kind of wrong that surfaces later as a performance
+    // problem rather than an error, and the same query written against an
+    // untyped include already fails loudly rather than degrading.
+    if sub_query.limit.is_some() || sub_query.offset.is_some() {
+        return Err(anyhow!(
+            "include on relation '{relation_name}': `limit`/`offset` are not supported on a \
+             polymorphic include, because the read runs one query per class present and a \
+             limit would apply to each of them separately. Drop them and the relation's own \
+             link order decides what survives, or read one class at a time."
+        ));
+    }
+
     let classes =
         crate::perspectives::subject_classes_of::subject_classes_of(store, resolver, target_ids)?;
 
@@ -226,10 +255,17 @@ async fn hydrate_polymorphic(
                 .entry(class_name.clone())
                 .or_default()
                 .push(id.clone());
+        } else {
+            // A target matching no registered class is skipped rather than
+            // hydrated as something it is not. It stays absent from the
+            // relation, which is the same outcome a non-conforming target has
+            // always had — but from the outside it looks like a child that
+            // simply is not there, and in a live neighbourhood it may only look
+            // that way until the type link arrives. Leave a trail.
+            log::debug!(
+                "polymorphic include on '{relation_name}': '{id}' matches no registered class, skipping"
+            );
         }
-        // A target matching no registered class is skipped rather than
-        // hydrated as something it is not. It stays absent from the relation,
-        // which is the same outcome a non-conforming target has always had.
     }
 
     for (class_name, ids) in by_class {
@@ -245,10 +281,8 @@ async fn hydrate_polymorphic(
         let mut wc = group_query.where_clause.take().unwrap_or_default();
         wc.insert("id".to_string(), WhereCondition::StringArray(ids));
         group_query.where_clause = Some(wc);
-        // A limit is per-class here; applying the parent's limit to each group
-        // would silently mean something different from what it means on a
-        // single-class include, so it is dropped and the caller's link order
-        // decides what survives.
+        // Already rejected above, so there is nothing here to drop — cleared
+        // only so a group query cannot inherit one by some later edit.
         group_query.limit = None;
         group_query.offset = None;
 
@@ -350,6 +384,7 @@ async fn resolve_forward_include(
     if polymorphic {
         hydrate_polymorphic(
             store,
+            &rel.name,
             &target_ids,
             &query,
             resolver,
@@ -531,6 +566,7 @@ async fn resolve_reverse_include(
         if polymorphic {
             hydrate_polymorphic(
                 store,
+                &rel.name,
                 &target_ids,
                 &query,
                 resolver,
