@@ -900,14 +900,18 @@ export interface RelationOptions {
      * thread — where timestamp order *is* the order. It cannot express a sequence
      * somebody chose: a kanban column, a playlist, the blocks of a post.
      *
-     * With this set, the executor derives ordering links from the array on save
-     * and reconstructs the order on read. Nothing about how you write the
-     * relation changes — assign the array in the order you want and save.
+     * **Declaration only, for now.** Setting this emits `ad4m://ordering` on the
+     * property shape, where the executor reads it back — but no read or write
+     * path acts on it yet, so a relation declaring it still hydrates by link
+     * timestamp exactly as one that does not. Wiring save and hydration to the
+     * declaration is the next change; nothing about how you write the relation
+     * will change when it lands — assign the array in the order you want and
+     * save.
      *
-     * Ordering lives in the executor rather than here so that *every* writer gets
-     * it: the ORM, MCP agents, raw GraphQL callers, another app sharing the
-     * neighbourhood. Implemented client-side it would order only what this client
-     * wrote.
+     * Ordering is declared in the type system, rather than passed per query, so
+     * that *every* writer gets it once it is wired: the ORM, MCP agents, raw
+     * GraphQL callers, another app sharing the neighbourhood. Implemented
+     * client-side it would order only what this client wrote.
      *
      * @example
      * ```typescript
