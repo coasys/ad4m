@@ -621,8 +621,24 @@ pub async fn run_interpretation_with_strategy_and_model(
     // flow-definition on the perspective can never blind the
     // extraction pass; the fallback is byte-for-byte the pre-slice-10.2
     // prompt shape.
+    //
+    // Flow subjects = the URIs the pass is actually interpreting.
+    // Prefer `cursor.sources` (the drained batch bases the
+    // auto-processor threaded through as `InterpretationRunCursor`); a
+    // dedup `Scope` is a legacy fallback for callers that predate the
+    // cursor (see J#1, PR #929 James review). Empty subjects → no flow
+    // context in the prompt (bounded), not the whole-perspective sweep
+    // the pre-fix `None` path did.
+    let flow_subjects: Vec<String> = if let Some(c) = cursor {
+        c.sources.clone()
+    } else if let Some(s) = scope {
+        vec![crate::perspectives::flow_context::scope_subject(s).to_string()]
+    } else {
+        Vec::new()
+    };
     let active_flows =
-        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, scope).await;
+        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, &flow_subjects)
+            .await;
     let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
 
     let service = crate::ai_service::AIService::global_instance()
@@ -829,9 +845,19 @@ pub async fn run_interpretation_with_harness_and_model(
 
     // Slice 10.3c — same flow-context load as the single-shot path.
     // Silently-empty on failure so a broken flow definition can never
-    // blind the harness pass.
+    // blind the harness pass. Subjects derived from `cursor.sources`
+    // (drained batch bases) with legacy `scope` fallback (J#1, PR #929
+    // James review).
+    let flow_subjects: Vec<String> = if let Some(c) = cursor {
+        c.sources.clone()
+    } else if let Some(s) = scope {
+        vec![crate::perspectives::flow_context::scope_subject(s).to_string()]
+    } else {
+        Vec::new()
+    };
     let active_flows =
-        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, scope).await;
+        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, &flow_subjects)
+            .await;
     let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
 
     // Build per-class propose shapes from the perspective's SHACL classes,

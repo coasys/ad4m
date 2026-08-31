@@ -53,9 +53,17 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
     })
 }
 
-/// Load every live `FlowInstance` on the perspective. When `subject` is
-/// `Some(uri)`, filters to instances tied to that base expression;
-/// otherwise returns every instance on the perspective.
+/// Load live `FlowInstance`s on the perspective whose `subject`
+/// matches any URI in `subjects`. Empty `subjects` returns `Ok(vec![])`
+/// without touching the store — the extraction pass has no batch bases
+/// to scope against, so surfacing every FlowInstance would be
+/// unbounded and violate Model C scope discipline (James PR #929 J#1).
+///
+/// Single-URI queries push the filter down to `model_query`
+/// (`where.subject == uri`) so the existing typed-in-store path is
+/// preserved. Multi-URI batches load-all and filter in-Rust because
+/// `model_query` has no `in` operator today; the batch is bounded by
+/// the auto-processor's drained item count.
 ///
 /// Silently returns `Ok(vec![])` when the `FlowInstance` class hasn't
 /// been registered yet on this perspective — a freshly-created
@@ -64,11 +72,15 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
 /// call before the first flow is ever spawned.
 pub async fn load_flow_instances(
     perspective: &PerspectiveInstance,
-    subject: Option<&str>,
+    subjects: &[String],
 ) -> anyhow::Result<Vec<FlowInstanceRecord>> {
-    let query = match subject {
-        None => serde_json::json!({}),
-        Some(uri) => serde_json::json!({ "where": { "subject": uri } }),
+    if subjects.is_empty() {
+        return Ok(vec![]);
+    }
+    let query = if subjects.len() == 1 {
+        serde_json::json!({ "where": { "subject": subjects[0].clone() } })
+    } else {
+        serde_json::json!({})
     };
     let json = match perspective
         .model_query(FLOW_INSTANCE_CLASS, &query.to_string())
@@ -97,9 +109,11 @@ pub async fn load_flow_instances(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let subject_set: HashSet<&str> = subjects.iter().map(String::as_str).collect();
     Ok(instances
         .iter()
         .filter_map(parse_flow_instance_from_hydrated)
+        .filter(|r| subject_set.contains(r.subject.as_str()))
         .collect())
 }
 
@@ -129,21 +143,6 @@ pub fn build_flow_contexts(
         .collect()
 }
 
-/// Given the extraction pass's `Scope`, return the base-expression URI
-/// that FlowInstances should be filtered on.
-///
-/// Both `Scope::Model { id, .. }` and `Scope::Raw { id, .. }` carry the
-/// scope's anchor URI in `id`; a FlowInstance whose `subject == id` is
-/// running on THIS anchor. Callers that want every active flow on the
-/// perspective (e.g. tests) pass `None` at the [`load_flow_instances`]
-/// layer directly and skip this helper.
-pub fn scope_subject(scope: &Scope) -> &str {
-    match scope {
-        Scope::Model { id, .. } => id.as_str(),
-        Scope::Raw { id, .. } => id.as_str(),
-    }
-}
-
 /// Slice 10.3c — compose the two loaders + [`build_flow_contexts`] into
 /// one call that the extraction pass (`run.rs`) can use directly.
 ///
@@ -153,13 +152,22 @@ pub fn scope_subject(scope: &Scope) -> &str {
 /// the fallback is "extract without flow-aware prompting", which is
 /// exactly the pre-slice-10.2 behaviour.
 ///
-/// `scope`, when `Some`, narrows [`load_flow_instances`] to flow
-/// instances whose base expression matches the scope's anchor URI (see
-/// [`scope_subject`]). Pass `None` to load every active flow on the
-/// perspective (e.g. from a perspective-scoped pass).
+/// `subjects` is the set of base-expression URIs the extraction pass is
+/// operating on — the drained batch bases in the auto-processor path
+/// (see `InterpretationRunCursor.sources`). A FlowInstance whose
+/// `subject` matches one of these is running on the same expression the
+/// pass is interpreting and is included in the prompt.
+///
+/// Empty `subjects` returns an empty result rather than the whole
+/// perspective's FlowInstance set — the pre-fix behaviour (loading
+/// every FlowInstance on the perspective when scope was `None`) was
+/// unbounded and violated Model C prompt discipline (James PR #929 J#1).
+/// Callers that legitimately want every active flow (e.g. component
+/// tests) can query [`load_flow_instances`] directly with the full
+/// subject set.
 pub async fn gather_active_flow_contexts(
     perspective: &PerspectiveInstance,
-    scope: Option<&Scope>,
+    subjects: &[String],
 ) -> Vec<FlowContext> {
     let flows_by_name = match load_shacl_flows(perspective).await {
         Ok(m) => m,
@@ -171,8 +179,7 @@ pub async fn gather_active_flow_contexts(
     if flows_by_name.is_empty() {
         return Vec::new();
     }
-    let subject = scope.map(scope_subject);
-    let records = match load_flow_instances(perspective, subject).await {
+    let records = match load_flow_instances(perspective, subjects).await {
         Ok(r) => r,
         Err(e) => {
             log::warn!(
@@ -182,6 +189,18 @@ pub async fn gather_active_flow_contexts(
         }
     };
     build_flow_contexts(&records, &flows_by_name)
+}
+
+/// Derive the flow-filter subject key from an extraction pass `Scope`.
+/// Kept for the strategy-path call site that has no drained-batch cursor
+/// available yet (it still uses the dedup scope's anchor URI). New code
+/// should prefer wiring `InterpretationRunCursor.sources` through and
+/// calling [`gather_active_flow_contexts`] with the batch bases.
+pub fn scope_subject(scope: &Scope) -> &str {
+    match scope {
+        Scope::Model { id, .. } => id.as_str(),
+        Scope::Raw { id, .. } => id.as_str(),
+    }
 }
 
 /// Discover every `SHACLFlow` definition present in a flat bag of links

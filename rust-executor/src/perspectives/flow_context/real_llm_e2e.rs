@@ -160,7 +160,7 @@ async fn model_c_real_llm_extraction_with_active_flow_in_prompt() {
         // Sanity check the wiring — the gather half of slice 10.3c must see
         // the just-minted instance, else the LLM can't possibly get flow
         // context and this test is measuring nothing.
-        let contexts = gather_active_flow_contexts(&perspective, None).await;
+        let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()]).await;
         assert_eq!(
             contexts.len(),
             1,

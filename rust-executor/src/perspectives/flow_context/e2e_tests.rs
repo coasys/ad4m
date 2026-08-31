@@ -38,7 +38,6 @@ use crate::perspectives::interpretation::{
     build_interpretation_input, ExistingInstances, TranscriptTurn,
 };
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
-use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::shacl_parser::parse_flow_to_links;
 use crate::types::LinkStatus;
 
@@ -131,10 +130,14 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     .await
     .expect("mint_flow_instance");
 
-    // 4) Perspective-wide gather — no scope narrowing. This is the
-    //    shape `run_interpretation_with_strategy_and_model` calls
-    //    on batch entry.
-    let contexts = gather_active_flow_contexts(&perspective, None).await;
+    // 4) Batch-scoped gather — the drained batch includes the base
+    //    URI the FlowInstance is anchored on. This is the shape
+    //    `run_interpretation_with_strategy_and_model` calls on batch
+    //    entry when the auto-processor drains an item whose URI is the
+    //    FlowInstance's subject (J#1, PR #929 James review — the fix
+    //    replaced `Option<&Scope>` on the dedup axis with
+    //    `subjects: &[String]` sourced from the batch cursor).
+    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()]).await;
     assert_eq!(
         contexts.len(),
         1,
@@ -160,34 +163,39 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
         Some("The team has agreed on what the work is and can begin execution.")
     );
 
-    // 5) Scope-narrowed gather on the same base URI: still one
-    //    context. This is the shape run.rs calls when the pass is
-    //    scoped to a specific model instance.
-    let matching_scope = Scope::Model {
-        model: "Task".to_string(),
-        id: base_uri.to_string(),
-        field: None,
-    };
-    let scoped = gather_active_flow_contexts(&perspective, Some(&matching_scope)).await;
+    // 5) Multi-subject batch containing the instance's subject: still
+    //    one context. Proves the multi-URI `where subject == ..` fallback
+    //    (query-all + filter-in-Rust) correctly retains the match.
+    let multi_matching = vec![
+        base_uri.to_string(),
+        "ad4m://task/other-batch-item".to_string(),
+    ];
+    let scoped = gather_active_flow_contexts(&perspective, &multi_matching).await;
     assert_eq!(
         scoped.len(),
         1,
-        "scope-narrowed gather on the instance's own subject must still see it"
+        "multi-subject batch containing the instance's subject must still see it"
     );
     assert_eq!(scoped[0].instance_uri, inst_uri);
 
-    // 6) Scope narrowing to a *different* base URI: empty. This is
-    //    the property that lets scope-scoped passes ignore flows
-    //    running on unrelated bases.
-    let other_scope = Scope::Model {
-        model: "Task".to_string(),
-        id: "ad4m://task/unrelated".to_string(),
-        field: None,
-    };
-    let other = gather_active_flow_contexts(&perspective, Some(&other_scope)).await;
+    // 6) Subjects that don't include the instance's base URI: empty.
+    //    This is the property that lets batch-scoped passes ignore
+    //    flows running on unrelated bases.
+    let other =
+        gather_active_flow_contexts(&perspective, &["ad4m://task/unrelated".to_string()]).await;
     assert!(
         other.is_empty(),
-        "scope narrowed to a different subject must drop the running flow, got {other:?}"
+        "batch narrowed to a different subject must drop the running flow, got {other:?}"
+    );
+
+    // 6b) Empty subjects — belt-and-braces: the pre-fix `None` path
+    //     used to sweep every FlowInstance on the perspective and
+    //     inject it into every prompt (unbounded). The fix makes empty
+    //     mean empty — no flow context, no unbounded sweep.
+    let empty = gather_active_flow_contexts(&perspective, &[] as &[String]).await;
+    assert!(
+        empty.is_empty(),
+        "empty subjects must not surface any flows, got {empty:?}"
     );
 
     // 7) The real payoff: feed the gathered context into the
