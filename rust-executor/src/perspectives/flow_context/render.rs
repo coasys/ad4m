@@ -102,14 +102,19 @@ pub fn reachable_next_states<'a>(flow: &'a SHACLFlow, current_state: &str) -> Ve
     out
 }
 
-/// Assemble a [`NextStateSummary`] from a `FlowState`. Pure. The
-/// `tokens` context is applied to `requires` string values — LLM sees
-/// concrete URIs, not `$flow.base`/`$flow.instance` sentinels.
-pub fn summarize_next_state(state: &FlowState, tokens: &FlowTokens) -> NextStateSummary {
+/// Assemble a [`NextStateSummary`] from a `FlowState`. Pure. `requires`
+/// renderings preserve their `$flow.base` / `$flow.instance` /
+/// `$did` tokens verbatim — the prompt-builder pairs them with a
+/// per-flow `tokens` legend so the LLM can look up what each token
+/// resolves to (Nico 2026-08-31: tokens in, tokens out, engine
+/// substitutes post-LLM). Slice 10.6 will call [`FlowTokens::substitute`]
+/// on any tokenised value the LLM emits back before it hits a query
+/// or a link.
+pub fn summarize_next_state(state: &FlowState) -> NextStateSummary {
     NextStateSummary {
         name: state.name.clone(),
         interpretation_hint: state.interpretation_hint.clone(),
-        requires_human_readable: render_requires_human_readable(state.requires.as_deref(), tokens),
+        requires_human_readable: render_requires_human_readable(state.requires.as_deref()),
         semantic_check: state.semantic_check.clone(),
         consensus_rule: state.consensus_rule.clone(),
     }
@@ -119,9 +124,11 @@ pub fn summarize_next_state(state: &FlowState, tokens: &FlowTokens) -> NextState
 /// scalar fields (URI + subject + current_state). Pure — the caller
 /// (loader) is responsible for loading those scalars off the graph.
 ///
-/// `requires` renderings on each reachable-next-state summary are
-/// substituted against the instance's own `(subject, instance_uri)` so
-/// tokens like `$flow.base` reach the LLM as concrete URIs.
+/// `requires` renderings on each reachable-next-state summary preserve
+/// the tokens (`$flow.base`, `$flow.instance`, `$did`). The prompt-builder
+/// pairs them with a per-flow legend telling the LLM what each token
+/// resolves to for THIS instance. Substitution happens only on the
+/// post-LLM engine side (slice 10.6), not at render time.
 pub fn summarize_flow_instance(
     flow: &SHACLFlow,
     instance_uri: impl Into<String>,
@@ -131,13 +138,9 @@ pub fn summarize_flow_instance(
     let current_state = current_state.into();
     let instance_uri = instance_uri.into();
     let subject = subject.into();
-    let tokens = FlowTokens {
-        subject: &subject,
-        instance_uri: &instance_uri,
-    };
     let reachable_next_states = reachable_next_states(flow, &current_state)
         .into_iter()
-        .map(|s| summarize_next_state(s, &tokens))
+        .map(summarize_next_state)
         .collect();
     FlowContext {
         flow_name: flow.name.clone(),
@@ -156,17 +159,19 @@ pub fn summarize_flow_instance(
 ///
 /// The rendering is deliberately terse (one sentence per query) so the
 /// composed prompt scales linearly with the number of active flows.
-pub fn render_requires_human_readable(
-    requires: Option<&[ModelQuery]>,
-    tokens: &FlowTokens,
-) -> String {
+///
+/// Tokens (`$flow.base`, `$flow.instance`, `$did`) are preserved as
+/// written — the prompt-builder pairs them with a per-flow `tokens`
+/// legend, and the post-LLM engine substitutes them before running any
+/// query (Nico 2026-08-31: tokens in, tokens out, engine substitutes).
+pub fn render_requires_human_readable(requires: Option<&[ModelQuery]>) -> String {
     let Some(qs) = requires else {
         return String::new();
     };
     if qs.is_empty() {
         return String::new();
     }
-    let sentences: Vec<String> = qs.iter().map(|q| render_model_query(q, tokens)).collect();
+    let sentences: Vec<String> = qs.iter().map(render_model_query).collect();
     sentences.join(" AND ")
 }
 
@@ -182,10 +187,10 @@ pub fn render_requires_human_readable(
 ///   `didProperty` is set (role-gate marker for the LLM)
 /// - `[either <sub1>, or <sub2>, ...]` when `or` is set — recurses
 ///
-/// String values in `where` clauses pass through [`FlowTokens::substitute`]
-/// so `$flow.base` / `$flow.instance` reach the LLM as concrete URIs. Other
-/// value types stringify via `serde_json` unchanged.
-pub fn render_model_query(q: &ModelQuery, tokens: &FlowTokens) -> String {
+/// String values in `where` clauses are emitted verbatim, so template
+/// tokens (`$flow.base` / `$flow.instance` / `$did`) survive to the
+/// prompt and get resolved via the per-flow `tokens` legend.
+pub fn render_model_query(q: &ModelQuery) -> String {
     // Count clause — pluralize on n=1 vs n>1
     let noun = |n: u32| if n == 1 { "match" } else { "matches" };
     let count_clause = match q.count.as_ref() {
@@ -206,7 +211,7 @@ pub fn render_model_query(q: &ModelQuery, tokens: &FlowTokens) -> String {
         if !where_map.is_empty() {
             let clauses: Vec<String> = where_map
                 .iter()
-                .map(|(field, cond)| format!("{field} {}", render_property_condition(cond, tokens)))
+                .map(|(field, cond)| format!("{field} {}", render_property_condition(cond)))
                 .collect();
             out.push_str(" where ");
             out.push_str(&clauses.join(", "));
@@ -218,11 +223,10 @@ pub fn render_model_query(q: &ModelQuery, tokens: &FlowTokens) -> String {
         out.push_str(&format!(" (signed by the acting DID via {did_prop})"));
     }
 
-    // OR composition — recurse (same tokens flow through)
+    // OR composition — recurse (tokens preserved through)
     if let Some(alts) = q.or.as_ref() {
         if !alts.is_empty() {
-            let sub_sentences: Vec<String> =
-                alts.iter().map(|a| render_model_query(a, tokens)).collect();
+            let sub_sentences: Vec<String> = alts.iter().map(render_model_query).collect();
             out.push_str(" OR [");
             out.push_str(&sub_sentences.join(" | "));
             out.push(']');
@@ -234,20 +238,18 @@ pub fn render_model_query(q: &ModelQuery, tokens: &FlowTokens) -> String {
 
 /// English rendering of a single `PropertyCondition`. The scalar
 /// shorthands compile to `"= <value>"` — matches the flow-parser's
-/// runtime semantics.
-fn render_property_condition(cond: &PropertyCondition, tokens: &FlowTokens) -> String {
+/// runtime semantics. Template tokens embedded in string values are
+/// preserved verbatim.
+fn render_property_condition(cond: &PropertyCondition) -> String {
     match cond {
-        PropertyCondition::Str(s) => format!("= \"{}\"", tokens.substitute(s)),
+        PropertyCondition::Str(s) => format!("= \"{}\"", s),
         PropertyCondition::Num(n) => format!("= {n}"),
         PropertyCondition::Bool(b) => format!("= {b}"),
         PropertyCondition::Equals { equals } => {
-            format!("= {}", value_to_prompt_str(equals, tokens))
+            format!("= {}", value_to_prompt_str(equals))
         }
         PropertyCondition::In { one_of } => {
-            let items: Vec<String> = one_of
-                .iter()
-                .map(|v| value_to_prompt_str(v, tokens))
-                .collect();
+            let items: Vec<String> = one_of.iter().map(value_to_prompt_str).collect();
             format!("in [{}]", items.join(", "))
         }
         PropertyCondition::Exists { exists } => {
@@ -263,27 +265,26 @@ fn render_property_condition(cond: &PropertyCondition, tokens: &FlowTokens) -> S
 
 /// Compact stringification of a JSON value for prompt insertion —
 /// strings unquoted (so `= "Bob"` doesn't turn into `= "\"Bob\""`),
-/// everything else via `serde_json`. String values pass through
-/// [`FlowTokens::substitute`] so embedded `$flow.base` /
-/// `$flow.instance` land as concrete URIs.
-fn value_to_prompt_str(v: &serde_json::Value, tokens: &FlowTokens) -> String {
+/// everything else via `serde_json`. Template tokens inside string
+/// values pass through untouched.
+fn value_to_prompt_str(v: &serde_json::Value) -> String {
     match v {
-        serde_json::Value::String(s) => format!("\"{}\"", tokens.substitute(s)),
+        serde_json::Value::String(s) => format!("\"{}\"", s),
         _ => v.to_string(),
     }
 }
 
 /// English rendering of a consensus rule: `"1 signer"` or
 /// `"3 signers from role: <role sentence>"`. Used both flow-level and
-/// state-level.
-pub fn render_consensus_rule(rule: &ConsensusRule, tokens: &FlowTokens) -> String {
+/// state-level. Tokens inside the role-gate query are preserved.
+pub fn render_consensus_rule(rule: &ConsensusRule) -> String {
     let plural = if rule.n == 1 { "signer" } else { "signers" };
     match rule.from_role.as_ref() {
         None => format!("{} {plural}", rule.n),
         Some(role) => format!(
             "{} {plural} from role: {}",
             rule.n,
-            render_model_query(role, tokens)
+            render_model_query(role)
         ),
     }
 }
@@ -405,10 +406,7 @@ mod tests {
             class_name: "ad4m://Task".to_string(),
             ..Default::default()
         };
-        assert_eq!(
-            render_model_query(&q, &FlowTokens::none()),
-            "at least 1 match of ad4m://Task"
-        );
+        assert_eq!(render_model_query(&q), "at least 1 match of ad4m://Task");
     }
 
     #[test]
@@ -424,10 +422,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert_eq!(
-            render_model_query(&q, &FlowTokens::none()),
-            "at least 1 match of ad4m://Task"
-        );
+        assert_eq!(render_model_query(&q), "at least 1 match of ad4m://Task");
 
         let q_max_one = ModelQuery {
             class_name: "ad4m://Task".to_string(),
@@ -438,7 +433,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_model_query(&q_max_one, &FlowTokens::none()),
+            render_model_query(&q_max_one),
             "at most 1 match of ad4m://Task"
         );
     }
@@ -454,7 +449,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_model_query(&q_min, &FlowTokens::none()),
+            render_model_query(&q_min),
             "at least 3 matches of ad4m://Task"
         );
 
@@ -467,7 +462,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_model_query(&q_max, &FlowTokens::none()),
+            render_model_query(&q_max),
             "at most 2 matches of ad4m://Task"
         );
 
@@ -480,7 +475,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_model_query(&q_both, &FlowTokens::none()),
+            render_model_query(&q_both),
             "at least 1, at most 3 matches of ad4m://Task"
         );
     }
@@ -509,7 +504,7 @@ mod tests {
             r#where: Some(where_map),
             ..Default::default()
         };
-        let out = render_model_query(&q, &FlowTokens::none());
+        let out = render_model_query(&q);
         // BTreeMap iteration order is alphabetical.
         assert!(
             out.contains(
@@ -528,7 +523,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            render_model_query(&q, &FlowTokens::none()),
+            render_model_query(&q),
             "at least 1 match of ad4m://Reviewer (signed by the acting DID via did)"
         );
     }
@@ -550,7 +545,7 @@ mod tests {
             or: Some(vec![alt1, alt2]),
             ..Default::default()
         };
-        let out = render_model_query(&q, &FlowTokens::none());
+        let out = render_model_query(&q);
         assert!(
             out.starts_with("at least 1 match of ad4m://Approver"),
             "outer query rendered first: {out}",
@@ -606,9 +601,11 @@ mod tests {
     }
 
     #[test]
-    fn render_model_query_substitutes_flow_base_in_where_string_value() {
-        // J#4: `$flow.base` and `$flow.instance` in a `where` string value
-        // reach the LLM as concrete URIs, not the raw sentinel.
+    fn render_model_query_preserves_flow_tokens_in_where_string_value() {
+        // Nico 2026-08-31: tokens in, tokens out. `$flow.base` and
+        // `$flow.instance` survive rendering verbatim so the prompt-builder
+        // can carry the concrete URIs in a separate legend and the engine
+        // can substitute post-LLM (slice 10.6).
         let mut where_map: BTreeMap<String, PropertyCondition> = BTreeMap::new();
         where_map.insert(
             "forTask".to_string(),
@@ -623,33 +620,21 @@ mod tests {
             r#where: Some(where_map),
             ..Default::default()
         };
-        let tokens = FlowTokens {
-            subject: "ad4m://task/foo",
-            instance_uri: "ad4m://flow/inst-42",
-        };
-        let out = render_model_query(&q, &tokens);
+        let out = render_model_query(&q);
         assert!(
-            out.contains("forTask = \"ad4m://task/foo\""),
-            "$flow.base substituted in where value: {out}",
+            out.contains("forTask = \"$flow.base\""),
+            "$flow.base preserved verbatim: {out}",
         );
         assert!(
-            out.contains("onInstance = \"ad4m://flow/inst-42\""),
-            "$flow.instance substituted in where value: {out}",
-        );
-        assert!(
-            !out.contains("$flow.base"),
-            "sentinel token must not reach the prompt: {out}",
-        );
-        assert!(
-            !out.contains("$flow.instance"),
-            "sentinel token must not reach the prompt: {out}",
+            out.contains("onInstance = \"$flow.instance\""),
+            "$flow.instance preserved verbatim: {out}",
         );
     }
 
     #[test]
-    fn render_model_query_substitutes_tokens_in_equals_and_in_variants() {
-        // Object-form `equals` + `in` value lists — both paths go through
-        // `value_to_prompt_str`, which must substitute string values.
+    fn render_model_query_preserves_flow_tokens_in_equals_and_in_variants() {
+        // Object-form `equals` + `in` value lists must also preserve
+        // tokens without substituting them.
         let mut where_map: BTreeMap<String, PropertyCondition> = BTreeMap::new();
         where_map.insert(
             "parentBase".to_string(),
@@ -671,25 +656,21 @@ mod tests {
             r#where: Some(where_map),
             ..Default::default()
         };
-        let tokens = FlowTokens {
-            subject: "ad4m://task/foo",
-            instance_uri: "",
-        };
-        let out = render_model_query(&q, &tokens);
+        let out = render_model_query(&q);
         assert!(
-            out.contains("parentBase = \"ad4m://task/foo\""),
-            "equals-form substituted: {out}",
+            out.contains("parentBase = \"$flow.base\""),
+            "equals-form token preserved: {out}",
         );
         assert!(
-            out.contains("anchor in [\"ad4m://task/foo\", \"literal-value\"]"),
-            "in-list substituted per-element: {out}",
+            out.contains("anchor in [\"$flow.base\", \"literal-value\"]"),
+            "in-list token preserved per-element: {out}",
         );
     }
 
     #[test]
-    fn render_model_query_substitutes_tokens_recursively_through_or() {
-        // The `or` branch recurses into `render_model_query` and must
-        // carry the same tokens context.
+    fn render_model_query_preserves_flow_tokens_recursively_through_or() {
+        // The `or` branch recurses into `render_model_query` — tokens
+        // inside `or` alternatives must survive the same way.
         let alt = ModelQuery {
             class_name: "coasys://Scope".to_string(),
             r#where: Some({
@@ -707,14 +688,10 @@ mod tests {
             or: Some(vec![alt]),
             ..Default::default()
         };
-        let tokens = FlowTokens {
-            subject: "ad4m://task/foo",
-            instance_uri: "",
-        };
-        let out = render_model_query(&q, &tokens);
+        let out = render_model_query(&q);
         assert!(
-            out.contains("forTask = \"ad4m://task/foo\""),
-            "OR branch inherits substitution context: {out}",
+            out.contains("forTask = \"$flow.base\""),
+            "OR branch preserves token: {out}",
         );
     }
 
@@ -722,18 +699,12 @@ mod tests {
 
     #[test]
     fn render_requires_none_is_empty_string() {
-        assert_eq!(
-            render_requires_human_readable(None, &FlowTokens::none()),
-            ""
-        );
+        assert_eq!(render_requires_human_readable(None), "");
     }
 
     #[test]
     fn render_requires_empty_slice_is_empty_string() {
-        assert_eq!(
-            render_requires_human_readable(Some(&[]), &FlowTokens::none()),
-            ""
-        );
+        assert_eq!(render_requires_human_readable(Some(&[])), "");
     }
 
     #[test]
@@ -752,7 +723,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let out = render_requires_human_readable(Some(&qs), &FlowTokens::none());
+        let out = render_requires_human_readable(Some(&qs));
         assert_eq!(
             out,
             "at least 2 matches of ad4m://Perspective AND at least 1 match of ad4m://Tension"
@@ -767,10 +738,7 @@ mod tests {
             n: 1,
             from_role: None,
         };
-        assert_eq!(
-            render_consensus_rule(&rule, &FlowTokens::none()),
-            "1 signer"
-        );
+        assert_eq!(render_consensus_rule(&rule), "1 signer");
     }
 
     #[test]
@@ -779,10 +747,7 @@ mod tests {
             n: 3,
             from_role: None,
         };
-        assert_eq!(
-            render_consensus_rule(&rule, &FlowTokens::none()),
-            "3 signers"
-        );
+        assert_eq!(render_consensus_rule(&rule), "3 signers");
     }
 
     #[test]
@@ -796,7 +761,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            render_consensus_rule(&rule, &FlowTokens::none()),
+            render_consensus_rule(&rule),
             "2 signers from role: at least 1 match of ad4m://Reviewer (signed by the acting DID via did)"
         );
     }
@@ -817,7 +782,7 @@ mod tests {
         }]);
         s.semantic_check = Some("Does the scope match what was actually agreed?".to_string());
 
-        let sum = summarize_next_state(&s, &FlowTokens::none());
+        let sum = summarize_next_state(&s);
         assert_eq!(sum.name, "scoped");
         assert_eq!(
             sum.interpretation_hint.as_deref(),
@@ -864,10 +829,12 @@ mod tests {
     }
 
     #[test]
-    fn summarize_flow_instance_substitutes_tokens_in_reachable_states_requires() {
-        // J#4 end-to-end: a next-state's `requires` clause referencing
-        // `$flow.base` / `$flow.instance` gets substituted with the
-        // instance's own scalars — no sentinel reaches the prompt.
+    fn summarize_flow_instance_preserves_tokens_in_reachable_states_requires() {
+        // Nico 2026-08-31: `requires` renderings on reachable next-states
+        // preserve `$flow.base` / `$flow.instance` verbatim. The prompt-
+        // builder pairs each flow entry with a per-instance `tokens`
+        // legend so the LLM can resolve the symbolic reference; the
+        // post-LLM engine (slice 10.6) substitutes on the way out.
         let mut flow = delivery_flow();
         let mut where_map: BTreeMap<String, PropertyCondition> = BTreeMap::new();
         where_map.insert(
@@ -897,20 +864,15 @@ mod tests {
         assert!(
             scoped
                 .requires_human_readable
-                .contains("forTask = \"ad4m://task/foo\""),
-            "$flow.base substituted: {}",
+                .contains("forTask = \"$flow.base\""),
+            "$flow.base preserved verbatim: {}",
             scoped.requires_human_readable,
         );
         assert!(
             scoped
                 .requires_human_readable
-                .contains("onInstance = \"ad4m://flow/instance/inst-42\""),
-            "$flow.instance substituted: {}",
-            scoped.requires_human_readable,
-        );
-        assert!(
-            !scoped.requires_human_readable.contains("$flow.base"),
-            "no sentinel token leaks: {}",
+                .contains("onInstance = \"$flow.instance\""),
+            "$flow.instance preserved verbatim: {}",
             scoped.requires_human_readable,
         );
     }

@@ -2,7 +2,7 @@ use super::{
     class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
 };
 use crate::db::Ad4mDb;
-use crate::perspectives::flow_context::{render_consensus_rule, FlowContext, FlowTokens};
+use crate::perspectives::flow_context::{render_consensus_rule, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
 use std::collections::HashMap;
@@ -217,17 +217,25 @@ pub fn build_interpretation_input(
 /// alone" signal (distinct from the field being absent, which shouldn't happen
 /// for a well-formed FlowContext).
 fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
-    // Tokens for this specific flow instance — substitute `$flow.base` /
-    // `$flow.instance` in consensus-rule role-gates (J#4). Note:
-    // `requires_human_readable` on each next-state has already been
-    // substituted by `summarize_next_state` when the FlowContext was
-    // built, so we don't touch it again here.
-    let tokens = FlowTokens::from_context(fc);
+    // Template tokens (`$flow.base`, `$flow.instance`) inside `requires` /
+    // `consensus` renderings are preserved verbatim. The `tokens` legend
+    // below gives the LLM the concrete URI each one resolves to for THIS
+    // instance, so the prompt stays compact and the LLM can either use
+    // the token symbolically OR the concrete URI when it emits back
+    // (Nico 2026-08-31: tokens in, tokens out, engine substitutes
+    // post-LLM in slice 10.6).
     let mut obj = serde_json::Map::new();
     obj.insert("instance".into(), serde_json::json!(fc.instance_uri));
     obj.insert("subject".into(), serde_json::json!(fc.subject));
     obj.insert("flow".into(), serde_json::json!(fc.flow_name));
     obj.insert("currentState".into(), serde_json::json!(fc.current_state));
+    obj.insert(
+        "tokens".into(),
+        serde_json::json!({
+            "$flow.base": fc.subject,
+            "$flow.instance": fc.instance_uri,
+        }),
+    );
     if let Some(hint) = fc.flow_interpretation_hint.as_ref() {
         if !hint.is_empty() {
             obj.insert("hint".into(), serde_json::json!(hint));
@@ -236,7 +244,7 @@ fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
     if let Some(rule) = fc.consensus_rule.as_ref() {
         obj.insert(
             "consensus".into(),
-            serde_json::json!(render_consensus_rule(rule, &tokens)),
+            serde_json::json!(render_consensus_rule(rule)),
         );
     }
     let next: Vec<serde_json::Value> = fc
@@ -262,7 +270,7 @@ fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
             if let Some(rule) = ns.consensus_rule.as_ref() {
                 o.insert(
                     "consensus".into(),
-                    serde_json::json!(render_consensus_rule(rule, &tokens)),
+                    serde_json::json!(render_consensus_rule(rule)),
                 );
             }
             serde_json::Value::Object(o)
@@ -301,17 +309,25 @@ You receive a JSON object with these fields:
   - `active_flows` (OPTIONAL — present only when flows are running on this
     scope): an array of live `FlowInstance` summaries. Each entry has an
     `instance` URI, the `subject` base expression it rides on, the `flow`
-    name, the `currentState`, an optional flow-level `hint`, an optional
-    default `consensus` rule, and a `nextStates` array. Every `nextStates`
-    entry carries a `name`, an optional `hint` (when to advance to this
-    state), a `requires` field (English rendering of the evidence guard —
-    the empty string means \"no structural guard, decide on hint alone\"),
-    an optional `semanticCheck` (extra 2nd-pass hint), and an optional
-    per-state `consensus` override. Read this section BEFORE deciding
-    what to extract: when the transcript matches a `nextStates` entry's
-    `hint`, prefer extracting instances that will satisfy its `requires`
-    guard so the flow can advance. When `active_flows` is absent, extract
-    freely on the class hints alone.
+    name, the `currentState`, a `tokens` legend, an optional flow-level
+    `hint`, an optional default `consensus` rule, and a `nextStates`
+    array. Every `nextStates` entry carries a `name`, an optional `hint`
+    (when to advance to this state), a `requires` field (English
+    rendering of the evidence guard — the empty string means \"no
+    structural guard, decide on hint alone\"), an optional
+    `semanticCheck` (extra 2nd-pass hint), and an optional per-state
+    `consensus` override. The `tokens` legend maps abstract references
+    (`$flow.base` = this flow's subject; `$flow.instance` = the flow
+    instance URI) to their concrete values; guard text uses those tokens
+    symbolically so you don't have to carry long URIs in your reasoning.
+    You may either read `where forTask = \"$flow.base\"` as \"where the
+    forTask matches the flow's subject\" and emit references either way
+    — as the token or as the URI — the engine substitutes tokens on the
+    way out. Read this section BEFORE deciding what to extract: when the
+    transcript matches a `nextStates` entry's `hint`, prefer extracting
+    instances that will satisfy its `requires` guard so the flow can
+    advance. When `active_flows` is absent, extract freely on the class
+    hints alone.
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...relations}`,
 where fields carry strings drawn from what participants actually said or
@@ -988,6 +1004,17 @@ mod tests {
         assert_eq!(fc["currentState"], "doing");
         assert_eq!(fc["hint"], "How this task moves from ready to done");
         assert_eq!(fc["consensus"], "1 signer");
+        // Tokens legend — maps abstract references to concrete URIs so
+        // the LLM can read `$flow.base` in `requires` sentences and know
+        // what it resolves to (Nico 2026-08-31).
+        assert_eq!(
+            fc["tokens"]["$flow.base"], "ad4m://tasks/onboard-users",
+            "tokens legend must map $flow.base to the instance's subject"
+        );
+        assert_eq!(
+            fc["tokens"]["$flow.instance"], "ad4m://flow/instance/abc",
+            "tokens legend must map $flow.instance to the instance's URI"
+        );
 
         let ns = fc["nextStates"]
             .as_array()
