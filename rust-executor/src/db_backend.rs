@@ -329,3 +329,166 @@ impl DbBackend for SharedDb {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shared_db_get() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("GET", "/did:test/settings/theme")
+            .match_header("Authorization", "Bearer db-tok")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": "{\"value\":\"dark\"}"}"#)
+            .create();
+
+        let db = SharedDb::new(url, "db-tok".to_string());
+        let result = db.get("did:test", "settings", "theme").unwrap();
+        assert!(result.is_some());
+        assert_eq!(
+            result.unwrap().get("value").unwrap().as_str().unwrap(),
+            "dark"
+        );
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_db_get_not_found() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("GET", "/did:test/settings/missing")
+            .with_status(404)
+            .create();
+
+        let db = SharedDb::new(url, "db-tok".to_string());
+        let result = db.get("did:test", "settings", "missing").unwrap();
+        assert!(result.is_none());
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_db_list() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("GET", "/did:test/users")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"rows":[
+                    {"rowId":"u1","data":"{\"email\":\"a@b.com\"}"},
+                    {"rowId":"u2","data":"{\"email\":\"c@d.com\"}"}
+                ]}"#,
+            )
+            .create();
+
+        let db = SharedDb::new(url, "db-tok".to_string());
+        let result = db.list("did:test", "users").unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].get("email").unwrap().as_str().unwrap(), "a@b.com");
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_db_upsert() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("POST", "/did:test/settings")
+            .match_header("Authorization", "Bearer db-tok")
+            .with_status(200)
+            .with_body("{}")
+            .create();
+
+        let db = SharedDb::new(url, "db-tok".to_string());
+        let data = serde_json::json!({"value": "light"});
+        let result = db.upsert("did:test", "settings", "theme", data);
+        assert!(result.is_ok());
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_db_delete() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("DELETE", "/did:test/settings/theme")
+            .match_header("Authorization", "Bearer db-tok")
+            .with_status(200)
+            .with_body("{}")
+            .create();
+
+        let db = SharedDb::new(url, "db-tok".to_string());
+        let result = db.delete("did:test", "settings", "theme");
+        assert!(result.is_ok());
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_db_cache_invalidated_by_upsert() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock_get1 = server
+            .mock("GET", "/did:test/settings/cached")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": "{\"v\":1}"}"#)
+            .create();
+
+        let db = SharedDb::new(url.clone(), "db-tok".to_string());
+        let r1 = db.get("did:test", "settings", "cached").unwrap();
+        assert_eq!(r1.unwrap().get("v").unwrap().as_i64().unwrap(), 1);
+        mock_get1.assert();
+
+        let mock_upsert = server
+            .mock("POST", "/did:test/settings")
+            .with_status(200)
+            .with_body("{}")
+            .create();
+        db.upsert(
+            "did:test",
+            "settings",
+            "cached",
+            serde_json::json!({"v": 2}),
+        )
+        .unwrap();
+        mock_upsert.assert();
+
+        let mock_get2 = server
+            .mock("GET", "/did:test/settings/cached")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"data": "{\"v\":2}"}"#)
+            .create();
+        let r2 = db.get("did:test", "settings", "cached").unwrap();
+        assert_eq!(r2.unwrap().get("v").unwrap().as_i64().unwrap(), 2);
+        mock_get2.assert();
+    }
+
+    #[test]
+    fn test_shared_db_server_error() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("GET", "/did:test/settings/err")
+            .with_status(500)
+            .create();
+
+        let db = SharedDb::new(url, "db-tok".to_string());
+        let result = db.get("did:test", "settings", "err");
+        assert!(result.is_err());
+        mock.assert();
+    }
+}

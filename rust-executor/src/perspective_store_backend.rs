@@ -335,3 +335,156 @@ impl PerspectiveStoreBackend for SharedPerspectiveStore {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_link() -> SyncLink {
+        SyncLink {
+            link_hash: "hash1".into(),
+            source: "src".into(),
+            predicate: "pred".into(),
+            target: "tgt".into(),
+            author: "did:test:author".into(),
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            proof: None,
+            status: None,
+        }
+    }
+
+    #[test]
+    fn test_shared_perspective_store_push_links() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("POST", "/did:test/persp-1/links")
+            .match_header("Authorization", "Bearer ps-tok")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"inserted":1}"#)
+            .create();
+
+        let store = SharedPerspectiveStore::new(url, "ps-tok".to_string());
+        let result = store.push_links("did:test", "persp-1", &[test_link()]);
+        assert_eq!(result.unwrap(), 1);
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_perspective_store_push_empty() {
+        let store = SharedPerspectiveStore::new("http://unused".into(), "tok".into());
+        let result = store.push_links("did:test", "persp-1", &[]);
+        assert_eq!(result.unwrap(), 0);
+    }
+
+    #[test]
+    fn test_shared_perspective_store_remove_links() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("DELETE", "/did:test/persp-1/links")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"removed":2}"#)
+            .create();
+
+        let store = SharedPerspectiveStore::new(url, "ps-tok".to_string());
+        let result = store.remove_links("did:test", "persp-1", &["h1".into(), "h2".into()]);
+        assert_eq!(result.unwrap(), 2);
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_perspective_store_fetch_links() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("GET", "/did:test/persp-1/links")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"links":[{"linkHash":"h1","source":"s","predicate":"p","target":"t","author":"a","timestamp":"ts"}]}"#,
+            )
+            .create();
+
+        let store = SharedPerspectiveStore::new(url, "ps-tok".to_string());
+        let links = store.fetch_links("did:test", "persp-1", None).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].link_hash, "h1");
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_perspective_store_fetch_paginated() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock_p1 = server
+            .mock("GET", "/did:test/persp-1/links")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("limit".into(), "1000".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"links":[{"linkHash":"h1","source":"s","predicate":"p","target":"t","author":"a","timestamp":"ts"}],"nextCursor":"cur1"}"#,
+            )
+            .create();
+
+        let mock_p2 = server
+            .mock("GET", "/did:test/persp-1/links")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("cursor".into(), "cur1".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "1000".into()),
+            ]))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"links":[{"linkHash":"h2","source":"s","predicate":"p","target":"t","author":"a","timestamp":"ts"}]}"#,
+            )
+            .create();
+
+        let store = SharedPerspectiveStore::new(url, "ps-tok".to_string());
+        let links = store.fetch_links("did:test", "persp-1", None).unwrap();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].link_hash, "h1");
+        assert_eq!(links[1].link_hash, "h2");
+        mock_p1.assert();
+        mock_p2.assert();
+    }
+
+    #[test]
+    fn test_shared_perspective_store_server_error() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("POST", "/did:test/persp-1/links")
+            .with_status(500)
+            .create();
+
+        let store = SharedPerspectiveStore::new(url, "ps-tok".to_string());
+        let result = store.push_links("did:test", "persp-1", &[test_link()]);
+        assert!(result.is_err());
+        mock.assert();
+    }
+
+    #[test]
+    fn test_local_perspective_store_push_returns_count() {
+        let store = LocalPerspectiveStore::new();
+        let links = vec![test_link(), test_link()];
+        let result = store.push_links("did:test", "persp-1", &links);
+        assert_eq!(result.unwrap(), 2);
+    }
+
+    #[test]
+    fn test_local_perspective_store_fetch_returns_empty() {
+        let store = LocalPerspectiveStore::new();
+        let result = store.fetch_links("did:test", "persp-1", None);
+        assert!(result.unwrap().is_empty());
+    }
+}
