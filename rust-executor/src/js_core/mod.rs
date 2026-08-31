@@ -1,6 +1,6 @@
 use ::futures::Future;
 use deno_core::anyhow::anyhow;
-use deno_core::error::{AnyError, CoreError};
+use deno_core::error::AnyError;
 use deno_core::{resolve_url_or_path, v8, PollEventLoopOptions};
 use deno_fs::RealFs;
 use deno_resolver::npm::DenoInNpmPackageChecker;
