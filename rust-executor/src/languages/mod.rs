@@ -436,7 +436,7 @@ impl LanguageController {
     fn calculate_language_hash(&self, bundle_content: &str) -> String {
         use cid::Cid;
         use multibase::Base;
-        use multihash::{Code, MultihashDigest};
+        use multihash_codetable::{Code, MultihashDigest};
 
         // Compute the SHA-256 multihash
         let multihash = Code::Sha2_256.digest(bundle_content.as_bytes());
