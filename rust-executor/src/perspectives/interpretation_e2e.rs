@@ -1118,7 +1118,13 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
     let channel = "soa://channel/general";
     let contains = "ns://contains";
     let decoy_base = "soa://other/subgroup/decoy";
-    let attempts = 3u8;
+    // Four sequential LLM passes with multi-clause assertions in each — every
+    // pass has its own chance to flake (empty summary, unexpected merge on
+    // topic shift, off-vocabulary word). 8 attempts matches the tail-tolerance
+    // of `harness_intention_links_to_seeded_beliefs`; 3 was under the p99 on
+    // gemma3:12b (see CI job 24601 on `5605119aa` — three attempts back-to-back
+    // failed on independent clauses).
+    let attempts = 8u8;
     let mut last_err: Option<String> = None;
 
     for attempt in 1..=attempts {
@@ -1322,72 +1328,109 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
 async fn e2e_semantic_dedup_drops_reworded_duplicate() {
     use crate::perspectives::interpretation::DedupStrategy;
 
-    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
-    // Semantic dedup embeds identity strings through AIService's own (local,
-    // CPU) embedding model — register it before the run.
-    super::interpretation_test_support::register_interpretation_embedding_model().await;
-    let task_shape = &shapes[0];
+    // Retry wrapper matches the pattern already used in this file for other
+    // real-LLM tests (see `e2e_flux_grouping_creates_new_subgroup_on_topic_shift`
+    // and `e2e_flux_grouping_scoped_incremental_lifecycle`). Gemma3-12B is
+    // non-deterministic on the "extract two distinct tasks from two short
+    // transcript lines" prompt: on the failing attempt the model emitted
+    // zero placements ("e2e placements: 0 instance(s)"), so the new CI-docs
+    // task never landed and the count assertion caught it as `{"task": 1}`.
+    // 3 attempts matches the neighbouring tests' guard against this LLM
+    // non-determinism — cheap on the real-LLM path (median first-attempt
+    // success), sufficient headroom for tail rejections.
+    let attempts = 3u8;
+    let mut last_err: Option<String> = None;
+    for i in 1..=attempts {
+        let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+        // Semantic dedup embeds identity strings through AIService's own (local,
+        // CPU) embedding model — register it before the run.
+        super::interpretation_test_support::register_interpretation_embedding_model().await;
+        let task_shape = &shapes[0];
 
-    // Seed with one wording; transcript uses a different wording for the SAME
-    // work + genuinely-new work. String-normalize would keep the rewording.
-    let seeded_title = "Finish the WebRTC call module";
-    seed_instance(
-        &mut perspective,
-        &ctx,
-        task_shape,
-        "soa://existing/task/webrtc",
-        seeded_title,
-    )
-    .await;
+        // Seed with one wording; transcript uses a different wording for the SAME
+        // work + genuinely-new work. String-normalize would keep the rewording.
+        let seeded_title = "Finish the WebRTC call module";
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            task_shape,
+            "soa://existing/task/webrtc",
+            seeded_title,
+        )
+        .await;
 
-    let placements = run_interpretation_e2e_with_strategy(
-        &mut perspective,
-        &shapes,
-        &[
-            (
-                "Nico",
-                "Reminder: James still needs to wrap up the WebRTC calling module for the app.",
-            ),
-            ("Josh", "I'll update the CI documentation this evening."),
-        ],
-        &ctx,
-        &DedupStrategy::semantic_from_env(0.75),
-    )
-    .await;
-    assert_persisted(&perspective, &shapes, &placements).await;
+        let placements = run_interpretation_e2e_with_strategy(
+            &mut perspective,
+            &shapes,
+            &[
+                (
+                    "Nico",
+                    "Reminder: James still needs to wrap up the WebRTC calling module for the app.",
+                ),
+                ("Josh", "I'll update the CI documentation this evening."),
+            ],
+            &ctx,
+            &DedupStrategy::semantic_from_env(0.75),
+        )
+        .await;
+        assert_persisted(&perspective, &shapes, &placements).await;
 
-    // No fresh instance under `soa://ext/` may carry a title whose embedding
-    // is close to the seeded title. Rather than re-embed here, we just check
-    // that no *newly-minted* task exists whose title lexically overlaps the
-    // seeded one on the key salient tokens ("webrtc" + a "call/calling" or
-    // "module"/"wrap up" verb). If the semantic filter did its job, the LLM's
-    // reworded proposal was dropped BEFORE it reached the write path.
-    let rows = model_instances(&perspective, "Task", &["title"]).await;
-    let minted_dup: Vec<&serde_json::Value> = rows
-        .iter()
-        .filter(|r| {
-            r.get("id")
-                .and_then(|i| i.as_str())
-                .map(|id| id.starts_with("soa://ext/"))
-                .unwrap_or(false)
-                && r.get("title")
-                    .and_then(|t| t.as_str())
-                    .map(|t| {
-                        let l = t.to_lowercase();
-                        l.contains("webrtc") && (l.contains("call") || l.contains("module"))
-                    })
+        macro_rules! fail_attempt {
+            ($($arg:tt)*) => {{
+                last_err = Some(format!("attempt {i}/{attempts}: {}", format!($($arg)*)));
+                continue;
+            }};
+        }
+
+        // No fresh instance under `soa://ext/` may carry a title whose embedding
+        // is close to the seeded title. Rather than re-embed here, we just check
+        // that no *newly-minted* task exists whose title lexically overlaps the
+        // seeded one on the key salient tokens ("webrtc" + a "call/calling" or
+        // "module"/"wrap up" verb). If the semantic filter did its job, the LLM's
+        // reworded proposal was dropped BEFORE it reached the write path. This is
+        // a HARD assertion — a false negative here is the actual bug the test
+        // exists to catch, so we do NOT retry past it.
+        let rows = model_instances(&perspective, "Task", &["title"]).await;
+        let minted_dup: Vec<&serde_json::Value> = rows
+            .iter()
+            .filter(|r| {
+                r.get("id")
+                    .and_then(|i| i.as_str())
+                    .map(|id| id.starts_with("soa://ext/"))
                     .unwrap_or(false)
-        })
-        .collect();
-    assert!(
-        minted_dup.is_empty(),
-        "semantic dedup must drop the reworded WebRTC task; freshly-minted duplicates = {minted_dup:#?}"
-    );
-    // The genuinely-new CI-docs task should still land.
-    let counts = graph_count_by_type(&perspective, &shapes).await;
-    assert!(
-        counts.get("task").copied().unwrap_or(0) >= 2,
-        "expected the seeded task + the new CI-docs task; got {counts:?}"
+                    && r.get("title")
+                        .and_then(|t| t.as_str())
+                        .map(|t| {
+                            let l = t.to_lowercase();
+                            l.contains("webrtc") && (l.contains("call") || l.contains("module"))
+                        })
+                        .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            minted_dup.is_empty(),
+            "semantic dedup must drop the reworded WebRTC task; freshly-minted duplicates = {minted_dup:#?}"
+        );
+
+        // The genuinely-new CI-docs task should still land. This one IS subject
+        // to LLM non-determinism (the model can decide the CI-docs turn is
+        // small-talk on any given attempt), so a failure here retries — the
+        // retry is what turns a probabilistic assertion into a reliable one.
+        let counts = graph_count_by_type(&perspective, &shapes).await;
+        if counts.get("task").copied().unwrap_or(0) < 2 {
+            fail_attempt!(
+                "expected the seeded task + the new CI-docs task; got {counts:?} \
+                 (placements={} — 0 typically means the model emitted no new tasks)",
+                placements.len()
+            );
+        }
+
+        // All assertions held on this attempt.
+        return;
+    }
+    panic!(
+        "semantic dedup e2e failed after {attempts} attempts: {}",
+        last_err.unwrap_or_default()
     );
 }
 

@@ -225,6 +225,11 @@ async fn harness_intention_links_to_seeded_beliefs() {
         Vec<(String, Vec<crate::types::Link>)>,
     )> = None;
 
+    let seeded_lower: Vec<String> = SEEDED_BELIEF_TITLES
+        .iter()
+        .map(|t| t.to_lowercase())
+        .collect();
+
     for attempt in 1..=MAX_ATTEMPTS {
         let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[
             ("Belief", BELIEF_SDNA),
@@ -282,9 +287,45 @@ async fn harness_intention_links_to_seeded_beliefs() {
             }
         }
 
+        // Also check for the "no seeded belief recreated by title"
+        // invariant *inside* the retry — otherwise the loop can exit
+        // early on `linked_to_seeded=true` while the same attempt
+        // ALSO recreated a seeded title, and the panic at the outer
+        // assertion (job 24186) becomes non-retryable. Gemma3-12B
+        // sometimes back-links AND creates a new belief in the same
+        // pass; both outcomes are LLM non-determinism, so both need
+        // to gate the exit.
+        let mut recreated_seeded_title = false;
+        for (base, _) in &placements {
+            if !base.starts_with("soa://ext/") {
+                continue;
+            }
+            let links = perspective
+                .get_links(&LinkQuery {
+                    source: Some(base.clone()),
+                    predicate: Some("ns://title".into()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links title (dup check inside retry)");
+            for l in &links {
+                if let serde_json::Value::String(t) =
+                    crate::perspectives::model_query::utils::parse_literal_value(&l.data.target)
+                {
+                    if seeded_lower.iter().any(|s| s == &t.to_lowercase()) {
+                        recreated_seeded_title = true;
+                        break;
+                    }
+                }
+            }
+            if recreated_seeded_title {
+                break;
+            }
+        }
+
         last = Some((perspective, shapes, placements));
 
-        if intentions >= 1 && linked_to_seeded {
+        if intentions >= 1 && linked_to_seeded && !recreated_seeded_title {
             if attempt > 1 {
                 eprintln!(
                     "[harness-e2e] relation-back-linking satisfied on attempt {attempt}/{MAX_ATTEMPTS}"
@@ -295,7 +336,7 @@ async fn harness_intention_links_to_seeded_beliefs() {
 
         eprintln!(
             "[harness-e2e] attempt {attempt}/{MAX_ATTEMPTS}: intentions={intentions} \
-             linked_to_seeded={linked_to_seeded}; retrying"
+             linked_to_seeded={linked_to_seeded} recreated_seeded_title={recreated_seeded_title}; retrying"
         );
     }
 
