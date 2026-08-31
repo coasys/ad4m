@@ -299,9 +299,21 @@ impl OrderingStrategy for LinkedListStrategy {
 /// link with `to_rfc3339_opts(SecondsFormat::Millis, true)`. `diff` compares
 /// projected members against stored ones by string, so a projection in any
 /// other format is not comparable with the data it is standing in for.
+///
+/// The fallback is unreachable for any clock this runs on — it needs a
+/// millisecond epoch outside chrono's calendar range — but it substitutes a
+/// timestamp the caller did not ask for, which would show up as a projection
+/// that silently disagrees with the links it stands in for. Say so if it ever
+/// fires.
 fn rfc3339_millis(ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(ms as i64)
-        .unwrap_or_else(chrono::Utc::now)
+        .unwrap_or_else(|| {
+            log::error!(
+                "ordering: timestamp {ms} is out of range for RFC3339 rendering; \
+                 projecting new members at the current time instead"
+            );
+            chrono::Utc::now()
+        })
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 

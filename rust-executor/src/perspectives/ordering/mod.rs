@@ -78,6 +78,11 @@ pub trait OrderingStrategy: Send + Sync {
     ) -> Vec<OrderingEntry>;
 
     /// The minimal entries that turn the current order into the desired one.
+    ///
+    /// `desired_items` is treated as a **set**: a relation is a set of links, so
+    /// a repeated item cannot be represented and the last of its positions is
+    /// the one that survives. An array with duplicates therefore reads back
+    /// deduplicated rather than being rejected.
     fn diff(
         &self,
         current_ordering: &[OrderingEntry],
@@ -90,6 +95,11 @@ pub trait OrderingStrategy: Send + Sync {
 
     /// An entry placing one new item at the end — for `addLink`, which has no
     /// array to diff against.
+    ///
+    /// The item is not assumed to be new: called for one that is already a
+    /// member, this reads as a move to the end, since the entry it returns
+    /// carries a fresh `pid` and supersedes the item's current position. A
+    /// caller wanting add-if-missing has to check membership itself.
     fn generate_append(
         &self,
         item_uri: &str,
