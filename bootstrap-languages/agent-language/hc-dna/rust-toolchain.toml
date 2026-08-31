@@ -1,0 +1,10 @@
+[toolchain]
+# Pinned to 1.95 for wasm32-unknown-unknown zome builds.
+# rustc 1.96+ ships with LLVM 22, whose wasm-ld no longer resolves
+# HDK/HDI host imports (__hc__*_1 symbols) as undefined even with
+# `-C link-arg=--import-undefined`, so integrity zomes fail to link.
+# Keep this until Holochain's wasm-guest crates (hdi, hdk,
+# holochain_wasmer_guest) are updated for LLVM 22's stricter rules.
+channel = "1.95"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

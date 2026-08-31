@@ -16,7 +16,6 @@ import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
-import { FlowInstance, FlowTransitionProposal } from "./FlowModels";
 import { Ad4mModel } from "../model/Ad4mModel";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
@@ -374,6 +373,7 @@ interface Parameter {
  * });
  * ```
  */
+
 export class PerspectiveProxy {
     /** Unique identifier of this perspective */
     uuid: string;
@@ -644,6 +644,25 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Stop an auto-processor by deleting its config.
+     *
+     * The registration is data — the watch loop reads the processor set back out of the
+     * perspective's graph on every tick — so deleting the config is what stops it, and there is
+     * nothing else to unregister. The config is `Shared`, so this stops the processor for the
+     * neighbourhood rather than only for this peer.
+     *
+     * Resolves `true` when there was a processor to remove and `false` when there was not; a
+     * processor another peer has already removed is not an error.
+     *
+     * The processor's `InterpretationRun` nodes stay: they are the record of what it did and the
+     * processed-turn cursor, so a processor later registered under the same id resumes where this
+     * one left off rather than re-reading every turn.
+     */
+    async removeAutoProcessor(processorId: string): Promise<boolean> {
+        return await this.#client.removeAutoProcessor(this.#handle.uuid, processorId)
+    }
+
+    /**
      * Pending interpretation overlays on this perspective — LLM suggestions the
      * §4 divergence gate staged rather than applied, awaiting human accept/reject.
      */
@@ -751,6 +770,41 @@ export class PerspectiveProxy {
      */
     async modelQuery(className: string, queryJson: string): Promise<{ instances: any[], totalCount: number }> {
         return await this.#client.modelQuery(this.#handle.uuid, className, queryJson);
+    }
+
+    /** Resolve each URI to the names of every subject class it is an instance of.
+     *
+     * The counterpart of {@link isSubjectInstance}, which asks the same question
+     * one class at a time. Without this, finding the class of an arbitrary URI
+     * meant looping over every registered class — a round trip each — and doing
+     * it again for every URI.
+     *
+     * Class membership in AD4M is structural — a URI belongs to a class when it
+     * carries that class's flags and required properties — so membership is **not
+     * exclusive**: an instance conforms to its parent classes, and to any
+     * unrelated class whose required set happens to be a subset of what it
+     * carries. Every match is returned.
+     *
+     * The list is ordered **most specific first**, meaning by the number of
+     * triples the class requires — a subclass requires everything its parent does
+     * and more — with ties broken alphabetically so that every peer answers
+     * identically. A caller that can only act on one class should take
+     * `classes[0]`, but that head is only a heuristic: it is arbitrary between two
+     * unrelated classes requiring the same number of triples, which is exactly
+     * the case the full list exists to expose.
+     *
+     * A URI is **absent from the result** when no *registered* class matched it.
+     * That covers two situations, and nothing here separates them: the URI may
+     * not be a subject instance at all, or it may be an instance of a class this
+     * perspective has not registered. Absence is used rather than an empty list
+     * because an empty list would claim the stronger thing — that the URI belongs
+     * to no class — which this cannot know.
+     *
+     * @param uris The expression URIs to classify.
+     */
+    async subjectClassesOf(uris: string[]): Promise<Record<string, string[]>> {
+        if (uris.length === 0) return {};
+        return await this.#client.subjectClassesOf(this.#handle.uuid, uris);
     }
 
     /**
@@ -1112,177 +1166,41 @@ export class PerspectiveProxy {
      * Returns all Social DNA flows that can be started from the given expression.
      *
      * Post-`flowable` retirement: a flow is a candidate iff its `inputTypes`
-     * declaration is compatible with the expression. A flow with no declared
-     * `inputTypes` (or one containing the `"any"` wildcard) matches every
-     * expression — same behaviour as the legacy `flowable === "any"` case.
-     * Concrete class-URI matching against the expression's runtime class is
-     * a follow-up (design doc §5 spawn engine).
+     * declaration is compatible with the expression. Matching rules:
+     * - Empty `inputTypes` or one containing the `"any"` wildcard → always
+     *   matches (same behaviour as the legacy `flowable === "any"` case).
+     * - Otherwise, at least one of the expression's registered subject-class
+     *   URIs (resolved via {@link subjectClassesOf}) must appear in
+     *   `inputTypes`. This is the concrete-type match the design doc's §5
+     *   spawn engine calls for; without it, a flow declaring
+     *   `inputTypes: ["Task"]` was previously *never* returned by
+     *   `availableFlows("some-task-uri")` — the entire point of typed
+     *   flows was silently unreachable (James PR #929 J#3).
+     *
+     * The expression is classified against the perspective's registered
+     * classes only. An expression whose class is not registered on this
+     * perspective matches no typed flow (absence, not falsehood — same
+     * discipline as {@link subjectClassesOf}); typed flows requiring
+     * unknown classes are still returned to their untyped-caller peers.
      */
     async availableFlows(exprAddr: string): Promise<string[]> {
         const allFlowNames = await this.sdnaFlows();
+        if (allFlowNames.length === 0) return [];
+        const classesOf = await this.subjectClassesOf([exprAddr]);
+        const exprClasses = classesOf[exprAddr] ?? [];
         const available: string[] = [];
         for (const name of allFlowNames) {
             const flow = await this.getFlow(name);
             if (!flow) continue;
             if (flow.inputTypes.length === 0 || flow.inputTypes.includes("any")) {
                 available.push(name);
+                continue;
+            }
+            if (exprClasses.some(cls => flow.inputTypes.includes(cls))) {
+                available.push(name);
             }
         }
         return available;
-    }
-
-    /**  Starts the Social DNA flow @param flowName on the expression @param exprAddr */
-    async startFlow(flowName: string, exprAddr: string) {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        if (flow.startAction.length === 0) throw `Flow "${flowName}" has no start action`;
-        await this.executeAction(flow.startAction, exprAddr, undefined)
-    }
-
-    /**
-     * v5-shaped flow instantiation (design doc §4.3). Mints a `FlowInstance`
-     * node on the graph tied to `baseExpression`, seeded at the flow's first
-     * declared state. Idempotently registers the hardwired `FlowInstance` and
-     * `FlowTransitionProposal` @Model classes on first call — the on-graph
-     * shape matches the Rust-side hardwired SDNA (parity-locked in
-     * `flow-instance.test.ts` / `flow-transition-proposal.test.ts`).
-     *
-     * The engine that fires transitions post-consensus (§7 / PR-sequence item
-     * 3) reads the returned instance's `currentState`; UIs subscribe via the
-     * `FlowInstance` wrapper class (§4.3, wrapper-side lands in the following
-     * slice).
-     *
-     * @param flowName - Name of a `SHACLFlow` already registered on the perspective
-     * @param baseExpression - URI of the subject expression the flow runs on
-     * @throws When the flow is unknown or has zero declared states (use the
-     *   zero-state action-flow path — coming with §6.3 fireAction — for that shape).
-     * @returns The freshly-minted `FlowInstance` (hydrated).
-     */
-    async startFlowInstance(flowName: string, baseExpression: string): Promise<FlowInstance> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        if (flow.states.length === 0) {
-            throw `Flow "${flowName}" has no states — startFlowInstance is for stateful flows only; zero-state flows fire via runFlowAction (§6.3)`;
-        }
-        // Register the hardwired runtime classes if this is the first flow
-        // instance on the perspective. registerAll is a single batched RPC and
-        // no-ops when both classes are already present.
-        await Ad4mModel.registerAll(this, [FlowInstance, FlowTransitionProposal]);
-        // Property keys must be the FlowInstance @Model field names — `subject`
-        // / `startedAt` (not `baseExpression` / `createdAt`, which collide with
-        // Ad4mModel synthetic hydration fields and would be silently shadowed
-        // on read).
-        const instance = await FlowInstance.create(this, {
-            flow: flowName,
-            subject: baseExpression,
-            currentState: flow.states[0].name,
-            startedAt: new Date().toISOString(),
-        });
-        return instance;
-    }
-
-    /**
-     * Returns all live `FlowInstance` records on this perspective (v5, design
-     * doc §4.3). Idempotently registers the hardwired `FlowInstance` +
-     * `FlowTransitionProposal` @Model classes on first call — so callers can
-     * ask for instances before any {@link startFlowInstance} has ever run
-     * without hitting a "class not registered" hydration error.
-     *
-     * Optional `flowName` narrows by flow-name discriminator (single SHACL
-     * `where`-filter round-trip; no client-side filtering). Omitting the arg
-     * returns instances across all flows in the perspective.
-     *
-     * Feeds §5 Model C: the channel-scoped extraction pass calls this to
-     * gather active flow context (currentState per instance) for the LLM
-     * prompt, and UIs use it to render active-flow indicators.
-     *
-     * @param flowName - Optional flow-name filter
-     * @returns Hydrated `FlowInstance[]`, empty when none exist
-     *
-     * @example
-     * ```typescript
-     * const deliveries = await p.getFlowInstances("Delivery");
-     * for (const inst of deliveries) {
-     *   console.log(`${inst.baseExpression} is in state ${inst.currentState}`);
-     * }
-     * ```
-     */
-    async getFlowInstances(flowName?: string): Promise<FlowInstance[]> {
-        await Ad4mModel.registerAll(this, [FlowInstance, FlowTransitionProposal]);
-        if (flowName !== undefined) {
-            return FlowInstance.findAll(this, { where: { flow: flowName } });
-        }
-        return FlowInstance.findAll(this);
-    }
-
-    /** Returns all expressions in the given state of given Social DNA flow */
-    async expressionsInFlowState(flowName: string, flowState: number): Promise<string[]> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) return [];
-        // Find the state with the matching value
-        const state = flow.states.find(s => s.value === flowState);
-        if (!state) return [];
-        // Query for expressions matching this state's check pattern
-        const pattern = state.stateCheck;
-        const links = await this.get(new LinkQuery({
-            predicate: pattern.predicate,
-            target: pattern.target
-        }));
-        // Return the sources (expression addresses) - use source if pattern has no explicit source
-        return links.map(l => pattern.source ? l.data.target : l.data.source);
-    }
-
-    /** Returns the given expression's flow state with regard to given Social DNA flow */
-    async flowState(flowName: string, exprAddr: string): Promise<number> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        // Check each state to find which one the expression is in
-        for (const state of flow.states) {
-            const pattern = state.stateCheck;
-            const source = pattern.source || exprAddr;
-            const links = await this.get(new LinkQuery({
-                source,
-                predicate: pattern.predicate,
-                target: pattern.target
-            }));
-            if (links.length > 0) return state.value;
-        }
-        throw `Expression "${exprAddr}" is not in any state of flow "${flowName}"`;
-    }
-
-    /** Returns available action names, with regard to Social DNA flow and expression's flow state */
-    async flowActions(flowName: string, exprAddr: string): Promise<string[]> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) return [];
-        // Determine current state
-        let currentStateName: string | null = null;
-        for (const state of flow.states) {
-            const pattern = state.stateCheck;
-            const source = pattern.source || exprAddr;
-            const links = await this.get(new LinkQuery({
-                source,
-                predicate: pattern.predicate,
-                target: pattern.target
-            }));
-            if (links.length > 0) {
-                currentStateName = state.name;
-                break;
-            }
-        }
-        if (!currentStateName) return [];
-        // Return transitions available from current state
-        return flow.transitions
-            .filter(t => t.fromState === currentStateName)
-            .map(t => t.actionName);
-    }
-
-    /** Runs given Social DNA flow action */
-    async runFlowAction(flowName: string, exprAddr: string, actionName: string) {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        const transition = flow.transitions.find(t => t.actionName === actionName);
-        if (!transition) throw `Action "${actionName}" not found in flow "${flowName}"`;
-        await this.executeAction(transition.actions, exprAddr, undefined)
     }
 
     /** Returns the perspective's Social DNA code

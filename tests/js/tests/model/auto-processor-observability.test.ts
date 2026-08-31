@@ -56,7 +56,15 @@ ORDER BY ?timestamp`;
 
 const SUBGROUP_CLASS = "ns://ConversationSubgroup";
 
-describe("AutoProcessor observability — events + debug output (PR #903)", function () {
+// LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
+// default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
+// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// `./scripts/run-llm-e2e.sh` at the repo root.
+const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
+  ? describe
+  : (describe.skip as unknown as Mocha.SuiteFunction));
+
+describeIfLLM("AutoProcessor observability — events + debug output (PR #903)", function () {
   this.timeout(900_000);
 
   let ad4m: Ad4mClient;

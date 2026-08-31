@@ -135,15 +135,6 @@ export interface FlowState {
   /** Numeric state value for ordering (e.g., 0, 0.5, 1) */
   value: number;
   /**
-   * Link pattern that indicates this state.
-   *
-   * Legacy field kept for existing consumers; v1+ flows should express
-   * "am I in this state?" via `requires` (design §4.1), which talks
-   * about subject-class instances rather than raw links. `stateCheck`
-   * will be retired once no production perspective still writes it.
-   */
-  stateCheck: LinkPattern;
-  /**
    * Natural-language description of what puts a flow instance IN this state.
    * Used by AI-driven state suggestion (`suggestFlowState`) — the same
    * pattern subject classes use for `interpretationHint`. When set, the LLM
@@ -160,10 +151,10 @@ export interface FlowState {
    * (overlays do NOT count as evidence — design §3 principle 5).
    *
    * Array semantics: AND — every entry must match. Empty / unset =
-   * no model-level guard (falls back to `stateCheck`).
+   * no model-level guard.
    *
-   * Design doc §4.1: "replaces stateCheck+guardQuery; array of queries,
-   * ALL must match; each query's matches become evidence."
+   * Design doc §4.1: "an array of queries, ALL must match; each query's
+   * matches become evidence."
    */
   requires?: ModelQuery[];
   /**
@@ -256,8 +247,13 @@ export interface FlowTransition {
  *
  * Flows define:
  * - Which expressions can enter the flow (via `inputTypes`)
- * - What states exist and how to detect them (via link patterns)
- * - How to transition between states (via actions)
+ * - What states exist and their per-state guards (via `requires`)
+ * - How to transition between states (via transitions + consensus rules)
+ *
+ * State lives on the on-graph `FlowInstanceRecord.currentState` and is
+ * read/written through the `FlowInstance` wrapper class
+ * ({@link FlowInstance.start} / {@link FlowInstance.findAll}) — see design
+ * doc §4.3/§5.
  *
  * @example
  * ```typescript
@@ -265,45 +261,21 @@ export interface FlowTransition {
  *
  * // Any expression can become a TODO
  * todoFlow.inputTypes = ['any'];
- * 
- * // Define states
- * todoFlow.addState({
- *   name: 'ready',
- *   value: 0,
- *   stateCheck: { predicate: 'todo://state', target: 'todo://ready' }
- * });
- * todoFlow.addState({
- *   name: 'doing', 
- *   value: 0.5,
- *   stateCheck: { predicate: 'todo://state', target: 'todo://doing' }
- * });
- * todoFlow.addState({
- *   name: 'done',
- *   value: 1,
- *   stateCheck: { predicate: 'todo://state', target: 'todo://done' }
- * });
- * 
- * // Define start action
- * todoFlow.startAction = [{
- *   action: 'addLink',
- *   source: 'this',
- *   predicate: 'todo://state',
- *   target: 'todo://ready'
- * }];
- * 
- * // Define transitions
+ *
+ * todoFlow.addState({ name: 'ready', value: 0 });
+ * todoFlow.addState({ name: 'doing', value: 0.5 });
+ * todoFlow.addState({ name: 'done',  value: 1 });
+ *
  * todoFlow.addTransition({
  *   actionName: 'Start',
  *   fromState: 'ready',
  *   toState: 'doing',
- *   actions: [
- *     { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://doing' },
- *     { action: 'removeLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
- *   ]
+ *   actions: [],
  * });
- * 
- * // Store in perspective
+ *
+ * // Register on the perspective and mint an instance on a subject.
  * await perspective.addFlow('TODO', todoFlow);
+ * const instance = await FlowInstance.start(perspective, 'TODO', 'expr://123');
  * ```
  */
 export class SHACLFlow {
@@ -312,9 +284,6 @@ export class SHACLFlow {
 
   /** Namespace for generated URIs */
   public namespace: string;
-
-  /** Actions to execute when starting the flow */
-  public startAction: AD4MAction[] = [];
 
   /**
    * Top-level natural-language description of what the flow is about — used
@@ -330,7 +299,7 @@ export class SHACLFlow {
   /**
    * Subject-class URIs the flow accepts as its base expression.
    *
-   * Design doc §4.1 (v4 addition): a flow's *typed input*. When an
+   * Design doc §4.1: a flow's *typed input*. When an
    * expression whose class matches any URI in this array enters scope,
    * the flow-spawn engine considers it a candidate base. Superseded
    * the older link-level `flowable: LinkPattern` primitive — model-level
@@ -344,7 +313,7 @@ export class SHACLFlow {
    * Subject-class URIs the flow must produce (linked to the base) for a
    * run to count as complete.
    *
-   * Design doc §4.1 (v4 addition): a flow's *typed output*. Two jobs:
+   * Design doc §4.1: a flow's *typed output*. Two jobs:
    * (a) documentation for stateful flows — records what a completed run
    * leaves in the graph; (b) **terminal condition** for zero-state flows —
    * a flow with no `FlowState`s completes when at least one instance of
@@ -389,7 +358,7 @@ export class SHACLFlow {
    *    moment `outputTypes` are satisfied. E.g. a Like flow declares
    *    `{ n: 1 }` and completes on the first author.
    *
-   * Design doc §4.1 (v4): terminal condition for stateless flows.
+   * Design doc §4.1: terminal condition for stateless flows.
    * Unset = engine default of `{ n: 1 }` applies at both layers.
    */
   public consensusRule?: ConsensusRule;
@@ -545,15 +514,6 @@ export class SHACLFlow {
       });
     }
 
-    // Start action
-    if (this.startAction.length > 0) {
-      links.push({
-        source: flowUri,
-        predicate: "ad4m://startAction",
-        target: `literal:string:${encodeURIComponent(JSON.stringify(this.startAction))}`
-      });
-    }
-
     // States
     for (const state of this._states) {
       const stateUri = this.stateUri(state.name);
@@ -584,13 +544,6 @@ export class SHACLFlow {
         source: stateUri,
         predicate: "ad4m://stateValue",
         target: Literal.from(state.value).toUrl()
-      });
-
-      // State check pattern
-      links.push({
-        source: stateUri,
-        predicate: "ad4m://stateCheck",
-        target: `literal:string:${encodeURIComponent(JSON.stringify(state.stateCheck))}`
       });
 
       // Per-state interpretation hint (optional, drives AI state suggestion).
@@ -831,18 +784,6 @@ export class SHACLFlow {
       }
     }
 
-    // Find start action
-    const startActionLink = links.find(l =>
-      l.source === flowUri && l.predicate === "ad4m://startAction"
-    );
-    if (startActionLink) {
-      try {
-        const jsonStr = startActionLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-        flow.startAction = JSON.parse(decodeURIComponent(jsonStr));
-      } catch {
-        // Ignore parse errors
-      }
-    }
 
     // Find states
     const stateLinks = links.filter(l =>
@@ -869,20 +810,6 @@ export class SHACLFlow {
         l.source === stateUri && l.predicate === "ad4m://stateValue"
       );
       const stateValue = valueLink ? Literal.fromUrl(valueLink.target).get() as number : 0;
-      
-      // Get state check
-      const checkLink = links.find(l =>
-        l.source === stateUri && l.predicate === "ad4m://stateCheck"
-      );
-      let stateCheck: LinkPattern = { predicate: "", target: "" };
-      if (checkLink) {
-        try {
-          const jsonStr = checkLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          stateCheck = JSON.parse(decodeURIComponent(jsonStr));
-        } catch {
-          // Ignore parse errors
-        }
-      }
       
       // Get per-state interpretation hint (optional). Same non-empty-string
       // guard as the flow-level hint.
@@ -964,13 +891,20 @@ export class SHACLFlow {
       flow.addState({
         name: stateName,
         value: stateValue,
-        stateCheck,
         ...(interpretationHint !== undefined ? { interpretationHint } : {}),
         ...(requires !== undefined ? { requires } : {}),
         ...(semanticCheck !== undefined ? { semanticCheck } : {}),
         ...(consensusRule !== undefined ? { consensusRule } : {}),
       });
     }
+
+    // Perspective link storage does not preserve insertion order — `hasState`
+    // links come back in arbitrary order from the graph, so `flow.states[0]`
+    // was randomly one of the round-tripped states. Sort by `value` ascending
+    // so the "initial state = states[0]" convention (used by
+    // `FlowInstance.start`) survives a fromGraph round trip.
+    // The `states` getter returns a defensive copy, so mutate `_states` directly.
+    flow._states.sort((a, b) => a.value - b.value);
 
     // Find transitions
     const transitionLinks = links.filter(l =>
@@ -1031,7 +965,6 @@ export class SHACLFlow {
     const sanitizedStates = this._states.map(s => ({
       name: s.name,
       value: s.value,
-      stateCheck: s.stateCheck,
       ...(s.interpretationHint ? { interpretationHint: s.interpretationHint } : {}),
       ...(s.requires && s.requires.length > 0 ? { requires: s.requires } : {}),
       ...(s.semanticCheck ? { semanticCheck: s.semanticCheck } : {}),
@@ -1040,7 +973,6 @@ export class SHACLFlow {
     return {
       name: this.name,
       namespace: this.namespace,
-      startAction: this.startAction,
       states: sanitizedStates,
       transitions: this._transitions,
       // Empty strings / empty arrays treated as unset — same semantics
@@ -1059,7 +991,6 @@ export class SHACLFlow {
    */
   static fromJSON(json: any): SHACLFlow {
     const flow = new SHACLFlow(json.name, json.namespace);
-    flow.startAction = json.startAction || [];
     // Non-empty-string guard — mirrors the toLinks-side reader.
     if (typeof json.interpretationHint === "string" && json.interpretationHint.length > 0) {
       flow.interpretationHint = json.interpretationHint;
@@ -1093,7 +1024,6 @@ export class SHACLFlow {
       const sanitized: FlowState = {
         name: state.name,
         value: state.value,
-        stateCheck: state.stateCheck,
       };
       if (typeof state.interpretationHint === "string" && state.interpretationHint.length > 0) {
         sanitized.interpretationHint = state.interpretationHint;

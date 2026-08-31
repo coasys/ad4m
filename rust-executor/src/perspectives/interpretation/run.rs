@@ -653,226 +653,284 @@ pub async fn run_interpretation_with_strategy_and_model(
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
     let task = ensure_interpretation_task_for_model(model_override).await?;
-    // Existing-instance snapshot: gives the model both the `id` handle to
-    // upsert/reference (so it can refine or link an existing node instead of
-    // duplicating) and the identity value to recognise it by. This one
-    // id-keyed map is the single source: the prompt, the dedup safety net, and
-    // Create-vs-Update routing all project what they need from it, so every
-    // path agrees on what counts as "existing".
-    let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
-    // The relation edges already in the graph, so a repeated continuous pass
-    // does not re-emit a link that already exists (James #883 #4). Additive
-    // AddLinks would otherwise duplicate the edge — and its reifier node, whose
-    // IRI hashes in the link timestamp — on every pass.
-    let existing_links = existing_relation_links(perspective, shapes).await?;
-    // class local name → identity property name, for the deterministic
-    // safety-net below. Classes with no identity property are omitted.
-    let identity_props: HashMap<String, String> = shapes
+    let interpretation_started = std::time::Instant::now();
+    let class_names: Vec<String> = shapes
         .iter()
-        .filter_map(|s| {
-            identity_property(s).map(|idp| (class_label(&s.target_class, shapes), idp.name.clone()))
-        })
+        .map(|s| class_label(&s.target_class, shapes))
         .collect();
-    // Slice 10.3c — Model C becomes end-to-end flow-aware. The two
-    // loaders return silently-empty on I/O failure so a broken
-    // flow-definition on the perspective can never blind the
-    // extraction pass; the fallback is byte-for-byte the pre-slice-10.2
-    // prompt shape.
-    let active_flows =
-        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, scope).await;
-    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
-
-    let service = crate::ai_service::AIService::global_instance()
-        .await
-        .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
-
-    // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
-    // `LlmRequestSent` fires right before EACH `service.prompt` call and
-    // `LlmResponseReceived` fires right after EACH successful prompt
-    // response — including responses that later fail parsing, so a UI
-    // can diagnose why a retry happened. Both live INSIDE the retry
-    // callback: emitting them once around the whole retry loop would
-    // hide any raw response that wasn't the final parse-successful one.
-    //
-    // `debug_response_capture` retains the LAST successful raw response
-    // for `InterpretationRun` persistence — the same value that ends up
-    // on the run node's `debugResponse` scalar. Retries only happen when
-    // parsing fails, so the value in the cell after `retry_interpretation_parse`
-    // succeeds is by construction the final (parse-successful) attempt.
-    let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
-    // Slice 10.6c — capture the FULL parsed output (instances + LLM-emitted
-    // `flow_proposals`) so the post-processing pass can honour LLM
-    // attribution when a satisfied transition matches an LLM proposal.
-    // Legacy bare-array LLM responses still parse (empty `flow_proposals`).
-    let InterpretationOutput {
-        instances,
-        flow_proposals: llm_flow_proposals,
-    } = retry_interpretation_output_parse(|_attempt| {
-        let service = service.clone();
-        let task_id = task.task_id.clone();
-        let prompt = prompt.clone();
-        let capture = debug_response_capture.clone();
-        let emit_ctx_cloned = emit_ctx.cloned();
-        async move {
-            use crate::perspectives::auto_processor::events::{
-                emit, AutoProcessorEvent, AutoProcessorStep,
-            };
-
-            if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                emit(
-                    AutoProcessorEvent::new(
-                        &ctx.perspective_uuid,
-                        &ctx.processor_id,
-                        AutoProcessorStep::LlmRequestSent,
-                    )
-                    .with_agent_did(&ctx.agent_did)
-                    .with_items(&ctx.item_ids)
-                    .with_batch_key(&ctx.batch_key)
-                    .with_llm_input(prompt.clone()),
-                )
-                .await;
-            }
-
-            let result = service
-                // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                .prompt(task_id, prompt, None)
-                .await
-                .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
-
-            if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                emit(
-                    AutoProcessorEvent::new(
-                        &ctx.perspective_uuid,
-                        &ctx.processor_id,
-                        AutoProcessorStep::LlmResponseReceived,
-                    )
-                    .with_agent_did(&ctx.agent_did)
-                    .with_items(&ctx.item_ids)
-                    .with_batch_key(&ctx.batch_key)
-                    .with_llm_output(result.text.clone()),
-                )
-                .await;
-            }
-
-            if emit_debug_events {
-                if let Ok(mut slot) = capture.lock() {
-                    *slot = Some(result.text.clone());
-                }
-            }
-            Ok(result.text)
-        }
-    })
-    .await?;
-
-    // Hard dedup guarantee: even if the model ignored the `existing` hint, an
-    // already-present (class, identity value) never becomes a *new* instance.
-    // Updates (proposals carrying an `id`) bypass this — they name a specific
-    // target. Rather than *drop* duplicates (which would shift later
-    // `new:<Class>:<n>` ordinals — James #883), we TAG every proposal in
-    // emission order with its `Resolution`; the planner indexes all of them for
-    // ordinal resolution but writes ops only for the kept ones.
-    let resolved = resolve_already_present_with_strategy(
-        instances,
-        &existing_ctx,
-        &identity_props,
+    log::info!(
         dedup_strategy,
-    )
-    .await?;
-
-    let planned = plan_interpretation_ops_resolved(
-        shapes,
-        &resolved,
-        base_prefix,
-        &existing_ctx,
-        &existing_links,
+        model_override.unwrap_or("<default>"),
+        class_names,
+        transcript.len()
     );
-    // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
-    // entry, and applying that would clear-and-rewrite scalar links for nothing.
-    let ops = strip_noop_updates(perspective, shapes, planned).await?;
+    // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
+    // line gets exactly one companion — `done` on success, `failed` on
+    // error. Wrap the fallible body so failures also produce a log line
+    // instead of leaving a dangling `start`.
+    let outcome_result: anyhow::Result<InterpretationOutcome> = async {
+        // Existing-instance snapshot: gives the model both the `id` handle to
+        // upsert/reference (so it can refine or link an existing node instead of
+        // duplicating) and the identity value to recognise it by. This one
+        // id-keyed map is the single source: the prompt, the dedup safety net, and
+        // Create-vs-Update routing all project what they need from it, so every
+        // path agrees on what counts as "existing".
+        let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
+        // The relation edges already in the graph, so a repeated continuous pass
+        // does not re-emit a link that already exists (James #883 #4). Additive
+        // AddLinks would otherwise duplicate the edge — and its reifier node, whose
+        // IRI hashes in the link timestamp — on every pass.
+        let existing_links = existing_relation_links(perspective, shapes).await?;
+        // class local name → identity property name, for the deterministic
+        // safety-net below. Classes with no identity property are omitted.
+        let identity_props: HashMap<String, String> = shapes
+            .iter()
+            .filter_map(|s| {
+                identity_property(s)
+                    .map(|idp| (class_label(&s.target_class, shapes), idp.name.clone()))
+            })
+            .collect();
+        // Slice 10.3c — Model C becomes end-to-end flow-aware. Flow context
+        // loads silently-empty on I/O failure so a broken flow-definition
+        // never blinds the extraction pass; the fallback is byte-for-byte
+        // the pre-slice-10.2 prompt shape.
+        //
+        // Flow subjects = the URIs the pass is actually interpreting.
+        // Prefer `cursor.sources` (the drained batch bases the auto-processor
+        // threaded through as `InterpretationRunCursor`); a dedup `Scope` is
+        // a legacy fallback for callers that predate the cursor (see J#1,
+        // PR #929 James review). Empty subjects → no flow context in the
+        // prompt (bounded), not the whole-perspective sweep the pre-fix
+        // `None` path did.
+        let flow_subjects: Vec<String> = if let Some(c) = cursor {
+            c.sources.clone()
+        } else if let Some(s) = scope {
+            vec![crate::perspectives::flow_context::scope_subject(s).to_string()]
+        } else {
+            Vec::new()
+        };
+        let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
+            perspective,
+            &flow_subjects,
+        )
+        .await;
+        let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
 
-    // Apply the writes AND the provenance overlay (#883): every create/update
-    // also instantiates/updates an `InterpretationOverlay` over the same base
-    // (kind + run + `inferred/<p>` snapshot), and the human-divergence gate keeps
-    // real writes only where the value is still the LLM's own. One
-    // `InterpretationRun` is minted per pass and threaded onto every overlay.
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let ran_at = chrono::Utc::now().timestamp_millis().to_string();
-    // Build the debug capture struct once so the shared cell's contents live
-    // exactly one hop: extracted here, cloned into the meta persisted on the
-    // run node, and returned to the caller for the live event.
-    let debug = if emit_debug_events {
-        let response = debug_response_capture
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
-            .unwrap_or_default();
-        Some(InterpretationDebug {
-            prompt: prompt.clone(),
-            response,
-        })
-    } else {
-        None
-    };
-    let bases = apply_with_overlay(
-        perspective,
-        shapes,
-        ops,
-        &task,
-        run_id,
-        ran_at,
-        context,
-        cursor,
-        debug.as_ref(),
-    )
-    .await?;
+        let service = crate::ai_service::AIService::global_instance()
+            .await
+            .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
 
-    // Slice 10.4c — deterministic post-processing runs AFTER
-    // `apply_with_overlay`: the LLM's writes are now on the graph, so a
-    // `requires` model_query that was unmet pre-pass can now match on
-    // fresh evidence, and a `FlowTransitionProposal` is minted on behalf
-    // of the acting DID. Silent-fallback throughout (see the fn doc) so
-    // the extraction pass cannot break on a flow-layer stumble.
-    //
-    // Slice 10.5c — semantic-check gate is now live. Reuses the same
-    // task row (and hence the same worker + billing scope) as the
-    // extraction pass, so an operator swapping models on the shared-
-    // default row auto-swaps the semantic-check model in lock-step.
-    // States without a `semanticCheck` hint short-circuit to Pass
-    // inside `run_semantic_check` without touching the LLM, and any
-    // LLM error becomes a discard-with-log at the gate — the
-    // extraction pass cannot break on a flow-layer stumble.
-    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
-        task_id: task.task_id.clone(),
-    };
-    // Slice 10.6c — adapt LLM-emitted flow proposals into the boundary type
-    // `run_engine_proposal_pass` accepts. The match rule inside the pass is
-    // (instance_uri, to_state); unmatched hints (no satisfied transition
-    // for that pair) are silently discarded per design §5.4 step 5.
-    let llm_hints: Vec<crate::perspectives::flow_evaluator::LlmProposalHint> = llm_flow_proposals
-        .iter()
-        .map(|p| crate::perspectives::flow_evaluator::LlmProposalHint {
-            instance_uri: p.instance.clone(),
-            to_state: p.to_state.clone(),
-            reason: p.reason.clone(),
+        // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
+        // `LlmRequestSent` fires right before EACH `service.prompt` call and
+        // `LlmResponseReceived` fires right after EACH successful prompt
+        // response — including responses that later fail parsing, so a UI
+        // can diagnose why a retry happened. Both live INSIDE the retry
+        // callback: emitting them once around the whole retry loop would
+        // hide any raw response that wasn't the final parse-successful one.
+        //
+        // `debug_response_capture` retains the LAST successful raw response
+        // for `InterpretationRun` persistence — the same value that ends up
+        // on the run node's `debugResponse` scalar. Retries only happen when
+        // parsing fails, so the value in the cell after `retry_interpretation_parse`
+        // succeeds is by construction the final (parse-successful) attempt.
+        let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        // Slice 10.6c — capture the FULL parsed output (instances + LLM-emitted
+        // `flow_proposals`) so the post-processing pass can honour LLM
+        // attribution when a satisfied transition matches an LLM proposal.
+        // Legacy bare-array LLM responses still parse (empty `flow_proposals`).
+        let InterpretationOutput {
+            instances,
+            flow_proposals: llm_flow_proposals,
+        } = retry_interpretation_output_parse(|_attempt| {
+            let service = service.clone();
+            let task_id = task.task_id.clone();
+            let prompt = prompt.clone();
+            let capture = debug_response_capture.clone();
+            let emit_ctx_cloned = emit_ctx.cloned();
+            async move {
+                use crate::perspectives::auto_processor::events::{
+                    emit, AutoProcessorEvent, AutoProcessorStep,
+                };
+
+                if let Some(ctx) = emit_ctx_cloned.as_ref() {
+                    emit(
+                        AutoProcessorEvent::new(
+                            &ctx.perspective_uuid,
+                            &ctx.processor_id,
+                            AutoProcessorStep::LlmRequestSent,
+                        )
+                        .with_agent_did(&ctx.agent_did)
+                        .with_items(&ctx.item_ids)
+                        .with_batch_key(&ctx.batch_key)
+                        .with_llm_input(prompt.clone()),
+                    )
+                    .await;
+                }
+
+                let result = service
+                    // Internal caller (interpretation runner) — no user auth context; billing skipped.
+                    .prompt(task_id, prompt, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+
+                if let Some(ctx) = emit_ctx_cloned.as_ref() {
+                    emit(
+                        AutoProcessorEvent::new(
+                            &ctx.perspective_uuid,
+                            &ctx.processor_id,
+                            AutoProcessorStep::LlmResponseReceived,
+                        )
+                        .with_agent_did(&ctx.agent_did)
+                        .with_items(&ctx.item_ids)
+                        .with_batch_key(&ctx.batch_key)
+                        .with_llm_output(result.text.clone()),
+                    )
+                    .await;
+                }
+
+                if emit_debug_events {
+                    if let Ok(mut slot) = capture.lock() {
+                        *slot = Some(result.text.clone());
+                    }
+                }
+                Ok(result.text)
+            }
         })
-        .collect();
-    let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
-        perspective,
-        scope,
-        context,
-        Some((&semantic_check, task.model_id.as_str())),
-        &llm_hints,
-    )
+        .await?;
+
+        // Hard dedup guarantee: even if the model ignored the `existing` hint, an
+        // already-present (class, identity value) never becomes a *new* instance.
+        // Updates (proposals carrying an `id`) bypass this — they name a specific
+        // target. Rather than *drop* duplicates (which would shift later
+        // `new:<Class>:<n>` ordinals — James #883), we TAG every proposal in
+        // emission order with its `Resolution`; the planner indexes all of them for
+        // ordinal resolution but writes ops only for the kept ones.
+        let resolved = resolve_already_present_with_strategy(
+            instances,
+            &existing_ctx,
+            &identity_props,
+            dedup_strategy,
+        )
+        .await?;
+
+        let planned = plan_interpretation_ops_resolved(
+            shapes,
+            &resolved,
+            base_prefix,
+            &existing_ctx,
+            &existing_links,
+        );
+        // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
+        // entry, and applying that would clear-and-rewrite scalar links for nothing.
+        let ops = strip_noop_updates(perspective, shapes, planned).await?;
+
+        // Apply the writes AND the provenance overlay (#883): every create/update
+        // also instantiates/updates an `InterpretationOverlay` over the same base
+        // (kind + run + `inferred/<p>` snapshot), and the human-divergence gate keeps
+        // real writes only where the value is still the LLM's own. One
+        // `InterpretationRun` is minted per pass and threaded onto every overlay.
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let ran_at = chrono::Utc::now().timestamp_millis().to_string();
+        // Build the debug capture struct once so the shared cell's contents live
+        // exactly one hop: extracted here, cloned into the meta persisted on the
+        // run node, and returned to the caller for the live event.
+        let debug = if emit_debug_events {
+            let response = debug_response_capture
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+                .unwrap_or_default();
+            Some(InterpretationDebug {
+                prompt: prompt.clone(),
+                response,
+            })
+        } else {
+            None
+        };
+        let bases = apply_with_overlay(
+            perspective,
+            shapes,
+            ops,
+            &task,
+            run_id,
+            ran_at,
+            context,
+            cursor,
+            debug.as_ref(),
+        )
+        .await?;
+
+        // Slice 10.4c — deterministic post-processing runs AFTER
+        // `apply_with_overlay`: the LLM's writes are now on the graph, so a
+        // `requires` model_query that was unmet pre-pass can now match on
+        // fresh evidence, and a `FlowTransitionProposal` is minted on behalf
+        // of the acting DID. Silent-fallback throughout (see the fn doc) so
+        // the extraction pass cannot break on a flow-layer stumble.
+        //
+        // Slice 10.5c — semantic-check gate is now live. Reuses the same
+        // task row (and hence the same worker + billing scope) as the
+        // extraction pass, so an operator swapping models on the shared-
+        // default row auto-swaps the semantic-check model in lock-step.
+        // States without a `semanticCheck` hint short-circuit to Pass
+        // inside `run_semantic_check` without touching the LLM, and any
+        // LLM error becomes a discard-with-log at the gate — the
+        // extraction pass cannot break on a flow-layer stumble.
+        let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
+            task_id: task.task_id.clone(),
+        };
+        // Slice 10.6c — adapt LLM-emitted flow proposals into the boundary type
+        // `run_engine_proposal_pass` accepts. The match rule inside the pass is
+        // (instance_uri, to_state); unmatched hints (no satisfied transition
+        // for that pair) are silently discarded per design §5.4 step 5.
+        let llm_hints: Vec<crate::perspectives::flow_evaluator::LlmProposalHint> =
+            llm_flow_proposals
+                .iter()
+                .map(|p| crate::perspectives::flow_evaluator::LlmProposalHint {
+                    instance_uri: p.instance.clone(),
+                    to_state: p.to_state.clone(),
+                    reason: p.reason.clone(),
+                })
+                .collect();
+        let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+            perspective,
+            scope,
+            context,
+            Some((&semantic_check, task.model_id.as_str())),
+            &llm_hints,
+        )
+        .await;
+
+        // The affected instance base URIs (created, updated, or given new
+        // relations). Links are owned by `create_subject` / `update_subject`.
+        Ok(InterpretationOutcome {
+            bases,
+            debug,
+            flow_proposals,
+        })
+    }
     .await;
-
-    // The affected instance base URIs (created, updated, or given new
-    // relations). Links are owned by `create_subject` / `update_subject`.
-    Ok(InterpretationOutcome {
-        bases,
-        debug,
-        flow_proposals,
-    })
+    match outcome_result {
+        Ok(outcome) => {
+            log::info!(
+                "✅ 🧠 interpretation done model={} latency={}ms bases_written={} flow_proposals={}",
+                model_override.unwrap_or("<default>"),
+                interpretation_started.elapsed().as_millis(),
+                outcome.bases.len(),
+                outcome.flow_proposals.len()
+            );
+            Ok(outcome)
+        }
+        Err(e) => {
+            log::error!(
+                "❌ 🧠 interpretation failed model={} latency={}ms err={}",
+                model_override.unwrap_or("<default>"),
+                interpretation_started.elapsed().as_millis(),
+                e
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
@@ -936,9 +994,19 @@ pub async fn run_interpretation_with_harness_and_model(
 
     // Slice 10.3c — same flow-context load as the single-shot path.
     // Silently-empty on failure so a broken flow definition can never
-    // blind the harness pass.
+    // blind the harness pass. Subjects derived from `cursor.sources`
+    // (drained batch bases) with legacy `scope` fallback (J#1, PR #929
+    // James review).
+    let flow_subjects: Vec<String> = if let Some(c) = cursor {
+        c.sources.clone()
+    } else if let Some(s) = scope {
+        vec![crate::perspectives::flow_context::scope_subject(s).to_string()]
+    } else {
+        Vec::new()
+    };
     let active_flows =
-        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, scope).await;
+        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, &flow_subjects)
+            .await;
     let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
 
     // Build per-class propose shapes from the perspective's SHACL classes,

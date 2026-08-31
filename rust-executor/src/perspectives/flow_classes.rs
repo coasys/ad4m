@@ -78,14 +78,20 @@ pub(crate) fn flow_transition_proposal_uri(proposal_id: &str) -> String {
 }
 
 /// Register the flow-runtime classes if needed, then mint a fresh `FlowInstance`
-/// bound to `base_expression`, seeded at `initial_state`, timestamped with
-/// `created_at`.
+/// bound to `base_expression`, seeded at `initial_state`.
 ///
-/// **Pure w.r.t. side-effects the caller controls** — `instance_id`,
-/// `created_at`, and `batch_id` are all caller-supplied so this function is
-/// deterministic and testable: the caller (auto-processor, WS-RPC handler, or
-/// unit test) generates the id + timestamp and threads its own batch. Mirrors
+/// **Pure w.r.t. side-effects the caller controls** — `instance_id` and
+/// `batch_id` are caller-supplied so this function is deterministic and
+/// testable: the caller (auto-processor, WS-RPC handler, or unit test)
+/// generates the id and threads its own batch. Mirrors
 /// [`super::interpretation::overlay::classes::mint_interpretation_run`].
+///
+/// **No explicit "startedAt" is written.** `Ad4mModel` synthesises `createdAt`
+/// on hydration from the earliest link timestamp on the instance's URI
+/// (all links land in the same `create_subject` batch, so they share one
+/// timestamp — that timestamp is the flow-start time). Writing a separate
+/// `ad4m://flow/created_at` link would duplicate the record and collide with
+/// the reserved `createdAt` field on the TS reader side.
 ///
 /// `batch_id` groups this instance write with any consumer's follow-on writes
 /// (e.g. the auto-processor bundling instance mint + first proposal in one
@@ -100,7 +106,6 @@ pub(crate) async fn mint_flow_instance(
     base_expression: &str,
     initial_state: &str,
     instance_id: &str,
-    created_at: &str,
     batch_id: Option<String>,
     context: &AgentContext,
 ) -> anyhow::Result<String> {
@@ -108,14 +113,13 @@ pub(crate) async fn mint_flow_instance(
 
     let uri = flow_instance_uri(instance_id);
     // Property names must match the SDNA `name` fields exactly, not the
-    // wire predicate paths. `subject` / `startedAt` (not `baseExpression`
-    // / `createdAt`) — the latter two collide with `Ad4mModel` synthetic
-    // hydration fields on the TS reader side.
+    // wire predicate paths. `subject` is used (not `baseExpression`) —
+    // the latter collides with `Ad4mModel`'s synthetic hydration field
+    // on the TS reader side.
     let values = serde_json::json!({
         "flow": flow_name,
         "subject": base_expression,
         "currentState": initial_state,
-        "startedAt": created_at,
     });
     perspective
         .create_subject(
@@ -270,7 +274,9 @@ mod tests {
             .expect("properties must be an array");
         assert!(!props.is_empty(), "FlowInstance must declare properties");
         let names: Vec<&str> = props.iter().filter_map(|p| p["name"].as_str()).collect();
-        for expected in ["flow", "subject", "currentState", "startedAt"] {
+        // No "startedAt" property — `Ad4mModel`'s built-in `createdAt`
+        // (earliest link timestamp) carries flow-start time on hydration.
+        for expected in ["flow", "subject", "currentState"] {
             assert!(
                 names.contains(&expected),
                 "FlowInstance SDNA missing '{expected}' property (found {names:?})",
@@ -293,6 +299,8 @@ mod tests {
             "FlowTransitionProposal must declare properties",
         );
         let names: Vec<&str> = props.iter().filter_map(|p| p["name"].as_str()).collect();
+        // No "proposedAt" property — `Ad4mModel`'s built-in `createdAt`
+        // (earliest link timestamp on the proposal's URI) is the propose time.
         for expected in [
             "flowInstance",
             "fromState",
@@ -300,7 +308,6 @@ mod tests {
             "proposer",
             "evidence",
             "evidenceHashes",
-            "proposedAt",
         ] {
             assert!(
                 names.contains(&expected),
@@ -339,7 +346,7 @@ mod tests {
             .iter()
             .filter_map(|p| p["name"].as_str())
             .collect();
-        for key in ["flow", "subject", "currentState", "startedAt"] {
+        for key in ["flow", "subject", "currentState"] {
             assert!(
                 props.contains(&key),
                 "mint_flow_instance writes `{key}` but SDNA does not declare it (found {props:?})",
