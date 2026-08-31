@@ -29,10 +29,26 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ad4mClient, Link, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
 import { FlowInstance, FlowInstanceRecord, FlowTransitionProposal, FlowTransition } from "@coasys/ad4m";
+import { Ad4mModel, Flag, Model, Property } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
 import { startAgent } from "../../helpers/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Local @Model class used by the `availableFlows` describe block below —
+// declared here rather than in `models.ts` so this file remains standalone.
+// Distinct class name (`FlowTestPost`) so co-running tests can't collide.
+@Model({ name: "FlowTestPost" })
+class TestPostForFlows extends Ad4mModel {
+  @Flag({ through: "flow-test://post_type", value: "flow-test://post" })
+  type = "flow-test://post";
+
+  @Property({ through: "flow-test://title", required: true })
+  title: string = "";
+
+  @Property({ through: "flow-test://body" })
+  body: string = "";
+}
 
 describe("FlowTransitionProposal — @Model", function () {
   this.timeout(120_000);
@@ -336,20 +352,10 @@ describe("PerspectiveProxy.startFlowInstance — v5 API", function () {
   function makeDeliveryFlow(): SHACLFlow {
     const flow = new SHACLFlow("Delivery", "flow://");
     flow.inputTypes = ["ad4m://Task"];
-    // v5 flow states express membership via `requires`; the legacy
-    // `value` / `stateCheck` fields are still on the interface until the
-    // retirement pass and are populated here with harmless placeholders
-    // so the type checks — they are not exercised by startFlowInstance.
-    const identified: FlowState = {
-      name: "Identified",
-      value: 0,
-      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
-    };
-    const inProgress: FlowState = {
-      name: "InProgress",
-      value: 1,
-      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
-    };
+    // v5-shape flow: no `stateCheck` on any state so
+    // `startFlowInstance`'s legacy-flow guard admits it (J#2 disjointness).
+    const identified: FlowState = { name: "Identified", value: 0 };
+    const inProgress: FlowState = { name: "InProgress", value: 1 };
     flow.addState(identified);
     flow.addState(inProgress);
     return flow;
@@ -463,27 +469,15 @@ describe("PerspectiveProxy.getFlowInstances — v5 read side", function () {
   function makeDeliveryFlow(): SHACLFlow {
     const flow = new SHACLFlow("Delivery", "flow://");
     flow.inputTypes = ["ad4m://Task"];
-    flow.addState({
-      name: "Identified",
-      value: 0,
-      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
-    });
-    flow.addState({
-      name: "InProgress",
-      value: 1,
-      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
-    });
+    flow.addState({ name: "Identified", value: 0 });
+    flow.addState({ name: "InProgress", value: 1 });
     return flow;
   }
 
   function makeDeliberationFlow(): SHACLFlow {
     const flow = new SHACLFlow("Deliberation", "flow://");
     flow.inputTypes = ["ad4m://Proposal"];
-    flow.addState({
-      name: "Proposal",
-      value: 0,
-      stateCheck: { predicate: "flow://legacy", target: "flow://Proposal" },
-    });
+    flow.addState({ name: "Proposal", value: 0 });
     return flow;
   }
 
@@ -649,21 +643,9 @@ describe("FlowInstance wrapper — read + stub API", function () {
   function makeDeliveryFlowWithTransitions(): SHACLFlow {
     const flow = new SHACLFlow("Delivery", "flow://");
     flow.inputTypes = ["ad4m://Task"];
-    flow.addState({
-      name: "Identified",
-      value: 0,
-      stateCheck: { predicate: "flow://legacy", target: "flow://Identified" },
-    });
-    flow.addState({
-      name: "InProgress",
-      value: 1,
-      stateCheck: { predicate: "flow://legacy", target: "flow://InProgress" },
-    });
-    flow.addState({
-      name: "Done",
-      value: 2,
-      stateCheck: { predicate: "flow://legacy", target: "flow://Done" },
-    });
+    flow.addState({ name: "Identified", value: 0 });
+    flow.addState({ name: "InProgress", value: 1 });
+    flow.addState({ name: "Done", value: 2 });
     const t1: FlowTransition = {
       fromState: "Identified",
       toState: "InProgress",
@@ -754,5 +736,86 @@ describe("FlowInstance wrapper — read + stub API", function () {
     expect(inst.record.flow).to.equal("Delivery");
     expect(inst.record.subject).to.equal("ad4m://task/record-access");
     expect(inst.record.currentState).to.equal("Identified");
+  });
+});
+
+// ── PerspectiveProxy.availableFlows — concrete-type matching (§5 spawn engine) ─
+// Post-`flowable` retirement, `availableFlows(uri)` must return a flow when
+// `inputTypes` contains any registered subject-class name of `uri`, in
+// addition to the "empty or `any`" always-match cases (James PR #929 J#3).
+// Before this fix, typed flows were the entire point of v4/v5 yet
+// `availableFlows` silently returned only untyped/wildcard flows — a live
+// public API returning a confidently wrong set.
+
+describe("PerspectiveProxy.availableFlows — concrete-type matching", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-available-flows");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-available-flows-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeTypedFlow(name: string, inputTypes: string[]): SHACLFlow {
+    // v5-shape flow — no `stateCheck` so `startFlowInstance` (if ever
+    // called on it) admits it; `availableFlows` cares only about
+    // `inputTypes`.
+    const flow = new SHACLFlow(name, "flow://");
+    flow.inputTypes = inputTypes;
+    flow.addState({ name: "s0", value: 0 });
+    return flow;
+  }
+
+  it("returns typed flows whose inputTypes intersect the expression's registered classes", async () => {
+    // TestPost is a real @Model — registering it teaches the perspective
+    // to classify TestPost instances via `subjectClassesOf`.
+    await (TestPostForFlows as any).register(p);
+
+    await p.addFlow("PostFlow", makeTypedFlow("PostFlow", ["FlowTestPost"]));
+    await p.addFlow("OtherFlow", makeTypedFlow("OtherFlow", ["OtherClass"]));
+
+    const post = await (TestPostForFlows as any).create(p, { title: "T", body: "B" });
+    const found = await p.availableFlows(post.baseExpression);
+    expect(found).to.include("PostFlow");
+    expect(found).to.not.include("OtherFlow");
+  });
+
+  it("keeps returning untyped and 'any'-wildcard flows for any expression", async () => {
+    await p.addFlow("Untyped", makeTypedFlow("Untyped", []));
+    await p.addFlow("Wildcard", makeTypedFlow("Wildcard", ["any"]));
+    await p.addFlow("PostOnly", makeTypedFlow("PostOnly", ["FlowTestPost"]));
+
+    // Random URI, no registered class on this perspective for it.
+    const found = await p.availableFlows("test-lang://random-1234");
+    expect(found).to.include("Untyped");
+    expect(found).to.include("Wildcard");
+    expect(found).to.not.include("PostOnly");
+  });
+
+  it("returns an empty array when no flows are registered", async () => {
+    const found = await p.availableFlows("test-lang://anything");
+    expect(found).to.deep.equal([]);
   });
 });

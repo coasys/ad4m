@@ -1186,19 +1186,37 @@ export class PerspectiveProxy {
      * Returns all Social DNA flows that can be started from the given expression.
      *
      * Post-`flowable` retirement: a flow is a candidate iff its `inputTypes`
-     * declaration is compatible with the expression. A flow with no declared
-     * `inputTypes` (or one containing the `"any"` wildcard) matches every
-     * expression — same behaviour as the legacy `flowable === "any"` case.
-     * Concrete class-URI matching against the expression's runtime class is
-     * a follow-up (design doc §5 spawn engine).
+     * declaration is compatible with the expression. Matching rules:
+     * - Empty `inputTypes` or one containing the `"any"` wildcard → always
+     *   matches (same behaviour as the legacy `flowable === "any"` case).
+     * - Otherwise, at least one of the expression's registered subject-class
+     *   URIs (resolved via {@link subjectClassesOf}) must appear in
+     *   `inputTypes`. This is the concrete-type match the design doc's §5
+     *   spawn engine calls for; without it, a flow declaring
+     *   `inputTypes: ["Task"]` was previously *never* returned by
+     *   `availableFlows("some-task-uri")` — the entire point of typed
+     *   flows was silently unreachable (James PR #929 J#3).
+     *
+     * The expression is classified against the perspective's registered
+     * classes only. An expression whose class is not registered on this
+     * perspective matches no typed flow (absence, not falsehood — same
+     * discipline as {@link subjectClassesOf}); typed flows requiring
+     * unknown classes are still returned to their untyped-caller peers.
      */
     async availableFlows(exprAddr: string): Promise<string[]> {
         const allFlowNames = await this.sdnaFlows();
+        if (allFlowNames.length === 0) return [];
+        const classesOf = await this.subjectClassesOf([exprAddr]);
+        const exprClasses = classesOf[exprAddr] ?? [];
         const available: string[] = [];
         for (const name of allFlowNames) {
             const flow = await this.getFlow(name);
             if (!flow) continue;
             if (flow.inputTypes.length === 0 || flow.inputTypes.includes("any")) {
+                available.push(name);
+                continue;
+            }
+            if (exprClasses.some(cls => flow.inputTypes.includes(cls))) {
                 available.push(name);
             }
         }
