@@ -15,7 +15,8 @@ import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
-import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
+import { SHACLFlow } from "../shacl/SHACLFlow";
+import { Ad4mModel } from "../model/Ad4mModel";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
@@ -372,6 +373,7 @@ interface Parameter {
  * });
  * ```
  */
+
 export class PerspectiveProxy {
     /** Unique identifier of this perspective */
     uuid: string;
@@ -1160,108 +1162,45 @@ export class PerspectiveProxy {
         });
     }
 
-    /** Returns all Social DNA flows that can be started from the given expression */
+    /**
+     * Returns all Social DNA flows that can be started from the given expression.
+     *
+     * Post-`flowable` retirement: a flow is a candidate iff its `inputTypes`
+     * declaration is compatible with the expression. Matching rules:
+     * - Empty `inputTypes` or one containing the `"any"` wildcard → always
+     *   matches (same behaviour as the legacy `flowable === "any"` case).
+     * - Otherwise, at least one of the expression's registered subject-class
+     *   URIs (resolved via {@link subjectClassesOf}) must appear in
+     *   `inputTypes`. This is the concrete-type match the design doc's §5
+     *   spawn engine calls for; without it, a flow declaring
+     *   `inputTypes: ["Task"]` was previously *never* returned by
+     *   `availableFlows("some-task-uri")` — the entire point of typed
+     *   flows was silently unreachable (James PR #929 J#3).
+     *
+     * The expression is classified against the perspective's registered
+     * classes only. An expression whose class is not registered on this
+     * perspective matches no typed flow (absence, not falsehood — same
+     * discipline as {@link subjectClassesOf}); typed flows requiring
+     * unknown classes are still returned to their untyped-caller peers.
+     */
     async availableFlows(exprAddr: string): Promise<string[]> {
         const allFlowNames = await this.sdnaFlows();
+        if (allFlowNames.length === 0) return [];
+        const classesOf = await this.subjectClassesOf([exprAddr]);
+        const exprClasses = classesOf[exprAddr] ?? [];
         const available: string[] = [];
         for (const name of allFlowNames) {
             const flow = await this.getFlow(name);
             if (!flow) continue;
-            if (flow.flowable === "any") {
+            if (flow.inputTypes.length === 0 || flow.inputTypes.includes("any")) {
                 available.push(name);
-            } else {
-                // Check if the expression matches the flowable link pattern
-                const pattern = flow.flowable as LinkPattern;
-                const source = pattern.source || exprAddr;
-                const links = await this.get(new LinkQuery({
-                    source,
-                    predicate: pattern.predicate,
-                    target: pattern.target
-                }));
-                if (links.length > 0) {
-                    available.push(name);
-                }
+                continue;
+            }
+            if (exprClasses.some(cls => flow.inputTypes.includes(cls))) {
+                available.push(name);
             }
         }
         return available;
-    }
-
-    /**  Starts the Social DNA flow @param flowName on the expression @param exprAddr */
-    async startFlow(flowName: string, exprAddr: string) {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        if (flow.startAction.length === 0) throw `Flow "${flowName}" has no start action`;
-        await this.executeAction(flow.startAction, exprAddr, undefined)
-    }
-
-    /** Returns all expressions in the given state of given Social DNA flow */
-    async expressionsInFlowState(flowName: string, flowState: number): Promise<string[]> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) return [];
-        // Find the state with the matching value
-        const state = flow.states.find(s => s.value === flowState);
-        if (!state) return [];
-        // Query for expressions matching this state's check pattern
-        const pattern = state.stateCheck;
-        const links = await this.get(new LinkQuery({
-            predicate: pattern.predicate,
-            target: pattern.target
-        }));
-        // Return the sources (expression addresses) - use source if pattern has no explicit source
-        return links.map(l => pattern.source ? l.data.target : l.data.source);
-    }
-
-    /** Returns the given expression's flow state with regard to given Social DNA flow */
-    async flowState(flowName: string, exprAddr: string): Promise<number> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        // Check each state to find which one the expression is in
-        for (const state of flow.states) {
-            const pattern = state.stateCheck;
-            const source = pattern.source || exprAddr;
-            const links = await this.get(new LinkQuery({
-                source,
-                predicate: pattern.predicate,
-                target: pattern.target
-            }));
-            if (links.length > 0) return state.value;
-        }
-        throw `Expression "${exprAddr}" is not in any state of flow "${flowName}"`;
-    }
-
-    /** Returns available action names, with regard to Social DNA flow and expression's flow state */
-    async flowActions(flowName: string, exprAddr: string): Promise<string[]> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) return [];
-        // Determine current state
-        let currentStateName: string | null = null;
-        for (const state of flow.states) {
-            const pattern = state.stateCheck;
-            const source = pattern.source || exprAddr;
-            const links = await this.get(new LinkQuery({
-                source,
-                predicate: pattern.predicate,
-                target: pattern.target
-            }));
-            if (links.length > 0) {
-                currentStateName = state.name;
-                break;
-            }
-        }
-        if (!currentStateName) return [];
-        // Return transitions available from current state
-        return flow.transitions
-            .filter(t => t.fromState === currentStateName)
-            .map(t => t.actionName);
-    }
-
-    /** Runs given Social DNA flow action */
-    async runFlowAction(flowName: string, exprAddr: string, actionName: string) {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        const transition = flow.transitions.find(t => t.actionName === actionName);
-        if (!transition) throw `Action "${actionName}" not found in flow "${flowName}"`;
-        await this.executeAction(transition.actions, exprAddr, undefined)
     }
 
     /** Returns the perspective's Social DNA code
@@ -1594,29 +1533,27 @@ export class PerspectiveProxy {
      * @example
      * ```typescript
      * import { SHACLFlow } from '@coasys/ad4m';
-     * 
-     * const todoFlow = new SHACLFlow('TODO', 'todo://');
-     * todoFlow.flowable = 'any';
-     * 
-     * // Define states
-     * todoFlow.addState({ name: 'ready', value: 0, stateCheck: { predicate: 'todo://state', target: 'todo://ready' }});
-     * todoFlow.addState({ name: 'done', value: 1, stateCheck: { predicate: 'todo://state', target: 'todo://done' }});
-     * 
-     * // Define start action
-     * todoFlow.startAction = [{ action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }];
-     * 
-     * // Define transitions
-     * todoFlow.addTransition({
-     *   actionName: 'Complete',
-     *   fromState: 'ready',
-     *   toState: 'done',
-     *   actions: [
-     *     { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://done' },
-     *     { action: 'removeLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
-     *   ]
-     * });
-     * 
-     * await perspective.addFlow('TODO', todoFlow);
+     *
+     * const deliveryFlow = new SHACLFlow('Delivery', 'delivery://');
+     * deliveryFlow.inputTypes = ['Task'];
+     * deliveryFlow.interpretationHint =
+     *   'Advance a Task through delivery: Identified → Scoped → InProgress → Review → Done.';
+     *
+     * deliveryFlow.addState({ name: 'Identified', value: 0 });
+     * deliveryFlow.addState({ name: 'Scoped',     value: 1 });
+     * deliveryFlow.addState({ name: 'InProgress', value: 2 });
+     * deliveryFlow.addState({ name: 'Review',     value: 3 });
+     * deliveryFlow.addState({ name: 'Done',       value: 4 });
+     *
+     * deliveryFlow.addTransition({ actionName: 'Scope',  fromState: 'Identified', toState: 'Scoped',     actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Start',  fromState: 'Scoped',     toState: 'InProgress', actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Submit', fromState: 'InProgress', toState: 'Review',     actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Accept', fromState: 'Review',     toState: 'Done',       actions: [] });
+     *
+     * // Optional: n distinct DIDs must co-sign a proposal before it fires.
+     * deliveryFlow.consensusRule = { n: 2 };
+     *
+     * await perspective.addFlow('Delivery', deliveryFlow);
      * ```
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
@@ -1668,7 +1605,7 @@ export class PerspectiveProxy {
 
         const flowUri = flowUriLinks[0].data.target;
 
-        // Fetch flow-level links (hasState, hasTransition, flowable, startAction)
+        // Fetch flow-level links (hasState, hasTransition, startAction, inputTypes/outputTypes/…)
         const flowLevelLinks = await this.get(new LinkQuery({ source: flowUri }));
 
         // Collect state and transition URIs, then fetch their child links

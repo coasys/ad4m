@@ -277,11 +277,12 @@ jobs:
             fi
       - setup_integration_test_environment
       - run:
-          name: Rust LLM-E2E (interpretation + harness suites)
+          name: Rust LLM-E2E (interpretation + harness + flow-context suites)
           command: |
             cargo test --release --lib \
               perspectives::interpretation_e2e \
               perspectives::interpretation_harness_e2e \
+              perspectives::flow_context::real_llm_e2e \
               -- --ignored --test-threads=1 --nocapture
           no_output_timeout: 60m
       - run:
