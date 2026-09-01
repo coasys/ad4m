@@ -596,169 +596,209 @@ pub async fn run_interpretation_with_strategy_and_model(
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
     let task = ensure_interpretation_task_for_model(model_override).await?;
-    // Existing-instance snapshot: gives the model both the `id` handle to
-    // upsert/reference (so it can refine or link an existing node instead of
-    // duplicating) and the identity value to recognise it by. This one
-    // id-keyed map is the single source: the prompt, the dedup safety net, and
-    // Create-vs-Update routing all project what they need from it, so every
-    // path agrees on what counts as "existing".
-    let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
-    // The relation edges already in the graph, so a repeated continuous pass
-    // does not re-emit a link that already exists (James #883 #4). Additive
-    // AddLinks would otherwise duplicate the edge — and its reifier node, whose
-    // IRI hashes in the link timestamp — on every pass.
-    let existing_links = existing_relation_links(perspective, shapes).await?;
-    // class local name → identity property name, for the deterministic
-    // safety-net below. Classes with no identity property are omitted.
-    let identity_props: HashMap<String, String> = shapes
+    let interpretation_started = std::time::Instant::now();
+    let class_names: Vec<String> = shapes
         .iter()
-        .filter_map(|s| {
-            identity_property(s).map(|idp| (class_label(&s.target_class, shapes), idp.name.clone()))
-        })
+        .map(|s| class_label(&s.target_class, shapes))
         .collect();
-    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx);
-
-    let service = crate::ai_service::AIService::global_instance()
-        .await
-        .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
-
-    // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
-    // `LlmRequestSent` fires right before EACH `service.prompt` call and
-    // `LlmResponseReceived` fires right after EACH successful prompt
-    // response — including responses that later fail parsing, so a UI
-    // can diagnose why a retry happened. Both live INSIDE the retry
-    // callback: emitting them once around the whole retry loop would
-    // hide any raw response that wasn't the final parse-successful one.
-    //
-    // `debug_response_capture` retains the LAST successful raw response
-    // for `InterpretationRun` persistence — the same value that ends up
-    // on the run node's `debugResponse` scalar. Retries only happen when
-    // parsing fails, so the value in the cell after `retry_interpretation_parse`
-    // succeeds is by construction the final (parse-successful) attempt.
-    let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
-    let instances = retry_interpretation_parse(|_attempt| {
-        let service = service.clone();
-        let task_id = task.task_id.clone();
-        let prompt = prompt.clone();
-        let capture = debug_response_capture.clone();
-        let emit_ctx_cloned = emit_ctx.cloned();
-        async move {
-            use crate::perspectives::auto_processor::events::{
-                emit, AutoProcessorEvent, AutoProcessorStep,
-            };
-
-            if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                emit(
-                    AutoProcessorEvent::new(
-                        &ctx.perspective_uuid,
-                        &ctx.processor_id,
-                        AutoProcessorStep::LlmRequestSent,
-                    )
-                    .with_agent_did(&ctx.agent_did)
-                    .with_items(&ctx.item_ids)
-                    .with_batch_key(&ctx.batch_key)
-                    .with_llm_input(prompt.clone()),
-                )
-                .await;
-            }
-
-            let result = service
-                // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                .prompt(task_id, prompt, None)
-                .await
-                .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
-
-            if let Some(ctx) = emit_ctx_cloned.as_ref() {
-                emit(
-                    AutoProcessorEvent::new(
-                        &ctx.perspective_uuid,
-                        &ctx.processor_id,
-                        AutoProcessorStep::LlmResponseReceived,
-                    )
-                    .with_agent_did(&ctx.agent_did)
-                    .with_items(&ctx.item_ids)
-                    .with_batch_key(&ctx.batch_key)
-                    .with_llm_output(result.text.clone()),
-                )
-                .await;
-            }
-
-            if emit_debug_events {
-                if let Ok(mut slot) = capture.lock() {
-                    *slot = Some(result.text.clone());
-                }
-            }
-            Ok(result.text)
-        }
-    })
-    .await?;
-
-    // Hard dedup guarantee: even if the model ignored the `existing` hint, an
-    // already-present (class, identity value) never becomes a *new* instance.
-    // Updates (proposals carrying an `id`) bypass this — they name a specific
-    // target. Rather than *drop* duplicates (which would shift later
-    // `new:<Class>:<n>` ordinals — James #883), we TAG every proposal in
-    // emission order with its `Resolution`; the planner indexes all of them for
-    // ordinal resolution but writes ops only for the kept ones.
-    let resolved = resolve_already_present_with_strategy(
-        instances,
-        &existing_ctx,
-        &identity_props,
+    log::info!(
+        "🧠 interpretation start strategy={:?} model={} classes={:?} transcript_turns={}",
         dedup_strategy,
-    )
-    .await?;
-
-    let planned = plan_interpretation_ops_resolved(
-        shapes,
-        &resolved,
-        base_prefix,
-        &existing_ctx,
-        &existing_links,
+        model_override.unwrap_or("<default>"),
+        class_names,
+        transcript.len()
     );
-    // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
-    // entry, and applying that would clear-and-rewrite scalar links for nothing.
-    let ops = strip_noop_updates(perspective, shapes, planned).await?;
+    // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
+    // line gets exactly one companion — `done` on success, `failed` on
+    // error. Wrap the fallible body so failures also produce a log line
+    // instead of leaving a dangling `start`.
+    let outcome_result: anyhow::Result<InterpretationOutcome> = async {
+        // Existing-instance snapshot: gives the model both the `id` handle to
+        // upsert/reference (so it can refine or link an existing node instead of
+        // duplicating) and the identity value to recognise it by. This one
+        // id-keyed map is the single source: the prompt, the dedup safety net, and
+        // Create-vs-Update routing all project what they need from it, so every
+        // path agrees on what counts as "existing".
+        let existing_ctx = existing_instance_context(perspective, shapes, scope).await?;
+        // The relation edges already in the graph, so a repeated continuous pass
+        // does not re-emit a link that already exists (James #883 #4). Additive
+        // AddLinks would otherwise duplicate the edge — and its reifier node, whose
+        // IRI hashes in the link timestamp — on every pass.
+        let existing_links = existing_relation_links(perspective, shapes).await?;
+        // class local name → identity property name, for the deterministic
+        // safety-net below. Classes with no identity property are omitted.
+        let identity_props: HashMap<String, String> = shapes
+            .iter()
+            .filter_map(|s| {
+                identity_property(s)
+                    .map(|idp| (class_label(&s.target_class, shapes), idp.name.clone()))
+            })
+            .collect();
+        let prompt = build_interpretation_input(shapes, transcript, &existing_ctx);
 
-    // Apply the writes AND the provenance overlay (#883): every create/update
-    // also instantiates/updates an `InterpretationOverlay` over the same base
-    // (kind + run + `inferred/<p>` snapshot), and the human-divergence gate keeps
-    // real writes only where the value is still the LLM's own. One
-    // `InterpretationRun` is minted per pass and threaded onto every overlay.
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let ran_at = chrono::Utc::now().timestamp_millis().to_string();
-    // Build the debug capture struct once so the shared cell's contents live
-    // exactly one hop: extracted here, cloned into the meta persisted on the
-    // run node, and returned to the caller for the live event.
-    let debug = if emit_debug_events {
-        let response = debug_response_capture
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
-            .unwrap_or_default();
-        Some(InterpretationDebug {
-            prompt: prompt.clone(),
-            response,
+        let service = crate::ai_service::AIService::global_instance()
+            .await
+            .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
+
+        // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
+        // `LlmRequestSent` fires right before EACH `service.prompt` call and
+        // `LlmResponseReceived` fires right after EACH successful prompt
+        // response — including responses that later fail parsing, so a UI
+        // can diagnose why a retry happened. Both live INSIDE the retry
+        // callback: emitting them once around the whole retry loop would
+        // hide any raw response that wasn't the final parse-successful one.
+        //
+        // `debug_response_capture` retains the LAST successful raw response
+        // for `InterpretationRun` persistence — the same value that ends up
+        // on the run node's `debugResponse` scalar. Retries only happen when
+        // parsing fails, so the value in the cell after `retry_interpretation_parse`
+        // succeeds is by construction the final (parse-successful) attempt.
+        let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let instances = retry_interpretation_parse(|_attempt| {
+            let service = service.clone();
+            let task_id = task.task_id.clone();
+            let prompt = prompt.clone();
+            let capture = debug_response_capture.clone();
+            let emit_ctx_cloned = emit_ctx.cloned();
+            async move {
+                use crate::perspectives::auto_processor::events::{
+                    emit, AutoProcessorEvent, AutoProcessorStep,
+                };
+
+                if let Some(ctx) = emit_ctx_cloned.as_ref() {
+                    emit(
+                        AutoProcessorEvent::new(
+                            &ctx.perspective_uuid,
+                            &ctx.processor_id,
+                            AutoProcessorStep::LlmRequestSent,
+                        )
+                        .with_agent_did(&ctx.agent_did)
+                        .with_items(&ctx.item_ids)
+                        .with_batch_key(&ctx.batch_key)
+                        .with_llm_input(prompt.clone()),
+                    )
+                    .await;
+                }
+
+                let result = service
+                    // Internal caller (interpretation runner) — no user auth context; billing skipped.
+                    .prompt(task_id, prompt, None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+
+                if let Some(ctx) = emit_ctx_cloned.as_ref() {
+                    emit(
+                        AutoProcessorEvent::new(
+                            &ctx.perspective_uuid,
+                            &ctx.processor_id,
+                            AutoProcessorStep::LlmResponseReceived,
+                        )
+                        .with_agent_did(&ctx.agent_did)
+                        .with_items(&ctx.item_ids)
+                        .with_batch_key(&ctx.batch_key)
+                        .with_llm_output(result.text.clone()),
+                    )
+                    .await;
+                }
+
+                if emit_debug_events {
+                    if let Ok(mut slot) = capture.lock() {
+                        *slot = Some(result.text.clone());
+                    }
+                }
+                Ok(result.text)
+            }
         })
-    } else {
-        None
-    };
-    let bases = apply_with_overlay(
-        perspective,
-        shapes,
-        ops,
-        &task,
-        run_id,
-        ran_at,
-        context,
-        cursor,
-        debug.as_ref(),
-    )
-    .await?;
+        .await?;
 
-    // The affected instance base URIs (created, updated, or given new
-    // relations). Links are owned by `create_subject` / `update_subject`.
-    Ok(InterpretationOutcome { bases, debug })
+        // Hard dedup guarantee: even if the model ignored the `existing` hint, an
+        // already-present (class, identity value) never becomes a *new* instance.
+        // Updates (proposals carrying an `id`) bypass this — they name a specific
+        // target. Rather than *drop* duplicates (which would shift later
+        // `new:<Class>:<n>` ordinals — James #883), we TAG every proposal in
+        // emission order with its `Resolution`; the planner indexes all of them for
+        // ordinal resolution but writes ops only for the kept ones.
+        let resolved = resolve_already_present_with_strategy(
+            instances,
+            &existing_ctx,
+            &identity_props,
+            dedup_strategy,
+        )
+        .await?;
+
+        let planned = plan_interpretation_ops_resolved(
+            shapes,
+            &resolved,
+            base_prefix,
+            &existing_ctx,
+            &existing_links,
+        );
+        // Filter no-op Updates: the LLM occasionally re-emits an unchanged existing
+        // entry, and applying that would clear-and-rewrite scalar links for nothing.
+        let ops = strip_noop_updates(perspective, shapes, planned).await?;
+
+        // Apply the writes AND the provenance overlay (#883): every create/update
+        // also instantiates/updates an `InterpretationOverlay` over the same base
+        // (kind + run + `inferred/<p>` snapshot), and the human-divergence gate keeps
+        // real writes only where the value is still the LLM's own. One
+        // `InterpretationRun` is minted per pass and threaded onto every overlay.
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let ran_at = chrono::Utc::now().timestamp_millis().to_string();
+        // Build the debug capture struct once so the shared cell's contents live
+        // exactly one hop: extracted here, cloned into the meta persisted on the
+        // run node, and returned to the caller for the live event.
+        let debug = if emit_debug_events {
+            let response = debug_response_capture
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+                .unwrap_or_default();
+            Some(InterpretationDebug {
+                prompt: prompt.clone(),
+                response,
+            })
+        } else {
+            None
+        };
+        let bases = apply_with_overlay(
+            perspective,
+            shapes,
+            ops,
+            &task,
+            run_id,
+            ran_at,
+            context,
+            cursor,
+            debug.as_ref(),
+        )
+        .await?;
+
+        // The affected instance base URIs (created, updated, or given new
+        // relations). Links are owned by `create_subject` / `update_subject`.
+        Ok(InterpretationOutcome { bases, debug })
+    }
+    .await;
+    match outcome_result {
+        Ok(outcome) => {
+            log::info!(
+                "✅ 🧠 interpretation done model={} latency={}ms bases_written={}",
+                model_override.unwrap_or("<default>"),
+                interpretation_started.elapsed().as_millis(),
+                outcome.bases.len()
+            );
+            Ok(outcome)
+        }
+        Err(e) => {
+            log::error!(
+                "❌ 🧠 interpretation failed model={} latency={}ms err={}",
+                model_override.unwrap_or("<default>"),
+                interpretation_started.elapsed().as_millis(),
+                e
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to

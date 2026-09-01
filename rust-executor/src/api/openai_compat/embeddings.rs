@@ -49,6 +49,8 @@ pub async fn embeddings(
 
     let mut data: Vec<EmbeddingItem> = Vec::with_capacity(inputs.len());
     let mut total_tokens: u64 = 0;
+    let batch_started = std::time::Instant::now();
+    let batch_n = inputs.len();
 
     for (index, text) in inputs.into_iter().enumerate() {
         let result = service
@@ -62,6 +64,15 @@ pub async fn embeddings(
             embedding: result.embeddings,
         });
     }
+    // Batch-level info replaces the per-call info in AIService::embed (now
+    // debug). See rust-executor/LOGGING.md.
+    log::info!(
+        "🤖 embed batch model={} n={} tokens_in={} latency_total={}ms (openai-compat)",
+        model_id,
+        batch_n,
+        total_tokens,
+        batch_started.elapsed().as_millis()
+    );
 
     Ok(Json(EmbeddingResponse {
         object: "list",
