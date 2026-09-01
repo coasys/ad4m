@@ -106,42 +106,71 @@ fn clean_llm_json(raw: &str) -> String {
     let fence = regex::Regex::new(r"```[a-zA-Z0-9]*").unwrap();
     let s = fence.replace_all(&s, "");
 
-    // 3. Extract the first JSON array (or object) if surrounded by prose.
-    //    Mirrors Flux `LLMutils.ts` — models sometimes prefix an explanation
-    //    even after `<think>`-stripping (e.g. gemma3 emitting plain prose).
-    //    This MUST run before trailing-comma stripping: `strip_trailing_commas`
-    //    tracks an `in_string` flag, and an odd number of `"` in the
-    //    surrounding prose would invert it before the real JSON begins, so a
-    //    comma inside a genuine string value could be dropped. Extracting the
-    //    bracketed block first confines the string-scanner to actual JSON.
+    // 3. Extract the first JSON value out of the surrounding prose. Models
+    //    sometimes prefix an explanation even after `<think>`-stripping (e.g.
+    //    gemma3 emitting plain prose), so we can't just hand the whole payload
+    //    to `serde_json::from_str`.
+    //
+    //    Regex can't do this correctly — matching balanced brackets isn't a
+    //    regular language, and a naive `\{.*\}` mangles nested objects,
+    //    strings containing `{`, or an unbalanced brace in prose. We use
+    //    `serde_json::StreamDeserializer` instead: given a position, it
+    //    consumes exactly one complete JSON value and reports the byte offset
+    //    it stopped at, which is precisely the "find the first well-formed
+    //    JSON value in this text" primitive we want.
     //
     //    Prefer whichever outer bracket appears FIRST in the trimmed input.
-    //    Pre-slice-10.6 the contract was array-only, so a naive `[` first
-    //    fallback-`{` was safe; post-10.6 the contract also accepts
-    //    `{"instances":[…],"flow_proposals":[…]}`, and the naive `[`-first
-    //    would misidentify the inner `instances` array as the payload and
-    //    swallow the outer object's tail.
+    //    Both extractors fall back to the other bracket kind on failure —
+    //    handles an LLM aside like "OK, I'll extract {a couple of things}:
+    //    [{\"class\":\"X\"}]" where the object at `{a couple` isn't valid
+    //    JSON and the real payload starts at `[`. Falls back further to the
+    //    hand-rolled bracket matcher so a payload with a trailing comma
+    //    (invalid JSON, common) still gets extracted for step 4 to salvage.
     let candidate = s.trim();
     let first_obj = candidate.find('{');
     let first_arr = candidate.find('[');
-    // Both branches fall back to the other bracket kind — if `{`-first
-    // matches a balanced brace inside prose (an LLM aside like "OK, I'll
-    // extract {a couple of things}: [{\"class\":\"X\"}]"), the primary
-    // extract returns bogus JSON; the `[…]` fallback recovers on the
-    // same tick instead of burning a retry.
     let extracted = match (first_obj, first_arr) {
-        (Some(o), Some(a)) if o < a => extract_bracketed(candidate, '{', '}')
+        (Some(o), Some(a)) if o < a => extract_first_json_value(candidate, '{')
+            .or_else(|| extract_first_json_value(candidate, '['))
+            .or_else(|| extract_bracketed(candidate, '{', '}'))
             .or_else(|| extract_bracketed(candidate, '[', ']')),
-        (Some(_), None) => extract_bracketed(candidate, '{', '}'),
-        _ => extract_bracketed(candidate, '[', ']')
+        (Some(_), None) => extract_first_json_value(candidate, '{')
+            .or_else(|| extract_bracketed(candidate, '{', '}')),
+        _ => extract_first_json_value(candidate, '[')
+            .or_else(|| extract_first_json_value(candidate, '{'))
+            .or_else(|| extract_bracketed(candidate, '[', ']'))
             .or_else(|| extract_bracketed(candidate, '{', '}')),
     }
     .unwrap_or_else(|| candidate.to_string());
 
     // 4. Remove trailing commas before a closing } or ] (invalid JSON, common),
     //    now scoped to the extracted JSON. Skips commas inside string literals
-    //    so values like "a, }" survive.
+    //    so values like "a, }" survive. No-op when step 3 already parsed a
+    //    well-formed value via serde — trailing commas would have caused the
+    //    parse to fail, so we'd have fallen through to `extract_bracketed`.
     strip_trailing_commas(&extracted)
+}
+
+/// Find the position of the first `open_bracket` in `s`, then use
+/// `serde_json` to consume exactly one JSON value starting there. Returns
+/// the substring that value occupies (byte-exact via
+/// `StreamDeserializer::byte_offset`), or `None` if no `open_bracket` was
+/// found or the tail didn't start with a well-formed JSON value.
+///
+/// Delegates the actual parsing to `serde_json` so nested brackets, escaped
+/// quotes, and quotes-containing-brackets are all handled by the real JSON
+/// grammar. That's the property regex + hand-rolled bracket matching
+/// can't give us.
+fn extract_first_json_value(s: &str, open_bracket: char) -> Option<String> {
+    let start = s.find(open_bracket)?;
+    let tail = &s[start..];
+    let mut stream = serde_json::Deserializer::from_str(tail).into_iter::<serde_json::Value>();
+    // The iterator yields one Result per JSON value the stream produces.
+    // The first `Ok(_)` marks a successful parse; the byte_offset AFTER
+    // that call is the end of the value.
+    stream.next()?.ok()?;
+    let end = stream.byte_offset();
+    Some(s[start..start + end].to_string())
 }
 
 /// Return the substring from the first `open` to the matching last `close`,
