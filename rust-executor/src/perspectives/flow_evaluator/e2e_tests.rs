@@ -1,5 +1,5 @@
 // ============================================================================
-// Slice 10.4a3 — live-perspective integration test
+// Live-perspective integration test
 // ============================================================================
 //
 // The stub-perspective tests above pin every failure mode inside the
@@ -13,13 +13,13 @@
 // a genuine perspective (real store, real Prolog, real `add_sdna`, real
 // `create_subject`, real `model_query`).
 //
-// Complements the 10.3d test in `flow_context.rs`:
-//   - 10.3d: read-side integration — definitions + minted instance
-//            → `FlowContext[]` + rendered prompt block.
-//   - 10.4a3 (this): write-side integration — same substrate → committed
-//            evidence flowing back through `model_query` → the
-//            deterministic `SatisfiedTransition[]` that slice 10.4b will
-//            turn into on-graph `FlowTransitionProposal` writes.
+// Complements the read-side integration test in `flow_context/e2e_tests.rs`:
+//   - Read side: definitions + minted instance → `FlowContext[]` +
+//                rendered prompt block.
+//   - Write side (this): same substrate → committed evidence flowing back
+//                through `model_query` → deterministic
+//                `SatisfiedTransition[]` → on-graph
+//                `FlowTransitionProposal` writes.
 //
 // No LLM is spun up.
 use super::engine_pass::write_engine_proposal;
@@ -36,7 +36,7 @@ use crate::types::{Link, LinkStatus};
 use std::collections::HashMap;
 
 /// URL-encoded string-literal target, matching the wire shape the
-/// slice 10.3a reader decodes.
+/// `shacl_parser` link reader decodes.
 fn lit(s: &str) -> String {
     format!("literal:string:{}", urlencoding::encode(s))
 }
@@ -85,9 +85,9 @@ async fn evaluate_flow_transitions_wires_definition_and_evidence_e2e() {
     //    through the writer; the one v5 predicate we need — the
     //    `requires` link on the `scoped` state — is added by hand
     //    because `parse_flow_to_links` does not yet emit v5. The
-    //    reader (slice 10.3a) already walks the v5 shape, and the
-    //    evaluator needs to consume it today; this test pins that
-    //    contract until the writer catches up.
+    //    link reader already walks the v5 shape, and the evaluator
+    //    needs to consume it today; this test pins that contract
+    //    until the writer catches up.
     let scoped_uri = "delivery://Delivery.scoped";
     for link in parse_flow_to_links(&delivery_flow_json(), "Delivery")
         .expect("parse_flow_to_links(Delivery)")
@@ -131,9 +131,9 @@ async fn evaluate_flow_transitions_wires_definition_and_evidence_e2e() {
     .await
     .expect("mint_flow_instance");
 
-    // 4) Load records + catalogue exactly as `run.rs` will after
-    //    slice 10.4b. Same shape 10.3d exercised on the read side,
-    //    but this time both are fed into the *write*-side gate.
+    // 4) Load records + catalogue exactly as the auto-processor will.
+    //    Same shape the read-side integration test exercises, but this
+    //    time both are fed into the *write*-side gate.
     let records = load_flow_instances(&perspective, &[base_uri.to_string()])
         .await
         .expect("load_flow_instances");
@@ -217,19 +217,19 @@ async fn evaluate_flow_transitions_wires_definition_and_evidence_e2e() {
     );
     // Flow definition carries no per-state semanticCheck and no
     // consensus rule (flow-level or per-state) — both must fall
-    // through unset. Slice 10.5 exercises the semanticCheck path;
-    // the stub tests above cover consensus override precedence.
+    // through unset. The semanticCheck path is exercised in the
+    // gate-wired e2e test below; the stub tests above cover
+    // consensus override precedence.
     assert!(t.semantic_check.is_none());
     assert!(t.consensus_rule.is_none());
 }
 
-/// Slice 10.4b — write-side end-to-end. Re-uses the 10.4a3 fixture:
-/// real perspective, Delivery flow with `requires: 1 × ns://Task`,
-/// one active FlowInstance, one seeded Task ⇒ one
-/// `SatisfiedTransition`. On top of that, this test calls
-/// [`write_engine_proposal`] and asserts every declared
-/// FlowTransitionProposal predicate landed on-graph with the
-/// expected target.
+/// Write-side end-to-end. Re-uses the fixture above (real perspective,
+/// Delivery flow with `requires: 1 × ns://Task`, one active
+/// FlowInstance, one seeded Task ⇒ one `SatisfiedTransition`). On top
+/// of that, this test calls [`write_engine_proposal`] and asserts
+/// every declared FlowTransitionProposal predicate landed on-graph
+/// with the expected target.
 ///
 /// Assertions cover the two silent-failure modes the writer has to
 /// rule out:
@@ -338,7 +338,7 @@ async fn write_engine_proposal_lands_all_declared_predicates_e2e() {
         "e2e-prop-1",
         proposer_did,
         t,
-        None, // rationale (slice 10.6c) — this e2e is the engine-only path
+        None, // rationale — this e2e is the engine-only path (no LLM attribution)
         None,
         &ctx,
     )
@@ -427,9 +427,9 @@ async fn write_engine_proposal_lands_all_declared_predicates_e2e() {
     }
 }
 
-/// Slice 10.4c — the end-to-end onion shell for the auto-processor
-/// entry point. Verifies that a single call to
-/// [`run_engine_proposal_pass`] against a live perspective:
+/// End-to-end onion shell for the auto-processor entry point. Verifies
+/// that a single call to [`run_engine_proposal_pass`] against a live
+/// perspective:
 ///
 /// 1. Loads flows + records + evaluates + writes without any
 ///    caller-side plumbing.
@@ -496,7 +496,7 @@ async fn run_engine_proposal_pass_lands_a_proposal_e2e() {
         None,
         &ctx,
         None,
-        &[], // llm_hints (slice 10.6c) — engine-only path
+        &[], // llm_hints — engine-only path (no LLM attribution)
     )
     .await;
     assert!(
@@ -521,7 +521,7 @@ async fn run_engine_proposal_pass_lands_a_proposal_e2e() {
         None,
         &ctx,
         None,
-        &[], // llm_hints (slice 10.6c) — engine-only path
+        &[], // llm_hints — engine-only path (no LLM attribution)
     )
     .await;
     assert_eq!(
@@ -598,8 +598,7 @@ async fn run_engine_proposal_pass_lands_a_proposal_e2e() {
 }
 
 // -----------------------------------------------------------------
-// Slice 10.5b — the semantic-check gate wired into
-// `run_engine_proposal_pass`.
+// Semantic-check gate wired into `run_engine_proposal_pass`
 // -----------------------------------------------------------------
 
 /// Stub [`SemanticCheckLlm`] whose `confirm` returns a canned response
@@ -683,10 +682,10 @@ async fn seed_semantic_check_e2e_fixture(
         )
         .await
         .expect("add_link(scoped.requires)");
-    // The 10.5b payload — per-state semanticCheck hint (predicate is
+    // The semantic-check payload — per-state hint (predicate is
     // `ad4m://semanticCheck` in camelCase to match the parser at
-    // `shacl_parser::find_link`). Parser (slice 10.3a) reads this
-    // and mounts it on `FlowState.semantic_check`, which
+    // `shacl_parser::find_link`). The link reader mounts it on
+    // `FlowState.semantic_check`, which
     // `evaluate_flow_transitions` threads into
     // `SatisfiedTransition.semantic_check`, which
     // `build_semantic_check_prompt` uses to produce a non-`None`
@@ -906,7 +905,7 @@ async fn semantic_check_absent_hint_autopasses_no_llm_call_e2e() {
 }
 
 // ---------------------------------------------------------------------
-// Slice 10.6c — LlmProposalHint matching / rationale attribution
+// LlmProposalHint matching / rationale attribution
 // ---------------------------------------------------------------------
 
 /// Helper: read the `ad4m://flow/rationale` link off a proposal URI and
@@ -944,7 +943,7 @@ async fn read_rationale(
 
 /// LLM hint matches a satisfied transition ⇒ the proposal fires with
 /// the LLM's `reason` written as the on-graph `rationale`. This is the
-/// load-bearing "LLM attribution rides through" property of slice 10.6c.
+/// load-bearing "LLM attribution rides through" property.
 #[tokio::test(flavor = "multi_thread")]
 async fn llm_hint_matches_transition_writes_rationale_e2e() {
     let (mut perspective, ctx, inst_uri) =
@@ -980,7 +979,7 @@ async fn llm_hint_matches_transition_writes_rationale_e2e() {
 
 /// LLM hint for a transition NOT in the satisfied set ⇒ hint is
 /// silently dropped; the engine's own satisfied-transition proposal
-/// still fires without a rationale. Documents design §5.4 step 5:
+/// still fires without a rationale. Documents the invariant that the
 /// LLM cannot bypass the deterministic `requires` guard.
 #[tokio::test(flavor = "multi_thread")]
 async fn llm_hint_without_matching_transition_is_discarded_e2e() {

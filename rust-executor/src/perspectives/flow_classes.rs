@@ -160,9 +160,9 @@ pub(crate) async fn mint_flow_instance(
 ///
 /// `runUri` is still not written here — engine-emitted proposals don't
 /// track back to a specific InterpretationRun today. `rationale` IS
-/// carried when the caller passes `Some(text)` (slice 10.6c: LLM-proposed
-/// path). The SDNA declares both as `min_count: 0, max_count: 1`
-/// (optional scalar), so `Some(_)` writes and `None` omits.
+/// carried when the caller passes `Some(text)` (LLM-proposed path).
+/// The SDNA declares both as `min_count: 0, max_count: 1` (optional
+/// scalar), so `Some(_)` writes and `None` omits.
 ///
 /// Returns the freshly-minted proposal URI
 /// (`ad4m://flow/proposal/{proposal_id}`).
@@ -195,9 +195,9 @@ pub(crate) async fn write_flow_transition_proposal(
         "proposer": proposer_did,
         "evidenceHashes": evidence_hash,
     });
-    // slice 10.6c: optional LLM-supplied attribution. Empty strings are
-    // treated as absent — the SDNA `min_count: 0` allows both, but writing
-    // an empty scalar bloats the graph with a link carrying no signal.
+    // Optional LLM-supplied attribution. Empty strings are treated as
+    // absent — the SDNA `min_count: 0` allows both, but writing an
+    // empty scalar bloats the graph with a link carrying no signal.
     if let Some(text) = rationale {
         if !text.is_empty() {
             values["rationale"] = text.to_string().into();
@@ -397,10 +397,10 @@ mod tests {
             "proposer",
             "evidence",
             "evidenceHashes",
-            // slice 10.6c: optional LLM-attribution field. Same alignment
-            // guard as the required scalars — a rename in the SDNA that
-            // did not land here would silently drop the rationale from
-            // the on-graph proposal without erroring.
+            // Optional LLM-attribution field. Same alignment guard as
+            // the required scalars — a rename in the SDNA that did not
+            // land here would silently drop the rationale from the
+            // on-graph proposal without erroring.
             "rationale",
         ] {
             assert!(

@@ -1,13 +1,16 @@
-//! Slice 10.4b — writer stage: `SatisfiedTransition` → on-graph proposal.
-//! Slice 10.4c — the auto-processor entry point that composes the
-//! load → evaluate → write pipeline into [`run_engine_proposal_pass`].
+//! Writer stage + composed entry point.
+//!
+//! [`write_engine_proposal`] turns one `SatisfiedTransition` into an
+//! on-graph `FlowTransitionProposal`. [`run_engine_proposal_pass`]
+//! composes load → evaluate → (optional semantic-check) → write into the
+//! single call the extraction pass invokes after `apply_with_overlay`.
 
 #![allow(dead_code, clippy::too_many_arguments)]
 
 use super::primitives::SatisfiedTransition;
 use super::queryable::evaluate_flow_transitions;
 
-/// Slice 10.4b — convenience over
+/// Convenience over
 /// [`crate::perspectives::flow_classes::write_flow_transition_proposal`]
 /// for the engine-generated path.
 ///
@@ -20,11 +23,11 @@ use super::queryable::evaluate_flow_transitions;
 /// path.
 ///
 /// `proposal_id` / `batch_id` are caller-supplied to stay consistent
-/// with `mint_flow_instance` — the auto-processor call-site
-/// (slice 10.4c) generates the id and threads its own batch so the
-/// whole extraction pass commits atomically. Propose-time is
-/// synthesised on-graph by `Ad4mModel`'s `createdAt` (earliest link
-/// timestamp on the proposal URI), so no timestamp param is threaded.
+/// with `mint_flow_instance` — the auto-processor generates the id and
+/// threads its own batch so the whole extraction pass commits atomically.
+/// Propose-time is synthesised on-graph by `Ad4mModel`'s `createdAt`
+/// (earliest link timestamp on the proposal URI), so no timestamp param
+/// is threaded.
 ///
 /// Returns the freshly-minted proposal URI.
 #[allow(clippy::too_many_arguments)]
@@ -53,8 +56,8 @@ pub async fn write_engine_proposal(
     .await
 }
 
-/// Slice 10.6c — an LLM-emitted "proposal to advance this flow" that the
-/// engine may honour when the deterministic `requires` guard also fires.
+/// An LLM-emitted "proposal to advance this flow" that the engine may
+/// honour when the deterministic `requires` guard also fires.
 ///
 /// This is the boundary type between the interpretation layer (which parses
 /// [`crate::perspectives::interpretation::types::LlmFlowProposal`] from the
@@ -80,8 +83,8 @@ pub struct LlmProposalHint {
     pub reason: Option<String>,
 }
 
-/// Slice 10.4c — compose the load → evaluate → write pipeline into one
-/// call that the extraction pass (`interpretation::run`) invokes AFTER
+/// Compose the load → evaluate → write pipeline into one call that the
+/// extraction pass (`interpretation::run`) invokes AFTER
 /// `apply_with_overlay` has committed the LLM-derived writes. At that
 /// point the graph state on which `requires` model-queries run is what
 /// the pass just produced, so a transition satisfied by fresh evidence
@@ -94,31 +97,31 @@ pub struct LlmProposalHint {
 /// to an empty result / a partial list.
 ///
 /// `scope`, when `Some`, narrows the FlowInstance load to the pass's
-/// anchor URI (same policy as [`crate::perspectives::flow_context::gather_active_flow_contexts`]).
+/// anchor URI (same policy as
+/// [`crate::perspectives::flow_context::gather_active_flow_contexts`]).
 ///
-/// `semantic_check`, when `Some((llm, model_id))`, wires the slice 10.5
-/// 2nd-pass LLM confirmation between the deterministic evaluator and the
-/// on-graph write. For each `SatisfiedTransition` whose target state
-/// carries a `semantic_check` hint, [`crate::perspectives::flow_semantic_check::run_semantic_check`]
-/// is invoked and only a `Pass` verdict advances the transition to the
+/// `semantic_check`, when `Some((llm, model_id))`, wires the 2nd-pass LLM
+/// confirmation between the deterministic evaluator and the on-graph
+/// write. For each `SatisfiedTransition` whose target state carries a
+/// `semantic_check` hint,
+/// [`crate::perspectives::flow_semantic_check::run_semantic_check`] is
+/// invoked and only a `Pass` verdict advances the transition to the
 /// write stage; `Fail` and `Ambiguous` discard the transition (fail-safe:
 /// an uncertain LLM must not silently advance a flow). Transitions
 /// without a per-state `semantic_check` hint are auto-passed without an
-/// LLM call. LLM I/O errors are treated as `discard` — flow layer must
-/// never break the extraction pass. When `semantic_check` is `None`
-/// (call sites pre-10.5c), the gate is skipped entirely and the pass
-/// behaves exactly as slice 10.4c shipped.
+/// LLM call. LLM I/O errors are treated as `discard` — the flow layer
+/// must never break the extraction pass. When `semantic_check` is `None`
+/// the gate is skipped entirely.
 ///
-/// `llm_hints` (slice 10.6c) carries the LLM's own `flow_proposals` output
-/// as a slice of [`LlmProposalHint`]s. When a hint matches a satisfied
-/// transition by `(instance_uri, to_state)`, the LLM's `reason` (if any)
-/// is written as the proposal's `rationale` field — attribution flows from
-/// the LLM to the on-graph proposal. Hints WITHOUT a matching satisfied
-/// transition are silently discarded (design §5.4 step 5: LLM cannot
-/// bypass the deterministic `requires` guard). Satisfied transitions
-/// without a matching hint still get an engine-emitted proposal, exactly
-/// as slice 10.4c/10.5c shipped — but with `rationale = None` (byte-
-/// identical writes to the pre-10.6c path). Pass `&[]` to opt out.
+/// `llm_hints` carries the LLM's own `flow_proposals` output as a slice
+/// of [`LlmProposalHint`]s. When a hint matches a satisfied transition
+/// by `(instance_uri, to_state)`, the LLM's `reason` (if any) is written
+/// as the proposal's `rationale` field — attribution flows from the LLM
+/// to the on-graph proposal. Hints WITHOUT a matching satisfied
+/// transition are silently discarded: the LLM cannot bypass the
+/// deterministic `requires` guard. Satisfied transitions without a
+/// matching hint still get an engine-emitted proposal with
+/// `rationale = None`. Pass `&[]` to opt out entirely.
 ///
 /// Returns the URIs of every `FlowTransitionProposal` this pass minted.
 /// The extraction pass threads these into
@@ -192,8 +195,8 @@ pub async fn run_engine_proposal_pass(
         return Vec::new();
     }
 
-    // Slice 10.5b — index FlowContext by instance_uri so the semantic-check
-    // gate can look up the flow's overall interpretationHint + next-state
+    // Index FlowContext by instance_uri so the semantic-check gate can
+    // look up the flow's overall interpretationHint + next-state
     // summaries when composing its confirmation prompt. Computed once per
     // pass (not per transition) since multiple SatisfiedTransitions can
     // share the same active FlowInstance. Only needed when
@@ -226,10 +229,10 @@ pub async fn run_engine_proposal_pass(
     // writer no longer takes a `proposed_at` param.
     let mut minted = Vec::with_capacity(satisfied.len());
     for transition in &satisfied {
-        // Slice 10.5b — semantic-check gate. Runs BEFORE the write so a
-        // rejected/uncertain transition never lands as a proposal. The gate
-        // is skipped entirely when the caller passes `None` (back-compat
-        // with slice 10.4c's callers). When `Some((llm, model_id))`:
+        // Semantic-check gate. Runs BEFORE the write so a
+        // rejected/uncertain transition never lands as a proposal. The
+        // gate is skipped entirely when the caller passes `None`. When
+        // `Some((llm, model_id))`:
         //   - transition has no `semantic_check` hint → `run_semantic_check`
         //     short-circuits to `Pass` without an LLM call (see the
         //     `build_semantic_check_prompt` contract).
@@ -280,13 +283,11 @@ pub async fn run_engine_proposal_pass(
             }
         }
 
-        // Slice 10.6c — match LLM hints by (instance_uri, to_state). The
-        // first matching hint wins if the LLM emitted several for the
-        // same pair (the prompt caps at one per instance per pass, but
-        // this is a fail-safe against a chatty small model). An unmatched
-        // satisfied transition still writes — just without a rationale —
-        // preserving byte-identical behavior with the pre-10.6c path
-        // when `llm_hints` is empty or nothing matches.
+        // Match LLM hints by (instance_uri, to_state). The first matching
+        // hint wins if the LLM emitted several for the same pair (the
+        // prompt caps at one per instance per pass, but this is a
+        // fail-safe against a chatty small model). An unmatched satisfied
+        // transition still writes — just without a rationale.
         let rationale = llm_hints
             .iter()
             .find(|h| {

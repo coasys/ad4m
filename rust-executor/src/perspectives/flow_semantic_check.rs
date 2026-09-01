@@ -1,17 +1,19 @@
-//! Slice 10.5a1 of the flow-implementation arc — pure primitives for the
-//! optional 2nd-pass semantic-check LLM confirmation gate.
+//! Optional 2nd-pass semantic-check LLM confirmation gate.
 //!
-//! Design authority: `planning/flow-interpretation-hints-design.md` §5 step 5
-//! ("If any state has `semanticCheck` → targeted small LLM call; on 'no'
-//! the proposal is discarded") and §5.5.4 (the semantic-check demo).
+//! A `FlowState` may declare `semanticCheck: "<English sentence>"` — a
+//! condition that must ALSO hold before the state's proposal fires,
+//! confirmed by a targeted small-LLM call. Structural `requires` matches
+//! remain load-bearing; the semantic check is an additional gate that
+//! defaults to fail-safe (an uncertain LLM must not silently advance a
+//! flow).
 //!
-//! # What this module owns
+//! # Layout
 //!
 //! Pure primitives (no LLM call, no perspective I/O):
 //!
 //! - [`SemanticCheckVerdict`] — the tri-state outcome (`Pass` / `Fail` /
-//!   `Ambiguous`) the async layer (slice 10.5a2) will produce from an
-//!   LLM response and slice 10.5b will consume as the fire/discard gate.
+//!   `Ambiguous`) that the async layer produces from an LLM response and
+//!   the writer stage consumes as the fire/discard gate.
 //! - [`build_semantic_check_prompt`] — assembles the targeted small
 //!   prompt from a `SatisfiedTransition` + its parent `FlowContext`.
 //!   Returns `None` when the transition carries no `semantic_check`
@@ -22,18 +24,16 @@
 //!   whitespace, defaults to `Ambiguous` when the first non-empty line
 //!   does not carry a decisive token.
 //! - [`should_fire_proposal`] — the fire/discard policy the writer stage
-//!   (slice 10.5b) will apply per transition. Ambiguous defaults to
-//!   discard: an uncertain LLM must not silently advance a flow.
+//!   applies per transition. Ambiguous defaults to discard.
+//!
+//! Async layer + AIService-backed impl are below the primitives.
 //!
 //! # Why a separate module
 //!
 //! `flow_evaluator` is already responsible for producing the guarded
 //! `SatisfiedTransition`s; wedging the semantic-check prompt/parse logic
-//! in there would blur two responsibilities (deterministic guard vs.
-//! LLM confirmation) and inflate the module's test surface. Following
-//! the same shape as `flow_classes` / `flow_context` / `flow_evaluator`
-//! (leaf pure module → async wrapper → wire-up) keeps each slice
-//! digestible and the onion shells testable in isolation.
+//! in there would blur two responsibilities (deterministic guard vs. LLM
+//! confirmation) and inflate the module's test surface.
 
 #![allow(dead_code)]
 
@@ -61,7 +61,7 @@ pub enum SemanticCheckVerdict {
 /// The fire/discard gate the writer stage applies per transition.
 ///
 /// Currently a total function on the verdict: only `Pass` fires.
-/// Extracted as its own primitive so slice 10.5b's call site is a
+/// Extracted as its own primitive so the writer-stage call site stays a
 /// one-liner and future policy tweaks (e.g. a threshold on repeated
 /// ambiguous responses) live behind one symbol.
 pub fn should_fire_proposal(verdict: SemanticCheckVerdict) -> bool {
@@ -73,7 +73,7 @@ pub fn should_fire_proposal(verdict: SemanticCheckVerdict) -> bool {
 /// the just-satisfied structural evidence.
 ///
 /// Returns `None` when the transition carries no `semantic_check`
-/// hint. Slice 10.5b short-circuits on `None` and treats the
+/// hint. The writer stage short-circuits on `None` and treats the
 /// deterministic requires as sufficient (auto-pass). Returning a
 /// bare `String` here would force the caller to inspect the option
 /// twice.
@@ -91,11 +91,11 @@ pub fn should_fire_proposal(verdict: SemanticCheckVerdict) -> bool {
 ///    on the first line. Case-insensitive matching is up to the
 ///    parser.
 ///
-/// The prompt deliberately does NOT include a transcript excerpt in
-/// this slice — that couples 10.5a1 to the auto-processor's transcript
-/// buffer and blocks the pure-testable shape. Slice 10.5a2 will thread
-/// a `Option<&str>` transcript_excerpt through when the async wrapper
-/// is added and the auto-processor's context is available.
+/// The prompt deliberately does NOT include a transcript excerpt at the
+/// primitive layer — coupling this pure function to the auto-processor's
+/// transcript buffer would break the pure-testable shape. The async
+/// wrapper threads an `Option<&str>` transcript_excerpt through when the
+/// auto-processor's context is available.
 pub fn build_semantic_check_prompt(
     transition: &SatisfiedTransition,
     flow_ctx: &FlowContext,
@@ -194,7 +194,7 @@ fn strip_code_fence(input: &str) -> &str {
 }
 
 // --------------------------------------------------------------------------
-// Slice 10.5a2 — async layer over an LLM seam
+// Async layer over an LLM seam
 // --------------------------------------------------------------------------
 
 /// The LLM seam the semantic-check pass calls into. Kept as a trait so the
@@ -202,10 +202,10 @@ fn strip_code_fence(input: &str) -> &str {
 /// real LLM, no network — in the same shape the auto-processor's harness
 /// uses ([`crate::ai_service::harness::CompletionSource`]).
 ///
-/// The single real implementation delegates to `AIService::prompt` (slice
-/// 10.5b wires that in from the auto-processor context). This trait is
-/// intentionally narrower than `CompletionSource`: semantic check never
-/// needs tool-calling, streaming, or credit-gate composition.
+/// The single real implementation delegates to `AIService::prompt` (the
+/// writer stage wires that in from the auto-processor context). This
+/// trait is intentionally narrower than `CompletionSource`: semantic
+/// check never needs tool-calling, streaming, or credit-gate composition.
 #[async_trait::async_trait]
 pub trait SemanticCheckLlm: Send + Sync {
     /// Send a completion `prompt` to `model_id`, get raw text back.
@@ -227,11 +227,11 @@ pub trait SemanticCheckLlm: Send + Sync {
 ///    returned verbatim; the fire/discard decision is
 ///    [`should_fire_proposal`]'s responsibility at the call site so the
 ///    caller can still surface `Fail` / `Ambiguous` in debug output.
-/// 3. LLM errors bubble up as `Err`. Slice 10.5b will map the `Err` case
-///    to "discard this transition and log a warning" so the extraction
-///    pass never breaks on a flow-layer LLM failure — but that mapping
-///    is a call-site concern, not this function's, to keep the async
-///    layer honest about I/O failures.
+/// 3. LLM errors bubble up as `Err`. The writer stage maps the `Err`
+///    case to "discard this transition and log a warning" so the
+///    extraction pass never breaks on a flow-layer LLM failure — but
+///    that mapping is a call-site concern, not this function's, to keep
+///    the async layer honest about I/O failures.
 pub async fn run_semantic_check(
     llm: &dyn SemanticCheckLlm,
     model_id: &str,
@@ -246,7 +246,7 @@ pub async fn run_semantic_check(
 }
 
 // --------------------------------------------------------------------------
-// Slice 10.5c — AIService-backed real implementation
+// AIService-backed real implementation
 // --------------------------------------------------------------------------
 
 /// Real [`SemanticCheckLlm`] that delegates to
@@ -471,7 +471,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------------
-    // Slice 10.5a2 — async layer tests
+    // Async layer tests
     // ----------------------------------------------------------------------
 
     use std::sync::Mutex;

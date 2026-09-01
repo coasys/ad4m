@@ -1,4 +1,5 @@
-//! Async layer (slice 10.4a2) over `model_query`.
+//! Async layer over `model_query` — the perspective-touching half of the
+//! evaluator, sitting on top of the pure primitives.
 //!
 //! - [`RequiresQueryable`] — the one perspective-side call the evaluator
 //!   needs, factored behind a trait so tests can stub it without a live
@@ -27,8 +28,8 @@ use std::collections::{HashMap, HashSet};
 /// The one perspective-side call the evaluator needs. Trait-based so tests
 /// can stub `model_query` deterministically without spinning up a full
 /// `PerspectiveInstance` (SPARQL store, Prolog engine, SDNA resolver,
-/// shape cache). `PerspectiveInstance` gets a blanket impl below so
-/// slice 10.4a3's call-site in `run.rs` can pass `&perspective` verbatim.
+/// shape cache). `PerspectiveInstance` gets a blanket impl below so the
+/// auto-processor call-site can pass `&perspective` verbatim.
 ///
 /// The return contract mirrors `PerspectiveInstance::model_query`: a JSON
 /// string of `{ instances: [...], totalCount: N }`. The evaluator only
@@ -69,9 +70,9 @@ impl RequiresQueryable for crate::perspectives::perspective_instance::Perspectiv
 ///   caller can log or reason about near-misses.
 ///
 /// Errors bubble up when `model_query` fails or when its result is not
-/// the documented `{ instances: [...], totalCount: N }` shape.
-/// Slice 10.4a3 wraps this in a `debug!` + skip so one malformed shape
-/// registration cannot poison the whole post-processing pass.
+/// the documented `{ instances: [...], totalCount: N }` shape. The top
+/// composer [`evaluate_flow_transitions`] wraps this in a `debug!` + skip
+/// so one malformed shape registration cannot poison the whole pass.
 pub async fn evaluate_single_query<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     query: &ModelQuery,
@@ -113,7 +114,7 @@ pub async fn evaluate_single_query<Q: RequiresQueryable + ?Sized>(
 /// Returns:
 /// - `Ok(None)` — at least one guard failed. Short-circuits: the caller
 ///   does not need to distinguish "which one" for the deterministic
-///   post-processing pass; slice 10.5's `semanticCheck` layer only fires
+///   post-processing pass; the optional `semanticCheck` gate only fires
 ///   when this returns `Some(_)`.
 /// - `Ok(Some((class_names, evidence_ids)))` — every guard was satisfied.
 ///   `class_names` is deduplicated and preserves first-occurrence order;
@@ -123,8 +124,8 @@ pub async fn evaluate_single_query<Q: RequiresQueryable + ?Sized>(
 ///
 /// Errors bubble up when any single query errors — same rationale as
 /// [`evaluate_single_query`]: a query surface should not be silently
-/// swallowed at the state level; slice 10.4a3 handles skip-on-error
-/// at the top composer.
+/// swallowed at the state level; the top composer
+/// [`evaluate_flow_transitions`] handles skip-on-error.
 pub async fn evaluate_state_requires<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     requires: &[ModelQuery],
@@ -155,21 +156,21 @@ pub async fn evaluate_state_requires<Q: RequiresQueryable + ?Sized>(
 /// state's `requires`, and return a [`SatisfiedTransition`] per satisfied
 /// (record, next-state) pair.
 ///
-/// Silent-skip rules mirror slice 10.1b (`load_flow_instances`) — the
-/// deterministic post-processing pass should never blow up because *one*
-/// flow definition or SDNA class went sideways:
+/// Silent-skip rules mirror `load_flow_instances` — the deterministic
+/// post-processing pass should never blow up because *one* flow
+/// definition or SDNA class went sideways:
 ///
 /// - Record whose `flow_name` is not in `flows_by_name` → skipped
 ///   (definition unpublished or hasn't synced yet).
 /// - State whose `requires` is `None` or empty → skipped (no
-///   deterministic guard; slice 10.5's `semanticCheck` picks these up
-///   separately when 10.5 lands).
+///   deterministic guard; the `semanticCheck` gate picks these up
+///   separately).
 /// - A `model_query` call that errors → logged at `debug!` and skipped.
-///   The consensus engine (slice 10.6) will re-evaluate on the next tick
-///   so a transient perspective error is self-healing.
+///   The next post-processing tick will re-evaluate, so a transient
+///   perspective error is self-healing.
 ///
 /// The effective `consensus_rule` per output prefers the per-state
-/// override (§7.1) and falls back to the flow-level default when unset.
+/// override and falls back to the flow-level default when unset.
 pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     records: &[FlowInstanceRecord],

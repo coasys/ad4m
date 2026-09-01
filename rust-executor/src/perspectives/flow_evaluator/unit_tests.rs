@@ -1,7 +1,6 @@
-//! Slice 10.4a1/10.4a2 unit tests — pure primitives + stubbed
-//! `RequiresQueryable` async composition, exercised without a live
-//! `PerspectiveInstance`. See [`super::e2e_tests`] for the live-perspective
-//! integration coverage.
+//! Unit tests — pure primitives + stubbed `RequiresQueryable` async
+//! composition, exercised without a live `PerspectiveInstance`. See
+//! [`super::e2e_tests`] for the live-perspective integration coverage.
 
 use super::primitives::{build_query_input_for_requires, cardinality_satisfied, evidence_hash};
 use super::queryable::{
@@ -348,8 +347,8 @@ fn build_query_or_empty_omitted() {
 
 #[test]
 fn build_query_recursive_or_nests_subclauses() {
-    // Two-level OR — mirrors §7.3 multi-role composition with a
-    // fallback that itself has alternatives.
+    // Two-level OR — multi-role composition with a fallback that itself
+    // has alternatives.
     let mut w_leaf: BTreeMap<String, PropertyCondition> = BTreeMap::new();
     w_leaf.insert("role".into(), PropertyCondition::Str("admin".into()));
     let leaf = ModelQuery {
@@ -391,7 +390,7 @@ fn build_query_recursive_or_nests_subclauses() {
 }
 
 // ============================================================================
-// Slice 10.4a2 — async layer tests (stubbed perspective)
+// Async layer tests (stubbed perspective)
 // ============================================================================
 //
 // These stub `RequiresQueryable` in-process so the evaluator's async
@@ -726,8 +725,8 @@ async fn flow_transitions_skips_state_when_requires_unsatisfied() {
 
 #[tokio::test]
 async fn flow_transitions_skips_states_without_requires() {
-    // No `requires` = no deterministic guard; slice 10.5's semanticCheck
-    // is a separate concern and doesn't fire here.
+    // No `requires` = no deterministic guard; the semanticCheck gate is
+    // a separate concern and doesn't fire here.
     let flow = simple_flow("Delivery", &[("identified", "scoped")]);
     let flows = HashMap::from([("Delivery".into(), flow)]);
     let recs = vec![record(

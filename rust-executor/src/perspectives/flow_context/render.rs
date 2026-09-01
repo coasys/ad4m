@@ -15,12 +15,11 @@ use crate::perspectives::shacl_parser::{
     ConsensusRule, FlowState, ModelQuery, PropertyCondition, SHACLFlow,
 };
 
-/// Substitution context for flow tokens in `ModelQuery` values. The
-/// design doc's §6 worked examples embed the tokens
-/// [`FLOW_BASE_TOKEN`] (the item the flow is anchored to) and
-/// [`FLOW_INSTANCE_TOKEN`] (the specific `FlowInstance` URI) in `where`
-/// clauses. Without substitution the LLM sees them verbatim, e.g.
-/// `where forTask = "$flow.base"` — no signal to the extractor.
+/// Substitution context for flow tokens in `ModelQuery` values. Flow
+/// definitions embed [`FLOW_BASE_TOKEN`] (the item the flow is anchored
+/// to) and [`FLOW_INSTANCE_TOKEN`] (the specific `FlowInstance` URI) in
+/// `where` clauses. Without substitution the LLM sees them verbatim,
+/// e.g. `where forTask = "$flow.base"` — no signal to the extractor.
 ///
 /// `subject` and `instance_uri` are typically taken from the enclosing
 /// [`FlowContext`]. `FlowTokens::none()` skips both substitutions;
@@ -38,11 +37,11 @@ pub struct FlowTokens<'a> {
 }
 
 /// The `$flow.base` prompt token — resolves to the flow instance's
-/// `subject`. Design doc §6 (Deliberation / Delivery worked examples).
+/// `subject` (the item the flow is anchored to, e.g. a Task URI).
 pub const FLOW_BASE_TOKEN: &str = "$flow.base";
 
 /// The `$flow.instance` prompt token — resolves to the flow instance's
-/// on-graph URI. Design doc §6.
+/// on-graph URI.
 pub const FLOW_INSTANCE_TOKEN: &str = "$flow.instance";
 
 impl<'a> FlowTokens<'a> {
@@ -106,10 +105,9 @@ pub fn reachable_next_states<'a>(flow: &'a SHACLFlow, current_state: &str) -> Ve
 /// renderings preserve their `$flow.base` / `$flow.instance` /
 /// `$did` tokens verbatim — the prompt-builder pairs them with a
 /// per-flow `tokens` legend so the LLM can look up what each token
-/// resolves to (Nico 2026-08-31: tokens in, tokens out, engine
-/// substitutes post-LLM). Slice 10.6 will call [`FlowTokens::substitute`]
-/// on any tokenised value the LLM emits back before it hits a query
-/// or a link.
+/// resolves to (tokens in, tokens out; engine substitutes post-LLM).
+/// The post-LLM engine calls [`FlowTokens::substitute`] on any tokenised
+/// value the LLM emits back before it hits a query or a link.
 pub fn summarize_next_state(state: &FlowState) -> NextStateSummary {
     NextStateSummary {
         name: state.name.clone(),
@@ -128,7 +126,7 @@ pub fn summarize_next_state(state: &FlowState) -> NextStateSummary {
 /// the tokens (`$flow.base`, `$flow.instance`, `$did`). The prompt-builder
 /// pairs them with a per-flow legend telling the LLM what each token
 /// resolves to for THIS instance. Substitution happens only on the
-/// post-LLM engine side (slice 10.6), not at render time.
+/// post-LLM engine side, not at render time.
 pub fn summarize_flow_instance(
     flow: &SHACLFlow,
     instance_uri: impl Into<String>,
@@ -602,10 +600,9 @@ mod tests {
 
     #[test]
     fn render_model_query_preserves_flow_tokens_in_where_string_value() {
-        // Nico 2026-08-31: tokens in, tokens out. `$flow.base` and
-        // `$flow.instance` survive rendering verbatim so the prompt-builder
-        // can carry the concrete URIs in a separate legend and the engine
-        // can substitute post-LLM (slice 10.6).
+        // Tokens in, tokens out. `$flow.base` and `$flow.instance` survive
+        // rendering verbatim so the prompt-builder can carry the concrete
+        // URIs in a separate legend and the engine substitutes post-LLM.
         let mut where_map: BTreeMap<String, PropertyCondition> = BTreeMap::new();
         where_map.insert(
             "forTask".to_string(),
@@ -830,11 +827,11 @@ mod tests {
 
     #[test]
     fn summarize_flow_instance_preserves_tokens_in_reachable_states_requires() {
-        // Nico 2026-08-31: `requires` renderings on reachable next-states
-        // preserve `$flow.base` / `$flow.instance` verbatim. The prompt-
-        // builder pairs each flow entry with a per-instance `tokens`
-        // legend so the LLM can resolve the symbolic reference; the
-        // post-LLM engine (slice 10.6) substitutes on the way out.
+        // `requires` renderings on reachable next-states preserve
+        // `$flow.base` / `$flow.instance` verbatim. The prompt-builder
+        // pairs each flow entry with a per-instance `tokens` legend so
+        // the LLM can resolve the symbolic reference; the post-LLM engine
+        // substitutes on the way out.
         let mut flow = delivery_flow();
         let mut where_map: BTreeMap<String, PropertyCondition> = BTreeMap::new();
         where_map.insert(

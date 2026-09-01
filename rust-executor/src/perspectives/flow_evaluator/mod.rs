@@ -1,49 +1,56 @@
-//! Slice 10.4a of the flow-implementation arc — the deterministic
-//! `FlowTransitionProposal` post-processing pass. Turns each active
-//! `FlowInstance` and its reachable next-states into a
-//! [`SatisfiedTransition`] per (record, next-state) whose `requires` array
-//! is fully satisfied against the committed perspective graph.
+//! Deterministic post-processing pass over active flows.
 //!
-//! Design authority: `planning/flow-interpretation-hints-design.md` §5 step 5
-//! ("Post-processing (engine, deterministic)") and §7 (`ConsensusRule` +
-//! `didProperty` role-gate).
+//! # What this pass does
 //!
-//! # What this module owns
+//! For each `FlowInstance` alive on the perspective, walk the reachable
+//! next-states declared on its `SHACLFlow`, evaluate every state's
+//! `requires` guard against the committed graph, and emit a
+//! [`SatisfiedTransition`] for every (instance, next-state) pair whose
+//! guards fully match. Downstream stages turn those satisfied transitions
+//! into on-graph `FlowTransitionProposal` writes.
 //!
-//! Pure primitives (slice 10.4a1, [`primitives`]):
+//! A `requires` guard is an array of `ModelQuery` shapes carrying an
+//! optional `count.{min,max}` cardinality. The guard is satisfied when
+//! every element matches the target class with the required cardinality;
+//! the AND across `requires` is what gates a proposal. The record of what
+//! matched (class name + sorted matched-ids per element) is hashed into an
+//! `evidence` value on the proposal so a later re-verification can catch a
+//! proposal whose evidence no longer resolves.
 //!
-//! - [`SatisfiedTransition`] — the record slice 10.4b's writer stage
-//!   consumes.
-//! - [`build_query_input_for_requires`] — translator from `ModelQuery`
+//! # Module layout
+//!
+//! [`primitives`] — pure, no-I/O building blocks:
+//!
+//! - [`SatisfiedTransition`] — the record the writer stage consumes.
+//! - `build_query_input_for_requires` — translator from `ModelQuery`
 //!   (flow-side type) to `serde_json::Value` (`model_query`'s input
 //!   shape). Substitutes `$did` in `didProperty` at translation time.
 //!   Recursive over `ModelQuery.or`.
-//! - [`cardinality_satisfied`] — `count.{min,max}` cardinality check.
-//! - [`evidence_hash`] — deterministic SHA256 of a (class, sorted
-//!   matched-ids) pair. Used to seed the evidence field on the
-//!   `FlowTransitionProposal` that slice 10.4b emits, so a re-verification
-//!   pass in slice 10.6 can catch a tampered proposal.
+//! - `cardinality_satisfied` — `count.{min,max}` check.
+//! - `evidence_hash` — deterministic SHA256 of a (class, sorted
+//!   matched-ids) pair, used to seed the proposal's evidence field.
 //!
-//! Async layer (slice 10.4a2, [`queryable`]):
+//! [`queryable`] — async layer over the one perspective-side query the
+//! evaluator needs:
 //!
-//! - [`RequiresQueryable`] — the one perspective-side call the evaluator
-//!   needs, factored behind a trait so tests can stub it without a live
-//!   `PerspectiveInstance`. `PerspectiveInstance` gets a blanket impl.
-//! - [`evaluate_single_query`] — one `model_query` call + cardinality
-//!   check + evidence extraction.
-//! - [`evaluate_state_requires`] — AND across a state's `requires` array;
-//!   returns `Some((class_names, evidence_ids))` when all guards match.
-//! - [`evaluate_flow_transitions`] — the top composer that walks every
-//!   active flow's reachable next-states and returns
-//!   `Vec<SatisfiedTransition>`. Silent-skip on unknown flow name,
+//! - `RequiresQueryable` trait — factored so tests can stub it without a
+//!   live `PerspectiveInstance`. `PerspectiveInstance` gets a blanket impl.
+//! - `evaluate_single_query` — one `model_query` call + cardinality check
+//!   + evidence extraction.
+//! - `evaluate_state_requires` — AND across a state's `requires`;
+//!   returns `Some((class_names, evidence_ids))` when all elements match.
+//! - `evaluate_flow_transitions` — top composer over all active flows and
+//!   their reachable next-states. Silent-skip on unknown flow name,
 //!   guardless states, and query errors so a single bad shape cannot
 //!   poison the whole pass.
 //!
-//! Writer + entry point (slices 10.4b/10.4c, [`engine_pass`]):
+//! [`engine_pass`] — writer + entry point:
 //!
-//! - [`write_engine_proposal`] — `SatisfiedTransition` → on-graph
+//! - `write_engine_proposal` — `SatisfiedTransition` → on-graph
 //!   `FlowTransitionProposal` write.
-//! - [`LlmProposalHint`] — the LLM-attribution boundary type (slice 10.6c).
+//! - [`LlmProposalHint`] — LLM-attribution boundary type: an LLM-side
+//!   proposal carries an optional `rationale` string that the writer
+//!   attaches to the proposal when the two match on (flow, from, to).
 //! - [`run_engine_proposal_pass`] — the composed load → evaluate →
 //!   (optional semantic-check) → write pipeline the auto-processor calls.
 //!
@@ -53,15 +60,16 @@
 //!
 //! # Why pure primitives + trait-backed async layer
 //!
-//! Slice 10.4b will emit `FlowTransitionProposal` writes on behalf of the
-//! extraction DID from these results. Any bug in the ModelQuery→ModelQueryInput
-//! translation would either miss a satisfied requires (flow silently
-//! stalls) or synthesize a wrong-guard proposal (garbage in the flow's
-//! evidence chain). Isolating the translation from graph I/O gives us
-//! fixture-driven unit tests for every `PropertyCondition` variant +
-//! `$did` substitution; the [`RequiresQueryable`] trait gives us the same
-//! coverage for the composition and error-handling shape without paying
-//! the cost of a live perspective per test.
+//! The writer stage emits `FlowTransitionProposal` writes on behalf of the
+//! extraction DID from the pass's results. A bug in the
+//! `ModelQuery` → `ModelQueryInput` translation would either miss a
+//! satisfied guard (flow silently stalls) or synthesize a wrong-guard
+//! proposal (garbage in the flow's evidence chain). Isolating the
+//! translation from graph I/O gives fixture-driven unit tests for every
+//! `PropertyCondition` variant + `$did` substitution; the
+//! `RequiresQueryable` trait gives the same coverage for the composition
+//! and error-handling shape without paying the cost of a live perspective
+//! per test.
 
 #![allow(dead_code)]
 

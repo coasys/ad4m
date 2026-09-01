@@ -1,12 +1,12 @@
-//! Pure primitives (slice 10.4a1): the [`SatisfiedTransition`] record type
-//! plus the guard-evaluation building blocks that don't need a live
-//! perspective — [`build_query_input_for_requires`] (`ModelQuery` →
+//! Pure primitives with no perspective dependency: the
+//! [`SatisfiedTransition`] record type plus the guard-evaluation building
+//! blocks — [`build_query_input_for_requires`] (`ModelQuery` →
 //! `ModelQueryInput` translation), [`cardinality_satisfied`]
 //! (`count.{min,max}` check), and [`evidence_hash`] (deterministic seal
 //! over a satisfied guard's evidence bag).
 //!
-//! See `super` (the `flow_evaluator` module doc) for the full slice
-//! breakdown and design-authority pointer.
+//! Every function here is fixture-testable without a live
+//! `PerspectiveInstance`; graph I/O lives one layer up in `queryable`.
 
 #![allow(dead_code)]
 
@@ -17,13 +17,14 @@ use sha2::{Digest, Sha256};
 
 /// One (flow_instance, next-state) pair whose `requires` array has been
 /// evaluated to fully-satisfied on the committed perspective graph. The
-/// output of slice 10.4a2's async evaluator; the input to slice 10.4b's
-/// [`synthesize_engine_proposals`].
+/// output of the async evaluator (`queryable`); the input to the writer
+/// stage (`engine_pass`).
 ///
 /// `evidence_ids` is the union of matched instance IDs across every
 /// `ModelQuery` in the state's `requires` array. `evidence_hash` is a
 /// content-hash of the same set (computed via [`evidence_hash`]) so a
-/// re-verification pass in slice 10.6 can catch a tampered proposal.
+/// later re-verification pass can catch a proposal whose evidence no
+/// longer resolves.
 ///
 /// (Not `PartialEq`: `consensus_rule: Option<ConsensusRule>` transitively
 /// holds `PropertyCondition` with float variants that can't derive `Eq`.
@@ -46,17 +47,16 @@ pub struct SatisfiedTransition {
     pub to_state: String,
     /// Every matched instance-id across all queries in the state's
     /// `requires` array, in the order they appeared per query then
-    /// sorted globally. Used by slice 10.4b as the proposal's evidence
-    /// bag; the same list is fed to [`evidence_hash`].
+    /// sorted globally. Used by the writer stage as the proposal's
+    /// evidence bag; the same list is fed to [`evidence_hash`].
     pub evidence_ids: Vec<String>,
     /// SHA256 of `(class_names_joined, evidence_ids_sorted)` — a
-    /// tamper-detectable seal the consensus engine can re-verify in
-    /// slice 10.6.
+    /// tamper-detectable seal a re-verification pass can compare against.
     pub evidence_hash: String,
-    /// Per-state `semanticCheck` hint carried forward so slice 10.5's
-    /// optional 2nd-pass LLM confirmation can be triggered. `None` =
+    /// Per-state `semanticCheck` hint carried forward so the optional
+    /// 2nd-pass LLM confirmation gate can be triggered. `None` =
     /// state-level `requires` matches are sufficient to fire the
-    /// proposal.
+    /// proposal without any semantic check.
     pub semantic_check: Option<String>,
     /// The consensus rule that must be met before the flow actually
     /// advances. Prefer the per-state override, fall back to the
@@ -87,11 +87,11 @@ pub fn evidence_hash(class_names: &[String], evidence_ids: &[String]) -> String 
 
 /// Cardinality check — is `actual` within `count.{min, max}`?
 ///
-/// Semantics match the design doc §7:
 /// - Unset `count` = at least one match (equivalent to `{ min: 1 }`).
 /// - `min` unset = no lower bound (0 matches is allowed).
 /// - `max` unset = no upper bound.
 /// - Both bounds are inclusive.
+/// - `{ max: 0 }` is a legal negative guard ("no matches allowed").
 pub fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool {
     let Some(c) = count else {
         return actual >= 1;
@@ -106,21 +106,19 @@ pub fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> 
             return false;
         }
     }
-    // Both bounds unset ⇒ every count satisfies, including 0. Matches
-    // the design intent ("at most 0 matches" is a legal negative guard).
     true
 }
 
 /// Translate a `ModelQuery` guard (flow-side type) to the
 /// `ModelQueryInput` shape (`model_query`'s serialized input). Pure —
-/// slice 10.4a2's async evaluator calls this once per query and hands
-/// the result to `PerspectiveInstance::model_query`.
+/// the async evaluator calls this once per query and hands the result to
+/// `PerspectiveInstance::model_query`.
 ///
-/// `acting_did` resolves `$did` in `didProperty` at translation time
-/// (§7.2). The convention `"$did"` triggers substitution; any other
-/// string is passed through verbatim — an escape hatch for hardcoded
-/// roles that never made it into the design doc but which we should
-/// not silently break.
+/// `acting_did` resolves `$did` in `didProperty` at translation time.
+/// A `didProperty` value equal to `"$did"` (the common case) becomes
+/// `where.<didProperty> = acting_did`; any other string is passed
+/// through verbatim, so a caller can hard-code a role by writing e.g.
+/// `where: { author: "did:key:..." }` directly instead.
 ///
 /// `or` composition recurses; each alternative is translated to a
 /// sub-object under the `where.OR` key using the `SubClauses` shape
@@ -145,9 +143,6 @@ pub fn build_query_input_for_requires(query: &ModelQuery, acting_did: &str) -> V
             prop.replace("$did", acting_did)
         } else {
             // Common case: `didProperty: "author"` means where.author = $did.
-            // The design doc does not spell out a way to hardcode a role
-            // via didProperty; if we ever want that, the caller writes
-            // `where: { author: "did:key:..." }` directly.
             acting_did.to_string()
         };
         where_obj.insert(
