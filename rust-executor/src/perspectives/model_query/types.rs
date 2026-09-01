@@ -303,11 +303,16 @@ pub struct ModelQueryInput {
     /// Naming classes here answers the one they did: read it as this, if it is
     /// one.
     ///
-    /// **Ranks, never excludes.** A target matching nothing named still arrives,
-    /// hydrated as whatever it is, because the relation is heterogeneous by
-    /// definition and a caller listing what it can use must not silently narrow
-    /// what the collection contains. Anything not named simply falls through to
-    /// the specificity order behind it.
+    /// **Ranks, never excludes.** Classification is unaffected: a target is still
+    /// tested against every registered class, and this only reorders the ones it
+    /// matched. So a target conforming to nothing named here still arrives,
+    /// hydrated against whichever class it *does* match, chosen by specificity as
+    /// it would have been anyway. The relation is heterogeneous by definition and
+    /// a caller listing what it can use must not thereby narrow what the
+    /// collection contains.
+    ///
+    /// (A target matching no registered class at all is a different case, and is
+    /// skipped — there is no shape to read it through.)
     ///
     /// Only meaningful alongside `polymorphic`.
     #[serde(default)]
