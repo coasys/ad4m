@@ -6401,3 +6401,985 @@ async fn test_relation_quantifier_requires_the_target_class() {
          the body but not the class",
     );
 }
+
+// --- Polymorphic includes -------------------------------------------------
+//
+// A note on the fixtures below, since they differ on purpose. A class is a set
+// of required triples, and `required_triples` builds that set from flags and
+// required properties alike — a flag contributes `(predicate, Some(value))`
+// where a required property contributes `(predicate, None)`, and nothing past
+// that point can tell them apart. So none of this machinery depends on flags.
+//
+// The first test discriminates its classes by flag, because that is what the
+// consumers of this API ship today and it should keep being covered. The two
+// overlap tests discriminate by required property, because what they assert is
+// about class membership itself and a fixture built from marker flags reads as
+// contrived — two classes needing an overlapping set of ordinary predicates is
+// how overlap actually arises.
+
+/// A heterogeneous relation hydrates each target as the class it actually is.
+///
+/// Without this the collection has no good answer. Declaring the base class
+/// loses every subclass property — `hydrate_one` only reads predicates present
+/// in the shape it is handed, so a subclass read as its parent arrives with
+/// `text` *absent*, not merely mislabelled — and declaring nothing leaves the
+/// include with no shape to resolve at all.
+#[tokio::test]
+async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // Register the classes so `subject_class_of` can enumerate them.
+    for uri in [
+        "we://models/Collection",
+        "we://models/TextBlock",
+        "we://models/ImageBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    // One collection holding one text block and one image block.
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://i/1", "4"))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "5",
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://i/1", "we://flag", "we://image_block", "6"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://i/1",
+            "we://src",
+            "literal:string:cat.png",
+            "6",
+        ))
+        .unwrap();
+
+    // The collection's `children` names no target class — which is exactly why
+    // it needs this: its members are of genuinely different types.
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
+                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImageBlock",
+        parse_shape_from_json(
+            r#"{"className":"ImageBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://image_block"},
+                 "src":{"predicate":"we://src","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "ImageBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 2, "both children hydrate");
+
+    let text = children
+        .iter()
+        .find(|c| c["id"] == "we://t/1")
+        .expect("the text block");
+    let image = children
+        .iter()
+        .find(|c| c["id"] == "we://i/1")
+        .expect("the image block");
+
+    assert_eq!(text["__subjectClass"].as_str(), Some("TextBlock"));
+    assert_eq!(image["__subjectClass"].as_str(), Some("ImageBlock"));
+    // The property that only exists on the concrete class — the thing a
+    // base-class hydration silently drops.
+    assert_eq!(text["text"].as_str(), Some("hello"));
+    assert_eq!(image["src"].as_str(), Some("cat.png"));
+}
+
+/// A target conforming to both a class and its parent hydrates as the class.
+///
+/// This is the case the specificity ranking exists for, and the one where it has
+/// a real answer rather than a convention: a subclass requires everything its
+/// parent requires and more, so "matched more triples" and "more derived" are the
+/// same ordering. Nothing exercised it end to end before — the sibling test's
+/// two classes match one shape each, so the head of the set was never contested.
+///
+/// Discriminated by required properties rather than by flags, so the superset
+/// relation the ranking depends on is visible in the shapes themselves: `Block`
+/// requires a title, `TextBlock` requires a title *and* a body.
+#[tokio::test]
+async fn test_polymorphic_include_hydrates_the_most_derived_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Collection",
+        "we://models/Block",
+        "we://models/TextBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://name",
+            "literal:string:reading list",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    // The child carries what `Block` requires *and* what `TextBlock` requires,
+    // which is what being a subclass looks like when membership is structural:
+    // it satisfies both, and satisfies the subclass by more.
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://title",
+            "literal:string:Chapter one",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "4",
+        ))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "Block",
+        parse_shape_from_json(
+            r#"{"className":"Block","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Block",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"},
+                 "text":{"predicate":"we://text","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "one link, one child");
+
+    let child = &children[0];
+    assert_eq!(child["__subjectClass"].as_str(), Some("TextBlock"));
+    // `text` exists only on the subclass, so its presence is the proof that the
+    // subclass's shape did the hydrating and not the parent's.
+    assert_eq!(child["text"].as_str(), Some("hello"));
+    // Conforming to the parent as well is not an error to be hidden — it is
+    // simply true, and it is reported.
+    assert_eq!(
+        child["__subjectClasses"],
+        serde_json::json!(["TextBlock", "Block"]),
+        "the whole set, most specific first"
+    );
+}
+
+/// A target conforming to two *unrelated* classes is still one member.
+///
+/// Links decide how many children a collection has; classes decide only how each
+/// one is read. A class is a set of required triples, so a node carrying what two
+/// independently authored classes each require belongs to both — which is not a
+/// contrived arrangement but the ordinary consequence of two communities modelling
+/// overlapping things. It appears once, read as one of them, with the other
+/// reported rather than dropped.
+///
+/// Which one wins is a convention here, not a fact: the two classes require one
+/// triple each, so the specificity ranking ties and the alphabetical tie-break
+/// decides. Arbitrary, but the same arbitrary answer on every peer, which is the
+/// property worth having when there is no `rdf:type` triple to appeal to.
+#[tokio::test]
+async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_target() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Collection",
+        "we://models/Bookmark",
+        "we://models/TextBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://name",
+            "literal:string:reading list",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://b/1", "3"))
+        .unwrap();
+
+    // One node holding what each class requires: somebody saved a link and wrote
+    // a note on it. Neither reading is wrong, and nothing marks it as either.
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://url",
+            "literal:string:https://ad4m.dev",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://text",
+            "literal:string:hello",
+            "4",
+        ))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "Bookmark",
+        parse_shape_from_json(
+            r#"{"className":"Bookmark","properties":{
+                 "url":{"predicate":"we://url","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Bookmark",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "text":{"predicate":"we://text","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    // The point of the test: two readings, one link, one member. Hydrating the
+    // node once per class it matches would make a three-link collection arrive
+    // with more than three children.
+    assert_eq!(
+        children.len(),
+        1,
+        "two readings of one node is still one node"
+    );
+
+    let child = &children[0];
+    assert_eq!(child["id"].as_str(), Some("we://b/1"));
+    assert_eq!(
+        child["__subjectClass"].as_str(),
+        Some("Bookmark"),
+        "the ranking ties, so the tie-break decides — and decides the same way everywhere"
+    );
+    assert_eq!(child["url"].as_str(), Some("https://ad4m.dev"));
+    // The reading that lost. A caller wanting it has the id and can ask
+    // `TextBlock` for it directly.
+    assert_eq!(
+        child["__subjectClasses"],
+        serde_json::json!(["Bookmark", "TextBlock"])
+    );
+}
+
+/// `limit` on a polymorphic include is refused, not quietly ignored.
+///
+/// The read runs one sub-query per class present, so a limit would apply to each
+/// group separately: the same `limit: 5` returns five rows or fifteen depending
+/// on how many classes the data happens to contain, which the caller cannot see.
+/// Dropping it silently hands back every row to someone who asked for five —
+/// wrong in a way that surfaces much later, and only as slowness.
+#[tokio::test]
+async fn test_limit_on_a_polymorphic_include_is_rejected() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in ["we://models/Collection", "we://models/TextBlock"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "4"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                limit: Some(5),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let err =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .expect_err("a limit that cannot be honoured must not be dropped in silence");
+    let msg = err.to_string();
+    assert!(msg.contains("children"), "names the relation: {msg}");
+    assert!(msg.contains("limit"), "names what was refused: {msg}");
+}
+
+/// A named class wins over a more specific one the caller did not ask for.
+///
+/// The case the specificity default gets wrong. A relation declares it holds
+/// `Post`s; a target is an `ImagePost`, so it conforms to both and `ImagePost`
+/// matched more. Read as an `ImagePost` it arrives as a class the caller has
+/// never heard of, and no client-side repair is possible for the general shape
+/// of this — a class whose shape does not declare the other's predicates
+/// projects those values out of the payload before anyone sees them.
+///
+/// Naming `Post` says what the read is for, and the answer follows.
+#[tokio::test]
+async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Feed",
+        "we://models/Post",
+        "we://models/ImagePost",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://f/1",
+            "we://name",
+            "literal:string:the feed",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://p/1", "3"))
+        .unwrap();
+
+    // An ImagePost: everything a Post requires, and an image besides.
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://title",
+            "literal:string:Chocolate Cake",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://src",
+            "literal:string:cake.png",
+            "4",
+        ))
+        .unwrap();
+
+    let feed_json = r#"{
+        "className": "Feed",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "entries": { "predicate": "we://entry", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, feed_shape) = StaticShapeResolver::from_json("Feed", feed_json).unwrap();
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImagePost",
+        parse_shape_from_json(
+            r#"{"className":"ImagePost","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"},
+                 "src":{"predicate":"we://src","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "ImagePost",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "entries".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                prefer_classes: Some(vec!["Post".to_string()]),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let entries = result.instances[0]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+
+    assert_eq!(
+        entry["__subjectClass"].as_str(),
+        Some("Post"),
+        "the caller named Post, and the target is one"
+    );
+    assert_eq!(entry["title"].as_str(), Some("Chocolate Cake"));
+    // Ranked by specificity regardless of what was preferred, so it stays a fact
+    // about the node rather than about the request — and a reader can see a
+    // preference was applied precisely because the head is not the chosen class.
+    assert_eq!(
+        entry["__subjectClasses"],
+        serde_json::json!(["ImagePost", "Post"]),
+        "the whole set, still most specific first"
+    );
+}
+
+/// Preferring classes never narrows what a relation returns.
+///
+/// A heterogeneous relation is open by definition, so a caller listing the
+/// classes it can use must not thereby drop the ones it cannot. Anything
+/// unnamed still arrives, hydrated as whatever it actually is — which is what
+/// keeps the declaration a preference rather than a scope, and what stops a
+/// model's class list from freezing which classes a collection may hold.
+#[tokio::test]
+async fn test_preferring_classes_does_not_drop_the_ones_not_named() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in ["we://models/Feed", "we://models/Post", "we://models/Recipe"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://f/1",
+            "we://name",
+            "literal:string:the feed",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://p/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://r/1", "3"))
+        .unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://title",
+            "literal:string:a post",
+            "4",
+        ))
+        .unwrap();
+    // A class the caller never names, and could not have: somebody defined it
+    // after this relation was written.
+    store
+        .add_link(&make_link(
+            "we://r/1",
+            "we://ingredients",
+            "literal:string:flour, sugar",
+            "4",
+        ))
+        .unwrap();
+
+    let feed_json = r#"{
+        "className": "Feed",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "entries": { "predicate": "we://entry", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, feed_shape) = StaticShapeResolver::from_json("Feed", feed_json).unwrap();
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Recipe",
+        parse_shape_from_json(
+            r#"{"className":"Recipe","properties":{
+                 "ingredients":{"predicate":"we://ingredients","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Recipe",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "entries".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                prefer_classes: Some(vec!["Post".to_string()]),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let entries = result.instances[0]["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        2,
+        "both links, though only one class was named"
+    );
+
+    let recipe = entries
+        .iter()
+        .find(|e| e["id"] == "we://r/1")
+        .expect("the unnamed class is still a member");
+    assert_eq!(recipe["__subjectClass"].as_str(), Some("Recipe"));
+    assert_eq!(recipe["ingredients"].as_str(), Some("flour, sugar"));
+}
+
+/// The same refusal on a relation that happens to hold nothing.
+///
+/// Both resolvers return early once they find no targets, so a check made during
+/// hydration would accept `limit: 5` on an empty collection and reject it on a
+/// full one — the query's validity decided by the data it is asking about.
+/// Whether a request can be answered is a property of the request.
+#[tokio::test]
+async fn test_limit_on_a_polymorphic_include_is_rejected_even_with_no_targets() {
+    let store = SparqlStore::new(None).unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://models/Collection",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+    // A collection, and deliberately no `children` links at all.
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" },
+            "markedBy": { "predicate": "we://marks", "kind": "belongsToMany", "targetClassName": "", "direction": "reverse" }
+        }
+    }"#;
+
+    for relation in ["children", "markedBy"] {
+        let (resolver, shape) =
+            StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+        let query = ModelQueryInput {
+            include: Some(HashMap::from([(
+                relation.to_string(),
+                super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                    polymorphic: Some(true),
+                    offset: Some(2),
+                    ..Default::default()
+                })),
+            )])),
+            ..Default::default()
+        };
+
+        let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+            .await
+            .expect_err("an empty relation must not make an unanswerable query answerable");
+        let msg = err.to_string();
+        assert!(msg.contains(relation), "names the relation: {msg}");
+        assert!(msg.contains("offset"), "names what was refused: {msg}");
+    }
+}
+
+/// An untyped relation read without `polymorphic` fails with an actionable
+/// message rather than a shape lookup for the empty string.
+#[tokio::test]
+async fn test_untyped_include_without_polymorphic_explains_itself() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, shape) = StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("must not silently succeed");
+    let msg = err.to_string();
+    assert!(msg.contains("children"), "names the relation: {msg}");
+    assert!(msg.contains("polymorphic"), "names the fix: {msg}");
+}
+
+/// The inverse side of a heterogeneous relation is heterogeneous too: whatever
+/// points *at* an instance is whatever somebody linked it into. A reverse
+/// include has to honour `polymorphic` for the same reason the forward one does.
+#[tokio::test]
+async fn test_polymorphic_reverse_include_hydrates_each_source_as_its_own_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/TextBlock",
+        "we://models/Collection",
+        "we://models/Board",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    // One block, held by two containers of different classes.
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "2",
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://title",
+            "literal:string:Reading list",
+            "3",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "4"))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://b/1", "we://flag", "we://board", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://label",
+            "literal:string:Sprint 3",
+            "5",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://b/1", "we://children", "we://t/1", "6"))
+        .unwrap();
+
+    // `containers` names no target class — a block does not know what kinds of
+    // thing may hold it, which is the case `polymorphic` exists for.
+    let block_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
+            "text": {"predicate":"we://text","resolveLanguage":"literal"}
+        },
+        "relations": {
+            "containers": {
+                "predicate": "we://children",
+                "kind": "belongsToMany",
+                "direction": "reverse",
+                "targetClassName": ""
+            }
+        }
+    }"#;
+    let (resolver, block_shape) = StaticShapeResolver::from_json("TextBlock", block_json).unwrap();
+    resolver.register(
+        "Collection",
+        parse_shape_from_json(
+            r#"{"className":"Collection","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"},
+                 "title":{"predicate":"we://title","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Collection",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Board",
+        parse_shape_from_json(
+            r#"{"className":"Board","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://board"},
+                 "label":{"predicate":"we://label","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Board",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "containers".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, block_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let containers = result.instances[0]["containers"].as_array().unwrap();
+    assert_eq!(containers.len(), 2, "both containers hydrate");
+
+    let collection = containers
+        .iter()
+        .find(|c| c["id"] == "we://c/1")
+        .expect("the collection");
+    let board = containers
+        .iter()
+        .find(|c| c["id"] == "we://b/1")
+        .expect("the board");
+
+    assert_eq!(collection["__subjectClass"].as_str(), Some("Collection"));
+    assert_eq!(board["__subjectClass"].as_str(), Some("Board"));
+    // The property that exists only on the concrete class — before this, both
+    // took the same path through the declared target class and arrived empty.
+    assert_eq!(collection["title"].as_str(), Some("Reading list"));
+    assert_eq!(board["label"].as_str(), Some("Sprint 3"));
+}
+
+/// An untyped *reverse* relation read without `polymorphic` gets the same
+/// actionable message the forward path gives, rather than a shape lookup for
+/// the empty string.
+#[tokio::test]
+async fn test_untyped_reverse_include_without_polymorphic_explains_itself() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    let block_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+        },
+        "relations": {
+            "containers": {
+                "predicate": "we://children",
+                "kind": "belongsToMany",
+                "direction": "reverse",
+                "targetClassName": ""
+            }
+        }
+    }"#;
+    let (resolver, shape) = StaticShapeResolver::from_json("TextBlock", block_json).unwrap();
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "containers".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("must not silently succeed");
+    let msg = err.to_string();
+    assert!(msg.contains("containers"), "names the relation: {msg}");
+    assert!(msg.contains("polymorphic"), "names the fix: {msg}");
+}

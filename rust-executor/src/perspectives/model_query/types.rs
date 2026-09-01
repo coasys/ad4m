@@ -284,6 +284,39 @@ pub struct ModelQueryInput {
     /// batched VALUES queries (O(M) cost).  Set to false to skip them.
     #[serde(default, rename = "deepQuery")]
     pub deep_query: Option<bool>,
+    /// Hydrate this relation's targets as the class each one actually *is*,
+    /// rather than as the class the relation declares.
+    ///
+    /// Only meaningful on an `include` sub-query. A heterogeneous relation —
+    /// `CollectionBlock.children`, a reified edge's endpoints — either declares
+    /// a base class, in which case every subclass property is dropped on
+    /// hydration, or declares nothing, in which case the include cannot resolve
+    /// a shape at all.
+    #[serde(default)]
+    pub polymorphic: Option<bool>,
+    /// Classes the caller would rather have, most wanted first.
+    ///
+    /// Membership is not exclusive, so a target can satisfy several classes and
+    /// hydration has to read it through one of them. Without this the choice is
+    /// made by specificity — how many required triples each class matched — which
+    /// answers "which class demanded most of this node", a question nobody asked.
+    /// Naming classes here answers the one they did: read it as this, if it is
+    /// one.
+    ///
+    /// **Ranks, never excludes.** Classification is unaffected: a target is still
+    /// tested against every registered class, and this only reorders the ones it
+    /// matched. So a target conforming to nothing named here still arrives,
+    /// hydrated against whichever class it *does* match, chosen by specificity as
+    /// it would have been anyway. The relation is heterogeneous by definition and
+    /// a caller listing what it can use must not thereby narrow what the
+    /// collection contains.
+    ///
+    /// (A target matching no registered class at all is a different case, and is
+    /// skipped — there is no shape to read it through.)
+    ///
+    /// Only meaningful alongside `polymorphic`.
+    #[serde(default)]
+    pub prefer_classes: Option<Vec<String>>,
 }
 
 /// Result returned by the model query endpoint.
