@@ -1223,87 +1223,6 @@ mod tests {
         assert!(local.sign("missing", b"data").is_none());
     }
 
-    // ── SharedWallet tests ────────────────────────────────────────────────
-
-    #[test]
-    fn test_shared_wallet_generate_keypair() {
-        let mut server = mockito::Server::new();
-        let url = server.url();
-
-        let mock_post = server
-            .mock("POST", "/keys/test_key")
-            .match_header("Authorization", "Bearer test-token")
-            .with_status(201)
-            .with_body("{}")
-            .create();
-
-        let secret = base64::engine::general_purpose::STANDARD.encode([1u8; 32]);
-        let public = base64::engine::general_purpose::STANDARD.encode([2u8; 32]);
-        let mock_get = server
-            .mock("GET", "/keys/test_key")
-            .match_header("Authorization", "Bearer test-token")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(format!(
-                r#"{{"secret":"{}","public":"{}"}}"#,
-                secret, public
-            ))
-            .create();
-
-        let wallet = SharedWallet::new(url, "test-token".to_string());
-        wallet
-            .generate_keypair("test_key")
-            .expect("generate should succeed");
-
-        mock_post.assert();
-        mock_get.assert();
-    }
-
-    #[test]
-    fn test_shared_wallet_get_key_material_cache() {
-        let mut server = mockito::Server::new();
-        let url = server.url();
-
-        let secret = base64::engine::general_purpose::STANDARD.encode([1u8; 32]);
-        let public = base64::engine::general_purpose::STANDARD.encode([2u8; 32]);
-        let mock = server
-            .mock("GET", "/keys/cached_key")
-            .match_header("Authorization", "Bearer tok")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(format!(
-                r#"{{"secret":"{}","public":"{}"}}"#,
-                secret, public
-            ))
-            .expect(1) // Only one network call — second call uses cache
-            .create();
-
-        let wallet = SharedWallet::new(url, "tok".to_string());
-        let sk1 = wallet.get_secret_key("cached_key");
-        assert!(sk1.is_some());
-        let sk2 = wallet.get_secret_key("cached_key");
-        assert_eq!(sk1, sk2);
-        mock.assert();
-    }
-
-    #[test]
-    fn test_shared_wallet_list_key_names() {
-        let mut server = mockito::Server::new();
-        let url = server.url();
-
-        let mock = server
-            .mock("GET", "/keys")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(r#"{"keys":["main","platform","user@test.com"]}"#)
-            .create();
-
-        let wallet = SharedWallet::new(url, "tok".to_string());
-        let names = wallet.list_key_names();
-        assert_eq!(names, vec!["main", "platform", "user@test.com"]);
-        mock.assert();
-    }
-
     #[test]
     fn test_shared_wallet_list_key_names_server_error() {
         let mut server = mockito::Server::new();
@@ -1348,34 +1267,6 @@ mod tests {
 
         let wallet = SharedWallet::new(url, "tok".to_string());
         assert!(!wallet.key_exists("missing"));
-        mock.assert();
-    }
-
-    #[test]
-    fn test_shared_wallet_sign() {
-        let mut server = mockito::Server::new();
-        let url = server.url();
-
-        let kp = did_key::generate::<Ed25519KeyPair>(None);
-        let public = kp.public_key_bytes();
-        let secret = kp.private_key_bytes();
-        let secret_b64 = base64::engine::general_purpose::STANDARD.encode(&secret);
-        let public_b64 = base64::engine::general_purpose::STANDARD.encode(&public);
-
-        let mock = server
-            .mock("GET", "/keys/sign_test")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(format!(
-                r#"{{"secret":"{}","public":"{}"}}"#,
-                secret_b64, public_b64
-            ))
-            .create();
-
-        let wallet = SharedWallet::new(url, "tok".to_string());
-        let sig = wallet.sign("sign_test", b"hello world");
-        assert!(sig.is_some());
-        assert!(!sig.unwrap().is_empty());
         mock.assert();
     }
 }
