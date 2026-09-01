@@ -370,7 +370,7 @@ Flows describe how a group advances an expression through a state machine, with 
   Flow state is tracked on-graph via `FlowInstance` (per-subject state) and
   `FlowTransitionProposal` (per-vote), not by the ad-hoc `todo://state`-style
   links used in earlier iterations. See
-  [`planning/flow-interpretation-hints-design.md`](https://github.com/coasys/ad4m/blob/dev/planning/flow-interpretation-hints-design.md)
+  [`docs/flow-interpretation-hints-design.md`](https://github.com/coasys/ad4m/blob/dev/docs/flow-interpretation-hints-design.md)
   for the full v5 design.
 </Callout>
 
@@ -403,36 +403,47 @@ deliveryFlow.consensusRule = { n: 2 };
 ### Using Flows in Code
 
 ```typescript
-import { FlowInstance, FlowTransitionProposal } from "@coasys/ad4m";
+import { FlowInstance } from "@coasys/ad4m";
 
-// Which flows accept this expression as input?
+// Which flows accept this expression as input? Returns flow names whose
+// `inputTypes` match the expression's registered subject classes, plus any
+// flow declaring no `inputTypes` or the "any" wildcard.
 const availableFlows = await perspective.availableFlows("task://sprint-3/T-42");
-// Returns: ["Delivery"]  (or ["any"] on legacy untyped flows)
+// Returns: ["Delivery"]
 
-// Load the flow shape.
-const flow = await perspective.getFlow("Delivery");
+// Mint a fresh FlowInstance in the flow's initial state (states[0] — the
+// lowest-valued state). Takes the flow *name*; the shape is loaded for you.
+const instance = await FlowInstance.start(
+  perspective,
+  "Delivery",
+  "task://sprint-3/T-42",
+);
 
-// Mint a fresh FlowInstance in the flow's initial state (states[0]).
-const instance = await FlowInstance.start(perspective, flow, "task://sprint-3/T-42");
-
-// Read every active FlowInstance for a flow.
+// Read every active FlowInstance for a flow. The filter also accepts
+// `{ flowName?, subject? }` — pass `subject` to ask "what is running on
+// this expression?".
 const instances = await FlowInstance.findAll(perspective, "Delivery");
 
-// Propose a state transition (any agent — including an LLM via the harness).
-await instance.proposeTransition({
-  toState: "InProgress",
-  reason: "Alice picked it up in the standup."
-});
+// Where is it now? `currentState` resolves to the FlowState on the shape,
+// so the interpretationHint the LLM sees is right there.
+console.log(instance.currentStateName);            // "Identified"
+console.log(instance.currentState.interpretationHint);
 
-// Aggregate the votes standing on this instance right now.
-const tally = await instance.aggregateVotes({ n: 2 });
+// Which actions are legal from here? Empty on a terminal state.
+for (const t of instance.availableTransitions) {
+  console.log(t.actionName, "→", t.toState);       // "Scope" → "Scoped"
+}
 
-// If the tally meets the consensus rule, fire it — advances currentState on-graph.
-await instance.fireIfConsensus({ n: 2 });
-
-// Report-only variant for UIs / previews (no writes).
-const preview = await instance.selectFireCandidate({ n: 2 });
+// Proposals standing against this instance.
+const proposals = await instance.proposals();
 ```
+
+<Callout type="info" emoji="ℹ️">
+  This is the read surface. Writing transitions — proposing one, voting on
+  it, and firing it once a `ConsensusRule` is met — lands with the consensus
+  engine and is not part of this API yet. Until then `FlowTransitionProposal`
+  records only exist where a client wrote one directly.
+</Callout>
 
 ### Adding Flows to a Perspective
 
