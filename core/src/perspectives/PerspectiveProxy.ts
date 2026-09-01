@@ -1533,29 +1533,27 @@ export class PerspectiveProxy {
      * @example
      * ```typescript
      * import { SHACLFlow } from '@coasys/ad4m';
-     * 
-     * const todoFlow = new SHACLFlow('TODO', 'todo://');
-     * todoFlow.inputTypes = ['any'];
-     * 
-     * // Define states
-     * todoFlow.addState({ name: 'ready', value: 0, stateCheck: { predicate: 'todo://state', target: 'todo://ready' }});
-     * todoFlow.addState({ name: 'done', value: 1, stateCheck: { predicate: 'todo://state', target: 'todo://done' }});
-     * 
-     * // Define start action
-     * todoFlow.startAction = [{ action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }];
-     * 
-     * // Define transitions
-     * todoFlow.addTransition({
-     *   actionName: 'Complete',
-     *   fromState: 'ready',
-     *   toState: 'done',
-     *   actions: [
-     *     { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://done' },
-     *     { action: 'removeLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
-     *   ]
-     * });
-     * 
-     * await perspective.addFlow('TODO', todoFlow);
+     *
+     * const deliveryFlow = new SHACLFlow('Delivery', 'delivery://');
+     * deliveryFlow.inputTypes = ['Task'];
+     * deliveryFlow.interpretationHint =
+     *   'Advance a Task through delivery: Identified → Scoped → InProgress → Review → Done.';
+     *
+     * deliveryFlow.addState({ name: 'Identified', value: 0 });
+     * deliveryFlow.addState({ name: 'Scoped',     value: 1 });
+     * deliveryFlow.addState({ name: 'InProgress', value: 2 });
+     * deliveryFlow.addState({ name: 'Review',     value: 3 });
+     * deliveryFlow.addState({ name: 'Done',       value: 4 });
+     *
+     * deliveryFlow.addTransition({ actionName: 'Scope',  fromState: 'Identified', toState: 'Scoped',     actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Start',  fromState: 'Scoped',     toState: 'InProgress', actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Submit', fromState: 'InProgress', toState: 'Review',     actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Accept', fromState: 'Review',     toState: 'Done',       actions: [] });
+     *
+     * // Optional: n distinct DIDs must co-sign a proposal before it fires.
+     * deliveryFlow.consensusRule = { n: 2 };
+     *
+     * await perspective.addFlow('Delivery', deliveryFlow);
      * ```
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {

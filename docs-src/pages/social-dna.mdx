@@ -364,90 +364,84 @@ While these methods are available, we recommend using the `Ad4mModel` system for
 
 ## Flows: Defining Actions
 
-Flows define what agents can do in a space and under what conditions. They manage state machines over expressions — defining states, transitions, and the actions that trigger them.
+Flows describe how a group advances an expression through a state machine, with each transition backed by an on-graph `FlowTransitionProposal` and (optionally) a `ConsensusRule` gating when a proposal fires. Each `FlowState` carries an `interpretationHint` — a short English sentence the interpretation engine surfaces to the LLM so agent-authored proposals stay coherent with the flow's intent.
 
 <Callout type="info" emoji="ℹ️">
-  Flows still use link-based state tracking internally. The flow state is determined
-  by querying links in the perspective, and actions modify links to change state.
+  Flow state is tracked on-graph via `FlowInstance` (per-subject state) and
+  `FlowTransitionProposal` (per-vote), not by the ad-hoc `todo://state`-style
+  links used in earlier iterations. See
+  [`planning/flow-interpretation-hints-design.md`](https://github.com/coasys/ad4m/blob/dev/planning/flow-interpretation-hints-design.md)
+  for the full v5 design.
 </Callout>
 
-Here's a complete example of a Todo flow:
+Here's a Delivery flow expressed with the `SHACLFlow` class — the shape a group would share as social DNA:
 
 ```typescript
-// Define flow states and transitions
-const todoFlow = {
-  name: "TODO",
-  states: {
-    ready: 0,
-    doing: 0.5,
-    done: 1
-  },
-  // State is determined by todo://state links
-  stateQuery: (base) => `todo://state`,
-  transitions: [
-    {
-      from: "ready",
-      to: "doing",
-      action: "Start",
-      effects: [
-        { action: "addLink", source: "this", predicate: "todo://state", target: "todo://doing" },
-        { action: "removeLink", source: "this", predicate: "todo://state", target: "todo://ready" }
-      ]
-    },
-    {
-      from: "doing",
-      to: "done",
-      action: "Finish",
-      effects: [
-        { action: "addLink", source: "this", predicate: "todo://state", target: "todo://done" },
-        { action: "removeLink", source: "this", predicate: "todo://state", target: "todo://doing" }
-      ]
-    }
-  ]
-};
-```
+import { SHACLFlow } from "@coasys/ad4m";
 
-This flow defines:
-1. A named flow ("TODO") with states (0 = ready, 0.5 = doing, 1 = done)
-2. How states are determined (by checking todo://state links)
-3. Available actions for each state with their transitions and effects
+const deliveryFlow = new SHACLFlow("Delivery", "delivery://");
+
+deliveryFlow.inputTypes = ["Task"];
+deliveryFlow.interpretationHint =
+  "Advance a Task through delivery: Identified → Scoped → InProgress → Review → Done.";
+
+deliveryFlow.addState({ name: "Identified", value: 0, interpretationHint: "The Task has been named but not yet scoped." });
+deliveryFlow.addState({ name: "Scoped",     value: 1, interpretationHint: "The Task has an acceptance criterion." });
+deliveryFlow.addState({ name: "InProgress", value: 2, interpretationHint: "Someone is actively working on it." });
+deliveryFlow.addState({ name: "Review",     value: 3, interpretationHint: "The Task is ready for peer review." });
+deliveryFlow.addState({ name: "Done",       value: 4, interpretationHint: "The Task is accepted and complete." });
+
+deliveryFlow.addTransition({ actionName: "Scope",     fromState: "Identified", toState: "Scoped",     actions: [] });
+deliveryFlow.addTransition({ actionName: "Start",     fromState: "Scoped",     toState: "InProgress", actions: [] });
+deliveryFlow.addTransition({ actionName: "Submit",    fromState: "InProgress", toState: "Review",     actions: [] });
+deliveryFlow.addTransition({ actionName: "Accept",    fromState: "Review",     toState: "Done",       actions: [] });
+
+// Optional: require n distinct DIDs to co-sign a proposal before it fires.
+deliveryFlow.consensusRule = { n: 2 };
+```
 
 ### Using Flows in Code
 
 ```typescript
-// Get all flows defined in a perspective
-const flows = await perspective.sdnaFlows();
-// Returns: ["TODO"]
+import { FlowInstance, FlowTransitionProposal } from "@coasys/ad4m";
 
-// Check what flows are available for an expression
-const availableFlows = await perspective.availableFlows("expression://123");
+// Which flows accept this expression as input?
+const availableFlows = await perspective.availableFlows("task://sprint-3/T-42");
+// Returns: ["Delivery"]  (or ["any"] on legacy untyped flows)
 
-// Start a flow on an expression
-await perspective.startFlow("TODO", "expression://123");
+// Load the flow shape.
+const flow = await perspective.getFlow("Delivery");
 
-// Get expressions in a specific flow state
-const readyTodos = await perspective.expressionsInFlowState("TODO", 0);
+// Mint a fresh FlowInstance in the flow's initial state (states[0]).
+const instance = await FlowInstance.start(perspective, flow, "task://sprint-3/T-42");
 
-// Get current state of an expression in a flow
-const state = await perspective.flowState("TODO", "expression://123");
-// Returns: 0, 0.5, or 1
+// Read every active FlowInstance for a flow.
+const instances = await FlowInstance.findAll(perspective, "Delivery");
 
-// Get available actions for current state
-const actions = await perspective.flowActions("TODO", "expression://123");
-// Returns: ["Start"] if in ready state
+// Propose a state transition (any agent — including an LLM via the harness).
+await instance.proposeTransition({
+  toState: "InProgress",
+  reason: "Alice picked it up in the standup."
+});
 
-// Execute an action
-await perspective.runFlowAction("TODO", "expression://123", "Start");
-// Transitions from ready (0) to doing (0.5)
+// Aggregate the votes standing on this instance right now.
+const tally = await instance.aggregateVotes({ n: 2 });
+
+// If the tally meets the consensus rule, fire it — advances currentState on-graph.
+await instance.fireIfConsensus({ n: 2 });
+
+// Report-only variant for UIs / previews (no writes).
+const preview = await instance.selectFireCandidate({ n: 2 });
 ```
 
 ### Adding Flows to a Perspective
 
 ```typescript
-await perspective.addSdna("Todo", flowDefinition, "flow");
+// Recommended: type-safe helper takes the SHACLFlow instance directly.
+await perspective.addFlow("Delivery", deliveryFlow);
 
 const flows = await perspective.sdnaFlows();
-console.log(flows); // Should include "TODO"
+console.log(flows); // Should include "Delivery"
 ```
 
 ## Query Engine: SPARQL
