@@ -623,17 +623,21 @@ pub async fn run_engine_proposal_pass(
         return Vec::new();
     }
 
-    // Load active FlowInstances, scope-narrowed if the pass carries an
-    // anchor. Same silent-fallback as the pre-pass loader.
-    let subjects: Vec<String> = scope
-        .map(|s| vec![crate::perspectives::flow_context::scope_subject(s).to_string()])
-        .unwrap_or_default();
-    let records = match crate::perspectives::flow_context::load_flow_instances(
-        perspective,
-        &subjects,
-    )
-    .await
-    {
+    // Load active FlowInstances. When the pass carries a `scope`
+    // anchor (extraction-pass path from `interpretation::run`), narrow
+    // to that anchor's base URI — J#1's bounded default. When `scope`
+    // is `None` (engine-only sweep entry point + all e2e tests), load
+    // every live FlowInstance on the perspective; the sweep's bound is
+    // the perspective's own flow count, not the extraction batch.
+    // Same silent-fallback on load failure as the pre-pass loader.
+    let records = match scope {
+        Some(s) => {
+            let subject = crate::perspectives::flow_context::scope_subject(s).to_string();
+            crate::perspectives::flow_context::load_flow_instances(perspective, &[subject]).await
+        }
+        None => crate::perspectives::flow_context::load_all_flow_instances(perspective).await,
+    };
+    let records = match records {
         Ok(r) => r,
         Err(e) => {
             log::warn!("run_engine_proposal_pass: load_flow_instances failed: {e:#}");
