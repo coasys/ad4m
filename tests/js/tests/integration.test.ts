@@ -20,6 +20,7 @@ import flatLanguageTests from "./flat-language.test";
 //import { Crypto } from "@peculiar/webcrypto"
 import agentLanguageTests from "./agent-language";
 import socialDNATests from "./social-dna-flow";
+import shaclRpcTests from "./shacl-rpc";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -141,6 +142,7 @@ describe("Integration tests", function () {
     describe('Runtime', runtimeTests(testContext))
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
+    describe('SHACL RPC', shaclRpcTests(testContext))
     describe('Social DNA', socialDNATests(testContext))
         describe('Flat Language (new flat export pattern)', flatLanguageTests(testContext))
 
