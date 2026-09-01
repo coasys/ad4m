@@ -5,6 +5,7 @@
 # What runs where (both hit the same OpenAI-compatible endpoint):
 #   Rust — perspectives::interpretation_e2e,
 #          perspectives::interpretation_harness_e2e,
+#          perspectives::flow_context::real_llm_e2e,
 #          (any other perspectives::* modules with `#[ignore = "llm-e2e"]`)
 #   JS   — tests/js/tests/model/{run-interpretation,interpretation-models,
 #          auto-processor,auto-processor-observability}.test.ts,
@@ -34,6 +35,7 @@ if [[ -z "${SKIP_RUST:-}" ]]; then
   if ! cargo test --release --lib \
       perspectives::interpretation_e2e \
       perspectives::interpretation_harness_e2e \
+      perspectives::flow_context::real_llm_e2e \
       -- --ignored --test-threads=1 --nocapture; then
     failed=1
     echo "!!! Rust LLM-E2E failed"

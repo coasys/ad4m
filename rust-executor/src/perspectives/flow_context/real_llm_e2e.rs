@@ -36,6 +36,15 @@
 //! `INTERPRETATION_E2E_MODEL` (default `gemma3:12b`). Retries the whole
 //! pass up to 3× to soak up single-sample LLM flake, matching the
 //! sibling generic-interpretation e2e tests.
+//!
+//! # CI gating (PR #943)
+//!
+//! Gated behind `#[ignore = "llm-e2e"]` — regular CI skips it; the nightly
+//! `llm-e2e` workflow on `dev` runs it against Marvin's local Ollama. Same
+//! discipline as `interpretation_e2e.rs` / `interpretation_harness_e2e.rs`.
+//! Run locally with `cargo test --release --lib
+//! perspectives::flow_context::real_llm_e2e -- --ignored --test-threads=1
+//! --nocapture`, or via the umbrella `scripts/run-llm-e2e.sh`.
 
 #![cfg(test)]
 
@@ -149,6 +158,7 @@ async fn seed_delivery_flow_and_instance(
 /// without hiding a real regression, since the last attempt's assertions
 /// still fire with full diagnostics).
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "llm-e2e"]
 async fn model_c_real_llm_extraction_with_active_flow_in_prompt() {
     let base_uri = "soa://ext/task/mvp";
     let mut last_counts: Option<std::collections::HashMap<String, usize>> = None;
