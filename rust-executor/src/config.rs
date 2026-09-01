@@ -13,19 +13,18 @@ lazy_static::lazy_static! {
     pub static ref GLOBAL_AD4M_CONFIG: Arc<Mutex<Option<Ad4mConfig>>> = Arc::new(Mutex::new(None));
 }
 
-/// Store the Ad4mConfig globally so services can access it without passing it through every call
+/// Store the Ad4mConfig globally so services can access it without passing it through every call.
+/// Recovers from a poisoned mutex so that a panic in one test does not cascade
+/// into every subsequent test that touches the global config.
 pub fn set_global_config(config: Ad4mConfig) {
-    let mut global_config = GLOBAL_AD4M_CONFIG
-        .lock()
-        .expect("Failed to lock GLOBAL_AD4M_CONFIG");
+    let mut global_config = GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     *global_config = Some(config);
 }
 
-/// Get a clone of the global Ad4mConfig
+/// Get a clone of the global Ad4mConfig.
+/// Recovers from a poisoned mutex (see `set_global_config` for rationale).
 pub fn get_global_config() -> Ad4mConfig {
-    let global_config = GLOBAL_AD4M_CONFIG
-        .lock()
-        .expect("Failed to lock GLOBAL_AD4M_CONFIG");
+    let global_config = GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
     global_config
         .clone()
         .expect("GLOBAL_AD4M_CONFIG not initialized")
@@ -188,29 +187,6 @@ impl Ad4mConfig {
             }
         }
 
-        // Validate shared-backend URLs use HTTPS (or approved local addresses)
-        if self.wallet_backend.as_deref() == Some("shared") {
-            if let Some(ref url) = self.wallet_backend_url {
-                if let Err(msg) = validate_shared_backend_url(url, "WALLET_BACKEND_URL") {
-                    log::warn!("{}", msg);
-                }
-            }
-        }
-        if self.db_backend.as_deref() == Some("shared") {
-            if let Some(ref url) = self.db_backend_url {
-                if let Err(msg) = validate_shared_backend_url(url, "DB_BACKEND_URL") {
-                    log::warn!("{}", msg);
-                }
-            }
-        }
-        if self.perspective_store_backend.as_deref() == Some("shared") {
-            if let Some(ref url) = self.perspective_store_url {
-                if let Err(msg) = validate_shared_backend_url(url, "PERSPECTIVE_STORE_URL") {
-                    log::warn!("{}", msg);
-                }
-            }
-        }
-
         if self.app_data_path.is_none() {
             self.app_data_path = Some(
                 utils::ad4m_data_directory()
@@ -287,13 +263,18 @@ pub fn validate_shared_backend_url(url: &str, label: &str) -> Result<(), String>
     if lower.starts_with("http://") {
         let host_part = &lower["http://".len()..];
         // Strip path, query, fragment to get host:port
-        let host = host_part
-            .split('/')
-            .next()
-            .unwrap_or(host_part)
-            .split(':')
-            .next()
-            .unwrap_or(host_part);
+        let host_and_port = host_part.split('/').next().unwrap_or(host_part);
+        // IPv6 addresses use [addr]:port — extract the bracketed address intact
+        let host = if host_and_port.starts_with('[') {
+            // Take everything up to and including ']'
+            host_and_port
+                .split(']')
+                .next()
+                .map(|s| &host_and_port[..s.len() + 1])
+                .unwrap_or(host_and_port)
+        } else {
+            host_and_port.split(':').next().unwrap_or(host_and_port)
+        };
 
         let allowed_hosts = [
             "localhost",
