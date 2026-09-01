@@ -10,6 +10,7 @@ mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
+pub mod ordering;
 pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;

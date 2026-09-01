@@ -470,6 +470,10 @@ pub struct ShapeProperty {
     /// generic LLM extractor (and MCP tool-schema generation) can inject it as
     /// semantic guidance.  `None` when the SDNA declared no hint.
     pub(crate) interpretation_hint: Option<String>,
+    /// CRDT ordering strategy for this collection, from `ad4m://ordering` on the
+    /// property shape. `None` leaves the relation an unordered set sorted by
+    /// link timestamp, which is what every existing relation is.
+    pub(crate) ordering: Option<String>,
     /// Whether this property is the class's dedup identity (its title-like
     /// interpretation key), read back from the `ad4m://identity` link on the
     /// property node.  `false` when the SDNA declared no identity — a class

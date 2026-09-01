@@ -61,6 +61,8 @@ export interface RelationMetadataEntry {
     polymorphic?: boolean;
     /** Model classes this relation's polymorphic results can be constructed as. */
     instantiateAs?: () => Ad4mModelLike[];
+    /** CRDT ordering config — see `RelationOptions.ordering`. */
+    ordering?: { strategy: 'linkedList' };
     /**
      * Natural-language hint describing what this relation MEANS semantically.
      * Emitted as an `ad4m://interpretation_hint` link on the SHACL property
@@ -949,6 +951,37 @@ export interface RelationOptions {
      */
     instantiateAs?: () => Ad4mModelLike[];
     /**
+     * Give this collection a user-controlled order that survives concurrent edits.
+     *
+     * A `@HasMany` is a set of links, and hydration sorts them by link timestamp.
+     * That is right for an append-only collection — a transcript, a message
+     * thread — where timestamp order *is* the order. It cannot express a sequence
+     * somebody chose: a kanban column, a playlist, the blocks of a post.
+     *
+     * **Declaration only, for now.** Setting this emits `ad4m://ordering` on the
+     * property shape, where the executor reads it back — but no read or write
+     * path acts on it yet, so a relation declaring it still hydrates by link
+     * timestamp exactly as one that does not. Wiring save and hydration to the
+     * declaration is the next change; nothing about how you write the relation
+     * will change when it lands — assign the array in the order you want and
+     * save.
+     *
+     * Ordering is declared in the type system, rather than passed per query, so
+     * that *every* writer gets it once it is wired: the ORM, MCP agents, raw
+     * GraphQL callers, another app sharing the neighbourhood. Implemented
+     * client-side it would order only what this client wrote.
+     *
+     * @example
+     * ```typescript
+     * @HasMany(() => Task, {
+     *   through: "kanban://has_task",
+     *   ordering: { strategy: "linkedList" },
+     * })
+     * tasks: Task[] = [];
+     * ```
+     */
+    ordering?: { strategy: 'linkedList' };
+    /**
      * Natural-language hint describing what this relation MEANS semantically —
      * the sentence-level rationale for when to use it, not just its structural
      * shape. Emitted as an `ad4m://interpretation_hint` link on the SHACL
@@ -1114,6 +1147,7 @@ export function HasMany(
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
@@ -1181,6 +1215,7 @@ export function HasOne(
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
@@ -1263,6 +1298,7 @@ export function BelongsToOne(
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
@@ -1325,6 +1361,7 @@ export function BelongsToMany(
             ...(opts.datatype && { datatype: opts.datatype }),
             ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 

@@ -670,6 +670,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             transform: None,
             interpretation_hint: None,
             identity: false,
+            ordering: None,
         }],
         include_relations: vec![],
         interpretation_hint: None,
@@ -1248,6 +1249,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            ordering: None,
         }],
         include_relations: vec![],
         interpretation_hint: None,
@@ -1815,6 +1817,7 @@ async fn test_where_filter_signed_expression_string() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            ordering: None,
         }],
         include_relations: vec![],
         interpretation_hint: None,
@@ -1892,6 +1895,7 @@ async fn test_where_filter_signed_expression_no_matches() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            ordering: None,
         }],
         include_relations: vec![],
         interpretation_hint: None,
@@ -2017,6 +2021,7 @@ async fn test_where_filter_multiple_conditions() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            ordering: None,
         }],
         include_relations: vec![],
         interpretation_hint: None,
@@ -2087,6 +2092,7 @@ async fn test_where_filter_missing_property_on_target() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            ordering: None,
         }],
         include_relations: vec![],
         interpretation_hint: None,
@@ -2155,6 +2161,7 @@ async fn test_where_filter_plain_literal_string() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            ordering: None,
         }],
         include_relations: vec![],
         interpretation_hint: None,
@@ -2246,6 +2253,7 @@ async fn test_where_filter_on_multiple_instances() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            ordering: None,
         }],
         include_relations: vec![],
         interpretation_hint: None,
@@ -2638,6 +2646,7 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         transform: None,
         interpretation_hint: None,
         identity: false,
+        ordering: None,
     }
 }
 
@@ -2660,6 +2669,7 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         transform: None,
         interpretation_hint: None,
         identity: false,
+        ordering: None,
     }
 }
 
@@ -4191,6 +4201,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            ordering: None,
         }],
         include_relations: vec![],
         interpretation_hint: None,
