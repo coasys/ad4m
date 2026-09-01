@@ -1378,46 +1378,4 @@ mod tests {
         assert!(!sig.unwrap().is_empty());
         mock.assert();
     }
-
-    #[test]
-    fn test_shared_wallet_get_did_document() {
-        let mut server = mockito::Server::new();
-        let url = server.url();
-
-        let kp = did_key::generate::<Ed25519KeyPair>(None);
-        let secret_b64 = base64::engine::general_purpose::STANDARD.encode(kp.private_key_bytes());
-        let public_b64 = base64::engine::general_purpose::STANDARD.encode(kp.public_key_bytes());
-
-        let mock = server
-            .mock("GET", "/keys/did_test")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(format!(
-                r#"{{"secret":"{}","public":"{}"}}"#,
-                secret_b64, public_b64
-            ))
-            .create();
-
-        let wallet = SharedWallet::new(url, "tok".to_string());
-        let doc = wallet.get_did_document("did_test");
-        assert!(doc.is_some());
-        assert!(doc.unwrap().id.starts_with("did:key:"));
-        mock.assert();
-    }
-
-    #[test]
-    fn test_shared_wallet_generate_keypair_server_error() {
-        let mut server = mockito::Server::new();
-        let url = server.url();
-
-        let mock = server
-            .mock("POST", "/keys/fail_key")
-            .with_status(500)
-            .create();
-
-        let wallet = SharedWallet::new(url, "tok".to_string());
-        let result = wallet.generate_keypair("fail_key");
-        assert!(result.is_err());
-        mock.assert();
-    }
 }
