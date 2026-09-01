@@ -489,10 +489,12 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 /// proposals, and this wrapper is only compiled on the evaluator's dep
 /// path.
 ///
-/// `proposal_id` / `proposed_at` / `batch_id` are caller-supplied to
-/// stay consistent with `mint_flow_instance` — the auto-processor
-/// call-site (slice 10.4c) will generate the id + timestamp and thread
-/// its own batch so the whole extraction pass commits atomically.
+/// `proposal_id` / `batch_id` are caller-supplied to stay consistent
+/// with `mint_flow_instance` — the auto-processor call-site
+/// (slice 10.4c) generates the id and threads its own batch so the
+/// whole extraction pass commits atomically. Propose-time is
+/// synthesised on-graph by `Ad4mModel`'s `createdAt` (earliest link
+/// timestamp on the proposal URI), so no timestamp param is threaded.
 ///
 /// Returns the freshly-minted proposal URI.
 #[allow(clippy::too_many_arguments)]
@@ -500,7 +502,6 @@ pub async fn write_engine_proposal(
     perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     proposal_id: &str,
     proposer_did: &str,
-    proposed_at: &str,
     transition: &SatisfiedTransition,
     rationale: Option<&str>,
     batch_id: Option<String>,
@@ -510,7 +511,6 @@ pub async fn write_engine_proposal(
         perspective,
         proposal_id,
         proposer_did,
-        proposed_at,
         &transition.instance_uri,
         &transition.from_state,
         &transition.to_state,
@@ -690,8 +690,10 @@ pub async fn run_engine_proposal_pass(
     // half-populated proposal). Per-transition batches — not one batch
     // for the whole pass — so a single failure only rolls back that
     // proposal and the others still ship.
-    let proposed_at = chrono::Utc::now().timestamp_millis().to_string();
-
+    //
+    // Propose-time is synthesised on-graph by `Ad4mModel`'s built-in
+    // `createdAt` (earliest link timestamp on the proposal URI) — the
+    // writer no longer takes a `proposed_at` param.
     let mut minted = Vec::with_capacity(satisfied.len());
     for transition in &satisfied {
         // Slice 10.5b — semantic-check gate. Runs BEFORE the write so a
@@ -769,7 +771,6 @@ pub async fn run_engine_proposal_pass(
             perspective,
             &proposal_id,
             &acting_did,
-            &proposed_at,
             transition,
             rationale,
             Some(batch_id.clone()),
@@ -1991,14 +1992,13 @@ mod e2e_tests {
         );
 
         // Write the proposal via the convenience wrapper. Caller-supplied
-        // id + timestamp mirror the mint_flow_instance contract.
+        // id mirrors the mint_flow_instance contract; propose-time is
+        // synthesised on-graph by `Ad4mModel`'s `createdAt`.
         let proposer_did = "did:key:acting";
-        let proposed_at = "2026-08-27T00:05:00Z";
         let proposal_uri = write_engine_proposal(
             &mut perspective,
             "e2e-prop-1",
             proposer_did,
-            proposed_at,
             t,
             None, // rationale (slice 10.6c) — this e2e is the engine-only path
             None,
@@ -2077,7 +2077,6 @@ mod e2e_tests {
             ("ad4m://flow/from_state", "identified"),
             ("ad4m://flow/to_state", "scoped"),
             ("ad4m://flow/evidence_hashes", t.evidence_hash.as_str()),
-            ("ad4m://flow/created_at", proposed_at),
         ] {
             let targets = by_pred
                 .get(pred)

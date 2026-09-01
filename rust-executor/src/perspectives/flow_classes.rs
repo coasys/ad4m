@@ -144,9 +144,11 @@ pub(crate) async fn mint_flow_instance(
 /// not the other way around).
 ///
 /// **Pure w.r.t. side-effects the caller controls** — `proposal_id` +
-/// `proposed_at` + `batch_id` are all caller-supplied, mirroring
+/// `batch_id` are caller-supplied, mirroring
 /// [`mint_flow_instance`] so the auto-processor / consensus loop can
-/// thread its own id-gen + clock + atomic-commit batch.
+/// thread its own id-gen + atomic-commit batch. Propose-time is
+/// synthesised by `Ad4mModel`'s built-in `createdAt` (earliest link
+/// timestamp on the proposal URI) — no `proposedAt` scalar is written.
 ///
 /// `evidence_ids` is written as a bag through the collection setter:
 /// `create_subject` seeds the first element via the constructor's own
@@ -169,7 +171,6 @@ pub(crate) async fn write_flow_transition_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_id: &str,
     proposer_did: &str,
-    proposed_at: &str,
     flow_instance_uri: &str,
     from_state: &str,
     to_state: &str,
@@ -193,7 +194,6 @@ pub(crate) async fn write_flow_transition_proposal(
         "toState": to_state,
         "proposer": proposer_did,
         "evidenceHashes": evidence_hash,
-        "proposedAt": proposed_at,
     });
     // slice 10.6c: optional LLM-supplied attribution. Empty strings are
     // treated as absent — the SDNA `min_count: 0` allows both, but writing
@@ -397,7 +397,6 @@ mod tests {
             "proposer",
             "evidence",
             "evidenceHashes",
-            "proposedAt",
             // slice 10.6c: optional LLM-attribution field. Same alignment
             // guard as the required scalars — a rename in the SDNA that
             // did not land here would silently drop the rationale from
