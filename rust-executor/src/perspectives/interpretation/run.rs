@@ -659,6 +659,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         .map(|s| class_label(&s.target_class, shapes))
         .collect();
     log::info!(
+        "🧠 interpretation start strategy={:?} model={} classes={:?} transcript_turns={}",
         dedup_strategy,
         model_override.unwrap_or("<default>"),
         class_names,

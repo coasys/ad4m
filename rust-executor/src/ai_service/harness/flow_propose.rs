@@ -183,6 +183,7 @@ pub fn propose_transition_tool_schema(context: &FlowContext) -> ToolSchema {
             "required": ["instance", "toState"],
             "additionalProperties": false
         }),
+        side_effect: crate::ai_service::harness::provider::SideEffect::Write,
     }
 }
 
