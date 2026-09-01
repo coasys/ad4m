@@ -2624,6 +2624,38 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     });
   });
 
+  // The failure this closes: every `save()` of a new instance logged one
+  // Rust-side "declares no setter" warning per ORM-internal field, per flag,
+  // and per empty HasMany relation — none of which are real model data, so
+  // none of them should ever have been offered to `createSubject` at all.
+  describe("initialValues sent to createSubject", () => {
+    @Model({ name: "TestNoisyPost" })
+    class TestNoisyPost extends Ad4mModel {
+      @Flag({ through: "test://post_type", value: "test://post" })
+      type: string = "test://post";
+
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+    }
+
+    it("excludes ORM bookkeeping fields, flags, and empty relations", async () => {
+      const perspective = makePerspective();
+
+      await TestNoisyPost.create(perspective, { title: "hello" }, { batchId: "batch-1" });
+
+      expect(perspective.createSubject).toHaveBeenCalled();
+      const initialValues = perspective.createSubject.mock.calls[0][2];
+      expect(initialValues).toEqual({ title: "hello" });
+      expect(initialValues).not.toHaveProperty("_baseExpression");
+      expect(initialValues).not.toHaveProperty("_perspective");
+      expect(initialValues).not.toHaveProperty("type");
+      expect(initialValues).not.toHaveProperty("tags");
+    });
+  });
+
   describe("generated @HasOne accessors", () => {
     it("forward batchId, so a to-one link can join a write group", async () => {
       // Without this the link commits on its own, so every subscriber sees the
