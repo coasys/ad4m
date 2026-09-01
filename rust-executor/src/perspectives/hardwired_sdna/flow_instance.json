@@ -1,0 +1,12 @@
+{
+  "target_class": "ad4m://FlowInstance",
+  "interpretation_hint": "A running instance of a SHACLFlow bound to a specific base expression. Persists the flow's identity as a URI (which SHACLFlow shape this instantiates — URIs collide-free across social-DNA modules, unlike bare names), the base subject it runs on, the current state name, and the RFC3339 timestamp of when the instance was started. FlowTransitionProposal nodes link back to a FlowInstance via `ad4m://flow/instance` — the URI of one of these nodes is what that predicate references.",
+  "constructor_actions": [
+    {"action": "addLink", "source": "this", "predicate": "ad4m://flow/flow_uri", "target": "placeholder"}
+  ],
+  "properties": [
+    {"path": "ad4m://flow/flow_uri",      "name": "flowUri",    "identity": true, "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/flow_uri", "target": "value"}]},
+    {"path": "ad4m://flow/base",          "name": "subject",                      "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/base", "target": "value"}]},
+    {"path": "ad4m://flow/current_state", "name": "currentState",                 "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/current_state", "target": "value"}]}
+  ]
+}
