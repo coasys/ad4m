@@ -339,12 +339,24 @@ async fn request_verification(
     }
 }
 
-async fn users_credits(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    // Stub — not yet implemented
-    let _ = params;
-    Err(WsRpcError::not_implemented(
-        "POST /users/credits is not yet implemented on the server",
-    ))
+async fn users_credits(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+
+    let email = params
+        .require_str("email")
+        .map_err(|e| WsRpcError::bad_request(format!("{e}")))?;
+    let amount = params
+        .get("amount")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| WsRpcError::bad_request("'amount' number required"))?;
+
+    crate::billing_backend::billing_backend()
+        .set_credits(&email, amount)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::json!({ "email": email, "credits": amount }))
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
