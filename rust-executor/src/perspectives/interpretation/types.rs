@@ -35,9 +35,10 @@ pub struct ProposedInstance {
 /// `active_flows` block in the prompt (see `render_active_flow_for_prompt`).
 ///
 /// The LLM emits only three fields — the rest of the on-graph
-/// `FlowTransitionProposal` (proposer DID, `proposedAt`, evidence hashes) is
-/// filled in by the engine post-processing pass so the LLM never has to invent
-/// crypto identity or run model_queries.
+/// `FlowTransitionProposal` (proposer DID, evidence hashes, propose-time
+/// via `Ad4mModel`'s `createdAt`) is filled in by the engine
+/// post-processing pass so the LLM never has to invent crypto identity
+/// or run model_queries.
 ///
 /// - `instance` names the FlowInstance URI (`active_flows[i].instance` in the
 ///   prompt).
