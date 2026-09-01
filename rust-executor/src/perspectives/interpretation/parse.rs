@@ -124,8 +124,14 @@ fn clean_llm_json(raw: &str) -> String {
     let candidate = s.trim();
     let first_obj = candidate.find('{');
     let first_arr = candidate.find('[');
+    // Both branches fall back to the other bracket kind — if `{`-first
+    // matches a balanced brace inside prose (an LLM aside like "OK, I'll
+    // extract {a couple of things}: [{\"class\":\"X\"}]"), the primary
+    // extract returns bogus JSON; the `[…]` fallback recovers on the
+    // same tick instead of burning a retry.
     let extracted = match (first_obj, first_arr) {
-        (Some(o), Some(a)) if o < a => extract_bracketed(candidate, '{', '}'),
+        (Some(o), Some(a)) if o < a => extract_bracketed(candidate, '{', '}')
+            .or_else(|| extract_bracketed(candidate, '[', ']')),
         (Some(_), None) => extract_bracketed(candidate, '{', '}'),
         _ => extract_bracketed(candidate, '[', ']')
             .or_else(|| extract_bracketed(candidate, '{', '}')),
@@ -331,9 +337,9 @@ mod tests {
     #[test]
     fn parse_error_does_not_leak_llm_payload() {
         // The cleaned LLM payload can carry the raw conversation transcript. It
-        // must not appear in the error message, because retry_interpretation_parse
-        // logs this error on every failed attempt. Only safe metadata (length) is
-        // allowed to surface.
+        // must not appear in the error message, because
+        // retry_interpretation_output_parse logs this error on every failed
+        // attempt. Only safe metadata (length) is allowed to surface.
         let secret = "TOP_SECRET_DINNER_PLAN alice met bob at the safehouse";
         let raw = format!("[{{ \"class\":\"Note\", \"title\":\"{secret}\", NOT_JSON");
         let err = parse_interpretation_response(&raw).unwrap_err();
@@ -349,10 +355,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_interpretation_parse_succeeds_on_first_attempt() {
+    async fn retry_interpretation_output_parse_succeeds_on_first_attempt() {
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
         let attempts_clone = attempts.clone();
-        let out = retry_interpretation_parse(move |_| {
+        let out = retry_interpretation_output_parse(move |_| {
             let a = attempts_clone.clone();
             async move {
                 a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -361,17 +367,19 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.instances.len(), 1);
+        assert!(out.flow_proposals.is_empty());
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn retry_interpretation_parse_recovers_after_bad_parse() {
+    async fn retry_interpretation_output_parse_recovers_after_bad_parse() {
         // First attempt returns unparseable garbage; second returns valid JSON.
-        // retry_interpretation_parse must call again and succeed within budget.
+        // retry_interpretation_output_parse must call again and succeed within
+        // budget.
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
         let attempts_clone = attempts.clone();
-        let out = retry_interpretation_parse(move |_| {
+        let out = retry_interpretation_output_parse(move |_| {
             let a = attempts_clone.clone();
             async move {
                 let n = a.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
@@ -384,24 +392,25 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.instances.len(), 1);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn retry_interpretation_parse_fails_after_max_attempts() {
+    async fn retry_interpretation_output_parse_fails_after_max_attempts() {
         // Every attempt returns garbage → we exhaust INTERPRETATION_MAX_ATTEMPTS
         // and propagate the last parse error rather than looping forever.
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
         let attempts_clone = attempts.clone();
-        let result: anyhow::Result<Vec<ProposedInstance>> = retry_interpretation_parse(move |_| {
-            let a = attempts_clone.clone();
-            async move {
-                a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok("never parseable".to_string())
-            }
-        })
-        .await;
+        let result: anyhow::Result<InterpretationOutput> =
+            retry_interpretation_output_parse(move |_| {
+                let a = attempts_clone.clone();
+                async move {
+                    a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok("never parseable".to_string())
+                }
+            })
+            .await;
         assert!(result.is_err());
         assert_eq!(
             attempts.load(std::sync::atomic::Ordering::SeqCst),

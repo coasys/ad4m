@@ -2,10 +2,9 @@ use super::{
     apply_with_overlay, build_interpretation_input, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
     identity_property, normalize_identity, parse_interpretation_output,
-    parse_interpretation_response, plan_interpretation_ops_resolved,
-    resolve_already_present_with_strategy, DedupStrategy, ExistingInstances, ExistingLinks,
-    InterpretationOp, InterpretationOutput, InterpretationRunCursor, ProposedInstance,
-    TranscriptTurn,
+    plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
+    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationOutput,
+    InterpretationRunCursor, TranscriptTurn,
 };
 use crate::agent::AgentContext;
 use crate::ai_service::harness::propose::{
@@ -21,68 +20,24 @@ use crate::types::LinkStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Max attempts for [`retry_interpretation_parse`]. Mirrors Flux's `LLMutils`
-/// retry-×5 loop: local models occasionally emit half-valid JSON, so we ask
-/// again a few times before giving up on the whole call.
+/// Max attempts for [`retry_interpretation_output_parse`]. Mirrors Flux's
+/// `LLMutils` retry-×5 loop: local models occasionally emit half-valid JSON,
+/// so we ask again a few times before giving up on the whole call.
 pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 
-/// run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
-/// response as an interpretation JSON payload. Returns the first successful parse;
-/// the last parse error propagates if every attempt fails. `prompt_fn` is an
-/// async closure so callers can inject anything (real `AIService`, a canned
-/// script, a mock) without a live LLM.
+/// Run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
+/// response as an [`InterpretationOutput`] payload (extracted instances +
+/// LLM-emitted flow proposals). Returns the first successful parse; the last
+/// parse error propagates if every attempt fails. `prompt_fn` is an async
+/// closure so callers can inject anything (real `AIService`, a canned script,
+/// a mock) without a live LLM.
 ///
 /// This is deliberately a thin generic wrapper: it never mutates state, and it
 /// is the only place we tolerate LLM flake. Any bug in prompt assembly should
 /// fail deterministically in [`build_interpretation_input`], not here.
 ///
-/// Legacy shape — returns `Vec<ProposedInstance>` only. Slice 10.6c added
-/// [`retry_interpretation_output_parse`] alongside it, which returns the
-/// full [`InterpretationOutput`] wrapper (instances + LLM-emitted
-/// flow proposals). This one is kept for the parse-loop tests + any legacy
-/// caller that doesn't need flow-proposal awareness.
-pub async fn retry_interpretation_parse<F, Fut>(
-    mut prompt_fn: F,
-) -> anyhow::Result<Vec<ProposedInstance>>
-where
-    F: FnMut(u8) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<String>>,
-{
-    let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 1..=INTERPRETATION_MAX_ATTEMPTS {
-        let raw = match prompt_fn(attempt).await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("interpretation: prompt attempt {attempt} failed: {e:#}");
-                last_err = Some(e);
-                continue;
-            }
-        };
-        match parse_interpretation_response(&raw) {
-            Ok(instances) => return Ok(instances),
-            Err(e) => {
-                log::warn!(
-                    "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
-                );
-                last_err = Some(e);
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| {
-        anyhow::anyhow!(
-            "interpretation: failed after {INTERPRETATION_MAX_ATTEMPTS} attempts with no captured error"
-        )
-    }))
-}
-
-/// Slice 10.6c — full-output variant of [`retry_interpretation_parse`] that
-/// parses via [`parse_interpretation_output`] and hence captures both the
-/// extracted instances AND any LLM-emitted `flow_proposals` alongside them.
-///
-/// Same retry contract (up to [`INTERPRETATION_MAX_ATTEMPTS`], last parse
-/// error propagates), same non-mutating "thin wrapper" nature. Used by
-/// [`run_interpretation_with_strategy_and_model`] so the strategy path can
-/// thread LLM-emitted flow proposals into [`crate::perspectives::flow_evaluator::run_engine_proposal_pass`].
+/// Callers that only need `.instances` should destructure the result;
+/// [`retry_interpretation_output_parse`] is the single retry primitive.
 pub async fn retry_interpretation_output_parse<F, Fut>(
     mut prompt_fn: F,
 ) -> anyhow::Result<InterpretationOutput>
@@ -731,8 +686,9 @@ pub async fn run_interpretation_with_strategy_and_model(
         // `debug_response_capture` retains the LAST successful raw response
         // for `InterpretationRun` persistence — the same value that ends up
         // on the run node's `debugResponse` scalar. Retries only happen when
-        // parsing fails, so the value in the cell after `retry_interpretation_parse`
-        // succeeds is by construction the final (parse-successful) attempt.
+        // parsing fails, so the value in the cell after
+        // `retry_interpretation_output_parse` succeeds is by construction the
+        // final (parse-successful) attempt.
         let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         // Slice 10.6c — capture the FULL parsed output (instances + LLM-emitted
