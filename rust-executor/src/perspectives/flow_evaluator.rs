@@ -2837,10 +2837,16 @@ mod e2e_tests {
         let (mut perspective, ctx, inst_uri) =
             seed_semantic_check_e2e_fixture("The scope is well-defined and actionable.").await;
 
-        // 2) Build the FlowContext list exactly as `run.rs` does. Passing
-        //    `None` for `scope` matches how the auto-processor call site
-        //    was passing when this slice was written.
-        let active_flows = gather_active_flow_contexts(&perspective, None).await;
+        // 2) Build the FlowContext list exactly as `run.rs` does. Post-J#1
+        //    the extraction path is bounded — pass the fixture's flow-instance
+        //    subject (base URI, per `mint_flow_instance` above) so
+        //    `load_flow_instances` finds this instance without spamming the
+        //    load with unrelated subjects.
+        let active_flows = gather_active_flow_contexts(
+            &perspective,
+            &["ad4m://task/onboarding-10.5b".to_string()],
+        )
+        .await;
         assert_eq!(
             active_flows.len(),
             1,
