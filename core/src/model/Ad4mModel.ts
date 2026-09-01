@@ -89,6 +89,28 @@ function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): 
       } else if (typeof val === 'object' && val !== null && subQuery.polymorphic === undefined) {
         subQuery.polymorphic = true;
       }
+      // The classes this call site can build are also the classes it wants its
+      // targets read as, so the declaration answers both questions and the call
+      // site repeats neither. Sent as part of the query rather than applied to
+      // the results: a preference in the request is reproducible by anyone who
+      // sends it, where one applied afterwards would make the same data read
+      // differently depending on which classes the caller happened to import.
+      //
+      // It ranks and does not narrow — a target matching none of them still
+      // arrives — so declaring what you can construct never costs you a member
+      // of a relation that is heterogeneous by definition.
+      if (
+        typeof subQuery === 'object' &&
+        subQuery !== null &&
+        subQuery.polymorphic &&
+        subQuery.preferClasses === undefined &&
+        meta.instantiateAs
+      ) {
+        const names = (meta.instantiateAs() ?? [])
+          .map((cls) => (cls as any)?.className)
+          .filter((name): name is string => typeof name === 'string');
+        if (names.length) subQuery.preferClasses = names;
+      }
     }
 
     if (typeof subQuery !== 'object' || subQuery === null) continue;

@@ -294,6 +294,24 @@ pub struct ModelQueryInput {
     /// a shape at all.
     #[serde(default)]
     pub polymorphic: Option<bool>,
+    /// Classes the caller would rather have, most wanted first.
+    ///
+    /// Membership is not exclusive, so a target can satisfy several classes and
+    /// hydration has to read it through one of them. Without this the choice is
+    /// made by specificity — how many required triples each class matched — which
+    /// answers "which class demanded most of this node", a question nobody asked.
+    /// Naming classes here answers the one they did: read it as this, if it is
+    /// one.
+    ///
+    /// **Ranks, never excludes.** A target matching nothing named still arrives,
+    /// hydrated as whatever it is, because the relation is heterogeneous by
+    /// definition and a caller listing what it can use must not silently narrow
+    /// what the collection contains. Anything not named simply falls through to
+    /// the specificity order behind it.
+    ///
+    /// Only meaningful alongside `polymorphic`.
+    #[serde(default)]
+    pub prefer_classes: Option<Vec<String>>,
 }
 
 /// Result returned by the model query endpoint.

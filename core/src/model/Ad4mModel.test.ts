@@ -2940,6 +2940,49 @@ describe("Polymorphic relations", () => {
       include: { children: true },
     });
 
+    expect(JSON.parse(queryJson).include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
+  });
+
+  it("sends the classes it can build as the classes it wants, in declaration order", () => {
+    // The two questions have one answer: what this call site can construct is
+    // what it wants its targets read as. Sent with the query rather than applied
+    // to the results, so the same request gives the same reading to anyone.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Declaration order is the preference order — a target conforming to two of
+    // them is read as whichever was named first.
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual([
+      "PolyTextBlock",
+      "PolyImageBlock",
+    ]);
+  });
+
+  it("lets an explicit preference at the call site win over the declaration", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { preferClasses: ["PolyBookmark"] } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["PolyBookmark"]);
+  });
+
+  it("sends no preference for a polymorphic relation that names no classes", () => {
+    @Model({ name: "PolyCollectionUndeclared" })
+    class PolyCollectionUndeclared extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const { queryJson } = (PolyCollectionUndeclared as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Nothing to prefer, so nothing is sent and the executor ranks by
+    // specificity exactly as it did before any of this existed.
     expect(JSON.parse(queryJson).include.children).toEqual({ polymorphic: true });
   });
 
@@ -2967,7 +3010,10 @@ describe("Polymorphic relations", () => {
     });
 
     const include = JSON.parse(queryJson).include;
-    expect(include.sections.include.children).toEqual({ polymorphic: true });
+    expect(include.sections.include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
   });
 
   it("lets an explicit false win at depth too", () => {

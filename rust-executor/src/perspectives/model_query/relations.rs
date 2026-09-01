@@ -236,18 +236,46 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 ///
 /// Which reading wins is therefore a policy, and this is where it is applied.
 /// `subject_classes_of` ranks the set by specificity and declines to choose;
-/// hydration needs exactly one shape, so it takes the head. Within an
-/// inheritance chain that is genuinely the most derived class — a subclass
-/// requires everything its parent does and more. Between two unrelated classes
-/// the ranking ties and the alphabetical tie-break decides, which is arbitrary
-/// but identical on every peer reading the same data. There is no better answer
-/// available: with no `rdf:type` triple to appeal to, "which class is this
-/// really" has no fact underneath it, and agreement between peers is worth more
-/// than a locally plausible guess.
+/// hydration needs exactly one shape, so it chooses.
+///
+/// The caller decides where it can. `prefer_classes` names the classes the read
+/// is for, and the first of them the target conforms to is the one it is
+/// hydrated as — see [`choose`]. That is the only ordering with a claim on being
+/// right, because specificity answers "which class demanded most of this node",
+/// which is a question nobody asked.
+///
+/// Where the caller names nothing, or names nothing this target is, specificity
+/// decides as before. Within an inheritance chain that is genuinely the most
+/// derived class — a subclass requires everything its parent does and more.
+/// Between two unrelated classes the ranking ties and the alphabetical tie-break
+/// decides, which is arbitrary but identical on every peer reading the same
+/// data. With no `rdf:type` triple to appeal to, "which class is this really"
+/// has no fact underneath it, so agreement between peers is the best a default
+/// can do — and naming classes is how a caller replaces the default with an
+/// answer.
 ///
 /// So that the discarded readings do not vanish without trace, every instance
 /// also carries the full set under [`SUBJECT_CLASSES_KEY`]. A caller that wants
 /// one of the others has its id and can query that class for it directly.
+/// Pick the class to hydrate a target against, from the set it conforms to.
+///
+/// The caller's `preferClasses` decides, in the order they wrote it: the first
+/// one the target actually conforms to wins. That is the only ordering with a
+/// claim on being right, because it is the only one that knows what the read is
+/// for. `matched` is already ranked by specificity, so a caller who names
+/// nothing — or names nothing this target is — gets exactly what it got before.
+///
+/// Preference is consulted in the caller's order rather than in `matched`'s, so
+/// naming `[Post, ImagePost]` reads an `ImagePost` as a `Post`. That is the
+/// point: a relation declared to hold `Post`s wants posts, not whatever more
+/// specific thing each one happens to be.
+fn choose<'a>(matched: &'a [String], preferred: &[String]) -> Option<&'a String> {
+    preferred
+        .iter()
+        .find_map(|want| matched.iter().find(|have| *have == want))
+        .or_else(|| matched.first())
+}
+
 async fn hydrate_polymorphic(
     store: &SparqlStore,
     relation_name: &str,
@@ -267,12 +295,13 @@ async fn hydrate_polymorphic(
     // a group's own results stay stable.
     //
     // `subject_classes_of` returns every class a URI conforms to, most specific
-    // first. Hydration needs exactly one shape per target, so the first is taken
-    // — hydrating against a parent is what this whole function exists to avoid.
+    // first. Hydration needs exactly one shape per target, so one is chosen —
+    // whichever the caller asked for, falling back to the most specific.
     // The rest are not lost: they ride back on the instance below.
+    let preferred = sub_query.prefer_classes.as_deref().unwrap_or(&[]);
     let mut by_class: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for id in target_ids {
-        if let Some(class_name) = classes.get(id).and_then(|names| names.first()) {
+        if let Some(class_name) = classes.get(id).and_then(|names| choose(names, preferred)) {
             by_class
                 .entry(class_name.clone())
                 .or_default()

@@ -6860,6 +6860,241 @@ async fn test_limit_on_a_polymorphic_include_is_rejected() {
     assert!(msg.contains("limit"), "names what was refused: {msg}");
 }
 
+/// A named class wins over a more specific one the caller did not ask for.
+///
+/// The case the specificity default gets wrong. A relation declares it holds
+/// `Post`s; a target is an `ImagePost`, so it conforms to both and `ImagePost`
+/// matched more. Read as an `ImagePost` it arrives as a class the caller has
+/// never heard of, and no client-side repair is possible for the general shape
+/// of this — a class whose shape does not declare the other's predicates
+/// projects those values out of the payload before anyone sees them.
+///
+/// Naming `Post` says what the read is for, and the answer follows.
+#[tokio::test]
+async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Feed",
+        "we://models/Post",
+        "we://models/ImagePost",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://f/1",
+            "we://name",
+            "literal:string:the feed",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://p/1", "3"))
+        .unwrap();
+
+    // An ImagePost: everything a Post requires, and an image besides.
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://title",
+            "literal:string:Chocolate Cake",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://src",
+            "literal:string:cake.png",
+            "4",
+        ))
+        .unwrap();
+
+    let feed_json = r#"{
+        "className": "Feed",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "entries": { "predicate": "we://entry", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, feed_shape) = StaticShapeResolver::from_json("Feed", feed_json).unwrap();
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImagePost",
+        parse_shape_from_json(
+            r#"{"className":"ImagePost","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"},
+                 "src":{"predicate":"we://src","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "ImagePost",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "entries".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                prefer_classes: Some(vec!["Post".to_string()]),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let entries = result.instances[0]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+
+    assert_eq!(
+        entry["__subjectClass"].as_str(),
+        Some("Post"),
+        "the caller named Post, and the target is one"
+    );
+    assert_eq!(entry["title"].as_str(), Some("Chocolate Cake"));
+    // Ranked by specificity regardless of what was preferred, so it stays a fact
+    // about the node rather than about the request — and a reader can see a
+    // preference was applied precisely because the head is not the chosen class.
+    assert_eq!(
+        entry["__subjectClasses"],
+        serde_json::json!(["ImagePost", "Post"]),
+        "the whole set, still most specific first"
+    );
+}
+
+/// Preferring classes never narrows what a relation returns.
+///
+/// A heterogeneous relation is open by definition, so a caller listing the
+/// classes it can use must not thereby drop the ones it cannot. Anything
+/// unnamed still arrives, hydrated as whatever it actually is — which is what
+/// keeps the declaration a preference rather than a scope, and what stops a
+/// model's class list from freezing which classes a collection may hold.
+#[tokio::test]
+async fn test_preferring_classes_does_not_drop_the_ones_not_named() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in ["we://models/Feed", "we://models/Post", "we://models/Recipe"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://f/1",
+            "we://name",
+            "literal:string:the feed",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://p/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://r/1", "3"))
+        .unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://title",
+            "literal:string:a post",
+            "4",
+        ))
+        .unwrap();
+    // A class the caller never names, and could not have: somebody defined it
+    // after this relation was written.
+    store
+        .add_link(&make_link(
+            "we://r/1",
+            "we://ingredients",
+            "literal:string:flour, sugar",
+            "4",
+        ))
+        .unwrap();
+
+    let feed_json = r#"{
+        "className": "Feed",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "entries": { "predicate": "we://entry", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, feed_shape) = StaticShapeResolver::from_json("Feed", feed_json).unwrap();
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Recipe",
+        parse_shape_from_json(
+            r#"{"className":"Recipe","properties":{
+                 "ingredients":{"predicate":"we://ingredients","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Recipe",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "entries".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                prefer_classes: Some(vec!["Post".to_string()]),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let entries = result.instances[0]["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        2,
+        "both links, though only one class was named"
+    );
+
+    let recipe = entries
+        .iter()
+        .find(|e| e["id"] == "we://r/1")
+        .expect("the unnamed class is still a member");
+    assert_eq!(recipe["__subjectClass"].as_str(), Some("Recipe"));
+    assert_eq!(recipe["ingredients"].as_str(), Some("flour, sugar"));
+}
+
 /// The same refusal on a relation that happens to hold nothing.
 ///
 /// Both resolvers return early once they find no targets, so a check made during

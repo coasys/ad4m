@@ -84,6 +84,43 @@ class PolyBookmark extends Ad4mModel {
   url: string = "";
 }
 
+/**
+ * A base class and a subclass of it, discriminated by required properties rather
+ * than flags: `PolyImagePost` requires everything `PolyPost` does and a source
+ * besides, so an image post conforms to both and matches `PolyPost` by less.
+ *
+ * This is the pair the specificity default reads the wrong way round for a
+ * caller that declared it holds posts.
+ */
+@Model({ name: "PolyPost" })
+class PolyPost extends Ad4mModel {
+  @Property({ through: "test://poly/headline", required: true })
+  headline: string = "";
+}
+
+@Model({ name: "PolyImagePost" })
+class PolyImagePost extends Ad4mModel {
+  @Property({ through: "test://poly/headline", required: true })
+  headline: string = "";
+
+  @Property({ through: "test://poly/cover", required: true })
+  cover: string = "";
+}
+
+/** Holds posts — and says so, both in its target and in what it can build. */
+@Model({ name: "PolyFeed" })
+class PolyFeed extends Ad4mModel {
+  @Flag({ through: "test://poly/feed_type", value: "test://poly/feed" })
+  feedType = "test://poly/feed";
+
+  @HasMany(() => PolyPost, {
+    through: "test://poly/entries",
+    polymorphic: true,
+    instantiateAs: () => [PolyPost],
+  })
+  entries: any[] = [];
+}
+
 @Model({ name: "PolyCollection" })
 class PolyCollection extends Ad4mModel {
   @Flag({ through: "test://poly/collection_type", value: "test://poly/collection" })
@@ -135,6 +172,9 @@ class PolyMarker extends Ad4mModel {
 }
 
 const ALL_MODELS = [
+  PolyPost,
+  PolyImagePost,
+  PolyFeed,
   PolyTextBlock,
   PolyImageBlock,
   PolyTaskBlock,
@@ -270,15 +310,15 @@ describe("Ad4mModel — polymorphic relations", function () {
   it("reports every class a child conforms to, and still returns one member per link", async () => {
     const collection = await PolyCollection.create(perspective, {});
 
-    // One node satisfying two unrelated classes: created as a bookmark, then
-    // given the text block's flag as well. Nothing forbids this — membership is
+    // One node satisfying two unrelated classes: created as a text block, then
+    // given the bookmark's flag as well. Nothing forbids this — membership is
     // structural, so both readings are simply true.
-    const both = await PolyBookmark.create(perspective, { url: "https://ad4m.dev" });
+    const both = await PolyTextBlock.create(perspective, { text: "hello" });
     await perspective.add(
       new Link({
         source: both.id,
-        predicate: "test://poly/block_type",
-        target: "test://poly/text_block",
+        predicate: "test://poly/bookmark_type",
+        target: "test://poly/bookmark",
       }),
     );
     await linkChild(collection.id, both.id);
@@ -295,14 +335,47 @@ describe("Ad4mModel — polymorphic relations", function () {
 
     const child = children[0];
     expect(child.id).to.equal(both.id);
-    // The ranking ties at one required triple each, so the tie-break decides —
-    // arbitrary, but the same answer on every peer reading the same data.
+    // Both classes require one triple, so specificity ties and the alphabetical
+    // fallback would have said PolyBookmark. It does not get that far: the
+    // collection declares it builds text blocks before bookmarks, so that is
+    // how a node answering to both is read. A convention losing to a statement
+    // of what the read is for.
+    expect(child.__subjectClass).to.equal("PolyTextBlock");
+    expect(child).to.be.instanceOf(PolyTextBlock);
+    expect(child.text).to.equal("hello");
+    // The reading that lost, reported rather than dropped, and still ranked by
+    // specificity — so the set stays a fact about the node while the choice
+    // follows the request. A caller wanting the other has the id.
+    expect(child.__subjectClasses).to.deep.equal(["PolyBookmark", "PolyTextBlock"]);
+  });
+
+  it("lets the call site name a different reading of the same child", async () => {
+    // The same node, the same collection, one word changed in the query. What a
+    // preference is for: two views over one collection can read a member as the
+    // thing each of them is about, without either being wrong.
+    const collection = await PolyCollection.create(perspective, {});
+    const both = await PolyBookmark.create(perspective, { url: "https://ad4m.dev" });
+    await perspective.add(
+      new Link({
+        source: both.id,
+        predicate: "test://poly/block_type",
+        target: "test://poly/text_block",
+      }),
+    );
+    await linkChild(collection.id, both.id);
+
+    const found = await PolyCollection.findOne(perspective, {
+      where: { id: collection.id },
+      include: { children: { preferClasses: ["PolyBookmark"] } },
+    });
+
+    const child = (found!.children as any[])[0];
     expect(child.__subjectClass).to.equal("PolyBookmark");
     expect(child).to.be.instanceOf(PolyBookmark);
+    // Read through the bookmark's shape, so the bookmark's property is what
+    // came back — the choice decides which predicates are fetched, not just
+    // which constructor runs.
     expect(child.url).to.equal("https://ad4m.dev");
-    // The reading that lost, reported rather than dropped. A caller wanting it
-    // has the id and can query PolyTextBlock for it directly.
-    expect(child.__subjectClasses).to.deep.equal(["PolyBookmark", "PolyTextBlock"]);
   });
 
   // ── 4. Nested and reverse ───────────────────────────────────────────────────
@@ -359,7 +432,46 @@ describe("Ad4mModel — polymorphic relations", function () {
     expect(markedBy.find((m) => m.id === text.id).text).to.equal("marks it");
   });
 
-  // ── 5. The failure that used to be unreadable ───────────────────────────────
+  // ── 5. Reading a target as the class the caller declared ────────────────────
+
+  it("yields the declared class for a target that is also something more specific", async () => {
+    // The whole pipeline, which is where this has to be true: a child that is a
+    // PolyImagePost conforms to PolyPost as well and matches it by fewer
+    // required triples, so specificity alone reads it as the subclass — a class
+    // the feed never declared and cannot construct. Declaring what it holds is
+    // what makes the answer come back as a PolyPost.
+    const feed = await PolyFeed.create(perspective, {});
+    const post = await PolyImagePost.create(perspective, {
+      headline: "Chocolate cake",
+      cover: "cake.png",
+    });
+    await perspective.add(
+      new Link({
+        source: feed.id,
+        predicate: "test://poly/entries",
+        target: post.id,
+      }),
+    );
+
+    const found = await PolyFeed.findOne(perspective, {
+      where: { id: feed.id },
+      include: { entries: true },
+    });
+
+    const entries = found!.entries as any[];
+    expect(entries.length).to.equal(1);
+
+    const entry = entries[0];
+    expect(entry).to.be.instanceOf(PolyPost, "constructed as the class the feed declared");
+    expect(entry.headline).to.equal("Chocolate cake");
+    expect(entry.__subjectClass).to.equal("PolyPost");
+    // The set stays ranked by specificity whatever was preferred, so it remains
+    // a fact about the node — and the caller can see the more specific reading
+    // exists, and fetch it by id if it ever wants it.
+    expect(entry.__subjectClasses).to.deep.equal(["PolyImagePost", "PolyPost"]);
+  });
+
+  // ── 6. The failure that used to be unreadable ───────────────────────────────
 
   it("names the relation and the fix when an untyped include is not polymorphic", async () => {
     const collection = await PolyLooseCollection.create(perspective, {});
