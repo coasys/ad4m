@@ -224,13 +224,15 @@ pub(crate) const SUBJECT_CLASSES_KEY: &str = "__subjectClasses";
 ///
 /// # One entry per link
 ///
-/// Membership is structural and therefore not exclusive, so a base expression
-/// can conform to two unrelated classes at once — a node carrying both classes'
-/// flags is idiomatic AD4M, not malformed data. Such a target is still hydrated
-/// **once**: links decide the relation's cardinality and classes decide only how
-/// a target is read, so one link is one member. Returning a member per class
-/// would make a three-link collection arrive with five entries, and every caller
-/// would have to know to collapse them.
+/// Membership is structural and therefore not exclusive: a class is a set of
+/// required triples, so a base expression carrying two classes' requirements
+/// belongs to both. Nothing about that is malformed — two independently authored
+/// classes needing an overlapping set of predicates is ordinary, and it is why
+/// `subject_classes_of` answers with a set rather than a name. Such a target is
+/// still hydrated **once**: links decide the relation's cardinality and classes
+/// decide only how a target is read, so one link is one member. Returning a
+/// member per class would make a three-link collection arrive with five entries,
+/// and every caller would have to know to collapse them.
 ///
 /// Which reading wins is therefore a policy, and this is where it is applied.
 /// `subject_classes_of` ranks the set by specificity and declines to choose;

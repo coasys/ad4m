@@ -6391,6 +6391,21 @@ async fn test_relation_quantifier_requires_the_target_class() {
     );
 }
 
+// --- Polymorphic includes -------------------------------------------------
+//
+// A note on the fixtures below, since they differ on purpose. A class is a set
+// of required triples, and `required_triples` builds that set from flags and
+// required properties alike — a flag contributes `(predicate, Some(value))`
+// where a required property contributes `(predicate, None)`, and nothing past
+// that point can tell them apart. So none of this machinery depends on flags.
+//
+// The first test discriminates its classes by flag, because that is what the
+// consumers of this API ship today and it should keep being covered. The two
+// overlap tests discriminate by required property, because what they assert is
+// about class membership itself and a fixture built from marker flags reads as
+// contrived — two classes needing an overlapping set of ordinary predicates is
+// how overlap actually arises.
+
 /// A heterogeneous relation hydrates each target as the class it actually is.
 ///
 /// Without this the collection has no good answer. Declaring the base class
@@ -6527,6 +6542,10 @@ async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
 /// parent requires and more, so "matched more triples" and "more derived" are the
 /// same ordering. Nothing exercised it end to end before — the sibling test's
 /// two classes match one shape each, so the head of the set was never contested.
+///
+/// Discriminated by required properties rather than by flags, so the superset
+/// relation the ranking depends on is visible in the shapes themselves: `Block`
+/// requires a title, `TextBlock` requires a title *and* a body.
 #[tokio::test]
 async fn test_polymorphic_include_hydrates_the_most_derived_class() {
     let store = SparqlStore::new(None).unwrap();
@@ -6542,19 +6561,27 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
     }
 
     store
-        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .add_link(&make_link(
+            "we://c/1",
+            "we://name",
+            "literal:string:reading list",
+            "2",
+        ))
         .unwrap();
     store
         .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
         .unwrap();
 
-    // The child carries `Block`'s flag *and* `TextBlock`'s, which is what being
-    // a subclass looks like when membership is structural: it satisfies both.
+    // The child carries what `Block` requires *and* what `TextBlock` requires,
+    // which is what being a subclass looks like when membership is structural:
+    // it satisfies both, and satisfies the subclass by more.
     store
-        .add_link(&make_link("we://t/1", "we://flag", "we://block", "4"))
-        .unwrap();
-    store
-        .add_link(&make_link("we://t/1", "we://kind", "we://text_block", "4"))
+        .add_link(&make_link(
+            "we://t/1",
+            "we://title",
+            "literal:string:Chapter one",
+            "4",
+        ))
         .unwrap();
     store
         .add_link(&make_link(
@@ -6568,7 +6595,7 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
     let collection_json = r#"{
         "className": "Collection",
         "properties": {
-            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
         },
         "relations": {
             "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
@@ -6580,7 +6607,7 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
         "Block",
         parse_shape_from_json(
             r#"{"className":"Block","properties":{
-                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://block"}
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
                },"relations":{}}"#,
             "Block",
         )
@@ -6590,9 +6617,8 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
         "TextBlock",
         parse_shape_from_json(
             r#"{"className":"TextBlock","properties":{
-                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://block"},
-                 "kind":{"predicate":"we://kind","required":true,"flag":true,"initial":"we://text_block"},
-                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"},
+                 "text":{"predicate":"we://text","required":true,"resolveLanguage":"literal"}
                },"relations":{}}"#,
             "TextBlock",
         )
@@ -6635,10 +6661,11 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
 /// A target conforming to two *unrelated* classes is still one member.
 ///
 /// Links decide how many children a collection has; classes decide only how each
-/// one is read. So a node carrying two classes' flags — idiomatic AD4M, since
-/// membership is structural and nothing stops an expression satisfying both —
-/// appears once, read as one of them, with the other reported rather than
-/// dropped.
+/// one is read. A class is a set of required triples, so a node carrying what two
+/// independently authored classes each require belongs to both — which is not a
+/// contrived arrangement but the ordinary consequence of two communities modelling
+/// overlapping things. It appears once, read as one of them, with the other
+/// reported rather than dropped.
 ///
 /// Which one wins is a convention here, not a fact: the two classes require one
 /// triple each, so the specificity ranking ties and the alphabetical tie-break
@@ -6659,20 +6686,19 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
     }
 
     store
-        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .add_link(&make_link(
+            "we://c/1",
+            "we://name",
+            "literal:string:reading list",
+            "2",
+        ))
         .unwrap();
     store
         .add_link(&make_link("we://c/1", "we://children", "we://b/1", "3"))
         .unwrap();
 
-    // One node, both classes' flags, both classes' properties. Neither reading is
-    // wrong.
-    store
-        .add_link(&make_link("we://b/1", "we://flag", "we://bookmark", "4"))
-        .unwrap();
-    store
-        .add_link(&make_link("we://b/1", "we://flag", "we://text_block", "4"))
-        .unwrap();
+    // One node holding what each class requires: somebody saved a link and wrote
+    // a note on it. Neither reading is wrong, and nothing marks it as either.
     store
         .add_link(&make_link(
             "we://b/1",
@@ -6693,7 +6719,7 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
     let collection_json = r#"{
         "className": "Collection",
         "properties": {
-            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
         },
         "relations": {
             "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
@@ -6705,8 +6731,7 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
         "Bookmark",
         parse_shape_from_json(
             r#"{"className":"Bookmark","properties":{
-                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://bookmark"},
-                 "url":{"predicate":"we://url","resolveLanguage":"literal"}
+                 "url":{"predicate":"we://url","required":true,"resolveLanguage":"literal"}
                },"relations":{}}"#,
             "Bookmark",
         )
@@ -6716,8 +6741,7 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
         "TextBlock",
         parse_shape_from_json(
             r#"{"className":"TextBlock","properties":{
-                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
-                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+                 "text":{"predicate":"we://text","required":true,"resolveLanguage":"literal"}
                },"relations":{}}"#,
             "TextBlock",
         )
