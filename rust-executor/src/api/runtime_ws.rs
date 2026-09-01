@@ -513,7 +513,8 @@ async fn get_free_hosting_enabled(
     _params: Value,
     _ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
-    let enabled = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
+    let enabled = crate::billing_backend::billing_backend()
+        .get_free_hosting_enabled()
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(Value::Bool(enabled))
 }
@@ -530,7 +531,8 @@ async fn set_free_hosting_enabled(
         .and_then(|v| v.as_bool())
         .ok_or_else(|| WsRpcError::bad_request("'enabled' boolean required"))?;
 
-    Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(enabled))
+    crate::billing_backend::billing_backend()
+        .set_free_hosting_enabled(enabled)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(enabled))
@@ -552,9 +554,9 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let since = params.opt_str("since");
     let limit = params.get("limit").and_then(|l| l.as_i64()).unwrap_or(100);
 
-    let logs =
-        Ad4mDb::with_global_instance(|db| db.get_compute_log(&email, since.as_deref(), limit))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let logs = crate::billing_backend::billing_backend()
+        .get_compute_log(&email, since.as_deref(), limit)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(logs).unwrap_or_default())
 }
@@ -562,16 +564,26 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    let _ = params;
-    Err(WsRpcError::not_implemented(
-        "PUT /runtime/host-rates is not yet implemented on the server",
-    ))
+
+    let rates_val = params
+        .get("rates")
+        .ok_or_else(|| WsRpcError::bad_request("'rates' array required"))?;
+    let rates_arr: Vec<(String, f64)> = serde_json::from_value(rates_val.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid rates: {e}")))?;
+
+    crate::billing_backend::billing_backend()
+        .set_rates(&rates_arr)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
 }
 
 async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented(
-        "GET /runtime/host-rates is not yet implemented on the server",
-    ))
+    let rates = crate::billing_backend::billing_backend()
+        .get_rates()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::to_value(rates).unwrap_or_default())
 }
 
 // ── Stubs for unyt endpoints ──

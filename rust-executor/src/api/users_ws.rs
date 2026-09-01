@@ -61,7 +61,8 @@ async fn get_user_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let email = params.require_str("email")?;
 
-    let wallet = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email))
+    let wallet = crate::billing_backend::billing_backend()
+        .get_user_hot_wallet(&email)
         .map_err(|e| WsRpcError::internal(e.to_string()))?
         .ok_or_else(|| WsRpcError::not_found("Wallet not found"))?;
 
@@ -80,16 +81,16 @@ async fn set_user_free_access(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
-    Ad4mDb::with_global_instance(|db| db.set_user_free_access(&email, body.enabled)).map_err(
-        |e| {
+    crate::billing_backend::billing_backend()
+        .set_user_free_access(&email, body.enabled)
+        .map_err(|e| {
             let message = e.to_string();
             if message.contains("User not found") {
                 WsRpcError::not_found(message)
             } else {
                 WsRpcError::internal(message)
             }
-        },
-    )?;
+        })?;
 
     Ok(Value::Bool(true))
 }
