@@ -219,6 +219,12 @@ export class FlowInstance {
     // missing SHACL shape and there is no side-effect-free way to ask
     // "does this class exist". Return `[]` on that specific case; rethrow
     // anything else so real infra failures don't get swallowed.
+    //
+    // Regex covers every message the executor + client stack raises for
+    // an unregistered class:
+    //   "No SHACL shape stored for class 'FlowInstance'." (executor RPC)
+    //   "Shape not found" (older Rust path)
+    //   "class not registered" / "not registered" (TS Ad4mModel guard)
     let records: FlowInstanceRecord[];
     try {
       records =
@@ -228,7 +234,9 @@ export class FlowInstance {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (
-        /shape not found|class not registered|not registered|no shape/i.test(msg)
+        /no shacl shape stored|shape not found|class not registered|not registered/i.test(
+          msg,
+        )
       ) {
         return [];
       }
