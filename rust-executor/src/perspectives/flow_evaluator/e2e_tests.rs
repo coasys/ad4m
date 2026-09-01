@@ -22,6 +22,9 @@
 //            turn into on-graph `FlowTransitionProposal` writes.
 //
 // No LLM is spun up.
+use super::engine_pass::write_engine_proposal;
+use super::primitives::evidence_hash;
+use super::queryable::evaluate_flow_transitions;
 use super::*;
 use crate::perspectives::flow_classes::mint_flow_instance;
 use crate::perspectives::flow_context::{load_flow_instances, load_shacl_flows};

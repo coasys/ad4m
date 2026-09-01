@@ -3,6 +3,10 @@
 //! `PerspectiveInstance`. See [`super::e2e_tests`] for the live-perspective
 //! integration coverage.
 
+use super::primitives::{build_query_input_for_requires, cardinality_satisfied, evidence_hash};
+use super::queryable::{
+    evaluate_flow_transitions, evaluate_single_query, evaluate_state_requires, RequiresQueryable,
+};
 use super::*;
 use crate::perspectives::shacl_parser::{
     ConsensusRule, ModelQuery, ModelQueryCount, PropertyCondition,
