@@ -118,9 +118,13 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    9 — it also idempotently registers the FlowInstance model
     //    class, which is the class `load_flow_instances` queries.
     let base_uri = "ad4m://task/onboarding";
+    // Pass the flow's canonical URI (`${namespace}${name}Flow`), not the
+    // bare name — `mint_flow_instance` writes into the record's
+    // `flowUri` property, which `build_flow_contexts` joins on
+    // (James PR #929 R5).
     let inst_uri = mint_flow_instance(
         &mut perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         base_uri,
         "identified",
         "e2e-inst-1",

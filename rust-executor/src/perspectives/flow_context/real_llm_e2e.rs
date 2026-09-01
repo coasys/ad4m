@@ -120,9 +120,11 @@ async fn seed_delivery_flow_and_instance(
             .expect("add_link(flow definition)");
     }
 
+    // Flow URI (`${namespace}${name}Flow`), not bare name — see James
+    // PR #929 R5.
     mint_flow_instance(
         perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         base_uri,
         "identified",
         "e2e-real-llm-inst",
