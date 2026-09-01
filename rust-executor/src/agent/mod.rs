@@ -334,6 +334,8 @@ impl AgentService {
                     perspective_store_backend: None,
                     perspective_store_url: None,
                     internal_api_token: None,
+                    billing_backend: None,
+                    billing_backend_url: None,
                 });
             }
         }

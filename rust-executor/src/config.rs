@@ -116,6 +116,13 @@ pub struct Ad4mConfig {
     /// Base URL for the shared perspective store (required when perspective_store_backend = "shared").
     pub perspective_store_url: Option<String>,
 
+    /// Billing backend type: "local" (default) or "shared".
+    /// "local" uses the in-process SQLite database (Ad4mDb billing tables).
+    /// "shared" delegates to the platform Worker's internal billing API.
+    pub billing_backend: Option<String>,
+    /// Base URL for the shared billing service (required when billing_backend = "shared").
+    pub billing_backend_url: Option<String>,
+
     /// Bearer token for internal API authentication (outbound: executor → platform Worker).
     /// MUST differ from `admin_credential` (inbound: client → executor) to maintain
     /// trust boundary separation. See the assertion in lib.rs::run().
@@ -160,6 +167,12 @@ impl Ad4mConfig {
         if self.perspective_store_url.is_none() {
             self.perspective_store_url = std::env::var("PERSPECTIVE_STORE_URL").ok();
         }
+        if self.billing_backend.is_none() {
+            self.billing_backend = std::env::var("BILLING_BACKEND").ok();
+        }
+        if self.billing_backend_url.is_none() {
+            self.billing_backend_url = std::env::var("BILLING_BACKEND_URL").ok();
+        }
         if self.internal_api_token.is_none() {
             self.internal_api_token = std::env::var("INTERNAL_API_TOKEN").ok();
         }
@@ -182,6 +195,13 @@ impl Ad4mConfig {
         if self.perspective_store_backend.as_deref() == Some("shared") {
             if let Some(ref url) = self.perspective_store_url {
                 if let Err(msg) = validate_shared_backend_url(url, "PERSPECTIVE_STORE_URL") {
+                    log::warn!("{}", msg);
+                }
+            }
+        }
+        if self.billing_backend.as_deref() == Some("shared") {
+            if let Some(ref url) = self.billing_backend_url {
+                if let Err(msg) = validate_shared_backend_url(url, "BILLING_BACKEND_URL") {
                     log::warn!("{}", msg);
                 }
             }
@@ -342,6 +362,8 @@ impl Default for Ad4mConfig {
             db_backend_url: None,
             perspective_store_backend: None,
             perspective_store_url: None,
+            billing_backend: None,
+            billing_backend_url: None,
             internal_api_token: None,
         };
         config.prepare();

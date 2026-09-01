@@ -22,6 +22,7 @@ pub mod wallet;
 pub mod agent;
 pub mod ai_service;
 pub mod billing;
+pub mod billing_backend;
 mod dapp_server;
 pub mod db;
 pub mod db_backend;
@@ -389,6 +390,36 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         crate::perspective_store_backend::init_perspective_store_backend(backend);
     }
 
+    // Initialise the billing backend.
+    // "shared" mode delegates billing operations to the platform Worker;
+    // everything else uses the in-process Ad4mDb billing tables (LocalBillingBackend).
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::billing_backend::BillingBackend> =
+            match config.billing_backend.as_deref() {
+                Some("shared") => {
+                    let url = config
+                        .billing_backend_url
+                        .as_ref()
+                        .expect("BILLING_BACKEND_URL required when billing_backend = shared");
+                    let token = config
+                        .internal_api_token
+                        .as_ref()
+                        .expect("INTERNAL_API_TOKEN required for shared backends");
+                    info!("Initialising shared billing backend at {}", url);
+                    Arc::new(crate::billing_backend::SharedBillingBackend::new(
+                        url.clone(),
+                        token.clone(),
+                    ))
+                }
+                _ => {
+                    info!("Initialising local billing backend");
+                    Arc::new(crate::billing_backend::LocalBillingBackend::new())
+                }
+            };
+        crate::billing_backend::init_billing_backend(backend);
+    }
+
     // ── Token separation assertion ──────────────────────────────────────
     // internal_api_token (executor → Worker) must differ from admin_credential
     // (client → executor) to maintain trust boundary separation. Same value
@@ -614,7 +645,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // When any credit mutation marks a user dirty, this drains the set
     // and publishes updated HostingUserInfo only for affected users.
     tokio::spawn(async {
-        use crate::db::Ad4mDb;
         use crate::pubsub::{
             get_global_pubsub, COMPUTE_LOG_UPDATED_TOPIC, DIRTY_CREDIT_USERS,
             HOSTING_USER_INFO_CHANGED_TOPIC, PENDING_COMPUTE_LOG_ENTRIES,
@@ -640,8 +670,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             }
 
             let pubsub = get_global_pubsub().await;
-            let global_free = match Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
-            {
+            let bb = crate::billing_backend::billing_backend();
+            let global_free = match bb.get_free_hosting_enabled() {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Credit flush: get_free_hosting_enabled failed: {}", e);
@@ -652,7 +682,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 let free_access = if global_free {
                     true
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
+                    match bb.get_user_free_access(email) {
                         Ok(v) => v,
                         Err(e) => {
                             error!(
@@ -666,7 +696,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 let remaining_credits = if free_access {
                     "unlimited".to_string()
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_credits(email)) {
+                    match bb.get_credits(email) {
                         Ok(credits) => format!("{}", credits),
                         Err(e) => {
                             error!("Credit flush: get_user_credits failed for {}: {}", email, e);
@@ -674,17 +704,16 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                         }
                     }
                 };
-                let hot_wallet_address =
-                    match Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email)) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!(
-                                "Credit flush: get_user_hot_wallet failed for {}: {}",
-                                email, e
-                            );
-                            continue;
-                        }
-                    };
+                let hot_wallet_address = match bb.get_user_hot_wallet(email) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!(
+                            "Credit flush: get_user_hot_wallet failed for {}: {}",
+                            email, e
+                        );
+                        continue;
+                    }
+                };
 
                 let info = crate::types::HostingUserInfo {
                     email: email.clone(),

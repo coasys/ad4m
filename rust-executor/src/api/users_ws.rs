@@ -61,7 +61,8 @@ async fn get_user_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let email = params.require_str("email")?;
 
-    let wallet = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&email))
+    let wallet = crate::billing_backend::billing_backend()
+        .get_user_hot_wallet(&email)
         .map_err(|e| WsRpcError::internal(e.to_string()))?
         .ok_or_else(|| WsRpcError::not_found("Wallet not found"))?;
 
@@ -80,16 +81,16 @@ async fn set_user_free_access(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
-    Ad4mDb::with_global_instance(|db| db.set_user_free_access(&email, body.enabled)).map_err(
-        |e| {
+    crate::billing_backend::billing_backend()
+        .set_user_free_access(&email, body.enabled)
+        .map_err(|e| {
             let message = e.to_string();
             if message.contains("User not found") {
                 WsRpcError::not_found(message)
             } else {
                 WsRpcError::internal(message)
             }
-        },
-    )?;
+        })?;
 
     Ok(Value::Bool(true))
 }
@@ -338,12 +339,24 @@ async fn request_verification(
     }
 }
 
-async fn users_credits(params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    // Stub — not yet implemented
-    let _ = params;
-    Err(WsRpcError::not_implemented(
-        "POST /users/credits is not yet implemented on the server",
-    ))
+async fn users_credits(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+
+    let email = params
+        .require_str("email")
+        .map_err(|e| WsRpcError::bad_request(format!("{e}")))?;
+    let amount = params
+        .get("amount")
+        .and_then(|v| v.as_f64())
+        .ok_or_else(|| WsRpcError::bad_request("'amount' number required"))?;
+
+    crate::billing_backend::billing_backend()
+        .set_credits(&email, amount)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::json!({ "email": email, "credits": amount }))
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
