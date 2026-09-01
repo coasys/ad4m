@@ -18,6 +18,25 @@ use tokio::sync::OnceCell;
 use crate::billing::BillingError;
 use crate::db::ComputeLogEntry;
 
+// ── Tier limits ──────────────────────────────────────────────────────────────
+
+/// Resource limits for a billing tier. `None` means unlimited.
+#[derive(Debug, Clone, Default)]
+pub struct TierLimits {
+    pub max_perspectives: Option<i64>,
+    pub max_members_per_perspective: Option<i64>,
+    pub monthly_inference_credits_cents: Option<i64>,
+    pub storage_limit_bytes: Option<i64>,
+}
+
+/// Error returned when a tier-limit check fails.
+#[derive(Debug)]
+pub struct TierLimitExceeded {
+    pub resource: String,
+    pub limit: i64,
+    pub current: i64,
+}
+
 // ── Trait ──────────────────────────────────────────────────────────────────────
 
 /// Abstracts billing operations so the executor can use either a local SQLite
@@ -108,6 +127,46 @@ pub trait BillingBackend: Send + Sync {
 
     /// Reverse lookup: find user email by HoT wallet address.
     fn get_user_by_hot_wallet_address(&self, address: &str) -> Result<Option<String>, AnyError>;
+
+    // ── Tier limits ───────────────────────────────────────────────────
+
+    /// Get the tier limits for a user. Returns `TierLimits::default()` (all
+    /// unlimited) if the user has no tier or the backend does not support tiers.
+    fn get_tier_limits(&self, _email: &str) -> Result<TierLimits, AnyError> {
+        Ok(TierLimits::default())
+    }
+
+    /// Check whether the user can create another resource of the given type.
+    /// Returns `Ok(())` if allowed, `Err(TierLimitExceeded)` if not.
+    ///
+    /// `resource_type`: "perspective", "member", etc.
+    /// `current_count`: how many the user already has.
+    fn check_tier_limit(
+        &self,
+        email: &str,
+        resource_type: &str,
+        current_count: i64,
+    ) -> Result<(), TierLimitExceeded> {
+        let limits = self.get_tier_limits(email).unwrap_or_default();
+
+        let cap = match resource_type {
+            "perspective" => limits.max_perspectives,
+            "member" => limits.max_members_per_perspective,
+            _ => None,
+        };
+
+        if let Some(limit) = cap {
+            if current_count >= limit {
+                return Err(TierLimitExceeded {
+                    resource: resource_type.to_string(),
+                    limit,
+                    current: current_count,
+                });
+            }
+        }
+
+        Ok(())
+    }
 
     /// Downcast support.
     fn as_any(&self) -> &dyn Any;
@@ -652,6 +711,18 @@ impl BillingBackend for SharedBillingBackend {
             .get("email")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()))
+    }
+
+    fn get_tier_limits(&self, email: &str) -> Result<TierLimits, AnyError> {
+        let result = self.get_json(&format!("/billing/{}/tier-limits", email))?;
+        Ok(TierLimits {
+            max_perspectives: result.get("maxSpaces").and_then(|v| v.as_i64()),
+            max_members_per_perspective: result.get("maxMembersPerSpace").and_then(|v| v.as_i64()),
+            monthly_inference_credits_cents: result
+                .get("monthlyInferenceCreditsCents")
+                .and_then(|v| v.as_i64()),
+            storage_limit_bytes: result.get("storageLimitBytes").and_then(|v| v.as_i64()),
+        })
     }
 
     fn as_any(&self) -> &dyn Any {
