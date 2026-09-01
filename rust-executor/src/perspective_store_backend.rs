@@ -404,6 +404,9 @@ mod tests {
 
         let mock = server
             .mock("GET", "/did:test/persp-1/links")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("limit".into(), "1000".into()),
+            ]))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
