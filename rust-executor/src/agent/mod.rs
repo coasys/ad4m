@@ -333,6 +333,8 @@ impl AgentService {
                     db_backend_url: None,
                     snapshot_interval_secs: None,
                     internal_api_token: None,
+                    billing_backend: None,
+                    billing_backend_url: None,
                 });
             }
         }

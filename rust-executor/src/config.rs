@@ -113,6 +113,13 @@ pub struct Ad4mConfig {
     /// Set to 0 to disable periodic snapshots. Only applies in shared mode.
     pub snapshot_interval_secs: Option<u64>,
 
+    /// Billing backend type: "local" (default) or "shared".
+    /// "local" uses the in-process SQLite database (Ad4mDb billing tables).
+    /// "shared" delegates to the platform Worker's internal billing API.
+    pub billing_backend: Option<String>,
+    /// Base URL for the shared billing service (required when billing_backend = "shared").
+    pub billing_backend_url: Option<String>,
+
     /// Bearer token for internal API authentication (outbound: executor → platform Worker).
     /// MUST differ from `admin_credential` (inbound: client → executor) to maintain
     /// trust boundary separation. See the assertion in lib.rs::run().
@@ -156,6 +163,12 @@ impl Ad4mConfig {
                 .ok()
                 .and_then(|v| v.parse().ok());
         }
+        if self.billing_backend.is_none() {
+            self.billing_backend = std::env::var("BILLING_BACKEND").ok();
+        }
+        if self.billing_backend_url.is_none() {
+            self.billing_backend_url = std::env::var("BILLING_BACKEND_URL").ok();
+        }
         if self.internal_api_token.is_none() {
             self.internal_api_token = std::env::var("INTERNAL_API_TOKEN").ok();
         }
@@ -171,6 +184,13 @@ impl Ad4mConfig {
         if self.db_backend.as_deref() == Some("shared") {
             if let Some(ref url) = self.db_backend_url {
                 if let Err(msg) = validate_shared_backend_url(url, "DB_BACKEND_URL") {
+                    log::warn!("{}", msg);
+                }
+            }
+        }
+        if self.billing_backend.as_deref() == Some("shared") {
+            if let Some(ref url) = self.billing_backend_url {
+                if let Err(msg) = validate_shared_backend_url(url, "BILLING_BACKEND_URL") {
                     log::warn!("{}", msg);
                 }
             }
@@ -330,6 +350,8 @@ impl Default for Ad4mConfig {
             db_backend: None,
             db_backend_url: None,
             snapshot_interval_secs: None,
+            billing_backend: None,
+            billing_backend_url: None,
             internal_api_token: None,
         };
         config.prepare();
