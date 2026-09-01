@@ -1,39 +1,34 @@
-//! Slice 10.1a of the flow-implementation arc — the data shape and pure
-//! rendering helpers that Model C's extraction prompt-builder (slice 10.2)
-//! consumes when it composes an "Active flows on this scope" block.
-//!
-//! Design authority: `planning/flow-interpretation-hints-design.md` §5.3–§5.4.
+//! Flow-aware extraction — data shape, rendering, and perspective
+//! loading for the "Active flows on this scope" prompt block that the
+//! extraction pass appends when the perspective has live `FlowInstance`s.
 //!
 //! # What this module owns
 //!
-//! - [`FlowContext`] — one running `FlowInstance` summarized for the LLM.
-//! - [`NextStateSummary`] — one reachable next-state, with `interpretationHint`
-//!   and English-rendered `requires` payload.
-//! - Pure helpers that turn a parsed [`SHACLFlow`] + current-state name into
-//!   the above.
+//! Pure data + rendering:
 //!
-//! # What slice 10.1b adds (this commit)
+//! - [`FlowContext`] — one running `FlowInstance` summarized for the LLM.
+//! - [`NextStateSummary`] — one reachable next-state, with
+//!   `interpretationHint` and English-rendered `requires` payload.
+//! - Pure helpers that turn a parsed [`SHACLFlow`] + current-state name
+//!   into the above ([`summarize_flow_instance`],
+//!   [`summarize_next_state`], [`render_model_query`], etc.).
+//!
+//! Perspective-side reading:
 //!
 //! - [`FlowInstanceRecord`] — the raw scalar row for one live
-//!   `FlowInstance`, as it comes off the perspective graph.
-//! - [`parse_flow_instance_from_hydrated`] — pure JSON→record parser
-//!   (isolated for exhaustive testing without a live perspective).
+//!   `FlowInstance`, as it comes off the graph.
+//! - [`parse_flow_instance_from_hydrated`] — pure JSON→record parser,
+//!   isolated for exhaustive testing without a live perspective.
 //! - [`load_flow_instances`] — thin `PerspectiveInstance::model_query`
-//!   wrapper that returns every active `FlowInstance` (optionally
-//!   filtered to one `subject` base expression).
+//!   wrapper that returns every active `FlowInstance`, optionally
+//!   filtered to one `subject` base expression.
+//! - [`load_shacl_flows`] — parses the flow catalogue off SDNA links.
 //! - [`build_flow_contexts`] — pairs each record with its parsed
 //!   [`SHACLFlow`] and hands the pair to [`summarize_flow_instance`].
+//! - [`gather_active_flow_contexts`] — the composed entry point the
+//!   extraction pass calls.
 //!
-//! # What slice 10.1c will add (NOT here)
-//!
-//! `parse_flow_from_links` — the Rust-side mirror of TS
-//! `SHACLFlow.fromLinks`. Needed so [`build_flow_contexts`]' caller can
-//! materialise a `flows_by_name: HashMap<String, SHACLFlow>` off the
-//! perspective's SDNA links without a JS RPC round-trip. Deferred out
-//! of this commit because the TS `fromLinks` is ~400 lines and porting
-//! it deserves its own PR scope.
-//!
-//! # Why pure
+//! # Why pure rendering is isolated
 //!
 //! Rendering `ModelQuery` to English is the single hottest correctness
 //! surface in the LLM prompt: an ambiguous or malformed sentence steers
@@ -54,8 +49,8 @@ use std::collections::{HashMap, HashSet};
 
 /// One live `FlowInstance` summarized for the LLM prompt-builder.
 ///
-/// Populated by slice 10.1b's `gather_active_flow_context` — this slice
-/// only defines the shape and the pure helpers that build it.
+/// Populated by `gather_active_flow_contexts` — this struct is the pure
+/// shape the perspective loader hydrates and hands to the prompt builder.
 #[derive(Debug, Clone)]
 pub struct FlowContext {
     /// The flow's name — matches `SHACLFlow.name` and
@@ -139,7 +134,7 @@ pub fn summarize_next_state(state: &FlowState) -> NextStateSummary {
 
 /// Assemble a [`FlowContext`] from a parsed flow + a live instance's
 /// scalar fields (URI + subject + current_state). Pure — the caller
-/// (slice 10.1b) is responsible for loading those scalars off the
+/// is responsible for loading those scalars off the
 /// graph.
 pub fn summarize_flow_instance(
     flow: &SHACLFlow,
@@ -291,7 +286,7 @@ pub fn render_consensus_rule(rule: &ConsensusRule) -> String {
 }
 
 // ============================================================================
-// Slice 10.1b — perspective-side FlowInstance loading + record→context pairing
+// perspective-side FlowInstance loading + record→context pairing
 // ============================================================================
 
 /// One live `FlowInstance` as read off the perspective graph — the raw
@@ -440,7 +435,7 @@ pub fn scope_subject(scope: &Scope) -> &str {
     }
 }
 
-/// Slice 10.3c — compose the two loaders + [`build_flow_contexts`] into
+/// compose the two loaders + [`build_flow_contexts`] into
 /// one call that the extraction pass (`run.rs`) can use directly.
 ///
 /// Returns the (possibly empty) list of [`FlowContext`]s. Any I/O
@@ -1027,7 +1022,7 @@ mod tests {
         );
     }
 
-    // ------------- parse_flow_instance_from_hydrated (slice 10.1b) -------------
+    // ------------- parse_flow_instance_from_hydrated -------------
 
     #[test]
     fn parse_flow_instance_happy_path() {
@@ -1113,7 +1108,7 @@ mod tests {
         assert!(parse_flow_instance_from_hydrated(&v).is_none());
     }
 
-    // ------------- build_flow_contexts (slice 10.1b) -------------
+    // ------------- build_flow_contexts -------------
 
     fn record(flow: &str, uri: &str, subject: &str, state: &str) -> FlowInstanceRecord {
         FlowInstanceRecord {
@@ -1388,7 +1383,7 @@ mod tests {
         assert_eq!(names, vec!["review", "identified"]);
     }
 
-    // ------------- scope_subject (slice 10.3c) -------------
+    // ------------- scope_subject -------------
 
     #[test]
     fn scope_subject_extracts_id_from_both_variants() {
@@ -1412,7 +1407,7 @@ mod tests {
 }
 
 // ============================================================================
-// Slice 10.3d — end-to-end integration test
+// end-to-end integration test
 // ============================================================================
 //
 // The tests above cover the pure halves in isolation: `parse_flow_from_links`

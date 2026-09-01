@@ -1,6 +1,6 @@
-//! Slice 10.9a/b2 — Rust port of `aggregateFlowVotes` +
-//! `fireFlowConsensus` (`core/src/perspectives/FlowVoteAggregator.ts`
-//! and `core/src/perspectives/FlowConsensusFire.ts`).
+//! Rust port of `aggregateFlowVotes` + `fireFlowConsensus`
+//! (`core/src/perspectives/FlowVoteAggregator.ts` and
+//! `core/src/perspectives/FlowConsensusFire.ts`).
 //!
 //! Byte-for-byte parity with the TS aggregator + firing pair so the
 //! auto-processor (engine side) and Ad4m clients (TS side) reach the
@@ -36,8 +36,8 @@
 //!
 //! - `fromRole` resolution — caller passes the pre-resolved eligible-DID
 //!   set. Same contract as the TS side: it keeps this helper sync +
-//!   composable with both engine and client firing paths (design §7.2).
-//! - Weighted / delegation / time-decay consensus (design §7.5 v1.5+).
+//!   composable with both engine and client firing paths.
+//! - Weighted / delegation / time-decay consensus (v1.5+).
 //! - Writing a `FlowInstanceAdvance` audit event alongside the state
 //!   advance ([`FireOutcome`] already carries what a future writer
 //!   would need). Same "v1 fires only" scope as TS `fireFlowConsensus`.
@@ -124,7 +124,7 @@ pub struct AggregateFlowVotesResult {
 ///   `FlowInstance`. The helper groups by `(from_state, to_state)`
 ///   internally, does not require pre-sort or filter.
 /// - `consensus_rule`: rule governing the transition(s). `None` →
-///   defaults to `{ n: 1 }` per design §7.1.
+///   defaults to `{ n: 1 }` (single-proposer suffices).
 /// - `eligible_dids`: optional pre-resolved DID set from
 ///   `consensus_rule.from_role`. When the rule has `from_role` set the
 ///   caller MUST supply this — omitting it errors, because a silent
@@ -200,8 +200,8 @@ pub fn aggregate_flow_votes(
         });
     }
 
-    // Select `fires` per §7.1 rule — earliest `proposed_at` among
-    // consensus-reached tallies, ties broken by lex (from_state, to_state).
+    // Select `fires` — earliest `proposed_at` among consensus-reached
+    // tallies, ties broken by lex (from_state, to_state).
     let mut fires: Option<FlowVoteTally> = None;
     let mut fires_earliest: Option<String> = None;
     for t in &tallies {

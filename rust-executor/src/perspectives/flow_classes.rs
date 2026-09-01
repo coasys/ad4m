@@ -249,20 +249,20 @@ pub(crate) async fn write_flow_transition_proposal(
     Ok(uri)
 }
 
-/// Slice 10.9b1 — writer primitive: advance a `FlowInstance`'s
+/// writer primitive: advance a `FlowInstance`'s
 /// `currentState` to `to_state` on-graph. Byte-atomic via the SDNA's
 /// `setSingleTarget` setter, which replaces the single existing target
 /// under one `batch_id` (no read-then-write race, no double-link
 /// residue).
 ///
 /// **Pure w.r.t. side-effects the caller controls** — `batch_id` is
-/// caller-supplied so the fire path (slice 10.9b2) can bundle the
+/// caller-supplied so the fire path can bundle the
 /// state-advance with any consumer's follow-on writes (e.g. audit
 /// event, `FlowInstanceAdvance` record) into one atomic commit. Mirrors
 /// [`mint_flow_instance`] and [`write_flow_transition_proposal`].
 ///
 /// No stale-state guard here — this is the raw writer. The consensus
-/// fire path (slice 10.9b2) is what checks `expected_from_state` before
+/// fire path is what checks `expected_from_state` before
 /// calling, so a post-advance vote can't cause a double-fire. Split
 /// this way so the writer stays composable with any other future
 /// caller (e.g. an admin `advanceFlow` WS-RPC) that has its own
