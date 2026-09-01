@@ -1202,7 +1202,7 @@ mod tests {
     // the real SPARQL/Prolog/SDNA stack.
 
     use crate::perspectives::flow_context::FlowInstanceRecord;
-    use crate::perspectives::shacl_parser::{FlowState, FlowTransition, LinkPattern, SHACLFlow};
+    use crate::perspectives::shacl_parser::{FlowState, FlowTransition, SHACLFlow};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -1440,11 +1440,6 @@ mod tests {
                     states.push(FlowState {
                         name: s.to_string(),
                         value: 0.0,
-                        state_check: LinkPattern {
-                            source: None,
-                            predicate: format!("{}://state", name.to_lowercase()),
-                            target: format!("{}://{}", name.to_lowercase(), s),
-                        },
                         interpretation_hint: None,
                         requires: None,
                         semantic_check: None,
@@ -1456,7 +1451,6 @@ mod tests {
         SHACLFlow {
             name: name.to_string(),
             namespace: format!("{}://", name.to_lowercase()),
-            start_action: Vec::new(),
             states,
             transitions: transitions
                 .iter()
@@ -1486,7 +1480,7 @@ mod tests {
             instance_uri: uri.into(),
             subject: subject.into(),
             current_state: state.into(),
-            started_at: None,
+            created_at: None,
         }
     }
 
@@ -1713,25 +1707,14 @@ mod e2e_tests {
         serde_json::json!({
             "name": "Delivery",
             "namespace": "delivery://",
-            "start_action": [],
             "states": [
                 {
                     "name": "identified",
                     "value": 0.0,
-                    "state_check": {
-                        "source": null,
-                        "predicate": "delivery://state",
-                        "target": "delivery://identified"
-                    }
                 },
                 {
                     "name": "scoped",
                     "value": 0.5,
-                    "state_check": {
-                        "source": null,
-                        "predicate": "delivery://state",
-                        "target": "delivery://scoped"
-                    }
                 }
             ],
             "transitions": [
@@ -1800,7 +1783,6 @@ mod e2e_tests {
             base_uri,
             "identified",
             "e2e-inst-1",
-            "2026-08-26T21:30:00Z",
             None,
             &ctx,
         )
@@ -1960,7 +1942,6 @@ mod e2e_tests {
             base_uri,
             "identified",
             "e2e-inst-writer",
-            "2026-08-27T00:00:00Z",
             None,
             &ctx,
         )
@@ -2164,7 +2145,6 @@ mod e2e_tests {
             base_uri,
             "identified",
             "e2e-10.4c-inst",
-            "2026-08-27T02:00:00Z",
             None,
             &ctx,
         )
@@ -2396,7 +2376,6 @@ mod e2e_tests {
             base_uri,
             "identified",
             "e2e-10.5b-inst",
-            "2026-08-27T02:00:00Z",
             None,
             &ctx,
         )
@@ -2551,7 +2530,6 @@ mod e2e_tests {
             "ad4m://task/no-hint",
             "identified",
             "e2e-10.5b-no-hint-inst",
-            "2026-08-27T02:00:00Z",
             None,
             &ctx,
         )
