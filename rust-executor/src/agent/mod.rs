@@ -295,7 +295,9 @@ impl AgentService {
 
         // Ensure a global config exists (create_new_keys reads signing_key_name).
         {
-            let cfg = crate::config::GLOBAL_AD4M_CONFIG.lock().unwrap();
+            let cfg = crate::config::GLOBAL_AD4M_CONFIG
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if cfg.is_none() {
                 drop(cfg);
                 crate::config::set_global_config(crate::config::Ad4mConfig {
