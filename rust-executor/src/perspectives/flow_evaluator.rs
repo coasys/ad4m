@@ -625,15 +625,21 @@ pub async fn run_engine_proposal_pass(
 
     // Load active FlowInstances, scope-narrowed if the pass carries an
     // anchor. Same silent-fallback as the pre-pass loader.
-    let subject = scope.map(crate::perspectives::flow_context::scope_subject);
-    let records =
-        match crate::perspectives::flow_context::load_flow_instances(perspective, subject).await {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("run_engine_proposal_pass: load_flow_instances failed: {e:#}");
-                return Vec::new();
-            }
-        };
+    let subjects: Vec<String> = scope
+        .map(|s| vec![crate::perspectives::flow_context::scope_subject(s).to_string()])
+        .unwrap_or_default();
+    let records = match crate::perspectives::flow_context::load_flow_instances(
+        perspective,
+        &subjects,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("run_engine_proposal_pass: load_flow_instances failed: {e:#}");
+            return Vec::new();
+        }
+    };
     if records.is_empty() {
         return Vec::new();
     }
@@ -1804,7 +1810,7 @@ mod e2e_tests {
         // 4) Load records + catalogue exactly as `run.rs` will after
         //    slice 10.4b. Same shape 10.3d exercised on the read side,
         //    but this time both are fed into the *write*-side gate.
-        let records = load_flow_instances(&perspective, None)
+        let records = load_flow_instances(&perspective, &[base_uri.to_string()])
             .await
             .expect("load_flow_instances");
         assert_eq!(records.len(), 1, "one active FlowInstance ⇒ one record");
@@ -1981,7 +1987,7 @@ mod e2e_tests {
         )
         .await;
 
-        let records = load_flow_instances(&perspective, None)
+        let records = load_flow_instances(&perspective, &[base_uri.to_string()])
             .await
             .expect("load_flow_instances");
         let flows_by_name = load_shacl_flows(&perspective)
