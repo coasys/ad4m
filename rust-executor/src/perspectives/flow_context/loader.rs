@@ -183,7 +183,7 @@ pub fn build_flow_contexts(
         .collect()
 }
 
-/// Slice 10.3c — compose the two loaders + [`build_flow_contexts`] into
+/// compose the two loaders + [`build_flow_contexts`] into
 /// one call that the extraction pass (`run.rs`) can use directly.
 ///
 /// Returns the (possibly empty) list of [`FlowContext`]s. Any I/O
@@ -417,7 +417,7 @@ mod tests {
     use super::*;
     use crate::perspectives::shacl_parser::parse_flow_to_links;
 
-    // ------------- parse_flow_instance_from_hydrated (slice 10.1b) -------------
+    // ------------- parse_flow_instance_from_hydrated -------------
 
     #[test]
     fn parse_flow_instance_happy_path() {
@@ -506,7 +506,7 @@ mod tests {
         assert!(parse_flow_instance_from_hydrated(&v).is_none());
     }
 
-    // ------------- build_flow_contexts (slice 10.1b) -------------
+    // ------------- build_flow_contexts -------------
 
     fn record(flow: &str, uri: &str, subject: &str, state: &str) -> FlowInstanceRecord {
         FlowInstanceRecord {
@@ -805,7 +805,7 @@ mod tests {
         assert!(flows.contains_key("TODO"), "must key on flow.name");
     }
 
-    // ------------- scope_subject (slice 10.3c) -------------
+    // ------------- scope_subject -------------
 
     #[test]
     fn scope_subject_extracts_id_from_both_variants() {

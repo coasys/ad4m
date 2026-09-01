@@ -1,6 +1,4 @@
-//! Real-LLM end-to-end test for the Model C data path — PR #929 review R5
-//! (Nico, 2026-08-27: "this PR/onion layer should have real LLM based
-//! interpretation tests already").
+//! Real-LLM end-to-end test for the flow-aware extraction data path.
 //!
 //! Complements the sibling `e2e_tests` module (no-LLM composition proof —
 //! walks the whole gather → prompt-builder chain against fixture inputs)
@@ -16,17 +14,17 @@
 //! 1. Prompt integration doesn't malform LLM output: the extractor
 //!    still returns JSON the parser can decode when `contexts.len() > 0`.
 //! 2. `run_interpretation` completes end-to-end with the flow-aware
-//!    slice 10.3c wiring live — one full pass against a real model.
+//!    wiring live — one full pass against a real model.
 //! 3. The extracted instance carries evidence the LLM's understanding of
 //!    the scope conversation, i.e. the new prompt section didn't cause
 //!    the model to hallucinate types outside the offered class set.
 //!
-//! # What it does *not* prove (deferred to PR #932 / slice 10.5+)
+//! # What it does *not* prove
 //!
-//! - The engine acts on the extracted instance (that's `run_engine_proposal_pass`
-//!   post-processing, PR #932).
-//! - The LLM proposes a `FlowTransitionProposal` on its own (that's the
-//!   `flow_proposals` output field, also PR #932).
+//! - The engine acts on the extracted instance (covered by the
+//!   `run_engine_proposal_pass` post-processing tests).
+//! - The LLM proposes a `FlowTransitionProposal` on its own (covered by
+//!   the `flow_proposals` output-field tests).
 //!
 //! # Endpoint + retry
 //!

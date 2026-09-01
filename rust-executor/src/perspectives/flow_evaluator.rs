@@ -1,33 +1,39 @@
-//! Slice 10.4a of the flow-implementation arc — the deterministic
-//! `FlowTransitionProposal` post-processing pass. Turns each active
-//! `FlowInstance` and its reachable next-states into a
-//! [`SatisfiedTransition`] per (record, next-state) whose `requires` array
-//! is fully satisfied against the committed perspective graph.
+//! Deterministic post-processing pass over active flows.
 //!
-//! Design authority: `planning/flow-interpretation-hints-design.md` §5 step 5
-//! ("Post-processing (engine, deterministic)") and §7 (`ConsensusRule` +
-//! `didProperty` role-gate).
+//! # What this pass does
+//!
+//! For each `FlowInstance` alive on the perspective, walk the reachable
+//! next-states declared on its `SHACLFlow`, evaluate every state's
+//! `requires` guard against the committed graph, and emit a
+//! [`SatisfiedTransition`] for every (instance, next-state) pair whose
+//! guards fully match. Downstream stages turn those satisfied transitions
+//! into on-graph `FlowTransitionProposal` writes.
+//!
+//! A `requires` guard is an array of `ModelQuery` shapes carrying an
+//! optional `count.{min,max}` cardinality. The guard is satisfied when
+//! every element matches the target class with the required cardinality;
+//! the AND across `requires` is what gates a proposal. The record of what
+//! matched (class name + sorted matched-ids per element) is hashed into an
+//! `evidence` value on the proposal so a later re-verification can catch a
+//! proposal whose evidence no longer resolves.
 //!
 //! # What this module owns
 //!
-//! Pure primitives (slice 10.4a1):
+//! Pure primitives (no perspective I/O):
 //!
-//! - [`SatisfiedTransition`] — the record slice 10.4b's writer stage
-//!   consumes.
+//! - [`SatisfiedTransition`] — the record the writer stage consumes.
 //! - [`build_query_input_for_requires`] — translator from `ModelQuery`
 //!   (flow-side type) to `serde_json::Value` (`model_query`'s input
 //!   shape). Substitutes `$did` in `didProperty` at translation time.
 //!   Recursive over `ModelQuery.or`.
 //! - [`cardinality_satisfied`] — `count.{min,max}` cardinality check.
 //! - [`evidence_hash`] — deterministic SHA256 of a (class, sorted
-//!   matched-ids) pair. Used to seed the evidence field on the
-//!   `FlowTransitionProposal` that slice 10.4b emits, so a re-verification
-//!   pass in slice 10.6 can catch a tampered proposal.
+//!   matched-ids) pair, used to seed the proposal's evidence field.
 //!
-//! Async layer (slice 10.4a2, this commit):
+//! Async layer over the one perspective-side query the evaluator needs:
 //!
-//! - [`RequiresQueryable`] — the one perspective-side call the evaluator
-//!   needs, factored behind a trait so tests can stub it without a live
+//! - [`RequiresQueryable`] — the one perspective-side call, factored
+//!   behind a trait so tests can stub it without a live
 //!   `PerspectiveInstance`. `PerspectiveInstance` gets a blanket impl.
 //! - [`evaluate_single_query`] — one `model_query` call + cardinality
 //!   check + evidence extraction.
@@ -41,15 +47,16 @@
 //!
 //! # Why pure primitives + trait-backed async layer
 //!
-//! Slice 10.4b will emit `FlowTransitionProposal` writes on behalf of the
-//! extraction DID from these results. Any bug in the ModelQuery→ModelQueryInput
-//! translation would either miss a satisfied requires (flow silently
-//! stalls) or synthesize a wrong-guard proposal (garbage in the flow's
-//! evidence chain). Isolating the translation from graph I/O gives us
-//! fixture-driven unit tests for every `PropertyCondition` variant +
-//! `$did` substitution; the [`RequiresQueryable`] trait gives us the same
-//! coverage for the composition and error-handling shape without paying
-//! the cost of a live perspective per test.
+//! The writer stage emits `FlowTransitionProposal` writes on behalf of
+//! the extraction DID from these results. A bug in the
+//! `ModelQuery` → `ModelQueryInput` translation would either miss a
+//! satisfied guard (flow silently stalls) or synthesize a wrong-guard
+//! proposal (garbage in the flow's evidence chain). Isolating the
+//! translation from graph I/O gives fixture-driven unit tests for every
+//! `PropertyCondition` variant + `$did` substitution; the
+//! [`RequiresQueryable`] trait gives the same coverage for the
+//! composition and error-handling shape without paying the cost of a
+//! live perspective per test.
 
 #![allow(dead_code)]
 
@@ -65,13 +72,13 @@ use std::collections::{HashMap, HashSet};
 
 /// One (flow_instance, next-state) pair whose `requires` array has been
 /// evaluated to fully-satisfied on the committed perspective graph. The
-/// output of slice 10.4a2's async evaluator; the input to slice 10.4b's
-/// [`synthesize_engine_proposals`].
+/// output of the async evaluator; the input to the writer stage.
 ///
 /// `evidence_ids` is the union of matched instance IDs across every
 /// `ModelQuery` in the state's `requires` array. `evidence_hash` is a
 /// content-hash of the same set (computed via [`evidence_hash`]) so a
-/// re-verification pass in slice 10.6 can catch a tampered proposal.
+/// later re-verification pass can catch a proposal whose evidence no
+/// longer resolves.
 ///
 /// (Not `PartialEq`: `consensus_rule: Option<ConsensusRule>` transitively
 /// holds `PropertyCondition` with float variants that can't derive `Eq`.
@@ -165,7 +172,7 @@ pub fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> 
 /// the result to `PerspectiveInstance::model_query`.
 ///
 /// `acting_did` resolves `$did` in `didProperty` at translation time
-/// (§7.2). The convention `"$did"` triggers substitution; any other
+///. The convention `"$did"` triggers substitution; any other
 /// string is passed through verbatim — an escape hatch for hardcoded
 /// roles that never made it into the design doc but which we should
 /// not silently break.
@@ -271,7 +278,7 @@ fn property_condition_to_where(cond: &PropertyCondition) -> Value {
 }
 
 // ============================================================================
-// Slice 10.4a2 — async layer over `model_query`
+// async layer over `model_query`
 // ============================================================================
 
 /// The one perspective-side call the evaluator needs. Trait-based so tests
@@ -415,11 +422,11 @@ pub async fn evaluate_state_requires<Q: RequiresQueryable + ?Sized>(
 ///   deterministic guard; slice 10.5's `semanticCheck` picks these up
 ///   separately when 10.5 lands).
 /// - A `model_query` call that errors → logged at `debug!` and skipped.
-///   The consensus engine (slice 10.6) will re-evaluate on the next tick
+///   The consensus engine will re-evaluate on the next tick
 ///   so a transient perspective error is self-healing.
 ///
 /// The effective `consensus_rule` per output prefers the per-state
-/// override (§7.1) and falls back to the flow-level default when unset.
+/// override and falls back to the flow-level default when unset.
 pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     records: &[FlowInstanceRecord],
@@ -474,10 +481,10 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 }
 
 // ============================================================================
-// Slice 10.4b — writer stage: SatisfiedTransition → on-graph proposal
+// writer stage: SatisfiedTransition → on-graph proposal
 // ============================================================================
 
-/// Slice 10.4b — convenience over
+/// convenience over
 /// [`crate::perspectives::flow_classes::write_flow_transition_proposal`]
 /// for the engine-generated path.
 ///
@@ -491,7 +498,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 ///
 /// `proposal_id` / `batch_id` are caller-supplied to stay consistent
 /// with `mint_flow_instance` — the auto-processor call-site
-/// (slice 10.4c) generates the id and threads its own batch so the
+/// generates the id and threads its own batch so the
 /// whole extraction pass commits atomically. Propose-time is
 /// synthesised on-graph by `Ad4mModel`'s `createdAt` (earliest link
 /// timestamp on the proposal URI), so no timestamp param is threaded.
@@ -523,7 +530,7 @@ pub async fn write_engine_proposal(
     .await
 }
 
-/// Slice 10.6c — an LLM-emitted "proposal to advance this flow" that the
+/// an LLM-emitted "proposal to advance this flow" that the
 /// engine may honour when the deterministic `requires` guard also fires.
 ///
 /// This is the boundary type between the interpretation layer (which parses
@@ -551,10 +558,10 @@ pub struct LlmProposalHint {
 }
 
 // ============================================================================
-// Slice 10.4c — the auto-processor entry point
+// the auto-processor entry point
 // ============================================================================
 
-/// Slice 10.4c — compose the load → evaluate → write pipeline into one
+/// compose the load → evaluate → write pipeline into one
 /// call that the extraction pass (`interpretation::run`) invokes AFTER
 /// `apply_with_overlay` has committed the LLM-derived writes. At that
 /// point the graph state on which `requires` model-queries run is what
@@ -583,7 +590,7 @@ pub struct LlmProposalHint {
 /// (call sites pre-10.5c), the gate is skipped entirely and the pass
 /// behaves exactly as slice 10.4c shipped.
 ///
-/// `llm_hints` (slice 10.6c) carries the LLM's own `flow_proposals` output
+/// `llm_hints` carries the LLM's own `flow_proposals` output
 /// as a slice of [`LlmProposalHint`]s. When a hint matches a satisfied
 /// transition by `(instance_uri, to_state)`, the LLM's `reason` (if any)
 /// is written as the proposal's `rationale` field — attribution flows from
@@ -666,7 +673,7 @@ pub async fn run_engine_proposal_pass(
         return Vec::new();
     }
 
-    // Slice 10.5b — index FlowContext by instance_uri so the semantic-check
+    // index FlowContext by instance_uri so the semantic-check
     // gate can look up the flow's overall interpretationHint + next-state
     // summaries when composing its confirmation prompt. Computed once per
     // pass (not per transition) since multiple SatisfiedTransitions can
@@ -700,7 +707,7 @@ pub async fn run_engine_proposal_pass(
     // writer no longer takes a `proposed_at` param.
     let mut minted = Vec::with_capacity(satisfied.len());
     for transition in &satisfied {
-        // Slice 10.5b — semantic-check gate. Runs BEFORE the write so a
+        // semantic-check gate. Runs BEFORE the write so a
         // rejected/uncertain transition never lands as a proposal. The gate
         // is skipped entirely when the caller passes `None` (back-compat
         // with slice 10.4c's callers). When `Some((llm, model_id))`:
@@ -754,7 +761,7 @@ pub async fn run_engine_proposal_pass(
             }
         }
 
-        // Slice 10.6c — match LLM hints by (instance_uri, to_state). The
+        // match LLM hints by (instance_uri, to_state). The
         // first matching hint wins if the LLM emitted several for the
         // same pair (the prompt caps at one per instance per pass, but
         // this is a fail-safe against a chatty small model). An unmatched
@@ -1197,7 +1204,7 @@ mod tests {
     }
 
     // ============================================================================
-    // Slice 10.4a2 — async layer tests (stubbed perspective)
+    // async layer tests (stubbed perspective)
     // ============================================================================
     //
     // These stub `RequiresQueryable` in-process so the evaluator's async
@@ -1664,7 +1671,7 @@ mod tests {
 }
 
 // ============================================================================
-// Slice 10.4a3 — live-perspective integration test
+// live-perspective integration test
 // ============================================================================
 //
 // The stub-perspective tests above pin every failure mode inside the
@@ -1748,7 +1755,7 @@ mod e2e_tests {
         //    through the writer; the one v5 predicate we need — the
         //    `requires` link on the `scoped` state — is added by hand
         //    because `parse_flow_to_links` does not yet emit v5. The
-        //    reader (slice 10.3a) already walks the v5 shape, and the
+        //    reader already walks the v5 shape, and the
         //    evaluator needs to consume it today; this test pins that
         //    contract until the writer catches up.
         let scoped_uri = "delivery://Delivery.scoped";
@@ -1888,7 +1895,7 @@ mod e2e_tests {
         assert!(t.consensus_rule.is_none());
     }
 
-    /// Slice 10.4b — write-side end-to-end. Re-uses the 10.4a3 fixture:
+    /// write-side end-to-end. Re-uses the 10.4a3 fixture:
     /// real perspective, Delivery flow with `requires: 1 × ns://Task`,
     /// one active FlowInstance, one seeded Task ⇒ one
     /// `SatisfiedTransition`. On top of that, this test calls
@@ -2093,7 +2100,7 @@ mod e2e_tests {
         }
     }
 
-    /// Slice 10.4c — the end-to-end onion shell for the auto-processor
+    /// the end-to-end onion shell for the auto-processor
     /// entry point. Verifies that a single call to
     /// [`run_engine_proposal_pass`] against a live perspective:
     ///
@@ -2264,7 +2271,7 @@ mod e2e_tests {
     }
 
     // -----------------------------------------------------------------
-    // Slice 10.5b — the semantic-check gate wired into
+    // the semantic-check gate wired into
     // `run_engine_proposal_pass`.
     // -----------------------------------------------------------------
 
@@ -2351,7 +2358,7 @@ mod e2e_tests {
             .expect("add_link(scoped.requires)");
         // The 10.5b payload — per-state semanticCheck hint (predicate is
         // `ad4m://semanticCheck` in camelCase to match the parser at
-        // `shacl_parser::find_link`). Parser (slice 10.3a) reads this
+        // `shacl_parser::find_link`). Parser reads this
         // and mounts it on `FlowState.semantic_check`, which
         // `evaluate_flow_transitions` threads into
         // `SatisfiedTransition.semantic_check`, which
@@ -2572,7 +2579,7 @@ mod e2e_tests {
     }
 
     // ---------------------------------------------------------------------
-    // Slice 10.6c — LlmProposalHint matching / rationale attribution
+    // LlmProposalHint matching / rationale attribution
     // ---------------------------------------------------------------------
 
     /// Helper: read the `ad4m://flow/rationale` link off a proposal URI and
@@ -2720,7 +2727,7 @@ mod e2e_tests {
     }
 
     // ---------------------------------------------------------------------
-    // Slice 10.7d — full-stack harness→engine end-to-end
+    // full-stack harness→engine end-to-end
     //
     // The 10.6c tests above prove `run_engine_proposal_pass` writes a
     // rationale when handed a `LlmProposalHint` directly. The 10.7b tests

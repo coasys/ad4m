@@ -1,9 +1,6 @@
 //! Model C flow-aware extraction — data shape, rendering, and perspective
 //! loading for the "Active flows on this scope" prompt block.
 //!
-//! Design authority: `docs/flow-interpretation-hints-design.md` §5.3–§5.4
-//! (previously referenced as `planning/…`, in-repo since PR #929 review R6).
-//!
 //! Split into three cohesive layers so each can be read + tested in
 //! isolation (Nico's PR #929 review R4, 2026-08-27):
 //!
