@@ -260,13 +260,14 @@ describe("FlowInstanceRecord — @Model", function () {
     if (p) await ad4m.perspective.remove(p.uuid);
   });
 
-  it("FlowInstanceRecord.findAll() returns records by flow-name discriminator", async () => {
+  it("FlowInstanceRecord.findAll() returns records by flowUri discriminator", async () => {
     // Simulate what the Rust flow engine writes when startFlow lands.
+    // Post-J#5: record stores the flow's canonical URI, not the bare name.
     const instance = "ad4m://flow/instance/inst-1";
     await p.add(new Link({
       source: instance,
-      predicate: "ad4m://flow/flow_name",
-      target: "literal:string:Delivery",
+      predicate: "ad4m://flow/flow_uri",
+      target: "literal:string:delivery%3A%2F%2FDeliveryFlow",
     }));
     await p.add(new Link({
       source: instance,
@@ -281,7 +282,7 @@ describe("FlowInstanceRecord — @Model", function () {
 
     const all = await FlowInstanceRecord.findAll(p);
     expect(all.length).to.equal(1);
-    expect(all[0].flow).to.equal("Delivery");
+    expect(all[0].flowUri).to.equal("delivery://DeliveryFlow");
     expect(all[0].subject).to.equal("ad4m://some-subject");
     expect(all[0].currentState).to.equal("Scoped");
     // `createdAt` is Ad4mModel's synthesised earliest-link timestamp
@@ -711,11 +712,16 @@ describe("FlowInstance wrapper — read + stub API", function () {
   // consensus engine lands.
 
   it("wrapper carries the record — callers can reach in for anything unexposed", async () => {
-    await p.addFlow("Delivery", makeDeliveryFlowWithTransitions());
+    const flow = makeDeliveryFlowWithTransitions();
+    await p.addFlow("Delivery", flow);
     const inst = await FlowInstance.start(p, "Delivery", "ad4m://task/record-access");
 
     expect(inst.record).to.be.instanceOf(FlowInstanceRecord);
-    expect(inst.record.flow).to.equal("Delivery");
+    // Post-J#5: record stores the flow's URI (`flowUri`), not the bare
+    // `name`. The human label is available via the wrapper's `flowName`
+    // getter, which reads it off the paired SHACLFlow.
+    expect(inst.record.flowUri).to.equal(flow.flowUri);
+    expect(inst.flowName).to.equal("Delivery");
     expect(inst.record.subject).to.equal("ad4m://task/record-access");
     expect(inst.record.currentState).to.equal("Identified");
   });

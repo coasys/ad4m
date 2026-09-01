@@ -34,7 +34,10 @@ use std::collections::{HashMap, HashSet};
 /// want that to poison every future extraction until it's hand-cleaned.
 pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowInstanceRecord> {
     let instance_uri = v.get("id").and_then(|x| x.as_str())?.to_string();
-    let flow_name = v.get("flow").and_then(|x| x.as_str())?.to_string();
+    // Property key `flowUri` on the TS @Model (SHACL predicate
+    // `ad4m://flow/flow_uri`) — the value is the flow's canonical URI,
+    // not the bare name (James PR #929 R5).
+    let flow_uri = v.get("flowUri").and_then(|x| x.as_str())?.to_string();
     let subject = v.get("subject").and_then(|x| x.as_str())?.to_string();
     let current_state = v.get("currentState").and_then(|x| x.as_str())?.to_string();
     // Ad4mModel synthesises `createdAt` from the earliest link timestamp
@@ -45,7 +48,7 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
         .and_then(|x| x.as_str())
         .map(str::to_string);
     Some(FlowInstanceRecord {
-        flow_name,
+        flow_uri,
         instance_uri,
         subject,
         current_state,
@@ -161,18 +164,19 @@ pub async fn load_all_flow_instances(
 /// [`SHACLFlow`] definition and produce [`FlowContext`]s for prompt
 /// insertion.
 ///
-/// Records whose `flow_name` is absent from `flows_by_name` are
-/// silently skipped — a stale FlowInstance (its flow was
-/// unregistered) shouldn't fail the whole extraction pass. Order is
-/// preserved from `records`.
+/// URI-keyed join (James PR #929 R5). Records whose `flow_uri` is absent
+/// from `flows_by_uri` are silently skipped — a stale FlowInstance
+/// (its flow was unregistered, or the local perspective doesn't yet
+/// have the flow's shape imported from the neighbourhood) shouldn't
+/// fail the whole extraction pass. Order is preserved from `records`.
 pub fn build_flow_contexts(
     records: &[FlowInstanceRecord],
-    flows_by_name: &HashMap<String, SHACLFlow>,
+    flows_by_uri: &HashMap<String, SHACLFlow>,
 ) -> Vec<FlowContext> {
     records
         .iter()
         .filter_map(|r| {
-            let flow = flows_by_name.get(&r.flow_name)?;
+            let flow = flows_by_uri.get(&r.flow_uri)?;
             Some(summarize_flow_instance(
                 flow,
                 r.instance_uri.clone(),
@@ -209,14 +213,14 @@ pub async fn gather_active_flow_contexts(
     perspective: &PerspectiveInstance,
     subjects: &[String],
 ) -> Vec<FlowContext> {
-    let flows_by_name = match load_shacl_flows(perspective).await {
+    let flows_by_uri = match load_shacl_flows(perspective).await {
         Ok(m) => m,
         Err(e) => {
             log::warn!("gather_active_flow_contexts: load_shacl_flows failed, using empty: {e:#}");
             return Vec::new();
         }
     };
-    if flows_by_name.is_empty() {
+    if flows_by_uri.is_empty() {
         return Vec::new();
     }
     let records = match load_flow_instances(perspective, subjects).await {
@@ -228,7 +232,7 @@ pub async fn gather_active_flow_contexts(
             return Vec::new();
         }
     };
-    build_flow_contexts(&records, &flows_by_name)
+    build_flow_contexts(&records, &flows_by_uri)
 }
 
 /// Derive the flow-filter subject key from an extraction pass `Scope`.
@@ -293,7 +297,9 @@ pub fn parse_flows_from_bag(links: &[Link]) -> HashMap<String, SHACLFlow> {
 
         match parse_flow_from_links(&related, &flow_uri) {
             Ok(flow) => {
-                flows.insert(flow.name.clone(), flow);
+                // URI-keyed (James PR #929 R5) — matches the join key on
+                // `build_flow_contexts` which reads `FlowInstanceRecord.flow_uri`.
+                flows.insert(flow.flow_uri(), flow);
             }
             Err(e) => {
                 log::warn!("parse_flows_from_bag: skipping flow {flow_uri} (parse failed): {e:#}");
@@ -424,7 +430,7 @@ mod tests {
         let v = serde_json::json!({
             "id": "ad4m://flow/instance/inst-1",
             "baseExpression": "ad4m://flow/instance/inst-1",
-            "flow": "Delivery",
+            "flowUri": "coasys://DeliveryFlow",
             "subject": "ad4m://task/foo",
             "currentState": "scoped",
             // `createdAt` is Ad4mModel's synthesised earliest-link
@@ -435,7 +441,7 @@ mod tests {
         });
         let r = parse_flow_instance_from_hydrated(&v).expect("required scalars present");
         assert_eq!(r.instance_uri, "ad4m://flow/instance/inst-1");
-        assert_eq!(r.flow_name, "Delivery");
+        assert_eq!(r.flow_uri, "coasys://DeliveryFlow");
         assert_eq!(r.subject, "ad4m://task/foo");
         assert_eq!(r.current_state, "scoped");
         assert_eq!(r.created_at.as_deref(), Some("2026-08-26T09:00:00Z"));
@@ -450,7 +456,7 @@ mod tests {
         // properties (see the reserved-field fix in `e6362e5ca`).
         let v = serde_json::json!({
             "id": "ad4m://flow/instance/inst-x",
-            "flow": "Deliberation",
+            "flowUri": "coasys://DeliberationFlow",
             "subject": "ad4m://proposal/bar",
             "currentState": "perspectives",
             "createdAt": "2026-08-26T10:00:00Z",
@@ -459,14 +465,14 @@ mod tests {
             "some_future_property_the_llm_added": "hello",
         });
         let r = parse_flow_instance_from_hydrated(&v).expect("required scalars present");
-        assert_eq!(r.flow_name, "Deliberation");
+        assert_eq!(r.flow_uri, "coasys://DeliberationFlow");
         assert_eq!(r.current_state, "perspectives");
         assert_eq!(r.created_at.as_deref(), Some("2026-08-26T10:00:00Z"));
     }
 
     #[test]
     fn parse_flow_instance_missing_required_returns_none() {
-        // Missing `flow` → mid-mint crash between constructor and setter
+        // Missing `flowUri` → mid-mint crash between constructor and setter
         // writes. Skip the record rather than pollute Vec<FlowContext>
         // with a half-typed instance.
         let v = serde_json::json!({
@@ -484,7 +490,7 @@ mod tests {
         // rather than skipping when a hydration path elides it.
         let v = serde_json::json!({
             "id": "ad4m://flow/instance/no-ts",
-            "flow": "Delivery",
+            "flowUri": "coasys://DeliveryFlow",
             "subject": "ad4m://task/foo",
             "currentState": "identified",
         });
@@ -494,12 +500,12 @@ mod tests {
 
     #[test]
     fn parse_flow_instance_non_string_required_returns_none() {
-        // A scalar that's on-graph as a non-string (e.g. flow name mistakenly
+        // A scalar that's on-graph as a non-string (e.g. flow URI mistakenly
         // stored as a number) is treated the same as missing — one half-typed
         // record must not block extraction of the well-typed rest.
         let v = serde_json::json!({
             "id": "ad4m://flow/instance/bad",
-            "flow": 42, // wrong type
+            "flowUri": 42, // wrong type
             "subject": "ad4m://task/foo",
             "currentState": "identified",
         });
@@ -508,9 +514,11 @@ mod tests {
 
     // ------------- build_flow_contexts -------------
 
+    /// Test-helper record builder — `flow` is now the flow's URI
+    /// (`SHACLFlow.flow_uri()`), not the bare name (James PR #929 R5).
     fn record(flow: &str, uri: &str, subject: &str, state: &str) -> FlowInstanceRecord {
         FlowInstanceRecord {
-            flow_name: flow.to_string(),
+            flow_uri: flow.to_string(),
             instance_uri: uri.to_string(),
             subject: subject.to_string(),
             current_state: state.to_string(),
@@ -575,10 +583,11 @@ mod tests {
     #[test]
     fn build_flow_contexts_pairs_records_with_flows() {
         let flow = delivery_flow();
+        let flow_uri = flow.flow_uri();
         let mut catalogue = HashMap::new();
-        catalogue.insert("Delivery".to_string(), flow);
+        catalogue.insert(flow_uri.clone(), flow);
         let records = vec![record(
-            "Delivery",
+            &flow_uri,
             "ad4m://flow/instance/inst-1",
             "ad4m://task/foo",
             "in_progress",
@@ -601,10 +610,16 @@ mod tests {
     fn build_flow_contexts_skips_records_with_unknown_flow() {
         // A stale FlowInstance whose flow was unregistered must not fail
         // extraction — silently skip and keep processing the rest.
+        let delivery_uri = delivery_flow().flow_uri();
         let records = vec![
-            record("Ghost", "ad4m://flow/instance/g", "ad4m://x", "s0"),
             record(
-                "Delivery",
+                "coasys://GhostFlow",
+                "ad4m://flow/instance/g",
+                "ad4m://x",
+                "s0",
+            ),
+            record(
+                &delivery_uri,
                 "ad4m://flow/instance/d",
                 "ad4m://task/y",
                 "identified",
@@ -617,7 +632,7 @@ mod tests {
 
         // Only Delivery known → Ghost skipped, Delivery kept.
         let mut catalogue_with_delivery: HashMap<String, SHACLFlow> = HashMap::new();
-        catalogue_with_delivery.insert("Delivery".to_string(), delivery_flow());
+        catalogue_with_delivery.insert(delivery_uri.clone(), delivery_flow());
         let ctxs = build_flow_contexts(&records, &catalogue_with_delivery);
         assert_eq!(ctxs.len(), 1);
         assert_eq!(ctxs[0].flow_name, "Delivery");
@@ -628,17 +643,28 @@ mod tests {
         // Order matters — the prompt-builder inserts flows in the order
         // the caller supplies. A HashMap-based iteration would be
         // non-deterministic; we iterate `records`.
+        let delivery_uri = delivery_flow().flow_uri();
         let mut catalogue = HashMap::new();
-        catalogue.insert("Delivery".to_string(), delivery_flow());
+        catalogue.insert(delivery_uri.clone(), delivery_flow());
         let records = vec![
             record(
-                "Delivery",
+                &delivery_uri,
                 "ad4m://flow/instance/a",
                 "ad4m://x",
                 "identified",
             ),
-            record("Delivery", "ad4m://flow/instance/b", "ad4m://y", "scoped"),
-            record("Delivery", "ad4m://flow/instance/c", "ad4m://z", "review"),
+            record(
+                &delivery_uri,
+                "ad4m://flow/instance/b",
+                "ad4m://y",
+                "scoped",
+            ),
+            record(
+                &delivery_uri,
+                "ad4m://flow/instance/c",
+                "ad4m://z",
+                "review",
+            ),
         ];
         let ctxs = build_flow_contexts(&records, &catalogue);
         let uris: Vec<&str> = ctxs.iter().map(|c| c.instance_uri.as_str()).collect();
@@ -706,7 +732,7 @@ mod tests {
         let bag = ready_done_flow_links("TODO", "todo://");
         let flows = parse_flows_from_bag(&bag);
         assert_eq!(flows.len(), 1, "expected exactly one flow");
-        let flow = flows.get("TODO").expect("flow keyed by name");
+        let flow = flows.get("todo://TODOFlow").expect("flow keyed by URI");
         assert_eq!(flow.namespace, "todo://");
         assert_eq!(flow.states.len(), 2);
         assert_eq!(flow.transitions.len(), 1);
@@ -721,15 +747,15 @@ mod tests {
         bag.extend(ready_done_flow_links("Approval", "gov://"));
         let flows = parse_flows_from_bag(&bag);
         assert_eq!(flows.len(), 2);
-        assert!(flows.contains_key("TODO"));
-        assert!(flows.contains_key("Approval"));
+        assert!(flows.contains_key("todo://TODOFlow"));
+        assert!(flows.contains_key("gov://ApprovalFlow"));
         // Namespaces stay isolated — cross-contamination would mean the
         // reader crossed hasState/hasTransition child gathering between
         // sibling flows.
-        assert_eq!(flows["TODO"].namespace, "todo://");
-        assert_eq!(flows["Approval"].namespace, "gov://");
-        assert_eq!(flows["TODO"].states.len(), 2);
-        assert_eq!(flows["Approval"].states.len(), 2);
+        assert_eq!(flows["todo://TODOFlow"].namespace, "todo://");
+        assert_eq!(flows["gov://ApprovalFlow"].namespace, "gov://");
+        assert_eq!(flows["todo://TODOFlow"].states.len(), 2);
+        assert_eq!(flows["gov://ApprovalFlow"].states.len(), 2);
     }
 
     #[test]
@@ -749,7 +775,7 @@ mod tests {
         ]);
         let flows = parse_flows_from_bag(&bag);
         assert_eq!(flows.len(), 1);
-        assert!(flows.contains_key("TODO"));
+        assert!(flows.contains_key("todo://TODOFlow"));
     }
 
     #[test]
@@ -761,7 +787,7 @@ mod tests {
         bag.push(mk_link("malformed://Broken", "rdf://type", "ad4m://Flow"));
         let flows = parse_flows_from_bag(&bag);
         assert_eq!(flows.len(), 1, "well-formed flow still discovered");
-        assert!(flows.contains_key("TODO"));
+        assert!(flows.contains_key("todo://TODOFlow"));
     }
 
     #[test]
@@ -772,7 +798,7 @@ mod tests {
         bag.push(mk_link("", "rdf://type", "ad4m://Flow"));
         let flows = parse_flows_from_bag(&bag);
         assert_eq!(flows.len(), 1);
-        assert!(flows.contains_key("TODO"));
+        assert!(flows.contains_key("todo://TODOFlow"));
     }
 
     #[test]
@@ -786,23 +812,29 @@ mod tests {
         assert_eq!(flows.len(), 2);
         // Each flow's state count must remain 2 — a leak would push
         // one flow's states into the other.
-        for name in ["Alpha", "Beta"] {
-            let f = flows.get(name).expect("flow present");
-            assert_eq!(f.states.len(), 2, "flow {name} states leaked from sibling");
+        for uri in ["ex://AlphaFlow", "ex://BetaFlow"] {
+            let f = flows.get(uri).expect("flow present");
+            assert_eq!(f.states.len(), 2, "flow {uri} states leaked from sibling");
         }
     }
 
     #[test]
-    fn parse_flows_from_bag_key_is_shaclflow_name_not_uri() {
-        // The HashMap MUST key on `SHACLFlow.name` (matches
-        // FlowInstance.flow discriminator + build_flow_contexts lookup).
+    fn parse_flows_from_bag_key_is_flow_uri_not_name() {
+        // The HashMap MUST key on `SHACLFlow.flow_uri()` — matches
+        // `FlowInstanceRecord.flow_uri` discriminator that
+        // `build_flow_contexts` joins on (James PR #929 R5). Bare-name
+        // keying was collision-prone across social-DNA modules from
+        // different communities.
         let bag = ready_done_flow_links("TODO", "todo://");
         let flows = parse_flows_from_bag(&bag);
         assert!(
-            !flows.contains_key("todo://TODOFlow"),
-            "keyed on URI, not name"
+            !flows.contains_key("TODO"),
+            "keyed on flow_uri, not bare name"
         );
-        assert!(flows.contains_key("TODO"), "must key on flow.name");
+        assert!(
+            flows.contains_key("todo://TODOFlow"),
+            "must key on flow.flow_uri()"
+        );
     }
 
     // ------------- scope_subject -------------

@@ -119,15 +119,23 @@ export class FlowTransitionProposal extends Ad4mModel {
 @Model({ name: "FlowInstance" })
 export class FlowInstanceRecord extends Ad4mModel {
   /**
-   * Name of the `SHACLFlow` this instance runs. First-declared property so
-   * `buildSHACL` derives the shape namespace from its `through` prefix —
-   * `ad4m://flow/flow_name` → `ad4m://` → target_class `ad4m://FlowInstance`.
-   * Also the discriminator predicate `findAll` uses to isolate instance nodes.
-   * (Presence-based discrimination — the same value can appear on many
-   * `FlowInstance` nodes when a flow is running on multiple bases.)
+   * URI of the `SHACLFlow` this instance runs — the flow's canonical
+   * identity, collision-free across social-DNA modules from different
+   * communities (bare names WILL collide once shared flows are adopted
+   * cross-team — James PR #929 R5). Sourced from `SHACLFlow.flowUri`
+   * (which is `${namespace}${name}Flow`, e.g. `coasys://DeliveryFlow`).
+   *
+   * First-declared property so `buildSHACL` derives the shape namespace
+   * from its `through` prefix — `ad4m://flow/flow_uri` → `ad4m://` →
+   * target_class `ad4m://FlowInstance`. Also the discriminator predicate
+   * `findAll` uses to isolate instance nodes.
+   *
+   * The human-readable flow name is still available on the paired
+   * `SHACLFlow` (via `perspective.getFlow(record.flowUri.split('/').pop()!.replace(/Flow$/,''))`,
+   * or more commonly via the `FlowInstance` wrapper's `flowName` getter).
    */
-  @Property({ through: "ad4m://flow/flow_name", required: true, identity: true })
-  flow: string = "";
+  @Property({ through: "ad4m://flow/flow_uri", required: true, identity: true })
+  flowUri: string = "";
 
   /**
    * URI of the subject expression this flow runs on.

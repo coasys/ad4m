@@ -363,9 +363,18 @@ export class SHACLFlow {
    */
   public consensusRule?: ConsensusRule;
 
-  /** States in this flow */
+  /**
+   * States in this flow.
+   *
+   * **Ordering convention (James PR #929 R9):** the array is stored sorted
+   * ascending by `value`. `states[0]` is the initial state — the one
+   * {@link FlowInstance.start} mints a fresh instance into. A flow author
+   * who wants a specific state as the entry point must give it the lowest
+   * `value` in the set. `fromLinks` enforces this sort, so link-order on
+   * the graph never dictates the initial state.
+   */
   private _states: FlowState[] = [];
-  
+
   /** Transitions between states */
   private _transitions: FlowTransition[] = [];
 

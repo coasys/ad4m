@@ -8,14 +8,16 @@
 //! `flow-transition-proposal.test.ts`) lock their shape to the SDNA JSON
 //! blobs loaded here so drift becomes unmergeable.
 //!
-//! Registration (`ensure_flow_model_classes`) is exposed for the engine
-//! (`mint_flow_instance` / future consensus firing). The auto-processor
-//! call-site — where an LLM-detected flow-start mints a `FlowInstance` on
-//! behalf of the extraction DID — lands with the slice-10 Model-C wiring;
-//! until then, callers are the unit tests here and the WS-RPC exposure of
-//! `startFlowInstance` (client mirror).
-
-#![allow(dead_code)]
+//! Forward-staging for the engine — no live WS-RPC path calls into this
+//! module today. The live flow-instance mint path is TS
+//! `FlowInstanceRecord.create` in `core/src/perspectives/FlowInstance.ts`
+//! (`FlowInstance.start` on the wrapper). When the consensus engine
+//! (slice 10.6+) fires transitions server-side, [`mint_flow_instance`]
+//! becomes the live path; keep the two representations in sync until
+//! then. James PR #929 R6 asked for this header to stop overclaiming
+//! today's state, and for the module-level `#![allow(dead_code)]` to be
+//! swapped for function-level attributes so drift on individual items
+//! surfaces at build time.
 
 use crate::agent::AgentContext;
 use crate::perspectives::hardwired_class::ensure_subject_class;
@@ -34,6 +36,10 @@ pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
 /// perspective. Mirrors [`super::interpretation::overlay::classes::ensure_interpretation_overlay_classes`].
 /// No `required_path` guard yet — the shapes are stable at this point; add one
 /// when a future property forces a re-register.
+///
+/// Only called from [`mint_flow_instance`] today, which is itself only test-
+/// called; the annotation follows.
+#[allow(dead_code)]
 pub(crate) async fn ensure_flow_model_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -64,6 +70,7 @@ pub(crate) async fn ensure_flow_model_classes(
 /// Mirrors [`super::interpretation::overlay::classes::mint_interpretation_run`]'s
 /// `ad4m://interp/run/{id}` layout — the two are the mirror runtime records the
 /// engine writes on behalf of an extracting DID.
+#[allow(dead_code)]
 pub(crate) fn flow_instance_uri(instance_id: &str) -> String {
     format!("ad4m://flow/instance/{instance_id}")
 }
@@ -100,9 +107,14 @@ pub(crate) fn flow_transition_proposal_uri(proposal_id: &str) -> String {
 /// whole record; there is no update-loop for follow-on collection members.
 ///
 /// Returns the freshly-minted `FlowInstance` URI (`ad4m://flow/instance/{id}`).
+///
+/// Only test-called today; the live mint path is TS `FlowInstanceRecord.create`.
+/// Comes alive as the write path when the consensus engine (slice 10.6+) fires
+/// transitions server-side.
+#[allow(dead_code)]
 pub(crate) async fn mint_flow_instance(
     perspective: &mut PerspectiveInstance,
-    flow_name: &str,
+    flow_uri: &str,
     base_expression: &str,
     initial_state: &str,
     instance_id: &str,
@@ -115,9 +127,11 @@ pub(crate) async fn mint_flow_instance(
     // Property names must match the SDNA `name` fields exactly, not the
     // wire predicate paths. `subject` is used (not `baseExpression`) —
     // the latter collides with `Ad4mModel`'s synthetic hydration field
-    // on the TS reader side.
+    // on the TS reader side. The `flowUri` value is the flow's canonical
+    // URI (e.g. `coasys://DeliveryFlow`), not the bare name — see
+    // James PR #929 R5.
     let values = serde_json::json!({
-        "flow": flow_name,
+        "flowUri": flow_uri,
         "subject": base_expression,
         "currentState": initial_state,
     });
@@ -276,7 +290,7 @@ mod tests {
         let names: Vec<&str> = props.iter().filter_map(|p| p["name"].as_str()).collect();
         // No "startedAt" property — `Ad4mModel`'s built-in `createdAt`
         // (earliest link timestamp) carries flow-start time on hydration.
-        for expected in ["flow", "subject", "currentState"] {
+        for expected in ["flowUri", "subject", "currentState"] {
             assert!(
                 names.contains(&expected),
                 "FlowInstance SDNA missing '{expected}' property (found {names:?})",
@@ -346,7 +360,7 @@ mod tests {
             .iter()
             .filter_map(|p| p["name"].as_str())
             .collect();
-        for key in ["flow", "subject", "currentState"] {
+        for key in ["flowUri", "subject", "currentState"] {
             assert!(
                 props.contains(&key),
                 "mint_flow_instance writes `{key}` but SDNA does not declare it (found {props:?})",
@@ -459,8 +473,9 @@ mod tests {
             .collect();
         assert_eq!(
             identity_names,
-            vec!["flow"],
-            "FlowInstance identity must be `flow` — the base's per-flow-name discriminator",
+            vec!["flowUri"],
+            "FlowInstance identity must be `flowUri` — the flow's canonical URI, \
+             collision-free across social-DNA modules (James PR #929 R5)",
         );
 
         let ftp = parse(FLOW_TRANSITION_PROPOSAL_SDNA);

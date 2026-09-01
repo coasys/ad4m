@@ -282,7 +282,8 @@ pub struct FlowTransition {
 /// SHACL Flow structure - state machine definition
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SHACLFlow {
-    /// Flow name (e.g., "TODO")
+    /// Flow name (e.g., "TODO"). Human-readable label; NOT the identity
+    /// used in cross-module joins (see [`SHACLFlow::flow_uri`]).
     pub name: String,
     /// Namespace for URIs (e.g., "todo://")
     pub namespace: String,
@@ -333,6 +334,17 @@ pub struct SHACLFlow {
         skip_serializing_if = "Option::is_none"
     )]
     pub consensus_rule: Option<ConsensusRule>,
+}
+
+impl SHACLFlow {
+    /// Canonical URI of this flow (`${namespace}${name}Flow`, e.g.
+    /// `coasys://DeliveryFlow`). This is the identity used for
+    /// cross-community joins — `FlowInstanceRecord.flow_uri` stores it,
+    /// and `build_flow_contexts` keys its shape lookup on it. See James
+    /// PR #929 R5.
+    pub fn flow_uri(&self) -> String {
+        format!("{}{}Flow", self.namespace, self.name)
+    }
 }
 
 /// Parse Flow JSON to RDF links

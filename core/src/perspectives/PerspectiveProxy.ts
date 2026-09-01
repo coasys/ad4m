@@ -1403,122 +1403,47 @@ export class PerspectiveProxy {
     }
     
     /**
-     * Retrieve a SHACL shape by name from this Perspective
+     * Retrieve a SHACL shape by name from this Perspective (one RPC call).
+     * The executor resolves the full shape (including property sub-shapes)
+     * in-process and returns link triples for client-side reconstruction.
      */
     async getShacl(name: string): Promise<SHACLShape | null> {
-        // Find the shape URI from the name mapping
-        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
-        const shapeUriLinks = await this.get(new LinkQuery({
-            source: nameMapping.toUrl(),
-            predicate: "ad4m://shacl_shape_uri"
-        }));
-        
-        if (shapeUriLinks.length === 0) {
-            return null;
-        }
-        
-        const shapeUri = shapeUriLinks[0].data.target;
-        
-        // First get property shape URIs so we can query everything in one go
-        const propertyLinks = await this.get(new LinkQuery({
-            source: shapeUri,
-            predicate: "sh://property"
-        }));
-        
-        // Fetch all links from the shape and its property shapes. These reads are
-        // independent of each other, so fire them concurrently rather than one RPC
-        // round trip at a time — over a remote (non-loopback) connection, a shape with
-        // a dozen properties otherwise pays a dozen sequential round trips just to load.
-        const sourceUris = [shapeUri, ...propertyLinks.map(l => l.data.target)];
-        const linksByUri = await Promise.all(sourceUris.map(uri => this.get(new LinkQuery({ source: uri }))));
-        // Dedupe by (source, predicate, target): a perspective that's accumulated duplicate
-        // SDNA links (e.g. from repeated registration attempts, or executor-side sync bugs)
-        // would otherwise feed the same triple into SHACLShape.fromLinks more than once —
-        // harmless for scalar fields like targetClass (first match wins) but can surface as
-        // visibly duplicated properties for repeated sh://property links. Cheap: this is an
-        // in-memory pass over data already fetched, no extra round trips.
-        const seenLinks = new Set<string>();
-        const allLinks: Array<{source: string, predicate: string, target: string}> = [];
-        for (const links of linksByUri) {
-            for (const l of links) {
-                const key = `${l.data.source} ${l.data.predicate} ${l.data.target}`;
-                if (seenLinks.has(key)) continue;
-                seenLinks.add(key);
-                allLinks.push({
-                    source: l.data.source,
-                    predicate: l.data.predicate,
-                    target: l.data.target
-                });
-            }
-        }
-
-        const shapeLinks = allLinks;
-
-        return SHACLShape.fromLinks(shapeLinks, shapeUri);
+        const result = await this.#client.getShacl(this.#handle.uuid, name);
+        if (!result) return null;
+        return SHACLShape.fromLinks(result.links as any, result.shapeUri);
     }
     
     /**
-     * List the names of every SHACL shape stored in this Perspective, without fetching
-     * each shape's full definition (properties, target class, etc.) — just the cheap
-     * `ad4m://has_shacl` enumeration, one round trip regardless of how many shapes exist.
-     * Use this to check which shapes are actually worth resolving via `getShacl()` before
-     * paying for each one's full (multi-round-trip) fetch.
+     * List the names of every SHACL shape stored in this Perspective (one RPC call).
      */
     async getShaclNames(): Promise<string[]> {
-        const nameLinks = await this.get(new LinkQuery({
-            source: "ad4m://self",
-            predicate: "ad4m://has_shacl"
-        }));
-        // Dedupe: a perspective with duplicate `has_shacl` links (see the dedup note in
-        // getShacl()) would otherwise report the same name more than once, causing callers
-        // to redundantly resolve (or redundantly disambiguate) it multiple times.
-        const names = nameLinks.map((nameLink) => {
-            const name = Literal.fromUrl(nameLink.data.target).get() as string;
-            return name.replace('shacl://', '');
-        });
-        return [...new Set(names)];
+        return this.#client.getShaclNames(this.#handle.uuid);
     }
 
     /**
-     * Resolve just a shape's `sh:targetClass` by name, without fetching its properties —
-     * two round trips (name → shapeUri, then shapeUri's own direct triples) instead of
-     * `getShacl()`'s full walk (which also fetches every property sub-shape). Use this to
-     * disambiguate a shape name that collides with another app's `@Model({ name })` string
-     * (the bare `shacl://{name}` mapping ad4m-core uses is namespace-blind — see
-     * `getShaclNames()` callers for why that matters) before paying for a full fetch.
+     * Resolve a shape's `sh:targetClass` by name (one RPC call).
+     *
+     * `PerspectiveClient.getShaclTargetClass` now returns `undefined` on
+     * "not found" already (see review r3897752023 — the null→undefined
+     * coercion used to happen here and be duplicated one layer down),
+     * so this method is a pure passthrough.
      */
     async getShaclTargetClass(name: string): Promise<string | undefined> {
-        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
-        const shapeUriLinks = await this.get(new LinkQuery({
-            source: nameMapping.toUrl(),
-            predicate: "ad4m://shacl_shape_uri"
-        }));
-        if (shapeUriLinks.length === 0) {
-            return undefined;
-        }
-        const shapeUri = shapeUriLinks[0].data.target;
-
-        const shapeOwnLinks = await this.get(new LinkQuery({ source: shapeUri }));
-        return shapeOwnLinks.find(l => l.data.predicate === "sh://targetClass")?.data.target;
+        return this.#client.getShaclTargetClass(this.#handle.uuid, name);
     }
 
     /**
-     * Get all SHACL shapes stored in this Perspective
+     * Get all SHACL shapes stored in this Perspective (one RPC call).
+     * The executor resolves all shapes in-process and returns them in bulk.
      */
     async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
-        const shapeNames = await this.getShaclNames();
-
-        // Each shape is fetched independently of the others — resolve them concurrently.
-        // Sequentially awaiting getShacl() per shape means a perspective with N SDNA
-        // models pays N times getShacl()'s own multi-round-trip cost one after another;
-        // over a remote connection with real per-call latency that compounds into the
-        // dominant cost of switching into a perspective at all.
-        const results = await Promise.all(shapeNames.map(async (shapeName) => {
-            const shape = await this.getShacl(shapeName);
-            return shape ? { name: shapeName, shape } : null;
-        }));
-
-        return results.filter((s): s is { name: string, shape: SHACLShape } => s !== null);
+        const entries = await this.#client.getAllShacl(this.#handle.uuid);
+        return entries
+            .map(({ name, shapeUri, links }) => {
+                const shape = SHACLShape.fromLinks(links as any, shapeUri);
+                return shape ? { name, shape } : null;
+            })
+            .filter((s): s is { name: string; shape: SHACLShape } => s !== null);
     }
 
     /**
@@ -1533,29 +1458,27 @@ export class PerspectiveProxy {
      * @example
      * ```typescript
      * import { SHACLFlow } from '@coasys/ad4m';
-     * 
-     * const todoFlow = new SHACLFlow('TODO', 'todo://');
-     * todoFlow.inputTypes = ['any'];
-     * 
-     * // Define states
-     * todoFlow.addState({ name: 'ready', value: 0, stateCheck: { predicate: 'todo://state', target: 'todo://ready' }});
-     * todoFlow.addState({ name: 'done', value: 1, stateCheck: { predicate: 'todo://state', target: 'todo://done' }});
-     * 
-     * // Define start action
-     * todoFlow.startAction = [{ action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }];
-     * 
-     * // Define transitions
-     * todoFlow.addTransition({
-     *   actionName: 'Complete',
-     *   fromState: 'ready',
-     *   toState: 'done',
-     *   actions: [
-     *     { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://done' },
-     *     { action: 'removeLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
-     *   ]
-     * });
-     * 
-     * await perspective.addFlow('TODO', todoFlow);
+     *
+     * const deliveryFlow = new SHACLFlow('Delivery', 'delivery://');
+     * deliveryFlow.inputTypes = ['Task'];
+     * deliveryFlow.interpretationHint =
+     *   'Advance a Task through delivery: Identified → Scoped → InProgress → Review → Done.';
+     *
+     * deliveryFlow.addState({ name: 'Identified', value: 0 });
+     * deliveryFlow.addState({ name: 'Scoped',     value: 1 });
+     * deliveryFlow.addState({ name: 'InProgress', value: 2 });
+     * deliveryFlow.addState({ name: 'Review',     value: 3 });
+     * deliveryFlow.addState({ name: 'Done',       value: 4 });
+     *
+     * deliveryFlow.addTransition({ actionName: 'Scope',  fromState: 'Identified', toState: 'Scoped',     actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Start',  fromState: 'Scoped',     toState: 'InProgress', actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Submit', fromState: 'InProgress', toState: 'Review',     actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Accept', fromState: 'Review',     toState: 'Done',       actions: [] });
+     *
+     * // Optional: n distinct DIDs must co-sign a proposal before it fires.
+     * deliveryFlow.consensusRule = { n: 2 };
+     *
+     * await perspective.addFlow('Delivery', deliveryFlow);
      * ```
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
