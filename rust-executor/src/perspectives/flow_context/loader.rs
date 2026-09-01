@@ -117,6 +117,46 @@ pub async fn load_flow_instances(
         .collect())
 }
 
+/// Load every live `FlowInstance` on the perspective, unfiltered.
+///
+/// The engine-only sweep entry point (`run_engine_proposal_pass` with
+/// `scope: None`) needs to evaluate all active FlowInstances — J#1's
+/// bounded default on [`load_flow_instances`] is a safety rail for the
+/// extraction pass (where empty subjects means "no anchor, so no scope
+/// to reason about"), not for the sweep pass. The sweep's bound is the
+/// perspective's own flow count, which the auto-processor mints
+/// one-per-message.
+///
+/// Absent-class case (no `FlowInstance` shape registered yet on this
+/// perspective) → `Ok(vec![])`, same policy as [`load_flow_instances`].
+pub async fn load_all_flow_instances(
+    perspective: &PerspectiveInstance,
+) -> anyhow::Result<Vec<FlowInstanceRecord>> {
+    let json = match perspective.model_query(FLOW_INSTANCE_CLASS, "{}").await {
+        Ok(j) => j,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            if msg.contains("Shape not found") || msg.contains("shape not found") {
+                return Ok(vec![]);
+            }
+            return Err(anyhow::anyhow!(
+                "load_all_flow_instances: model_query failed: {msg}"
+            ));
+        }
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&json)
+        .map_err(|e| anyhow::anyhow!("load_all_flow_instances: response not JSON: {e:#}"))?;
+    let instances = parsed
+        .get("instances")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(instances
+        .iter()
+        .filter_map(parse_flow_instance_from_hydrated)
+        .collect())
+}
+
 /// Pair each active [`FlowInstanceRecord`] with its parsed
 /// [`SHACLFlow`] definition and produce [`FlowContext`]s for prompt
 /// insertion.

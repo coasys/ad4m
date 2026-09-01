@@ -42,8 +42,8 @@ mod real_llm_e2e;
 // Public re-exports — callers outside this module (`interpretation::run`,
 // `PerspectiveInstance::…`) import from `flow_context::` as before.
 pub use loader::{
-    build_flow_contexts, gather_active_flow_contexts, load_flow_instances, load_shacl_flows,
-    parse_flow_instance_from_hydrated, parse_flows_from_bag, scope_subject,
+    build_flow_contexts, gather_active_flow_contexts, load_all_flow_instances, load_flow_instances,
+    load_shacl_flows, parse_flow_instance_from_hydrated, parse_flows_from_bag, scope_subject,
 };
 pub use render::{
     reachable_next_states, render_consensus_rule, render_model_query,
