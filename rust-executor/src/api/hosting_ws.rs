@@ -93,10 +93,28 @@ async fn request_payment(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let body: RequestPaymentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    Ok(serde_json::json!({
-        "success": true,
-        "amountHOT": body.amount_hot
-    }))
+    // Look up the user's HOT wallet agent key as the counterparty
+    let email = ctx
+        .user_email
+        .clone()
+        .ok_or_else(|| WsRpcError::forbidden("User email required for payment"))?;
+    let agent_key = billing_backend()
+        .get_user_hot_wallet(&email)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .ok_or_else(|| {
+            WsRpcError::bad_request("No HoT wallet address set — call hosting.setHotWallet first")
+        })?;
+
+    match crate::unyt_service::create_proposal(&body.amount_hot, &agent_key, None).await {
+        Ok(action_hash) => Ok(serde_json::json!({
+            "success": true,
+            "message": format!("Proposal created: {}", action_hash),
+        })),
+        Err(e) => Ok(serde_json::json!({
+            "success": false,
+            "message": e.to_string(),
+        })),
+    }
 }
 
 async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {

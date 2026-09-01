@@ -586,12 +586,99 @@ async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Val
     Ok(serde_json::to_value(rates).unwrap_or_default())
 }
 
-// ── Stubs for unyt endpoints ──
+// ── Unyt endpoints ──
 
-async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented(
-        "Not yet implemented on the server",
-    ))
+async fn unyt_agent_key(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let key = crate::unyt_service::get_or_create_agent_key()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(key))
+}
+
+async fn unyt_send_hot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let to = params
+        .require_str("to")
+        .map_err(|e| WsRpcError::bad_request(format!("{e}")))?;
+    let amount = params
+        .get("amount")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| WsRpcError::bad_request("'amount' string required"))?;
+    let note = params.opt_str("note");
+
+    let result = crate::unyt_service::send_hot(&to, amount, note.as_deref())
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(result))
+}
+
+async fn unyt_wallet_balance(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let ledger = crate::unyt_service::get_ledger()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(ledger)
+}
+
+async fn unyt_wallet_history(
+    params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let page = params.get("page").and_then(|v| v.as_u64());
+    let per_page = params.get("perPage").and_then(|v| v.as_u64()).unwrap_or(50);
+
+    let history = crate::unyt_service::get_history(page, per_page)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(history)
+}
+
+async fn unyt_version_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let (dna_hash, build_version) = crate::unyt_service::version_info();
+    Ok(serde_json::json!({
+        "dnaHash": dna_hash,
+        "buildVersion": build_version,
+    }))
+}
+
+async fn unyt_hot_agent_pubkey(
+    _params: Value,
+    _ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let pubkey = crate::unyt_service::get_or_create_agent_key()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(pubkey))
+}
+
+async fn unyt_set_membrane_proof(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let proof = params
+        .require_str("proof")
+        .map_err(|e| WsRpcError::bad_request(format!("{e}")))?;
+    crate::unyt_service::set_membrane_proof(&proof)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(serde_json::json!({ "success": true, "message": "ok" }))
+}
+
+async fn unyt_reinstall_dna(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    crate::unyt_service::reinstall()
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -636,15 +723,15 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Hosting flags
     map.register("runtime.freeHostingEnabled", get_free_hosting_enabled);
     map.register("runtime.setFreeHostingEnabled", set_free_hosting_enabled);
-    map.register("runtime.hostRates", get_host_rates);
+    map.register("runtime.getHostRates", get_host_rates);
     map.register("runtime.setHostRates", set_host_rates);
-    // Unyt stubs
-    map.register("runtime.unytAgentKey", stub_not_impl);
-    map.register("runtime.unytSendHot", stub_not_impl);
-    map.register("runtime.unytWalletBalance", stub_not_impl);
-    map.register("runtime.unytWalletHistory", stub_not_impl);
-    map.register("runtime.unytVersionInfo", stub_not_impl);
-    map.register("runtime.unytHotAgentPubkey", stub_not_impl);
-    map.register("runtime.unytMembraneProof", stub_not_impl);
-    map.register("runtime.unytReinstallDna", stub_not_impl);
+    // Unyt / HoloFuel
+    map.register("runtime.unytAgentKey", unyt_agent_key);
+    map.register("runtime.unytSendHot", unyt_send_hot);
+    map.register("runtime.unytWalletBalance", unyt_wallet_balance);
+    map.register("runtime.unytWalletHistory", unyt_wallet_history);
+    map.register("runtime.unytVersionInfo", unyt_version_info);
+    map.register("runtime.unytHotAgentPubkey", unyt_hot_agent_pubkey);
+    map.register("runtime.unytSetMembraneProof", unyt_set_membrane_proof);
+    map.register("runtime.unytReinstallDna", unyt_reinstall_dna);
 }

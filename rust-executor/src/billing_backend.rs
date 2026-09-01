@@ -106,6 +106,9 @@ pub trait BillingBackend: Send + Sync {
     /// Set the user's HoloFuel/HoT wallet address.
     fn set_user_hot_wallet(&self, email: &str, address: &str) -> Result<(), AnyError>;
 
+    /// Reverse lookup: find user email by HoT wallet address.
+    fn get_user_by_hot_wallet_address(&self, address: &str) -> Result<Option<String>, AnyError>;
+
     /// Downcast support.
     fn as_any(&self) -> &dyn Any;
 }
@@ -256,6 +259,10 @@ impl BillingBackend for LocalBillingBackend {
 
     fn set_user_hot_wallet(&self, email: &str, address: &str) -> Result<(), AnyError> {
         crate::db::Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(email, address))
+    }
+
+    fn get_user_by_hot_wallet_address(&self, address: &str) -> Result<Option<String>, AnyError> {
+        crate::db::Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(address))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -614,6 +621,37 @@ impl BillingBackend for SharedBillingBackend {
             &serde_json::json!({ "address": address }),
         )?;
         Ok(())
+    }
+
+    fn get_user_by_hot_wallet_address(&self, address: &str) -> Result<Option<String>, AnyError> {
+        let url = format!(
+            "{}/billing/lookup-by-wallet/{}",
+            self.base_url,
+            urlencoding::encode(address)
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .map_err(|e| anyhow!("SharedBillingBackend wallet lookup failed: {}", e))?;
+
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(anyhow!(
+                "SharedBillingBackend wallet lookup returned {}",
+                resp.status()
+            ));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .map_err(|e| anyhow!("SharedBillingBackend wallet lookup parse: {}", e))?;
+        Ok(body
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()))
     }
 
     fn as_any(&self) -> &dyn Any {
