@@ -17,6 +17,7 @@ import {
   BelongsToOne,
   BelongsToMany,
 } from "./decorators";
+import { SHACLShape } from "../shacl/SHACLShape";
 
 function flatten(
   shape: any,
@@ -234,6 +235,59 @@ describe("Decorators → SHACL writer round-trip", () => {
     ).toBeUndefined();
   });
 
+  it("emits ad4m://interpretation_hint on relation properties", () => {
+    // Relation-level interpretation hints (RelationOptions.interpretationHint)
+    // are read by the Rust harness's `ShaclProperty.interpretation_hint` and
+    // rendered into the `_propose_link_child` predicate-field description so
+    // the LLM knows what each relation MEANS semantically, not just that it
+    // exists. Regression against the follow-up-branch scope creep: pulled
+    // into PR #911 per Nico's 2026-08-24 ask.
+    @Model({ name: "Intention" })
+    class Intention extends Ad4mModel {
+      @Property({
+        through: "ns://title",
+        required: true,
+        interpretationHint: "Imperative statement of intent.",
+      })
+      title: string = "";
+
+      @HasMany(() => Belief, {
+        through: "ns://basedOn",
+        interpretationHint:
+          "The prior beliefs this intention derives from.",
+      })
+      basedOn: Belief[] = [];
+
+      @HasMany(() => Belief, { through: "ns://contradicts" })
+      contradicts: Belief[] = [];
+    }
+    @Model({ name: "Belief" })
+    class Belief extends Ad4mModel {
+      @Property({ through: "ns://title", required: true }) title: string = "";
+    }
+
+    const { shape } = Intention.generateSHACL();
+    const links = flatten(shape);
+
+    // Named relation with a hint → link present on the relation's property
+    // node with the hint text.
+    expect(
+      findLinkTarget(links, "ns://Intention.basedOn", "ad4m://interpretation_hint"),
+    ).toBe(
+      "literal:string:The prior beliefs this intention derives from.",
+    );
+
+    // Named relation WITHOUT a hint → no interpretation_hint link (the
+    // scalar-property "no hint = no link" path is what relations follow too).
+    expect(
+      findLinkTarget(
+        links,
+        "ns://Intention.contradicts",
+        "ad4m://interpretation_hint",
+      ),
+    ).toBeUndefined();
+  });
+
   it("round-trips interpretationHint through toJSON/fromJSON", () => {
     @Model({
       name: "Task",
@@ -271,5 +325,41 @@ describe("Decorators → SHACL writer round-trip", () => {
     expect(rebuiltTitle.interpretationHint).toBe(
       "Imperative summary of the work.",
     );
+  });
+
+  it("round-trips ordering through toLinks/fromLinks", () => {
+    @Model({ name: "OrderedItem" })
+    class OrderedItem extends Ad4mModel {}
+
+    @Model({ name: "OrderedHolder" })
+    class OrderedHolder extends Ad4mModel {
+      @HasMany({
+        through: "ns://ordered",
+        target: () => OrderedItem,
+        ordering: { strategy: "linkedList" },
+      })
+      ordered: string[] = [];
+    }
+
+    const { shape } = OrderedHolder.generateSHACL();
+    const links = shape.toLinks();
+
+    // Pin the wire format itself.  `ordering` is the one relation field the
+    // read path recovers by stripping a prefix off the target rather than by
+    // parsing a typed literal, so a change to how the writer spells it would
+    // otherwise surface as the executor silently seeing no strategy.
+    expect(
+      findLinkTarget(
+        flatten(shape),
+        "ns://OrderedHolder.ordered",
+        "ad4m://ordering",
+      ),
+    ).toBe("literal:string:linkedList");
+
+    const rebuilt = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+    const rebuiltProp = rebuilt.properties.find(
+      (p: any) => p.name === "ordered",
+    );
+    expect(rebuiltProp?.ordering).toBe("linkedList");
   });
 });

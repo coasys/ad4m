@@ -309,9 +309,25 @@ export function buildSHACL(
             relShape.filter = false;
         }
 
+        // Ordering is declared in the type system so the executor can act on it
+        // for every writer, not just this client.
+        if (relMeta.ordering) {
+            relShape.ordering = relMeta.ordering.strategy;
+        }
+
         // AD4M-specific metadata
         if (relMeta.local !== undefined) {
             relShape.local = relMeta.local;
+        }
+
+        // Per-relation interpretation hint — sentence-level meaning that
+        // steers the harness LLM's `_propose_link_child` `predicate` field
+        // description. Read back on the Rust side by
+        // `ShaclProperty.interpretation_hint` and rendered into the tool
+        // schema alongside the predicate URI enum (so `basedOn` reads
+        // "prior beliefs this intention derives from", not just "some link").
+        if (relMeta.interpretationHint) {
+            relShape.interpretationHint = relMeta.interpretationHint;
         }
 
         // Adder / Remover actions — only meaningful for relations backed

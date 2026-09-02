@@ -13,10 +13,20 @@
 //! (self-hosted runner = Marvin) that endpoint is local; from a dev box, tunnel
 //! it (`ssh -L 11434:localhost:11434 marvin`).
 //!
-//! Requires that endpoint to be up — they are NOT `#[ignore]`d, so a `cargo test`
-//! with no model reachable will fail here by design (that is the CI signal).
-//! Run just this suite: `cargo test --release --lib perspectives::interpretation_e2e
-//! -- --test-threads=1 --nocapture`.
+//! Gated behind `#[ignore = "llm-e2e"]` so a `cargo test` on a dev box with no
+//! model reachable does not fail on the suite; regular CI skips it too. The
+//! nightly `llm-e2e` workflow on `dev` runs them all against Marvin's local
+//! Ollama.
+//!
+//! Run this suite locally:
+//!   `cargo test --release --lib perspectives::interpretation_e2e -- --ignored
+//!    --test-threads=1 --nocapture`
+//! or the umbrella script `scripts/run-llm-e2e.sh` which runs it plus the JS
+//! LLM-E2E suite.
+//!
+//! `create_subject_roundtrips_soa_instance` is deliberately NOT gated — it uses
+//! `create_subject` directly, never touches AIService, and is the "the write path
+//! still works" smoke test the rest of the file depends on.
 
 #![cfg(test)]
 
@@ -80,6 +90,7 @@ async fn create_subject_roundtrips_soa_instance() {
 
 /// Intention + Belief: an intent with an owner and a claim.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_intention_and_belief() {
     // gemma3:12b occasionally files the belief-shaped utterance as another
     // intention (and vice-versa) on a single sample — mirrors the LLM-flake
@@ -127,6 +138,7 @@ async fn e2e_intention_and_belief() {
 /// Task-tracking conversation -> only Tasks, with owners. Three assignments in
 /// the transcript should yield 2–4 tasks (LLM may merge/split slightly).
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_task_tracking_counts() {
     let (p, shapes, bases) = run_e2e_until(
         &[("Task", TASK_SDNA)],
@@ -170,6 +182,7 @@ async fn e2e_task_tracking_counts() {
 /// Mixed epistemic conversation -> the three distinct modalities. The question
 /// (ends in "?") is the clearest signal and should always be picked up.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_mixed_epistemic_modalities() {
     let (p, shapes, bases) = run_e2e_until(
         &[
@@ -208,6 +221,7 @@ async fn e2e_mixed_epistemic_modalities() {
 
 /// Strategy conversation -> a Vision (the dream) and a Plan (the concrete path).
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_vision_and_plan() {
     let (p, shapes, bases) = run_e2e_until(
         &[("Vision", VISION_SDNA), ("Plan", PLAN_SDNA)],
@@ -244,6 +258,7 @@ async fn e2e_vision_and_plan() {
 /// right amount of each comes out" over a longer transcript, not just "something
 /// came out".
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_longer_standup_conversation() {
     let (p, shapes, bases) = run_e2e_until(
         &[
@@ -301,6 +316,7 @@ async fn e2e_longer_standup_conversation() {
 /// selector must still place NEW instances correctly (fresh bases under
 /// `soa://ext/`) without disturbing or colliding with the pre-existing nodes.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_selector_over_prepopulated_graph() {
     // gemma3:12b occasionally hijacks a seeded task's id when the transcript
     // topic is only loosely related — a legal upsert, but not what this test is
@@ -424,6 +440,7 @@ async fn e2e_selector_over_prepopulated_graph() {
 /// update on the seeded base and reword its title. What must never happen is a
 /// *fresh* instance under `soa://ext/` carrying the already-present title.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_does_not_recreate_existing_task() {
     const SEEDED_BASE: &str = "soa://existing/task/webrtc";
     const SEEDED_TITLE: &str = "Finish the WebRTC call module";
@@ -529,6 +546,7 @@ async fn e2e_does_not_recreate_existing_task() {
 /// If the LLM refuses to emit `id`, the test surfaces that as a real failure —
 /// the prompt/example engineering needs work.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_updates_existing_instance_via_id() {
     const SEEDED_BASE: &str = "soa://existing/task/webrtc";
     const SEEDED_TITLE: &str = "Finish the WebRTC call module";
@@ -751,6 +769,7 @@ fn tag_resolves_to_topic(pl: &[(String, Vec<Link>)]) -> bool {
 /// prompt work rather than silently passing. Paraphrased from the few-shot so
 /// it isn't verbatim.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_interprets_topic_relation_from_transcript() {
     let (p, shapes, placements) = run_e2e_until_placements(
         &[
@@ -820,6 +839,7 @@ async fn e2e_interprets_topic_relation_from_transcript() {
 /// one) forces the model to discriminate rather than always update the last
 /// one.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
     let payments_base = "soa://existing/subgroup/payments";
     let onboarding_base = "soa://existing/subgroup/onboarding";
@@ -969,6 +989,7 @@ async fn e2e_flux_grouping_updates_seeded_subgroup_on_topic_continuation() {
 /// upserting the seeded id under a renamed topic). The retry loop stays as a
 /// cheap guard against LLM non-determinism.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_flux_grouping_creates_new_subgroup_on_topic_shift() {
     let seeded_base = "soa://existing/subgroup/payments";
     let attempts = 5u8;
@@ -1111,6 +1132,7 @@ async fn link_under_channel(
 /// four sequential model calls compound non-determinism — with a fresh graph
 /// per attempt.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
     use crate::perspectives::interpretation::existing_instance_context;
     use crate::perspectives::model_query::types::Scope;
@@ -1118,7 +1140,13 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
     let channel = "soa://channel/general";
     let contains = "ns://contains";
     let decoy_base = "soa://other/subgroup/decoy";
-    let attempts = 3u8;
+    // Four sequential LLM passes with multi-clause assertions in each — every
+    // pass has its own chance to flake (empty summary, unexpected merge on
+    // topic shift, off-vocabulary word). 8 attempts matches the tail-tolerance
+    // of `harness_intention_links_to_seeded_beliefs`; 3 was under the p99 on
+    // gemma3:12b (see CI job 24601 on `5605119aa` — three attempts back-to-back
+    // failed on independent clauses).
+    let attempts = 8u8;
     let mut last_err: Option<String> = None;
 
     for attempt in 1..=attempts {
@@ -1319,75 +1347,113 @@ async fn e2e_flux_grouping_scoped_incremental_lifecycle() {
 /// hit `http://localhost:11434/v1` + `nomic-embed-text`, matching the LLM
 /// tunnel).
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_semantic_dedup_drops_reworded_duplicate() {
     use crate::perspectives::interpretation::DedupStrategy;
 
-    let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
-    // Semantic dedup embeds identity strings through AIService's own (local,
-    // CPU) embedding model — register it before the run.
-    super::interpretation_test_support::register_interpretation_embedding_model().await;
-    let task_shape = &shapes[0];
+    // Retry wrapper matches the pattern already used in this file for other
+    // real-LLM tests (see `e2e_flux_grouping_creates_new_subgroup_on_topic_shift`
+    // and `e2e_flux_grouping_scoped_incremental_lifecycle`). Gemma3-12B is
+    // non-deterministic on the "extract two distinct tasks from two short
+    // transcript lines" prompt: on the failing attempt the model emitted
+    // zero placements ("e2e placements: 0 instance(s)"), so the new CI-docs
+    // task never landed and the count assertion caught it as `{"task": 1}`.
+    // 3 attempts matches the neighbouring tests' guard against this LLM
+    // non-determinism — cheap on the real-LLM path (median first-attempt
+    // success), sufficient headroom for tail rejections.
+    let attempts = 3u8;
+    let mut last_err: Option<String> = None;
+    for i in 1..=attempts {
+        let (mut perspective, shapes, ctx) = setup_interpretation_e2e(&[("Task", TASK_SDNA)]).await;
+        // Semantic dedup embeds identity strings through AIService's own (local,
+        // CPU) embedding model — register it before the run.
+        super::interpretation_test_support::register_interpretation_embedding_model().await;
+        let task_shape = &shapes[0];
 
-    // Seed with one wording; transcript uses a different wording for the SAME
-    // work + genuinely-new work. String-normalize would keep the rewording.
-    let seeded_title = "Finish the WebRTC call module";
-    seed_instance(
-        &mut perspective,
-        &ctx,
-        task_shape,
-        "soa://existing/task/webrtc",
-        seeded_title,
-    )
-    .await;
+        // Seed with one wording; transcript uses a different wording for the SAME
+        // work + genuinely-new work. String-normalize would keep the rewording.
+        let seeded_title = "Finish the WebRTC call module";
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            task_shape,
+            "soa://existing/task/webrtc",
+            seeded_title,
+        )
+        .await;
 
-    let placements = run_interpretation_e2e_with_strategy(
-        &mut perspective,
-        &shapes,
-        &[
-            (
-                "Nico",
-                "Reminder: James still needs to wrap up the WebRTC calling module for the app.",
-            ),
-            ("Josh", "I'll update the CI documentation this evening."),
-        ],
-        &ctx,
-        &DedupStrategy::semantic_from_env(0.75),
-    )
-    .await;
-    assert_persisted(&perspective, &shapes, &placements).await;
+        let placements = run_interpretation_e2e_with_strategy(
+            &mut perspective,
+            &shapes,
+            &[
+                (
+                    "Nico",
+                    "Reminder: James still needs to wrap up the WebRTC calling module for the app.",
+                ),
+                ("Josh", "I'll update the CI documentation this evening."),
+            ],
+            &ctx,
+            &DedupStrategy::semantic_from_env(0.75),
+        )
+        .await;
+        assert_persisted(&perspective, &shapes, &placements).await;
 
-    // No fresh instance under `soa://ext/` may carry a title whose embedding
-    // is close to the seeded title. Rather than re-embed here, we just check
-    // that no *newly-minted* task exists whose title lexically overlaps the
-    // seeded one on the key salient tokens ("webrtc" + a "call/calling" or
-    // "module"/"wrap up" verb). If the semantic filter did its job, the LLM's
-    // reworded proposal was dropped BEFORE it reached the write path.
-    let rows = model_instances(&perspective, "Task", &["title"]).await;
-    let minted_dup: Vec<&serde_json::Value> = rows
-        .iter()
-        .filter(|r| {
-            r.get("id")
-                .and_then(|i| i.as_str())
-                .map(|id| id.starts_with("soa://ext/"))
-                .unwrap_or(false)
-                && r.get("title")
-                    .and_then(|t| t.as_str())
-                    .map(|t| {
-                        let l = t.to_lowercase();
-                        l.contains("webrtc") && (l.contains("call") || l.contains("module"))
-                    })
+        macro_rules! fail_attempt {
+            ($($arg:tt)*) => {{
+                last_err = Some(format!("attempt {i}/{attempts}: {}", format!($($arg)*)));
+                continue;
+            }};
+        }
+
+        // No fresh instance under `soa://ext/` may carry a title whose embedding
+        // is close to the seeded title. Rather than re-embed here, we just check
+        // that no *newly-minted* task exists whose title lexically overlaps the
+        // seeded one on the key salient tokens ("webrtc" + a "call/calling" or
+        // "module"/"wrap up" verb). If the semantic filter did its job, the LLM's
+        // reworded proposal was dropped BEFORE it reached the write path. This is
+        // a HARD assertion — a false negative here is the actual bug the test
+        // exists to catch, so we do NOT retry past it.
+        let rows = model_instances(&perspective, "Task", &["title"]).await;
+        let minted_dup: Vec<&serde_json::Value> = rows
+            .iter()
+            .filter(|r| {
+                r.get("id")
+                    .and_then(|i| i.as_str())
+                    .map(|id| id.starts_with("soa://ext/"))
                     .unwrap_or(false)
-        })
-        .collect();
-    assert!(
-        minted_dup.is_empty(),
-        "semantic dedup must drop the reworded WebRTC task; freshly-minted duplicates = {minted_dup:#?}"
-    );
-    // The genuinely-new CI-docs task should still land.
-    let counts = graph_count_by_type(&perspective, &shapes).await;
-    assert!(
-        counts.get("task").copied().unwrap_or(0) >= 2,
-        "expected the seeded task + the new CI-docs task; got {counts:?}"
+                    && r.get("title")
+                        .and_then(|t| t.as_str())
+                        .map(|t| {
+                            let l = t.to_lowercase();
+                            l.contains("webrtc") && (l.contains("call") || l.contains("module"))
+                        })
+                        .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            minted_dup.is_empty(),
+            "semantic dedup must drop the reworded WebRTC task; freshly-minted duplicates = {minted_dup:#?}"
+        );
+
+        // The genuinely-new CI-docs task should still land. This one IS subject
+        // to LLM non-determinism (the model can decide the CI-docs turn is
+        // small-talk on any given attempt), so a failure here retries — the
+        // retry is what turns a probabilistic assertion into a reliable one.
+        let counts = graph_count_by_type(&perspective, &shapes).await;
+        if counts.get("task").copied().unwrap_or(0) < 2 {
+            fail_attempt!(
+                "expected the seeded task + the new CI-docs task; got {counts:?} \
+                 (placements={} — 0 typically means the model emitted no new tasks)",
+                placements.len()
+            );
+        }
+
+        // All assertions held on this attempt.
+        return;
+    }
+    panic!(
+        "semantic dedup e2e failed after {attempts} attempts: {}",
+        last_err.unwrap_or_default()
     );
 }
 
@@ -1405,6 +1471,7 @@ async fn e2e_semantic_dedup_drops_reworded_duplicate() {
 /// what this test uniquely exercises is the LLM round-trip on top of that
 /// scaffolding.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn auto_processor_pass_lands_interpretation_instance() {
     use crate::perspectives::auto_processor::config::{
         load_processors, write_processor, AutoProcessorConfig,
@@ -1479,8 +1546,10 @@ async fn auto_processor_pass_lands_interpretation_instance() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
+        emit_debug_events: false,
     };
-    write_processor(&mut perspective, &cfg, &ctx)
+    write_processor(&mut perspective, &cfg, Some(false), &ctx)
         .await
         .expect("write_processor");
 
@@ -1597,6 +1666,7 @@ async fn auto_processor_pass_lands_interpretation_instance() {
 /// per-processor interpretation) has now been driven end-to-end for a
 /// multi-processor perspective with a real model.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn auto_processor_two_configs_no_cross_contamination() {
     use crate::perspectives::auto_processor::config::{
         load_processors, write_processor, AutoProcessorConfig,
@@ -1677,6 +1747,8 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
+        emit_debug_events: false,
     };
     let task_cfg = AutoProcessorConfig {
         processor_id: "pc-task-proc".into(),
@@ -1692,12 +1764,14 @@ async fn auto_processor_two_configs_no_cross_contamination() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
+        emit_debug_events: false,
     };
 
-    write_processor(&mut perspective, &intent_cfg, &ctx)
+    write_processor(&mut perspective, &intent_cfg, Some(false), &ctx)
         .await
         .expect("write intent");
-    write_processor(&mut perspective, &task_cfg, &ctx)
+    write_processor(&mut perspective, &task_cfg, Some(false), &ctx)
         .await
         .expect("write task");
 
@@ -1880,6 +1954,7 @@ async fn auto_processor_two_configs_no_cross_contamination() {
 ///
 /// Real-LLM (gemma3:12b). Retry loop for model non-determinism.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn auto_processor_high_level_signal_driven_pass() {
     use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
     use crate::perspectives::auto_processor::events::{
@@ -1935,8 +2010,10 @@ async fn auto_processor_high_level_signal_driven_pass() {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
+            emit_debug_events: false,
         };
-        write_processor(&mut perspective, &cfg, &ctx)
+        write_processor(&mut perspective, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -2113,8 +2190,10 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
+            emit_debug_events: false,
         };
-        write_processor(&mut perspective, &cfg, &ctx_main)
+        write_processor(&mut perspective, &cfg, Some(false), &ctx_main)
             .await
             .expect("write_processor");
 
@@ -2201,6 +2280,7 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
 /// than processing a channel it doesn't participate in. No LLM: `run_one_pass`
 /// returns the election verdict before the interpretation step.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn auto_processor_election_only_online_participants_process() {
     use crate::agent::{did_for_context, AgentContext, AgentService};
     use crate::db::Ad4mDb;
@@ -2256,6 +2336,8 @@ async fn auto_processor_election_only_online_participants_process() {
         source_window_ms: None,
         existing_scope: None,
         mint_scope: None,
+        max_tool_calls: None,
+        emit_debug_events: false,
     };
 
     // Case 1 — a batch authored by carol (offline) then bob (online), in that
@@ -2308,6 +2390,7 @@ async fn auto_processor_election_only_online_participants_process() {
 /// test removes that non-determinism by feeding hand-crafted proposals straight
 /// into `filter_already_present_with_strategy`.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
     use crate::perspectives::interpretation::{
         filter_already_present_with_strategy, DedupStrategy, ExistingInstances, InstanceContext,
@@ -2384,6 +2467,7 @@ async fn e2e_semantic_dedup_pure_drops_paraphrase_keeps_distinct() {
 ///   - scoped to parent A (empty): the seed is out of scope, so the restatement
 ///     is created as a new instance. Retried until the model proposes it.
 #[tokio::test]
+#[ignore = "llm-e2e"]
 async fn e2e_run_interpretation_honours_parent_scope() {
     use crate::perspectives::interpretation::{
         run_interpretation_with_strategy, DedupStrategy, TranscriptTurn,

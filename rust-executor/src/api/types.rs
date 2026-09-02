@@ -552,6 +552,8 @@ pub struct RunInterpretationRequest {
     pub base_prefix: String,
     /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
     /// `None`/empty selects all subject classes registered in the perspective.
+    #[serde(default)]
+    #[ts(optional)]
     pub classes: Option<Vec<String>>,
     /// Optional parent-scope filter for the dedup lookup: when set, only
     /// existing instances of the target classes that live under this scope
@@ -569,6 +571,81 @@ pub struct RunInterpretationRequest {
     #[serde(default)]
     #[ts(optional, type = "any")]
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Opt into live observability for this one-shot pass, under an id the
+    /// **caller** chooses.
+    ///
+    /// A watch pass is identified by its `batch_key` — a hash of the source
+    /// items the watcher gathered. A one-shot pass has neither: the caller
+    /// supplies the transcript directly, so there are no source item ids to
+    /// hash and no claim to key off. Rather than invent a server-side id the
+    /// caller would then have to correlate by guesswork (the pass is one
+    /// blocking RPC, so there is no earlier response to carry it), the caller
+    /// names the pass and gets its own id back on every event.
+    ///
+    /// Present: the pass emits `RunningInterpretation` → `Processed` on the
+    /// `auto-processor-event` topic, plus `Claimed` → `Finished`/`Abandoned`
+    /// on the neighbourhood topic, all carrying this value as both
+    /// `processor_id` and `batch_key`. Absent: the pass is silent, exactly as
+    /// before — no existing caller changes behaviour.
+    #[serde(default)]
+    #[ts(optional)]
+    pub observation_id: Option<String>,
+    /// Emit `LlmRequestSent` / `LlmResponseReceived` (carrying the raw prompt
+    /// and response) for this pass. Ignored without `observation_id` — there
+    /// would be nothing to correlate the payloads to. Same switch, same
+    /// reasons, as `AutoProcessorConfig.emit_debug_events`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub emit_debug_events: Option<bool>,
+}
+
+/// Run harness-dispatched LLM interpretation over a transcript. Mirrors
+/// [`RunInterpretationRequest`] but takes the tool-calling path — the LLM
+/// sees a live `{Class}_query` / `{Class}_propose_create` /
+/// `{Class}_propose_link_child` tool surface (design v3 §6) and drives the
+/// extraction by tool calls rather than by emitting one big JSON blob.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RunInterpretationWithHarnessRequest {
+    pub uuid: String,
+    pub transcript: Vec<TranscriptTurn>,
+    /// URI namespace new instance identities are minted under, e.g. `soa://ext/`.
+    pub base_prefix: String,
+    /// Local names of the subject classes to extract into (e.g. `["Task","Belief"]`).
+    /// `None`/empty selects all subject classes registered in the perspective.
+    #[serde(default)]
+    #[ts(optional)]
+    pub classes: Option<Vec<String>>,
+    /// Upper bound on tool calls the harness will make in one pass. Reaching
+    /// the bound forces a final-answer step (no more tools). Must be > 0 —
+    /// zero would collapse the loop to the classic single-shot path and
+    /// should be routed there instead.
+    pub max_tool_calls: u32,
+    /// Optional model override — same semantics as the auto-processor's
+    /// `modelOverride`. `None` uses the default LLM.
+    #[serde(default)]
+    #[ts(optional)]
+    pub model_override: Option<String>,
+    /// Optional parent-scope filter for existing-instance context (fed into
+    /// the pre-loop prompt). Same semantics as `RunInterpretationRequest`.
+    #[serde(default)]
+    #[ts(optional, type = "any")]
+    pub existing_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Present: the pass emits `ToolCall` / `ToolResult` events on the
+    /// `auto-processor-event` topic carrying this value as both
+    /// `processor_id` and `batch_key`, so a subscribed UI can render the
+    /// harness loop live. Absent: the pass is silent (fast headless path).
+    /// Same wire-shape as `RunInterpretationRequest.observation_id`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub observation_id: Option<String>,
+    /// Enable per-tool-call `ToolCall` + `ToolResult` events on the
+    /// auto-processor topic. Dead-letter without `observation_id` (nothing
+    /// to key against); the server gates on both.
+    #[serde(default)]
+    #[ts(optional)]
+    pub emit_debug_events: Option<bool>,
 }
 
 /// Register a neighbourhood auto-processor on a perspective. The executor's
@@ -637,6 +714,36 @@ pub struct AddAutoProcessorRequest {
     /// at watch time.
     #[serde(default)]
     pub mint_scope: Option<crate::perspectives::model_query::types::Scope>,
+    /// Tool-call budget for the interpretation-pass harness this processor
+    /// runs. Omit / `0` → single-shot LLM path. `N > 0` → engage the
+    /// tool-calling harness with a cap of N calls per pass. Round-tripped
+    /// through the SDNA via `AutoProcessorConfig.maxToolCalls`.
+    #[serde(default)]
+    pub max_tool_calls: Option<u32>,
+    /// Enable full debug observability on the auto-processor's passes:
+    /// persist raw LLM prompt/response on the InterpretationRun +
+    /// emit `LlmRequestSent` / `LlmResponseReceived` (classic) and
+    /// `ToolCall` / `ToolResult` (harness) events. Round-tripped through
+    /// the SDNA via `AutoProcessorConfig.emitDebugEvents`.
+    #[serde(default)]
+    pub emit_debug_events: Option<bool>,
+}
+
+/// Stop a neighbourhood auto-processor by deleting its config instance.
+///
+/// The counterpart to [`AddAutoProcessorRequest`]. A processor's registration is a subject instance
+/// in the shared graph, which the watch loop re-reads on every tick, so removing that instance is
+/// what stops it — and stops it for the neighbourhood, since the config is `Shared` state rather
+/// than one peer's local record of it.
+///
+/// Server-side deserialization only, matching [`AddAutoProcessorRequest`]: the TypeScript client
+/// passes `uuid` separately and names only the processor.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveAutoProcessorRequest {
+    pub uuid: String,
+    /// The `processorId` the processor was registered under.
+    pub processor_id: String,
 }
 
 /// `perspective.acceptInterpretation` / `perspective.rejectInterpretation` —

@@ -1,0 +1,13 @@
+# Configure getrandom's custom backend for wasm32-unknown-unknown zome builds.
+# Zomes cannot use the "wasm_js" backend (they run on Holochain's wasmer host,
+# not in a browser). The Holochain HDK provides a custom getrandom backend
+# that delegates to host functions, and it is activated via this cfg flag.
+[target.wasm32-unknown-unknown]
+# --import-undefined lets wasm-ld emit host-provided imports (Holochain HDK
+# uses `extern "C" { ... }` without `#[link(wasm_import_module = ...)]`, so
+# rust-lld would otherwise error "undefined symbol" for every __hc__* host
+# function).
+rustflags = [
+    '--cfg', 'getrandom_backend="custom"',
+    '-C', 'link-arg=--import-undefined',
+]

@@ -55,11 +55,20 @@ commands:
       - run:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
           command: |
+            # CI_ARTIFACT_DIR: env-driven so the shared self-hosted runner
+            # can be re-imaged / re-owned without editing this file. Default
+            # is a system-level path that does not couple this config to any
+            # particular user account on the runner host. The runner must
+            # `mkdir -p /var/lib/ci-artifacts && chown <ci-user> /var/lib/ci-artifacts`
+            # once at install time. Long-term this should move to GitLab CI
+            # (Nico's 2026-08-27 review); the /var/lib default is the short-term
+            # de-marvin-ification step.
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             mkdir -p target/release
             # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
             rm -f target/release/ad4m target/release/ad4m-executor
-            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m target/release/ad4m
-            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m-executor target/release/ad4m-executor
+            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m" target/release/ad4m
+            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m-executor" target/release/ad4m-executor
       - setup_env
       - run:
           name: Install dependencies
@@ -75,6 +84,21 @@ commands:
           command: |
             rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
       - run:
+          # Isolate `hc` AND `kitsune2-bootstrap-srv` per CI run so the host's
+          # global copies (shared across branches / other PRs on this
+          # self-hosted runner) don't drift out of sync with Cargo.lock.
+          # The workspace's Cargo.lock is the source of truth; this script
+          # installs matching `hc` (from coasys/holochain rev) and
+          # `kitsune2-bootstrap-srv` (from crates.io version) into
+          # $REPO/.hc-toolchain/bin/. Consumers: prepareTestDirectory.sh,
+          # bootstrap-language build.sh files, tests/js/utils/utils.ts.
+          # Fixes: `Failed to unpack hApp: unknown field 'signal_url'`
+          # (hc mismatch) and multi-user signal-routing timeouts
+          # (kitsune2-bootstrap-srv wire-protocol drift).
+          name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
+          command: bash scripts/install-hc-toolchain.sh
+          no_output_timeout: 30m
+      - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
 
@@ -89,7 +113,20 @@ jobs:
       - run:
           name: Clean up stale local artifact stashes (older than 1 day)
           command: |
-            find /tmp/circleci-artifacts -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+      - run:
+          # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
+          # Cargo.lock. Needed here (in build-and-test) because pnpm
+          # build-libs -> the bootstrap-languages build.sh files pack DNAs
+          # with `hc`, and downstream integration tests spawn
+          # `kitsune2-bootstrap-srv`. Both must match what the executor is
+          # linked against, otherwise packed bundles trip `unknown field
+          # 'signal_url'` at install time and cross-node signals never
+          # route between agents.
+          name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
+          command: bash scripts/install-hc-toolchain.sh
+          no_output_timeout: 30m
       - run:
           name: cargo fmt --check
           command: cargo fmt --check
@@ -120,8 +157,9 @@ jobs:
       - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
-            mkdir -p /tmp/circleci-artifacts/${CIRCLE_SHA1}
-            cp target/release/ad4m target/release/ad4m-executor /tmp/circleci-artifacts/${CIRCLE_SHA1}/
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            mkdir -p "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
+            cp target/release/ad4m target/release/ad4m-executor "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -207,6 +245,57 @@ jobs:
           command: cd ./tests/js && pnpm run test-model
           no_output_timeout: 30m
 
+  # Runs everything gated by #[ignore = "llm-e2e"] (Rust) or LLM_E2E=1 (JS).
+  # These hit Marvin's local Ollama; too slow + occasionally flaky for
+  # per-push CI, so they run once nightly against `dev`. Trigger:
+  # `workflows.nightly-llm-e2e` at the bottom of this file.
+  llm-e2e:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      # Skip-if-unchanged: only run the expensive suite when dev has moved
+      # since the last successful nightly. `circleci-agent step halt` ends
+      # the job cleanly (green) so the workflow shows no wasted GPU cycles
+      # on quiet days. `CIRCLECI_API_TOKEN` comes from the `nightly-llm-e2e`
+      # context — set once via the API, org-scoped, read-only calls only.
+      - checkout
+      - run:
+          name: Skip if dev SHA unchanged since last successful llm-e2e
+          command: |
+            LAST_SHA=$(curl -sL -H "Circle-Token: $CIRCLECI_API_TOKEN" \
+              "https://circleci.com/api/v2/insights/gh/coasys/ad4m/workflows/nightly-llm-e2e/jobs?branch=dev" \
+              | jq -r '.items[]? | select(.status=="success") | .commit_id' \
+              | head -1)
+            if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" = "$CIRCLE_SHA1" ]; then
+              echo "dev @ $CIRCLE_SHA1 already tested by last nightly — halting"
+              circleci-agent step halt
+            fi
+            if [ -z "$LAST_SHA" ]; then
+              echo "no previous successful llm-e2e run found — proceeding"
+            else
+              echo "dev @ $CIRCLE_SHA1, last tested $LAST_SHA — proceeding"
+            fi
+      - setup_integration_test_environment
+      - run:
+          name: Rust LLM-E2E (interpretation + harness + flow-context suites)
+          command: |
+            cargo test --release --lib \
+              perspectives::interpretation_e2e \
+              perspectives::interpretation_harness_e2e \
+              perspectives::flow_context::real_llm_e2e \
+              -- --ignored --test-threads=1 --nocapture
+          no_output_timeout: 60m
+      - run:
+          name: JS LLM-E2E (auto-processor + interpretation suites)
+          command: |
+            cd ./tests/js && LLM_E2E=1 pnpm run test-model
+          no_output_timeout: 60m
+      - run:
+          name: JS LLM-E2E (integration — includes auto-processor-neighbourhood)
+          command: |
+            cd ./tests/js && LLM_E2E=1 pnpm run test-integration
+          no_output_timeout: 60m
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin
@@ -216,9 +305,10 @@ jobs:
       - run:
           name: Restore binaries from local stash
           command: |
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             mkdir -p target/release
-            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m target/release/ad4m
-            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m-executor target/release/ad4m-executor
+            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m" target/release/ad4m
+            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m-executor" target/release/ad4m-executor
       - setup_env
       - run:
           name: git submodule
@@ -266,3 +356,22 @@ workflows:
       - integration-tests-model:
           requires:
             - build-and-test
+
+  # Nightly at 03:00 UTC against dev. Runs the LLM-heavy suites that are
+  # skipped from the per-push workflow (Rust `#[ignore = "llm-e2e"]` +
+  # JS `LLM_E2E=1`). Same resource class (Marvin) so the Ollama endpoint
+  # is local. If it fails, look for a real regression against dev — the
+  # gate exists to keep per-push CI fast, not to hide breakage.
+  nightly-llm-e2e:
+    triggers:
+      - schedule:
+          cron: "0 3 * * *"
+          filters:
+            branches:
+              only:
+                - dev
+    jobs:
+      - llm-e2e:
+          # Provides `CIRCLECI_API_TOKEN` for the skip-if-unchanged preflight.
+          context:
+            - nightly-llm-e2e
