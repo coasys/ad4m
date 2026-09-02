@@ -3353,6 +3353,20 @@ impl PerspectiveInstance {
         super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
     }
 
+    /// Cancellation-aware async variant of [`Self::sparql_query`].
+    ///
+    /// Forwards to [`SparqlStore::query_cancellable`] — see that method
+    /// for the cancellation semantics (the eval is uncancellable on the
+    /// Oxigraph side, but the network reply + JSON serialisation are
+    /// short-circuited).
+    pub async fn sparql_query_cancellable(
+        &self,
+        query: String,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store.query_cancellable(&query, cancel).await
+    }
+
     /// Execute a model query — the executor-side replacement for
     /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
     ///
@@ -7389,5 +7403,40 @@ mod tests {
                 "ascending top-N should yield non-decreasing timestamps"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sparql_query_cancellable_round_trip() {
+        let mut perspective = setup().await;
+        let link = create_link();
+        perspective
+            .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+            .await
+            .unwrap();
+
+        // Uncancelled — should return JSON with at least the inserted triple.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = perspective
+            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .await
+            .expect("non-cancelled query should succeed");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(!rows.is_empty(), "expected at least one row");
+    }
+
+    #[tokio::test]
+    async fn sparql_query_cancellable_pre_cancelled_errors() {
+        let perspective = setup().await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let err = perspective
+            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .await
+            .expect_err("pre-cancelled query should error");
+        assert!(
+            err.to_string().contains("query cancelled"),
+            "expected cancellation marker in error, got: {}",
+            err
+        );
     }
 }

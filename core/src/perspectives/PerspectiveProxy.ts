@@ -1,4 +1,5 @@
 import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
 import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
@@ -546,8 +547,8 @@ export class PerspectiveProxy {
      * });
      * ```
      */
-    async get(query: LinkQuery): Promise<LinkExpression[]> {
-        return await this.#client.queryLinks(this.#handle.uuid, query)
+    async get(query: LinkQuery, options?: CallOptions): Promise<LinkExpression[]> {
+        return await this.#client.queryLinks(this.#handle.uuid, query, options)
     }
 
     /**
@@ -729,30 +730,36 @@ export class PerspectiveProxy {
      * `);
      * ```
      */
-    async infer(query: string): Promise<any> {
-        return await this.#client.queryProlog(this.#handle.uuid, query)
+    async infer(query: string, options?: CallOptions): Promise<any> {
+        return await this.#client.queryProlog(this.#handle.uuid, query, options)
     }
 
     /**
      * Executes a SPARQL query against the perspective's link cache.
      * This allows powerful SQL-like queries on the link data stored in SPARQL.
-     * 
+     *
      * **Security Note:** Only read-only queries (SELECT, RETURN, etc.) are permitted.
      * Mutating operations (DELETE, UPDATE, INSERT, CREATE, DROP, DEFINE, etc.) are
      * blocked for security reasons. Use the perspective's add/remove methods to modify links.
-     * 
-     * @param query - SPARQL query string (read-only operations only)
-     * @returns Query results as parsed JSON
-     * 
-     * Executes a SPARQL query against the perspective's RDF (Oxigraph) store.
      *
-     * @param query - SPARQL query string
+     * **Cancellation:** Pass `{ signal }` from an `AbortController` to abort
+     * an in-flight query.  The executor receives `request.cancel` over the
+     * WebSocket and short-circuits the JSON reply.  Caveat: Oxigraph itself
+     * cannot be interrupted mid-evaluation, so an already-running scan will
+     * keep its blocking thread busy until it completes; what's saved is the
+     * serialise + network + client-deserialise tax on the result.  Aborted
+     * calls reject with `DOMException('Aborted', 'AbortError')` — match
+     * `fetch()` for handling. Cached results bypass the round-trip entirely
+     * and are returned synchronously, ignoring the signal.
+     *
+     * @param query - SPARQL query string (read-only operations only)
+     * @param options - Optional call options (e.g. AbortSignal for cancellation)
      * @returns Query results as parsed JSON
      */
-    async querySparql<T = any>(query: string): Promise<T> {
+    async querySparql<T = any>(query: string, options?: CallOptions): Promise<T> {
         const cached = getCachedResult(this.#handle.uuid, query);
         if (cached !== undefined) return cached as T;
-        const result = await this.#client.querySparql(this.#handle.uuid, query);
+        const result = await this.#client.querySparql(this.#handle.uuid, query, options);
         setCachedResult(this.#handle.uuid, query, result);
         return result as T;
     }
@@ -768,8 +775,8 @@ export class PerspectiveProxy {
      * @param queryJson - Structured query as JSON string
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: string, queryJson: string): Promise<{ instances: any[], totalCount: number }> {
-        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson);
+    async modelQuery(className: string, queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
     /** Resolve each URI to the names of every subject class it is an instance of.
