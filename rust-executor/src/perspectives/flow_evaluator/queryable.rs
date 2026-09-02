@@ -160,7 +160,7 @@ pub async fn evaluate_state_requires<Q: RequiresQueryable + ?Sized>(
 /// post-processing pass should never blow up because *one* flow
 /// definition or SDNA class went sideways:
 ///
-/// - Record whose `flow_name` is not in `flows_by_name` → skipped
+/// - Record whose `flow_uri` is not in `flows_by_uri` → skipped
 ///   (definition unpublished or hasn't synced yet).
 /// - State whose `requires` is `None` or empty → skipped (no
 ///   deterministic guard; the `semanticCheck` gate picks these up
@@ -174,12 +174,12 @@ pub async fn evaluate_state_requires<Q: RequiresQueryable + ?Sized>(
 pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     records: &[FlowInstanceRecord],
-    flows_by_name: &HashMap<String, SHACLFlow>,
+    flows_by_uri: &HashMap<String, SHACLFlow>,
     acting_did: &str,
 ) -> Vec<SatisfiedTransition> {
     let mut out = Vec::new();
     for record in records {
-        let Some(flow) = flows_by_name.get(&record.flow_name) else {
+        let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
             continue;
         };
         for state in reachable_next_states(flow, &record.current_state) {
@@ -198,7 +198,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         .clone()
                         .or_else(|| flow.consensus_rule.clone());
                     out.push(SatisfiedTransition {
-                        flow_name: record.flow_name.clone(),
+                        flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
                         subject: record.subject.clone(),
                         from_state: record.current_state.clone(),
@@ -212,7 +212,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                 Err(e) => {
                     log::debug!(
                         "flow evaluator: model_query failed for {}.{} on {}: {:#}",
-                        record.flow_name,
+                        flow.name,
                         state.name,
                         record.instance_uri,
                         e

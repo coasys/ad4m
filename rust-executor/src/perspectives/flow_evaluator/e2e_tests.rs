@@ -138,11 +138,11 @@ async fn evaluate_flow_transitions_wires_definition_and_evidence_e2e() {
         .await
         .expect("load_flow_instances");
     assert_eq!(records.len(), 1, "one active FlowInstance ⇒ one record");
-    let flows_by_name = load_shacl_flows(&perspective)
+    let flows_by_uri = load_shacl_flows(&perspective)
         .await
         .expect("load_shacl_flows");
     assert_eq!(
-        flows_by_name.len(),
+        flows_by_uri.len(),
         1,
         "one Delivery definition ⇒ one catalogue entry"
     );
@@ -151,8 +151,8 @@ async fn evaluate_flow_transitions_wires_definition_and_evidence_e2e() {
     // the evaluator would see `None` and silent-skip regardless of
     // the graph state, which would make the negative path below a
     // false positive.
-    let scoped = flows_by_name
-        .get("Delivery")
+    let scoped = flows_by_uri
+        .get("delivery://DeliveryFlow")
         .expect("Delivery in catalogue")
         .states
         .iter()
@@ -170,7 +170,7 @@ async fn evaluate_flow_transitions_wires_definition_and_evidence_e2e() {
     //    reached through the real SPARQL/SDNA stack, not just the
     //    stub.
     let before =
-        evaluate_flow_transitions(&perspective, &records, &flows_by_name, "did:key:acting").await;
+        evaluate_flow_transitions(&perspective, &records, &flows_by_uri, "did:key:acting").await;
     assert!(
         before.is_empty(),
         "no Task instances ⇒ requires unmet ⇒ 0 satisfied, got {before:?}"
@@ -193,7 +193,7 @@ async fn evaluate_flow_transitions_wires_definition_and_evidence_e2e() {
     // 7) Positive pass: one FlowInstance × one reachable next-state
     //    × requires met ⇒ exactly one SatisfiedTransition.
     let after =
-        evaluate_flow_transitions(&perspective, &records, &flows_by_name, "did:key:acting").await;
+        evaluate_flow_transitions(&perspective, &records, &flows_by_uri, "did:key:acting").await;
     assert_eq!(
         after.len(),
         1,
@@ -311,11 +311,11 @@ async fn write_engine_proposal_lands_all_declared_predicates_e2e() {
     let records = load_flow_instances(&perspective, &[base_uri.to_string()])
         .await
         .expect("load_flow_instances");
-    let flows_by_name = load_shacl_flows(&perspective)
+    let flows_by_uri = load_shacl_flows(&perspective)
         .await
         .expect("load_shacl_flows");
     let satisfied =
-        evaluate_flow_transitions(&perspective, &records, &flows_by_name, "did:key:acting").await;
+        evaluate_flow_transitions(&perspective, &records, &flows_by_uri, "did:key:acting").await;
     assert_eq!(
         satisfied.len(),
         1,

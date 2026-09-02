@@ -140,7 +140,7 @@ pub async fn run_engine_proposal_pass(
     // Load the flow catalogue. Empty on I/O failure — same policy as
     // `gather_active_flow_contexts`. An empty perspective has zero flows,
     // and there's nothing to post-process.
-    let flows_by_name = match crate::perspectives::flow_context::load_shacl_flows(perspective).await
+    let flows_by_uri = match crate::perspectives::flow_context::load_shacl_flows(perspective).await
     {
         Ok(m) => m,
         Err(e) => {
@@ -148,7 +148,7 @@ pub async fn run_engine_proposal_pass(
             return Vec::new();
         }
     };
-    if flows_by_name.is_empty() {
+    if flows_by_uri.is_empty() {
         return Vec::new();
     }
 
@@ -190,7 +190,7 @@ pub async fn run_engine_proposal_pass(
     };
 
     let satisfied =
-        evaluate_flow_transitions(perspective, &records, &flows_by_name, &acting_did).await;
+        evaluate_flow_transitions(perspective, &records, &flows_by_uri, &acting_did).await;
     if satisfied.is_empty() {
         return Vec::new();
     }
@@ -206,7 +206,7 @@ pub async fn run_engine_proposal_pass(
         String,
         crate::perspectives::flow_context::FlowContext,
     > = if semantic_check.is_some() {
-        crate::perspectives::flow_context::build_flow_contexts(&records, &flows_by_name)
+        crate::perspectives::flow_context::build_flow_contexts(&records, &flows_by_uri)
             .into_iter()
             .map(|c| (c.instance_uri.clone(), c))
             .collect()
