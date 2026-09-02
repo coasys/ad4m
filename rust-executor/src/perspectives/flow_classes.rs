@@ -151,35 +151,20 @@ pub(crate) async fn mint_flow_instance(
     Ok(uri)
 }
 
-/// Mint one `FlowTransitionProposal` on-graph as the write-side counterpart
-/// to a [`super::flow_evaluator::SatisfiedTransition`]. Takes primitive
-/// fields — no dependency on `flow_evaluator` — so the module stays a
-/// leaf in the flow-runtime layering (evaluator can depend on classes,
-/// not the other way around).
+/// Mint one `FlowTransitionProposal` at `ad4m://flow/proposal/{proposal_id}`.
 ///
-/// **Pure w.r.t. side-effects the caller controls** — `proposal_id` +
-/// `batch_id` are caller-supplied, mirroring
-/// [`mint_flow_instance`] so the auto-processor / consensus loop can
-/// thread its own id-gen + atomic-commit batch. Propose-time is
-/// synthesised by `Ad4mModel`'s built-in `createdAt` (earliest link
-/// timestamp on the proposal URI) — no `proposedAt` scalar is written.
+/// `proposal_id` and `batch_id` are caller-supplied, as in
+/// [`mint_flow_instance`], so the caller controls id generation and atomic
+/// commit. Propose-time comes from `Ad4mModel`'s built-in `createdAt`.
 ///
-/// `evidence_ids` is written as a bag through the collection setter:
-/// `create_subject` seeds the first element via the constructor's own
-/// setter, then the remaining N-1 elements each go through
-/// `update_subject` with `{ "evidence": id }`. Every call shares
-/// `batch_id`, so the constructor + collection bumps commit atomically.
-/// Same shape [`super::interpretation::overlay::classes::mint_interpretation_run`]
-/// uses for its `sources` collection.
+/// `evidence` is a collection: `create_subject` writes the first element and
+/// each further element goes through `update_subject` in the same batch.
+/// `rationale` is written only when `Some` and non-empty. `runUri` is not
+/// written; engine-emitted proposals do not track back to a run today.
 ///
-/// `runUri` is still not written here — engine-emitted proposals don't
-/// track back to a specific InterpretationRun today. `rationale` IS
-/// carried when the caller passes `Some(text)` (LLM-proposed path).
-/// The SDNA declares both as `min_count: 0, max_count: 1` (optional
-/// scalar), so `Some(_)` writes and `None` omits.
-///
-/// Returns the freshly-minted proposal URI
-/// (`ad4m://flow/proposal/{proposal_id}`).
+/// Property names must match the SDNA `name` fields exactly. A mismatched
+/// key is silently dropped by `create_subject`; the alignment test below
+/// locks the mapping.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_flow_transition_proposal(
     perspective: &mut PerspectiveInstance,
@@ -198,10 +183,6 @@ pub(crate) async fn write_flow_transition_proposal(
 
     let uri = flow_transition_proposal_uri(proposal_id);
 
-    // Property names MUST match the SDNA `name` fields exactly — a
-    // mismatched key is silently dropped by `create_subject`
-    // (2026-08-20 bug). Locked by
-    // `write_flow_transition_proposal_values_align_with_sdna_property_names`.
     let mut values = serde_json::json!({
         "flowInstance": flow_instance_uri,
         "fromState": from_state,
@@ -209,19 +190,12 @@ pub(crate) async fn write_flow_transition_proposal(
         "proposer": proposer_did,
         "evidenceHashes": evidence_hash,
     });
-    // Optional LLM-supplied attribution. Empty strings are treated as
-    // absent — the SDNA `min_count: 0` allows both, but writing an
-    // empty scalar bloats the graph with a link carrying no signal.
     if let Some(text) = rationale {
         if !text.is_empty() {
             values["rationale"] = text.to_string().into();
         }
     }
 
-    // `evidence` is a collection with an `addLink` setter. `create_subject`
-    // only writes ONE value per property, so seed with the first element
-    // and stream the rest through `update_subject` — same pattern as
-    // `mint_interpretation_run(...).sources`.
     let mut rest_evidence: Vec<String> = Vec::new();
     if let Some((first, rest)) = evidence_ids.split_first() {
         values["evidence"] = first.clone().into();

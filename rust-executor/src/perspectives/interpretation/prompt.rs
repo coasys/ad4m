@@ -329,34 +329,9 @@ You receive a JSON object with these fields:
     advance. When `active_flows` is absent, extract freely on the class
     hints alone.
 
-Output shape:
-  - Default (and always valid): a JSON array of instance elements.
-  - When `active_flows` is present you MAY instead emit a JSON object wrapping
-    the array in an `instances` field, optionally alongside a `flow_proposals`
-    array:
-      `{\"instances\": [ ...instance elements... ],
-        \"flow_proposals\": [ ...flow proposals... ]}`
-    A response with only `flow_proposals` is legal (`instances` defaults to
-    empty); a response with only `instances` is equivalent to the bare-array
-    form. If `active_flows` is absent, prefer the bare array.
-
-Each instance element is `{\"class\": <class name>, ...fields, ...relations}`,
+Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...relations}`,
 where fields carry strings drawn from what participants actually said or
 committed to, and relations carry *references* to other instances (see below).
-
-Flow proposals (only when `active_flows` is present):
-  - Each entry is `{\"instance\": <flowInstance URI>, \"toState\": <nextStates name>, \"reason\": <optional short attribution>}`.
-  - `instance` MUST be a URI drawn verbatim from an `active_flows[i].instance`
-    value; never invent one.
-  - `toState` MUST be one of that instance's `nextStates[j].name` values.
-  - Emit a proposal only when BOTH: (a) the transcript matches the target
-    `nextStates[j].hint`, AND (b) enough evidence to satisfy its `requires`
-    guard is either already in the graph OR present in the `instances` you
-    return this turn. The engine re-verifies the guard — proposals without
-    supporting evidence are silently discarded, so guessing does not help.
-  - Emit at most one proposal per FlowInstance per pass.
-  - When no flow should advance, omit `flow_proposals` (or emit `[]`); do not
-    invent a transition just because a flow is active.
 
 How to decide what to extract:
   - Consider EACH class independently against the WHOLE transcript, using its
@@ -1144,65 +1119,6 @@ mod tests {
         assert!(
             p.contains("advance"),
             "system prompt must instruct the LLM to bias toward extractions that advance the flow"
-        );
-    }
-
-    #[test]
-    fn system_prompt_documents_flow_proposals_output_shape() {
-        // Regression guard for slice 10.6b: the prompt must teach the LLM the
-        // OPTIONAL wrapping-object output shape so `flow_proposals` can ride
-        // alongside the extracted instances on flow-carrying passes.
-        //
-        // The wrapping-object shape is what `parse_interpretation_output`
-        // (slice 10.6a) reads; without prompt-side documentation the LLM
-        // never emits it and the whole slice-10.6c wiring is on the model's
-        // blindside.
-        let p = INTERPRETATION_SYSTEM_PROMPT;
-        // Wrapping-object shape must be introduced by both key names — the
-        // parser accepts either alone, but only the paired doc keeps the LLM
-        // from having to guess the field name.
-        assert!(
-            p.contains("`instances`") && p.contains("`flow_proposals`"),
-            "system prompt must name both wrapping-object keys (`instances`, `flow_proposals`)"
-        );
-        // Legacy bare-array must still be advertised as valid — an aggressive
-        // rewrite of this section could silently break every non-flow pass.
-        assert!(
-            p.contains("bare array") || p.contains("JSON array"),
-            "system prompt must keep the bare-array shape advertised as valid"
-        );
-        // The wrapping-object shape is gated on `active_flows` being present;
-        // teaching it unconditionally would make small models emit it on
-        // every pass (bloat + parser fast-path misses).
-        assert!(
-            p.contains("only when `active_flows` is present")
-                || p.contains("when `active_flows` is present"),
-            "system prompt must gate the wrapping-object shape on active_flows being present"
-        );
-        // Guard fields on flow_proposals entries — instance URI must be
-        // drawn verbatim from active_flows, toState from nextStates. Small
-        // models otherwise fabricate both.
-        assert!(
-            p.contains("verbatim from an `active_flows[i].instance`"),
-            "system prompt must forbid inventing flow-instance URIs (verbatim rule)"
-        );
-        assert!(
-            p.contains("one of that instance's `nextStates[j].name`"),
-            "system prompt must constrain toState to a declared nextStates name"
-        );
-        // The evidence rule is what makes proposals useful — the engine
-        // discards proposals whose `requires` guard is unsatisfied. Without
-        // this instruction the LLM would fire proposals on hint alone.
-        assert!(
-            p.contains("evidence") && p.contains("`requires`"),
-            "system prompt must connect flow proposals to the `requires` evidence guard"
-        );
-        // At-most-one-per-instance-per-pass — otherwise the engine's
-        // deterministic single-transition semantics collide with the LLM
-        // emitting several toStates simultaneously (undefined merge order).
-        assert!(
-            p.contains("at most one proposal per FlowInstance"),
-            "system prompt must cap proposals at one per FlowInstance per pass"
         );
     }
 

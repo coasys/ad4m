@@ -1,10 +1,10 @@
 use super::{
     apply_with_overlay, build_interpretation_input, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
-    identity_property, normalize_identity, parse_interpretation_output,
+    identity_property, normalize_identity, parse_interpretation_response,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
-    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationOutput,
-    InterpretationRunCursor, TranscriptTurn,
+    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationRunCursor, ProposedInstance,
+    TranscriptTurn,
 };
 use crate::agent::AgentContext;
 use crate::ai_service::harness::propose::{
@@ -20,27 +20,23 @@ use crate::types::LinkStatus;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Max attempts for [`retry_interpretation_output_parse`]. Mirrors Flux's
-/// `LLMutils` retry-×5 loop: local models occasionally emit half-valid JSON,
-/// so we ask again a few times before giving up on the whole call.
+/// Max attempts for [`retry_interpretation_parse`]. Mirrors Flux's `LLMutils`
+/// retry-×5 loop: local models occasionally emit half-valid JSON, so we ask
+/// again a few times before giving up on the whole call.
 pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 
-/// Run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
-/// response as an [`InterpretationOutput`] payload (extracted instances +
-/// LLM-emitted flow proposals). Returns the first successful parse; the last
-/// parse error propagates if every attempt fails. `prompt_fn` is an async
-/// closure so callers can inject anything (real `AIService`, a canned script,
-/// a mock) without a live LLM.
+/// run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
+/// response as an interpretation JSON payload. Returns the first successful parse;
+/// the last parse error propagates if every attempt fails. `prompt_fn` is an
+/// async closure so callers can inject anything (real `AIService`, a canned
+/// script, a mock) without a live LLM.
 ///
 /// This is deliberately a thin generic wrapper: it never mutates state, and it
 /// is the only place we tolerate LLM flake. Any bug in prompt assembly should
 /// fail deterministically in [`build_interpretation_input`], not here.
-///
-/// Callers that only need `.instances` should destructure the result;
-/// [`retry_interpretation_output_parse`] is the single retry primitive.
-pub async fn retry_interpretation_output_parse<F, Fut>(
+pub async fn retry_interpretation_parse<F, Fut>(
     mut prompt_fn: F,
-) -> anyhow::Result<InterpretationOutput>
+) -> anyhow::Result<Vec<ProposedInstance>>
 where
     F: FnMut(u8) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<String>>,
@@ -55,8 +51,8 @@ where
                 continue;
             }
         };
-        match parse_interpretation_output(&raw) {
-            Ok(output) => return Ok(output),
+        match parse_interpretation_response(&raw) {
+            Ok(instances) => return Ok(instances),
             Err(e) => {
                 log::warn!(
                     "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
@@ -582,12 +578,8 @@ pub struct InterpretationDebug {
 pub struct InterpretationOutcome {
     pub bases: Vec<String>,
     pub debug: Option<InterpretationDebug>,
-    /// Slice 10.4c — URIs of every `FlowTransitionProposal` the
-    /// deterministic post-processing pass minted on the graph after
-    /// `apply_with_overlay` committed this pass's writes. Empty when
-    /// the perspective has no active flows, no satisfied transitions,
-    /// or the loader path silent-failed (see
-    /// [`crate::perspectives::flow_evaluator::run_engine_proposal_pass`]).
+    /// URIs of the `FlowTransitionProposal`s the deterministic flow pass
+    /// minted after this pass's writes were committed.
     pub flow_proposals: Vec<String>,
 }
 
@@ -686,19 +678,11 @@ pub async fn run_interpretation_with_strategy_and_model(
         // `debug_response_capture` retains the LAST successful raw response
         // for `InterpretationRun` persistence — the same value that ends up
         // on the run node's `debugResponse` scalar. Retries only happen when
-        // parsing fails, so the value in the cell after
-        // `retry_interpretation_output_parse` succeeds is by construction the
-        // final (parse-successful) attempt.
+        // parsing fails, so the value in the cell after `retry_interpretation_parse`
+        // succeeds is by construction the final (parse-successful) attempt.
         let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
-        // Slice 10.6c — capture the FULL parsed output (instances + LLM-emitted
-        // `flow_proposals`) so the post-processing pass can honour LLM
-        // attribution when a satisfied transition matches an LLM proposal.
-        // Legacy bare-array LLM responses still parse (empty `flow_proposals`).
-        let InterpretationOutput {
-            instances,
-            flow_proposals: llm_flow_proposals,
-        } = retry_interpretation_output_parse(|_attempt| {
+        let instances = retry_interpretation_parse(|_attempt| {
             let service = service.clone();
             let task_id = task.task_id.clone();
             let prompt = prompt.clone();
@@ -817,48 +801,17 @@ pub async fn run_interpretation_with_strategy_and_model(
         )
         .await?;
 
-        // Slice 10.4c — deterministic post-processing runs AFTER
-        // `apply_with_overlay`: the LLM's writes are now on the graph, so a
-        // `requires` model_query that was unmet pre-pass can now match on
-        // fresh evidence, and a `FlowTransitionProposal` is minted on behalf
-        // of the acting DID. Silent-fallback throughout (see the fn doc) so
-        // the extraction pass cannot break on a flow-layer stumble.
-        //
-        // Slice 10.5c — semantic-check gate is now live. Reuses the same
-        // task row (and hence the same worker + billing scope) as the
-        // extraction pass, so an operator swapping models on the shared-
-        // default row auto-swaps the semantic-check model in lock-step.
-        // States without a `semanticCheck` hint short-circuit to Pass
-        // inside `run_semantic_check` without touching the LLM, and any
-        // LLM error becomes a discard-with-log at the gate — the
-        // extraction pass cannot break on a flow-layer stumble.
-        let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
-            task_id: task.task_id.clone(),
-        };
-        // Slice 10.6c — adapt LLM-emitted flow proposals into the boundary type
-        // `run_engine_proposal_pass` accepts. The match rule inside the pass is
-        // (instance_uri, to_state); unmatched hints (no satisfied transition
-        // for that pair) are silently discarded per design §5.4 step 5.
-        let llm_hints: Vec<crate::perspectives::flow_evaluator::LlmProposalHint> =
-            llm_flow_proposals
-                .iter()
-                .map(|p| crate::perspectives::flow_evaluator::LlmProposalHint {
-                    instance_uri: p.instance.clone(),
-                    to_state: p.to_state.clone(),
-                    reason: p.reason.clone(),
-                })
-                .collect();
+        // The affected instance base URIs (created, updated, or given new
+        // relations). Links are owned by `create_subject` / `update_subject`.
+        // The LLM's writes are on the graph now, so re-evaluate every active
+        // flow's `requires` guards against the fresh evidence.
         let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
             perspective,
             scope,
             context,
-            Some((&semantic_check, task.model_id.as_str())),
-            &llm_hints,
         )
         .await;
 
-        // The affected instance base URIs (created, updated, or given new
-        // relations). Links are owned by `create_subject` / `update_subject`.
         Ok(InterpretationOutcome {
             bases,
             debug,
@@ -1123,38 +1076,15 @@ pub async fn run_interpretation_with_harness_and_model(
 
     log::warn!("harness: apply_with_overlay produced {} bases", bases.len());
 
-    // Slice 10.4c — same post-processing hook as the single-shot path.
-    // The harness return signature is `Vec<String>` (bases only) so the
-    // proposal URIs are surfaced via `warn!` rather than the outcome
-    // shape; extending the harness return to a struct is a separate
-    // slice. The proposals themselves land on the graph regardless,
-    // which is the load-bearing property.
-    //
-    // Slice 10.5c — semantic-check gate live here as well. Same
-    // AIService-backed impl, same reuse of `task.task_id` so the
-    // billing scope + spawned worker match the harness path's own
-    // extraction dispatch.
-    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
-        task_id: task.task_id.clone(),
-    };
-    // Slice 10.6c — harness path passes `&[]`. The harness LLM writes via
-    // tool calls, not by emitting a JSON `InterpretationOutput` blob, so
-    // there is no LLM-side `flow_proposals` field to thread here. A future
-    // slice can add a `propose_flow_transition` tool to the harness surface
-    // if we want LLM-attributed proposals over the tool-calling path too.
-    let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
-        perspective,
-        scope,
-        context,
-        Some((&semantic_check, task.model_id.as_str())),
-        &[],
-    )
-    .await;
+    // Same flow post-processing as the single-shot path. The harness
+    // returns bases only, so the minted proposals are just logged here.
+    let flow_proposals =
+        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, scope, context)
+            .await;
     if !flow_proposals.is_empty() {
         log::warn!(
-            "harness: engine-proposal pass minted {} FlowTransitionProposal(s): {:?}",
-            flow_proposals.len(),
-            flow_proposals
+            "harness: flow pass minted {} proposal(s): {flow_proposals:?}",
+            flow_proposals.len()
         );
     }
 

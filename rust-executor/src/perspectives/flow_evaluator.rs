@@ -1,0 +1,718 @@
+//! Deterministic post-processing over active flows.
+//!
+//! After an extraction pass has committed its writes, every live
+//! `FlowInstance` is checked against the `requires` guards of the states
+//! reachable from its current one. Each fully satisfied (instance,
+//! next-state) pair becomes an on-graph `FlowTransitionProposal` written
+//! on behalf of the acting DID. This is what keeps a flow moving when the
+//! LLM forgets to propose a transition it has just produced the evidence
+//! for.
+//!
+//! A `requires` guard is an array of `ModelQuery`s with AND semantics.
+//! Each query is translated to a `model_query` input, run against the
+//! perspective and checked against its `count` cardinality. The matched
+//! instance IDs form the proposal's evidence bag, sealed by an
+//! order-independent SHA256 in [`evidence_hash`] so a later verification
+//! can detect evidence that no longer resolves.
+//!
+//! Every failure here is a skip, never an error: a broken flow
+//! definition, an unregistered class or a transient query failure drops
+//! one transition and the extraction pass carries on.
+
+use crate::agent::AgentContext;
+use crate::perspectives::flow_classes::write_flow_transition_proposal;
+use crate::perspectives::flow_context::{
+    load_all_flow_instances, load_flow_instances, load_shacl_flows, reachable_next_states,
+    scope_subject, FlowInstanceRecord,
+};
+use crate::perspectives::model_query::types::Scope;
+use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::shacl_parser::{
+    ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
+};
+use anyhow::{anyhow, bail, Result};
+use async_trait::async_trait;
+use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+
+/// One (flow instance, next-state) pair whose `requires` guard is fully
+/// satisfied on the committed graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SatisfiedTransition {
+    pub flow_name: String,
+    pub instance_uri: String,
+    pub from_state: String,
+    pub to_state: String,
+    /// Every matched instance ID across the state's `requires`, deduplicated.
+    pub evidence_ids: Vec<String>,
+    /// See [`evidence_hash`].
+    pub evidence_hash: String,
+}
+
+/// Order-independent seal over a satisfied guard's evidence: SHA256 of the
+/// class names joined by `|`, a NUL, and the sorted evidence IDs joined by
+/// newlines. Two evaluations of the same guard against the same graph
+/// produce the same hash regardless of result order.
+pub fn evidence_hash(class_names: &[String], evidence_ids: &[String]) -> String {
+    let mut sorted_ids = evidence_ids.to_vec();
+    sorted_ids.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(class_names.join("|"));
+    hasher.update(b"\0");
+    hasher.update(sorted_ids.join("\n"));
+    hex::encode(hasher.finalize())
+}
+
+/// `count.{min,max}` check with inclusive bounds. An unset `count` means
+/// "at least one match"; `{ max: 0 }` is a valid negative guard.
+fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool {
+    match count {
+        None => actual >= 1,
+        Some(c) => {
+            c.min.is_none_or(|min| actual >= min as usize)
+                && c.max.is_none_or(|max| actual <= max as usize)
+        }
+    }
+}
+
+/// Translate a flow-side `ModelQuery` into the JSON input `model_query`
+/// accepts. `didProperty` becomes `where.<prop> = acting_did`; `or`
+/// alternatives become an `OR` list of sub-clauses.
+///
+/// Scalars, `equals` and `in` map directly onto `WhereCondition`.
+/// `exists` and `matches` have no `model_query` counterpart yet, so a
+/// guard using them fails translation and is skipped instead of being
+/// evaluated against a wrong query.
+fn requires_query_input(query: &ModelQuery, acting_did: &str) -> Result<Value> {
+    let where_clause = requires_where(query, acting_did)?;
+    Ok(if where_clause.is_empty() {
+        json!({})
+    } else {
+        json!({ "where": where_clause })
+    })
+}
+
+fn requires_where(query: &ModelQuery, acting_did: &str) -> Result<Map<String, Value>> {
+    let mut out = Map::new();
+    for (field, cond) in query.r#where.iter().flatten() {
+        out.insert(field.clone(), where_condition(field, cond)?);
+    }
+    if let Some(prop) = &query.did_property {
+        out.insert(prop.clone(), Value::String(acting_did.to_string()));
+    }
+    if let Some(alts) = query.or.as_ref().filter(|a| !a.is_empty()) {
+        let branches = alts
+            .iter()
+            .map(|alt| requires_where(alt, acting_did).map(Value::Object))
+            .collect::<Result<Vec<_>>>()?;
+        out.insert("OR".to_string(), Value::Array(branches));
+    }
+    Ok(out)
+}
+
+fn where_condition(field: &str, cond: &PropertyCondition) -> Result<Value> {
+    Ok(match cond {
+        PropertyCondition::Str(s) => json!(s),
+        PropertyCondition::Num(n) => json!(n),
+        PropertyCondition::Bool(b) => json!(b),
+        PropertyCondition::Equals { equals } => equals.clone(),
+        PropertyCondition::In { one_of } => Value::Array(one_of.clone()),
+        PropertyCondition::Exists { .. } => {
+            bail!("`{field}`: `exists` is not supported by model_query")
+        }
+        PropertyCondition::Matches { .. } => {
+            bail!("`{field}`: `matches` is not supported by model_query")
+        }
+    })
+}
+
+/// The one perspective call the evaluator needs, behind a trait so the
+/// composition below can be unit-tested against a stub.
+#[async_trait]
+pub trait RequiresQueryable: Send + Sync {
+    async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String>;
+}
+
+#[async_trait]
+impl RequiresQueryable for PerspectiveInstance {
+    async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
+        PerspectiveInstance::model_query(self, class_name, query_json).await
+    }
+}
+
+/// Run one guard query. Returns whether its cardinality is satisfied and
+/// the IDs it matched.
+async fn evaluate_query<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    query: &ModelQuery,
+    acting_did: &str,
+) -> Result<(bool, Vec<String>)> {
+    let input = requires_query_input(query, acting_did)?;
+    let raw = perspective
+        .model_query(&query.class_name, &input.to_string())
+        .await?;
+    let result: Value = serde_json::from_str(&raw)?;
+    let ids: Vec<String> = result
+        .get("instances")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            anyhow!(
+                "model_query for `{}` returned no `instances` array",
+                query.class_name
+            )
+        })?
+        .iter()
+        .filter_map(|inst| inst.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    Ok((cardinality_satisfied(query.count.as_ref(), ids.len()), ids))
+}
+
+/// AND across a state's `requires`. `Ok(None)` as soon as one guard
+/// misses; `Ok(Some((class_names, evidence_ids)))`, both deduplicated in
+/// first-seen order, when every guard holds.
+async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    requires: &[ModelQuery],
+    acting_did: &str,
+) -> Result<Option<(Vec<String>, Vec<String>)>> {
+    let mut class_names: Vec<String> = Vec::new();
+    let mut evidence_ids: Vec<String> = Vec::new();
+    for query in requires {
+        let (satisfied, ids) = evaluate_query(perspective, query, acting_did).await?;
+        if !satisfied {
+            return Ok(None);
+        }
+        if !class_names.contains(&query.class_name) {
+            class_names.push(query.class_name.clone());
+        }
+        for id in ids {
+            if !evidence_ids.contains(&id) {
+                evidence_ids.push(id);
+            }
+        }
+    }
+    Ok(Some((class_names, evidence_ids)))
+}
+
+/// Walk every record's reachable next-states and collect the ones whose
+/// `requires` guard holds. Records whose flow is unknown and states without
+/// a guard are skipped; a query error skips that one transition and is
+/// logged at debug level.
+pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    records: &[FlowInstanceRecord],
+    flows_by_uri: &HashMap<String, SHACLFlow>,
+    acting_did: &str,
+) -> Vec<SatisfiedTransition> {
+    let mut out = Vec::new();
+    for record in records {
+        let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
+            continue;
+        };
+        for state in reachable_next_states(flow, &record.current_state) {
+            let requires = state.requires.as_deref().unwrap_or_default();
+            if requires.is_empty() {
+                continue;
+            }
+            match evaluate_requires(perspective, requires, acting_did).await {
+                Ok(Some((class_names, evidence_ids))) => out.push(SatisfiedTransition {
+                    flow_name: flow.name.clone(),
+                    instance_uri: record.instance_uri.clone(),
+                    from_state: record.current_state.clone(),
+                    to_state: state.name.clone(),
+                    evidence_hash: evidence_hash(&class_names, &evidence_ids),
+                    evidence_ids,
+                }),
+                Ok(None) => {}
+                Err(e) => log::debug!(
+                    "flow evaluator: skipping {}.{} on {}: {e:#}",
+                    flow.name,
+                    state.name,
+                    record.instance_uri
+                ),
+            }
+        }
+    }
+    out
+}
+
+/// Load → evaluate → write, called by the extraction pass once its own
+/// writes are committed. `scope` narrows the FlowInstance load to the
+/// pass's anchor; `None` sweeps every live instance. Returns the URIs of
+/// the proposals minted. Never fails: loader errors yield an empty result
+/// and a failed write drops only that proposal.
+pub async fn run_engine_proposal_pass(
+    perspective: &mut PerspectiveInstance,
+    scope: Option<&Scope>,
+    context: &AgentContext,
+) -> Vec<String> {
+    let loaded = async {
+        let flows_by_uri = load_shacl_flows(perspective).await?;
+        let records = match scope {
+            Some(s) => load_flow_instances(perspective, &[scope_subject(s).to_string()]).await?,
+            None => load_all_flow_instances(perspective).await?,
+        };
+        let acting_did = crate::agent::did_for_context(context)?;
+        anyhow::Ok((flows_by_uri, records, acting_did))
+    }
+    .await;
+    let (flows_by_uri, records, acting_did) = match loaded {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            log::warn!("run_engine_proposal_pass: {e:#}");
+            return Vec::new();
+        }
+    };
+
+    let satisfied =
+        evaluate_flow_transitions(perspective, &records, &flows_by_uri, &acting_did).await;
+
+    let mut minted = Vec::with_capacity(satisfied.len());
+    for transition in &satisfied {
+        match write_proposal(perspective, transition, &acting_did, context).await {
+            Ok(uri) => minted.push(uri),
+            Err(e) => log::debug!(
+                "run_engine_proposal_pass: {}.{}→{} not written: {e:#}",
+                transition.flow_name,
+                transition.from_state,
+                transition.to_state
+            ),
+        }
+    }
+    minted
+}
+
+/// Write one proposal inside its own batch, so readers never see a
+/// half-written proposal and one failed write does not roll back the rest.
+async fn write_proposal(
+    perspective: &mut PerspectiveInstance,
+    transition: &SatisfiedTransition,
+    proposer_did: &str,
+    context: &AgentContext,
+) -> Result<String> {
+    let batch_id = perspective.create_batch().await;
+    let written = write_flow_transition_proposal(
+        perspective,
+        &uuid::Uuid::new_v4().to_string(),
+        proposer_did,
+        &transition.instance_uri,
+        &transition.from_state,
+        &transition.to_state,
+        &transition.evidence_ids,
+        &transition.evidence_hash,
+        None,
+        Some(batch_id.clone()),
+        context,
+    )
+    .await;
+    let committed = match written {
+        Ok(uri) => perspective
+            .commit_batch(batch_id.clone(), context)
+            .await
+            .map(|_| uri)
+            .map_err(|e| anyhow!("commit_batch failed: {e:#}")),
+        Err(e) => Err(e),
+    };
+    if committed.is_err() {
+        perspective.discard_batch(&batch_id).await;
+    }
+    committed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::shacl_parser::{FlowState, FlowTransition};
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
+    fn mq(class: &str) -> ModelQuery {
+        ModelQuery {
+            class_name: class.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn with_where(mut q: ModelQuery, pairs: Vec<(&str, PropertyCondition)>) -> ModelQuery {
+        q.r#where = Some(
+            pairs
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect::<BTreeMap<_, _>>(),
+        );
+        q
+    }
+
+    fn count(min: Option<u32>, max: Option<u32>) -> Option<ModelQueryCount> {
+        Some(ModelQueryCount { min, max })
+    }
+
+    #[test]
+    fn evidence_hash_is_order_independent_and_content_sensitive() {
+        let classes = vec!["ns://A".to_string()];
+        let a = evidence_hash(&classes, &["b".into(), "a".into(), "c".into()]);
+        let b = evidence_hash(&classes, &["c".into(), "a".into(), "b".into()]);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64, "hex-encoded SHA256");
+        assert_ne!(a, evidence_hash(&classes, &["a".into(), "b".into()]));
+        assert_ne!(
+            a,
+            evidence_hash(&["ns://B".into()], &["a".into(), "b".into(), "c".into()])
+        );
+    }
+
+    #[test]
+    fn cardinality_bounds_are_inclusive_and_default_to_at_least_one() {
+        assert!(!cardinality_satisfied(None, 0));
+        assert!(cardinality_satisfied(None, 1));
+        let range = count(Some(1), Some(3));
+        assert!(!cardinality_satisfied(range.as_ref(), 0));
+        assert!(cardinality_satisfied(range.as_ref(), 1));
+        assert!(cardinality_satisfied(range.as_ref(), 3));
+        assert!(!cardinality_satisfied(range.as_ref(), 4));
+        let negative = count(None, Some(0));
+        assert!(cardinality_satisfied(negative.as_ref(), 0));
+        assert!(!cardinality_satisfied(negative.as_ref(), 1));
+        assert!(cardinality_satisfied(count(None, None).as_ref(), 0));
+    }
+
+    #[test]
+    fn query_input_translates_scalars_operators_and_did_property() {
+        assert_eq!(
+            requires_query_input(&mq("ns://T"), "did:key:x").unwrap(),
+            json!({}),
+            "bare class → no filter"
+        );
+        let mut q = with_where(
+            mq("ns://T"),
+            vec![
+                ("state", PropertyCondition::Str("done".into())),
+                ("priority", PropertyCondition::Num(3.0)),
+                ("archived", PropertyCondition::Bool(false)),
+                (
+                    "owner",
+                    PropertyCondition::Equals {
+                        equals: json!("alice"),
+                    },
+                ),
+                (
+                    "tag",
+                    PropertyCondition::In {
+                        one_of: vec![json!("a"), json!("b")],
+                    },
+                ),
+            ],
+        );
+        q.did_property = Some("author".into());
+        assert_eq!(
+            requires_query_input(&q, "did:key:acting").unwrap(),
+            json!({ "where": {
+                "state": "done",
+                "priority": 3.0,
+                "archived": false,
+                "owner": "alice",
+                "tag": ["a", "b"],
+                "author": "did:key:acting",
+            }})
+        );
+    }
+
+    #[test]
+    fn query_input_nests_or_branches() {
+        let leaf = |role: &str| {
+            with_where(
+                mq("ns://M"),
+                vec![("role", PropertyCondition::Str(role.into()))],
+            )
+        };
+        let mut inner = mq("ns://M");
+        inner.or = Some(vec![leaf("admin")]);
+        let mut outer = with_where(
+            mq("ns://M"),
+            vec![("channel", PropertyCondition::Str("c".into()))],
+        );
+        outer.or = Some(vec![leaf("owner"), inner]);
+        assert_eq!(
+            requires_query_input(&outer, "did:key:x").unwrap(),
+            json!({ "where": {
+                "channel": "c",
+                "OR": [ { "role": "owner" }, { "OR": [ { "role": "admin" } ] } ],
+            }})
+        );
+        let mut empty_or = mq("ns://M");
+        empty_or.or = Some(vec![]);
+        assert_eq!(
+            requires_query_input(&empty_or, "did:key:x").unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn query_input_rejects_conditions_model_query_cannot_express() {
+        let exists = with_where(
+            mq("ns://T"),
+            vec![("deletedAt", PropertyCondition::Exists { exists: false })],
+        );
+        assert!(requires_query_input(&exists, "did:key:x").is_err());
+        let matches = with_where(
+            mq("ns://T"),
+            vec![(
+                "title",
+                PropertyCondition::Matches {
+                    matches: "^Q".into(),
+                },
+            )],
+        );
+        assert!(requires_query_input(&matches, "did:key:x").is_err());
+    }
+
+    /// Canned `model_query` keyed by class name; records every call.
+    #[derive(Default)]
+    struct StubPerspective {
+        calls: Mutex<Vec<(String, String)>>,
+        responses: HashMap<String, Result<Vec<String>, String>>,
+    }
+
+    impl StubPerspective {
+        fn with_instances(mut self, class: &str, ids: &[&str]) -> Self {
+            self.responses.insert(
+                class.into(),
+                Ok(ids.iter().map(|s| s.to_string()).collect()),
+            );
+            self
+        }
+        fn with_error(mut self, class: &str, msg: &str) -> Self {
+            self.responses.insert(class.into(), Err(msg.into()));
+            self
+        }
+        fn calls_for(&self, class: &str) -> Vec<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(c, _)| c == class)
+                .map(|(_, q)| q.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl RequiresQueryable for StubPerspective {
+        async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((class_name.to_string(), query_json.to_string()));
+            match self.responses.get(class_name) {
+                Some(Ok(ids)) => Ok(json!({
+                    "instances": ids.iter().map(|id| json!({ "id": id })).collect::<Vec<_>>(),
+                    "totalCount": ids.len(),
+                })
+                .to_string()),
+                Some(Err(msg)) => Err(anyhow!(msg.clone())),
+                None => Err(anyhow!("no canned response for `{class_name}`")),
+            }
+        }
+    }
+
+    fn state(name: &str, requires: Option<Vec<ModelQuery>>) -> FlowState {
+        FlowState {
+            name: name.to_string(),
+            value: 0.0,
+            interpretation_hint: None,
+            requires,
+            semantic_check: None,
+            consensus_rule: None,
+        }
+    }
+
+    /// `from → to` flow whose `to` state carries `requires`.
+    fn flow(name: &str, from: &str, to: &str, requires: Option<Vec<ModelQuery>>) -> SHACLFlow {
+        SHACLFlow {
+            name: name.to_string(),
+            namespace: format!("{}://", name.to_lowercase()),
+            states: vec![state(from, None), state(to, requires)],
+            transitions: vec![FlowTransition {
+                action_name: format!("{from}To{to}"),
+                from_state: from.to_string(),
+                to_state: to.to_string(),
+                actions: Vec::new(),
+            }],
+            interpretation_hint: None,
+            input_types: Vec::new(),
+            output_types: Vec::new(),
+            creation_hint: None,
+            context: None,
+            consensus_rule: None,
+        }
+    }
+
+    fn record(flow_uri: &str, instance: &str, state: &str) -> FlowInstanceRecord {
+        FlowInstanceRecord {
+            flow_uri: flow_uri.into(),
+            instance_uri: instance.into(),
+            subject: "ad4m://subject".into(),
+            current_state: state.into(),
+            created_at: None,
+        }
+    }
+
+    const DELIVERY: &str = "delivery://DeliveryFlow";
+
+    fn delivery(requires: Vec<ModelQuery>) -> HashMap<String, SHACLFlow> {
+        HashMap::from([(
+            DELIVERY.to_string(),
+            flow("Delivery", "identified", "scoped", Some(requires)),
+        )])
+    }
+
+    #[tokio::test]
+    async fn satisfied_guard_yields_one_transition_with_sealed_evidence() {
+        let flows = delivery(vec![mq("ns://Task")]);
+        let recs = vec![record(DELIVERY, "ad4m://flow/instance/1", "identified")];
+        let stub = StubPerspective::default().with_instances("ns://Task", &["ad4m://task/1"]);
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x").await;
+        assert_eq!(
+            out,
+            vec![SatisfiedTransition {
+                flow_name: "Delivery".into(),
+                instance_uri: "ad4m://flow/instance/1".into(),
+                from_state: "identified".into(),
+                to_state: "scoped".into(),
+                evidence_ids: vec!["ad4m://task/1".into()],
+                evidence_hash: evidence_hash(&["ns://Task".into()], &["ad4m://task/1".into()]),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsatisfied_guardless_and_unknown_flow_yield_nothing() {
+        let unsatisfied = delivery(vec![mq("ns://Task")]);
+        let stub = StubPerspective::default().with_instances("ns://Task", &[]);
+        let recs = vec![record(DELIVERY, "ad4m://flow/instance/1", "identified")];
+        assert!(
+            evaluate_flow_transitions(&stub, &recs, &unsatisfied, "did:key:x")
+                .await
+                .is_empty()
+        );
+
+        let guardless = HashMap::from([(
+            DELIVERY.to_string(),
+            flow("Delivery", "identified", "scoped", None),
+        )]);
+        let stub = StubPerspective::default();
+        assert!(
+            evaluate_flow_transitions(&stub, &recs, &guardless, "did:key:x")
+                .await
+                .is_empty()
+        );
+        assert!(stub.calls.lock().unwrap().is_empty(), "no guard → no query");
+
+        let unknown = vec![record("unknown://Flow", "ad4m://flow/instance/2", "x")];
+        assert!(
+            evaluate_flow_transitions(&stub, &unknown, &guardless, "did:key:x")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn requires_is_an_and_that_short_circuits_and_dedups_evidence() {
+        let flows = delivery(vec![mq("ns://A"), mq("ns://B"), mq("ns://A")]);
+        let recs = vec![record(DELIVERY, "ad4m://flow/instance/1", "identified")];
+
+        let stub = StubPerspective::default()
+            .with_instances("ns://A", &["x/1", "x/2"])
+            .with_instances("ns://B", &["x/2", "x/3"]);
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x").await;
+        assert_eq!(out[0].evidence_ids, vec!["x/1", "x/2", "x/3"]);
+        assert_eq!(
+            out[0].evidence_hash,
+            evidence_hash(&["ns://A".into(), "ns://B".into()], &out[0].evidence_ids)
+        );
+
+        let stub = StubPerspective::default()
+            .with_instances("ns://A", &["x/1"])
+            .with_instances("ns://B", &[]);
+        assert!(evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x")
+            .await
+            .is_empty());
+        assert_eq!(
+            stub.calls_for("ns://A").len(),
+            1,
+            "third guard never runs after B misses"
+        );
+    }
+
+    #[tokio::test]
+    async fn cardinality_and_translated_query_are_applied_per_guard() {
+        let mut q = with_where(
+            mq("ns://T"),
+            vec![("author", PropertyCondition::Str("did:key:a".into()))],
+        );
+        q.count = count(Some(2), Some(3));
+        let flows = delivery(vec![q]);
+        let recs = vec![record(DELIVERY, "ad4m://flow/instance/1", "identified")];
+
+        let stub = StubPerspective::default().with_instances("ns://T", &["a", "b", "c", "d"]);
+        assert!(evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x")
+            .await
+            .is_empty());
+        let sent: Value = serde_json::from_str(&stub.calls_for("ns://T")[0]).unwrap();
+        assert_eq!(sent, json!({ "where": { "author": "did:key:a" } }));
+
+        let stub = StubPerspective::default().with_instances("ns://T", &["a", "b"]);
+        assert_eq!(
+            evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x")
+                .await
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_guard_skips_only_its_own_transition() {
+        let mut flows = delivery(vec![mq("ns://Broken")]);
+        flows.insert(
+            "deliberation://Flow".into(),
+            flow(
+                "Deliberation",
+                "proposal",
+                "tension",
+                Some(vec![mq("ns://Perspective")]),
+            ),
+        );
+        let recs = vec![
+            record(DELIVERY, "ad4m://flow/instance/1", "identified"),
+            record("deliberation://Flow", "ad4m://flow/instance/2", "proposal"),
+        ];
+        let stub = StubPerspective::default()
+            .with_error("ns://Broken", "unregistered class")
+            .with_instances("ns://Perspective", &["p/1"]);
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x").await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].flow_name, "Deliberation");
+
+        let untranslatable = delivery(vec![with_where(
+            mq("ns://T"),
+            vec![(
+                "title",
+                PropertyCondition::Matches {
+                    matches: "^Q".into(),
+                },
+            )],
+        )]);
+        let stub = StubPerspective::default().with_instances("ns://T", &["t/1"]);
+        assert!(
+            evaluate_flow_transitions(&stub, &recs, &untranslatable, "did:key:x")
+                .await
+                .is_empty()
+        );
+        assert!(
+            stub.calls.lock().unwrap().is_empty(),
+            "untranslatable guard never reaches model_query"
+        );
+    }
+}
