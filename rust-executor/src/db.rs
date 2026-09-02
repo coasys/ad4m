@@ -1430,6 +1430,7 @@ impl Ad4mDb {
                         proof: ExpressionProof {
                             signature: row.get(6)?,
                             key: row.get(7)?,
+                            ..Default::default()
                         },
                         author: row.get(4)?,
                         timestamp: row.get(5)?,
@@ -1468,6 +1469,7 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    ..Default::default()
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -1505,6 +1507,7 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    ..Default::default()
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -1542,6 +1545,7 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    ..Default::default()
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -1580,6 +1584,7 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    ..Default::default()
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -3942,6 +3947,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "signature".to_string(),
                 key: "key".to_string(),
+                ..Default::default()
             },
             author: "did:test:key".to_string(),
             timestamp: Utc::now().to_rfc3339(),

@@ -483,6 +483,7 @@ impl PerspectiveExpression {
             proof: ExpressionProof {
                 key: self.proof.key.clone(),
                 signature: self.proof.signature.clone(),
+                ..Default::default()
             },
             timestamp: self.timestamp.clone(),
         };

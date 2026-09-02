@@ -25,6 +25,14 @@ pub struct Expression<T: Serialize> {
 pub struct ExpressionProof {
     pub key: String,
     pub signature: String,
+    /// Verification-method id that produced `signature` (did:scid path).
+    /// Absent for legacy did:key proofs, which decode the key from the DID.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "keyId")]
+    pub key_id: Option<String>,
+    /// Key-event-log sequence the signer anchored to (did:scid path). Absent
+    /// for legacy did:key proofs.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "kelSeq")]
+    pub kel_seq: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -168,6 +176,7 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
             proof: ExpressionProof {
                 key: input.proof.key.ok_or(anyhow!("Key is required"))?,
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
+                ..Default::default()
             },
             status: input.status,
         })
@@ -236,6 +245,7 @@ impl DecoratedLinkExpression {
             proof: ExpressionProof {
                 key: self.proof.key.clone(),
                 signature: self.proof.signature.clone(),
+                ..Default::default()
             },
         };
         let valid = verify(&link_expr).unwrap_or(false);
@@ -268,6 +278,7 @@ impl From<DecoratedLinkExpression> for LinkExpression {
             proof: ExpressionProof {
                 key: decorated.proof.key,
                 signature: decorated.proof.signature,
+                ..Default::default()
             },
             status: decorated.status,
         }

@@ -453,6 +453,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig1".to_string(),
                 key: "key1".to_string(),
+                ..Default::default()
             },
             status: Some(LinkStatus::Local),
         };
@@ -468,6 +469,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig2".to_string(),
                 key: "key2".to_string(),
+                ..Default::default()
             },
             status: Some(LinkStatus::Local),
         };
@@ -536,6 +538,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig".to_string(),
                 key: "key".to_string(),
+                ..Default::default()
             },
             status: Some(LinkStatus::Shared),
         };
@@ -551,6 +554,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig2".to_string(),
                 key: "key2".to_string(),
+                ..Default::default()
             },
             status: Some(LinkStatus::Shared),
         };
@@ -621,6 +625,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "sig".to_string(),
                 key: "key".to_string(),
+                ..Default::default()
             },
             status: Some(LinkStatus::Local),
         };

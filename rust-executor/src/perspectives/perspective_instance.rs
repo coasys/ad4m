@@ -2306,6 +2306,7 @@ impl PerspectiveInstance {
                     proof: ExpressionProof {
                         key: decorated.proof.key,
                         signature: decorated.proof.signature,
+                        ..Default::default()
                     },
                     status: Some(status.clone()),
                 };
