@@ -66,6 +66,21 @@ pub(crate) fn estimate_token_count(text: &str) -> usize {
     (chars + 3) / 4
 }
 
+/// Truncate LLM prompt/response text for debug logging. LOGGING.md: debug
+/// level carries "prompt/response bodies (truncated)" — long enough to
+/// actually debug what the model was asked / returned, bounded so a huge
+/// interpretation prompt doesn't flood the log file. Char-boundary safe.
+const LOG_TEXT_PREVIEW_CHARS: usize = 2000;
+
+pub(crate) fn truncate_for_log(text: &str) -> String {
+    let total = text.chars().count();
+    if total <= LOG_TEXT_PREVIEW_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(LOG_TEXT_PREVIEW_CHARS).collect();
+    format!("{head}… [+{} more chars]", total - LOG_TEXT_PREVIEW_CHARS)
+}
+
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
 static TRANSCRIPTION_TIMEOUT_SECS: u64 = 30; // 30 seconds (was 2 minutes)
 static TRANSCRIPTION_CHECK_INTERVAL_SECS: u64 = 5; // 5 seconds (was 10)
@@ -1336,8 +1351,18 @@ impl AIService {
             }))?;
         }
         let prompt_tokens = estimate_token_count(&final_prompt);
+        log::debug!(
+            "🤖 prompt_messages input model={} text={:?}",
+            resolved,
+            truncate_for_log(&final_prompt)
+        );
         let text = prompt_rx.await??;
         let completion_tokens = estimate_token_count(&text);
+        log::debug!(
+            "🤖 prompt_messages output model={} text={:?}",
+            resolved,
+            truncate_for_log(&text)
+        );
 
         // Clean up the ephemeral task entry on the LLM thread.
         let (remove_tx, _) = oneshot::channel();
@@ -1487,6 +1512,17 @@ impl AIService {
             prompt_chars,
             prompt_tokens
         );
+        // LOGGING.md policy: "prompt/response bodies (truncated)" belong at
+        // debug. The start/done info lines above only carry char/token
+        // counts — this is the only place the actual text is ever logged
+        // (LlmRequestSent/LlmResponseReceived cover the interpretation
+        // engine's own event bus, but that's gated on emit_ctx and never
+        // reaches the `log` crate, so it doesn't show up under RUST_LOG=debug).
+        log::debug!(
+            "🤖 prompt input model={} text={:?}",
+            model_id,
+            truncate_for_log(&prompt)
+        );
         let started = std::time::Instant::now();
 
         // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
@@ -1533,6 +1569,11 @@ impl AIService {
             started.elapsed().as_millis(),
             prompt_tokens,
             completion_tokens
+        );
+        log::debug!(
+            "🤖 prompt output model={} text={:?}",
+            model_id,
+            truncate_for_log(&text)
         );
 
         // Bill via the shared host_rates helper. See prompt_messages.
