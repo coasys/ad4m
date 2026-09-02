@@ -1199,7 +1199,13 @@ impl SparqlStore {
         }
         let store = self.clone();
         let query = query_string.to_string();
-        let handle = tokio::task::spawn_blocking(move || store.query(&query));
+        // query_arbitrary, not query: this is the arbitrary-caller-supplied-
+        // SPARQL entry point (matches the non-cancellable sparql_query path
+        // one level up in perspective_instance.rs). `query()` re-encodes
+        // external ?target/?t bindings into AD4M's internal literal:*: wire
+        // format, which callers of an ad-hoc query string have no reason to
+        // expect (CodeRabbit review, PR #855).
+        let handle = tokio::task::spawn_blocking(move || store.query_arbitrary(&query));
 
         tokio::select! {
             biased;

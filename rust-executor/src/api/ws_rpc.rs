@@ -228,10 +228,17 @@ async fn handle_ws(
             // Re-check token revocation on every request so that
             // revokeToken() takes effect immediately for existing connections.
             if let Err(e) = check_token_revoked(&token_for_dispatch) {
-                let _ = tx_clone
-                    .send(json!({"id": id, "error": {"code": 401, "message": e}}).to_string());
+                // Remove the inflight entry BEFORE sending the terminal
+                // reply — same ordering as the normal-completion path
+                // below, and for the same reason: a `request.cancel`
+                // landing in the gap between send and remove would find
+                // the token, cancel it, and report `cancelled: true` for
+                // a request that already got its (401) answer.
                 let mut guard = inflight_clone.lock().await;
                 guard.remove(&id);
+                drop(guard);
+                let _ = tx_clone
+                    .send(json!({"id": id, "error": {"code": 401, "message": e}}).to_string());
                 return;
             }
             // Refresh last_seen on every RPC dispatch so long-lived
