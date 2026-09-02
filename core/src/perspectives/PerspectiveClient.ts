@@ -297,7 +297,7 @@ export class PerspectiveClient {
                     emitDebugEvents: observe.emitDebugEvents ?? false,
                 } : {}),
             },
-            RUN_INTERPRETATION_TIMEOUT_MS,
+            { timeoutMs: RUN_INTERPRETATION_TIMEOUT_MS },
         )
     }
 
@@ -347,7 +347,7 @@ export class PerspectiveClient {
                 observationId,
                 emitDebugEvents,
             },
-            RUN_INTERPRETATION_TIMEOUT_MS,
+            { timeoutMs: RUN_INTERPRETATION_TIMEOUT_MS },
         )
     }
 

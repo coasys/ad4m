@@ -3683,13 +3683,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_cancellable_token_can_be_cancelled_mid_flight() {
-        // Race a long-running query against a delayed cancellation.
-        // We can't deterministically force the SPARQL eval to be slow,
-        // but we can cancel *before* the spawn_blocking handle resolves
-        // by triggering the token in another task.  Because the select!
-        // is `biased`, the cancellation arm wins even if the handle also
-        // resolves in the same poll.
+    async fn query_cancellable_biased_select_prefers_cancel_over_ready_handle() {
+        // Honest framing (review nit, PR #855): this does NOT test true
+        // mid-flight cancellation — we can't deterministically force the
+        // SPARQL eval to be slow, so there's no way to land the cancel
+        // while `spawn_blocking` is actually still running without
+        // introducing timing-dependent flakiness.
+        //
+        // What this test does verify: cancelling before the handle is
+        // awaited, on a query with real work to do (50 links, not the
+        // trivial empty-store case the other pre-cancelled test uses),
+        // still takes the `cancel.cancelled()` arm of the `select!` and
+        // never touches the query result — i.e. the `biased` ordering
+        // holds even when the blocking handle would very plausibly have
+        // already resolved by the time we poll (a fast query over 50
+        // triples on a local RocksDB-backed store almost certainly has).
         let svc = new_service();
         // Insert a handful of links so the query has actual work to do.
         for i in 0..50 {

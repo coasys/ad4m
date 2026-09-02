@@ -354,6 +354,18 @@ export class ApiClient {
                         try {
                             const cancelId = nextId()
                             this._ignoredResponseIds.add(cancelId)
+                            // Safety-net eviction: if the executor's ack never
+                            // arrives (e.g. the socket drops right after we
+                            // send request.cancel), the normal cleanup path
+                            // (deleting the id when its response lands) never
+                            // fires and the entry would live in this set for
+                            // the lifetime of the client. Bound it instead —
+                            // DEFAULT_TIMEOUT_MS is already the ceiling every
+                            // other in-flight call uses, so an ack that hasn't
+                            // shown up by then isn't coming.
+                            setTimeout(() => {
+                                this._ignoredResponseIds.delete(cancelId)
+                            }, DEFAULT_TIMEOUT_MS)
                             this._ws.send(JSON.stringify({
                                 id: cancelId,
                                 type: 'request.cancel',
