@@ -138,15 +138,15 @@ fn clean_llm_json(raw: &str) -> String {
     // `trailing_comma_cleanup_preserves_commas_inside_strings` catches.
     let extracted = match (first_obj, first_arr) {
         (Some(o), Some(a)) if o < a => extract_first_json_value(candidate, '{')
-            .or_else(|| extract_bracketed(candidate, '{', '}'))
+            .or_else(|| extract_bracketed_salvageable(candidate, '{', '}'))
             .or_else(|| extract_first_json_value(candidate, '['))
-            .or_else(|| extract_bracketed(candidate, '[', ']')),
+            .or_else(|| extract_bracketed_salvageable(candidate, '[', ']')),
         (Some(_), None) => extract_first_json_value(candidate, '{')
-            .or_else(|| extract_bracketed(candidate, '{', '}')),
+            .or_else(|| extract_bracketed_salvageable(candidate, '{', '}')),
         _ => extract_first_json_value(candidate, '[')
-            .or_else(|| extract_bracketed(candidate, '[', ']'))
+            .or_else(|| extract_bracketed_salvageable(candidate, '[', ']'))
             .or_else(|| extract_first_json_value(candidate, '{'))
-            .or_else(|| extract_bracketed(candidate, '{', '}')),
+            .or_else(|| extract_bracketed_salvageable(candidate, '{', '}')),
     }
     .unwrap_or_else(|| candidate.to_string());
 
@@ -190,6 +190,22 @@ fn extract_bracketed(s: &str, open: char, close: char) -> Option<String> {
         return None;
     }
     Some(s[start..=end].to_string())
+}
+
+/// `extract_bracketed`, accepted only when the slice actually becomes valid
+/// JSON after the step-4 trailing-comma cleanup that will be applied to it.
+///
+/// Without this check the hand-rolled matcher short-circuits the fallback
+/// chain with a malformed candidate: prose like
+/// `OK, I'll extract {a couple of things}: [{"class":"X"}]` yields
+/// `{a couple of things}`, `Option::or_else` stops there, and the real
+/// payload after it is never tried. Validating first keeps the
+/// trailing-comma salvage (its whole reason to exist) while letting genuine
+/// prose brackets fall through to the other bracket kind.
+fn extract_bracketed_salvageable(s: &str, open: char, close: char) -> Option<String> {
+    let candidate = extract_bracketed(s, open, close)?;
+    serde_json::from_str::<serde_json::Value>(&strip_trailing_commas(&candidate)).ok()?;
+    Some(candidate)
 }
 
 /// Remove commas that appear immediately before `}` or `]` (with optional
@@ -286,6 +302,19 @@ mod tests {
         let out = parse_interpretation_response(raw).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn prose_braces_before_the_real_array_dont_swallow_the_payload() {
+        // The brace-prose appears BEFORE the array, so the '{' path is tried
+        // first. Neither serde nor the hand-rolled matcher can make valid
+        // JSON out of `{a couple of things}` — the fallback chain must keep
+        // going and land on the array.
+        let raw = r#"OK, I'll extract {a couple of things}: [{"class":"Task","title":"A"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class, "Task");
+        assert_eq!(prop_values(&out, "title"), vec!["A"]);
     }
 
     #[test]
