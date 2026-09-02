@@ -1088,20 +1088,20 @@ impl PerspectiveInstance {
                 if last_diff_time.unwrap().elapsed() >= Duration::from_secs(MAX_PENDING_SECONDS) {
                     if self.commit_pending_diffs().await.is_ok() {
                         last_diff_time = None;
-                        log::info!("Committed diffs after reaching 10s maximum wait time");
+                        log::debug!("💾 committed diffs after reaching 10s maximum wait time");
                     }
                 // 2. It's been > 1s since last new diff (burst is over)
                 } else if !self.has_new_diffs_in_last_second().await {
                     if self.commit_pending_diffs().await.is_ok() {
                         last_diff_time = None;
-                        log::info!("Committed diffs after 1s of inactivity");
+                        log::debug!("💾 committed diffs after 1s of inactivity");
                     }
                 // 3. We have collected more than 100 diffs
                 } else if ids.len() >= MAX_PENDING_DIFFS_COUNT
                     && self.commit_pending_diffs().await.is_ok()
                 {
                     last_diff_time = None;
-                    log::info!("Committed diffs after collecting 100");
+                    log::debug!("💾 committed diffs after collecting 100");
                 }
             }
         }
@@ -1133,7 +1133,7 @@ impl PerspectiveInstance {
             };
 
             if let Some(mut link_language) = link_language_clone {
-                log::info!("Committing {} pending diffs...", pending_ids.len());
+                log::debug!("💾 committing {} pending diffs...", pending_ids.len());
                 let commit_result = link_language.commit(pending_diffs).await;
                 match commit_result {
                     // Spec §5.2 splits perspective-commit (write) from
@@ -1151,7 +1151,7 @@ impl PerspectiveInstance {
                         })?;
                         // Reset immediate commits counter after successful commit
                         self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
-                        log::info!("Successfully committed pending diffs");
+                        log::debug!("✅ 💾 successfully committed pending diffs");
                         Ok(())
                     }
                     Err(e) => Err(e),
@@ -1432,7 +1432,7 @@ impl PerspectiveInstance {
                     log::warn!("LinkLanguage.commit returned an empty revision string; treating as success");
                     true
                 } else {
-                    log::info!("Committed to revision: {}", rev);
+                    log::debug!("💾 committed to revision: {}", rev);
                     true
                 }
             }
@@ -3015,8 +3015,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
+                log::debug!(
+                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
                 // Return empty result instead of error to allow SHACL-based SDNA to work
@@ -3051,8 +3051,8 @@ impl PerspectiveInstance {
                 .await
             }
             PrologMode::Disabled => {
-                log::warn!(
-                    "⚠️ Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
+                log::debug!(
+                    "📜 Prolog subscription query received but Prolog is DISABLED (query: {}), returning empty result",
                     query
                 );
                 // Return empty result instead of error to allow SHACL-based SDNA to work
@@ -3331,41 +3331,52 @@ impl PerspectiveInstance {
         self.sparql_store.query_arbitrary(&query)
     }
 
-    /// Execute a model query — the executor-side replacement for
-    /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
-    ///
-    /// If the perspective is joined to a neighbourhood and `class_name`'s
-    /// SHACL has not yet synced from a remote peer, waits up to
-    /// [`MODEL_QUERY_SHAPE_WAIT`] before erroring so cross-peer callers
-    /// can query classes registered by another peer without racing
-    /// p-diff-sync (see [`get_shape_or_wait`]).
-    /// Resolve each URI to the subject class it is an instance of.
+    /// Resolve each URI to every subject class it is an instance of, most
+    /// specific first.
     ///
     /// The missing counterpart of `is_subject_instance`, which answers the same
     /// question one class at a time. Callers wanting the class of an arbitrary
     /// URI had to loop over every registered class asking that yes/no question —
     /// one round trip per class, per URI. This answers a whole batch in two
-    /// queries: one over every class's flags, and at most one per flagless class
-    /// for whatever the flags did not settle.
+    /// queries.
+    ///
+    /// Membership is structural and therefore not exclusive — an instance
+    /// conforms to its parent classes too — so the answer is a list, ordered
+    /// most specific first. A caller that can only act on one takes the first.
     ///
     /// URIs that match no registered class are simply absent from the map.
-    pub fn subject_class_of(
+    pub fn subject_classes_of(
         &self,
         uris: &[String],
-    ) -> Result<std::collections::HashMap<String, String>, AnyError> {
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
         let resolver = self.shape_resolver();
-        super::subject_class_of::subject_class_of(&self.sparql_store, &resolver, uris)
+        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
+    }
+
+    /// Cancellation-aware async variant of [`Self::sparql_query`].
+    ///
+    /// Forwards to [`SparqlStore::query_cancellable`] — see that method
+    /// for the cancellation semantics (the eval is uncancellable on the
+    /// Oxigraph side, but the network reply + JSON serialisation are
+    /// short-circuited).
+    pub async fn sparql_query_cancellable(
+        &self,
+        query: String,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store.query_cancellable(&query, cancel).await
     }
 
     /// The ordering strategy declared for `(source, predicate)`, if any.
     ///
     /// Resolved by asking which class this source is an instance of and reading
-    /// that class's shape. Answering `None` — because the source is not a
+    /// that class's shape. Class membership is not exclusive, so the most
+    /// specific match is taken. Answering `None` — because the source is not a
     /// subject instance, or its class declares nothing — is the ordinary case
     /// and costs one classification.
     async fn ordering_strategy_for(&self, source: &str, predicate: &str) -> Option<String> {
-        let classes = self.subject_class_of(&[source.to_string()]).ok()?;
-        let class_name = classes.get(source)?;
+        let classes = self.subject_classes_of(&[source.to_string()]).ok()?;
+        let class_name = classes.get(source)?.first()?;
         let shape = self.get_shape(class_name).ok()?;
         shape
             .properties
@@ -3471,6 +3482,14 @@ impl PerspectiveInstance {
         Ok(())
     }
 
+    /// Execute a model query — the executor-side replacement for
+    /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
+    ///
+    /// If the perspective is joined to a neighbourhood and `class_name`'s
+    /// SHACL has not yet synced from a remote peer, waits up to
+    /// [`MODEL_QUERY_SHAPE_WAIT`] before erroring so cross-peer callers
+    /// can query classes registered by another peer without racing
+    /// p-diff-sync (see [`get_shape_or_wait`]).
     pub async fn model_query(
         &self,
         class_name: &str,
@@ -3920,7 +3939,8 @@ impl PerspectiveInstance {
                         .body(message.clone())
                         .send()
                         .await;
-                    log::info!("Notification webhook response: {:?}", res);
+                    // Response body can be large / contain PII — debug only.
+                    log::debug!("🪝 notification webhook response: {:?}", res);
                 }
             }
         }
@@ -5482,7 +5502,7 @@ impl PerspectiveInstance {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("Model subscription query failed: {}", e);
+                            log::error!("❌ 🔗 🧠 model-based subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -5490,7 +5510,7 @@ impl PerspectiveInstance {
                     match self_clone.sparql_query(query_string) {
                         Ok(r) => r,
                         Err(e) => {
-                            log::error!("SPARQL subscription query failed: {}", e);
+                            log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -5501,7 +5521,7 @@ impl PerspectiveInstance {
                     {
                         Ok(result) => prolog_resolution_to_string(result),
                         Err(e) => {
-                            log::error!("Prolog subscription query failed: {}", e);
+                            log::error!("❌ 🔗 📜 Prolog subscription query failed: {}", e);
                             return None;
                         }
                     }
@@ -5526,7 +5546,7 @@ impl PerspectiveInstance {
                         let old_len = stored_query.last_result.len();
                         let new_len = result_string.len();
                         log::debug!(
-                            "📤 Subscription {} result changed (old_len={}, new_len={})",
+                            "📤 🔗 subscription {} result changed (old_len={}, new_len={})",
                             id,
                             old_len,
                             new_len
@@ -5535,7 +5555,7 @@ impl PerspectiveInstance {
                         updates_to_send.push((id, result_string));
                     } else {
                         log::trace!(
-                            "📭 Subscription {} result unchanged (len={})",
+                            "📭 🔗 subscription {} result unchanged (len={})",
                             id,
                             result_string.len()
                         );
@@ -5616,7 +5636,7 @@ impl PerspectiveInstance {
                 );
 
                 log::debug!(
-                    "🔔 Subscription check triggered for perspective {} with changed_preds: {:?}",
+                    "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
                     self.uuid,
                     changed_preds
                 );
@@ -5650,7 +5670,7 @@ impl PerspectiveInstance {
 
                 if !removed_queries.is_empty() {
                     log::info!(
-                        "🧹 Cleaned up {} timed-out subscription(s) for perspective {}",
+                        "🧹 🔗 cleaned up {} timed-out subscription(s) for perspective {}",
                         removed_queries.len(),
                         perspective_uuid
                     );
@@ -5674,8 +5694,11 @@ impl PerspectiveInstance {
                 let queries = self.subscribed_queries.lock().await;
 
                 if !queries.is_empty() {
-                    log::info!(
-                        "📊 Prolog subscriptions [{}]: {} active",
+                    // Heartbeat only — every ~60s per perspective. Kept at
+                    // debug to avoid steady-state noise; a subscription
+                    // register/dispose event is emitted at info instead.
+                    log::debug!(
+                        "📊 🔗 subscriptions [{}]: {} active",
                         perspective_uuid,
                         queries.len()
                     );
@@ -5685,7 +5708,7 @@ impl PerspectiveInstance {
                         } else {
                             query.query.clone()
                         };
-                        log::info!("   - [{}]: {}", id, query_preview);
+                        log::debug!("   - 🔗 [{}]: {}", id, query_preview);
                     }
                 }
             }
@@ -7542,5 +7565,40 @@ mod tests {
                 "ascending top-N should yield non-decreasing timestamps"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn sparql_query_cancellable_round_trip() {
+        let mut perspective = setup().await;
+        let link = create_link();
+        perspective
+            .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+            .await
+            .unwrap();
+
+        // Uncancelled — should return JSON with at least the inserted triple.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = perspective
+            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .await
+            .expect("non-cancelled query should succeed");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(!rows.is_empty(), "expected at least one row");
+    }
+
+    #[tokio::test]
+    async fn sparql_query_cancellable_pre_cancelled_errors() {
+        let perspective = setup().await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let err = perspective
+            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .await
+            .expect_err("pre-cancelled query should error");
+        assert!(
+            err.to_string().contains("query cancelled"),
+            "expected cancellation marker in error, got: {}",
+            err
+        );
     }
 }

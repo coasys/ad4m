@@ -18,8 +18,8 @@
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    run_interpretation_with_strategy_and_model, DedupStrategy, InterpretationRunCursor,
-    TranscriptTurn,
+    run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
+    DedupStrategy, InterpretationRunCursor, TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::model_query::types::Scope;
@@ -477,6 +477,7 @@ pub async fn run_one_pass(
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
     let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
+    let pass_started = std::time::Instant::now();
     /*
        Derived once, up here, rather than at the claim below where it used to be.
 
@@ -532,7 +533,7 @@ pub async fn run_one_pass(
     //    author that is online but never actually claims.
     if escalate_past_election {
         log::info!(
-            "auto_processor `{}`: escalating past election (elected author stalled > claim_ttl_ms); claiming anyway",
+            "⚙️ auto_processor `{}`: escalating past election (elected author stalled > claim_ttl_ms); claiming anyway",
             cfg.processor_id
         );
     } else {
@@ -558,18 +559,19 @@ pub async fn run_one_pass(
                     match elect_author(&authors, &online, &me) {
                         AuthorElection::Me => { /* elected — fall through to claim */ }
                         AuthorElection::Other(winner) => {
-                            log::info!(
-                                "auto_processor `{}`: standing down — online author `{winner}` \
-                             precedes us in message order",
+                            // Steady-state passive branch — debug per Nico's
+                            // level policy (fires every tick while another
+                            // peer is elected).
+                            log::debug!(
+                                "⚙️ auto_processor `{}`: standing down — online author `{winner}` precedes us in message order",
                                 cfg.processor_id
                             );
                             signal!(AutoProcessorStep::NotCandidate, detail = winner.clone());
                             return Ok(PassOutcome::NotCandidate { winner });
                         }
                         AuthorElection::NoneOnline => {
-                            log::info!(
-                                "auto_processor `{}`: no batch author online — waiting for a \
-                             participant to return before processing",
+                            log::debug!(
+                                "⚙️ auto_processor `{}`: no batch author online — waiting for a participant to return before processing",
                                 cfg.processor_id
                             );
                             signal!(AutoProcessorStep::AwaitingAuthor);
@@ -601,13 +603,24 @@ pub async fn run_one_pass(
     )
     .await?;
     if let ClaimOutcome::BackedOff { holder } = claim {
-        log::info!(
-            "auto_processor `{}`: backed off — holder `{holder}` has the claim",
+        // Steady-state passive branch — debug per Nico's level policy
+        // (fires every tick while another peer holds the claim).
+        log::debug!(
+            "⚙️ auto_processor `{}`: backed off — holder `{holder}` has the claim",
             cfg.processor_id
         );
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
         return Ok(PassOutcome::BackedOff { holder });
     }
+    // Signal-based Claimed (and the neighbourhood-state Claimed row below)
+    // are DID- / perspective-scoped events with their own Abandoned /
+    // Finished companions on every exit path, so they can fire here right
+    // after `try_claim` succeeds. The lifecycle **info log** (`picked task`
+    // ↔ `completed`) is deliberately deferred until after the no-op guards
+    // (ShapesMissing / EmptyTranscript) so every emitted `picked task` has
+    // a matching `✅ completed` or `❌ abandoned` companion — see the
+    // one-to-one pairing note in rust-executor/LOGGING.md and CodeRabbit
+    // review on PR #942 (round 2, watcher.rs claimed-pass lifecycle).
     signal!(AutoProcessorStep::Claimed);
     // Neighbourhood-state (Nico 2026-08-19): a small perspective-scoped
     // event so a UI can render "someone is auto-processing here". Distinct
@@ -662,8 +675,9 @@ pub async fn run_one_pass(
     // 3. Interpret the drained batch — no second SPARQL.
     signal!(AutoProcessorStep::GatheringTranscript);
     if turns.is_empty() {
-        log::info!(
-            "auto_processor `{}`: drained batch is empty; nothing to interpret",
+        // Steady-state passive branch — debug per Nico's level policy.
+        log::debug!(
+            "⚙️ auto_processor `{}`: drained batch is empty; nothing to interpret",
             cfg.processor_id
         );
         signal!(AutoProcessorStep::EmptyTranscript);
@@ -677,6 +691,42 @@ pub async fn run_one_pass(
         .await;
         return Ok(PassOutcome::EmptyTranscript);
     }
+
+    // Past both no-op guards: from here on the pass is committed to a
+    // real interpretation attempt, so emit the lifecycle `picked task`
+    // info line. Every path out from here MUST emit a terminal companion:
+    // `✅ … completed` on the happy path (below) or `❌ … abandoned` on
+    // any fallible-op failure between here and the completion line
+    // (wrapped via `abandon_on_err!` so `?` still bubbles the error up).
+    log::info!(
+        "⚙️ auto-processor picked task processor={} items={} perspective={}",
+        cfg.processor_id,
+        item_ids.len(),
+        uuid
+    );
+
+    // Companion log for post-claim failures — pairs every `picked task`
+    // with an `❌ abandoned` when a fallible operation returns Err.
+    // Matches the AI/interpretation failure-companion pattern established
+    // in the round-2 refactor.
+    macro_rules! abandon_on_err {
+        ($expr:expr) => {
+            match $expr {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!(
+                        "❌ ⚙️ auto-processor task abandoned processor={} items={} perspective={} reason={:#}",
+                        cfg.processor_id,
+                        item_ids.len(),
+                        uuid,
+                        e
+                    );
+                    return Err(e.into());
+                }
+            }
+        };
+    }
+
     let transcript: Vec<TranscriptTurn> = turns.iter().map(|t| t.as_transcript()).collect();
 
     // 4. Interpret.
@@ -699,15 +749,31 @@ pub async fn run_one_pass(
     // into our scope. Skipped entirely when mint_scope is absent — nothing
     // consumes the snapshot in that path.
     let pre_existing_uris: HashSet<String> = if cfg.mint_scope.is_some() {
-        crate::perspectives::interpretation::existing_instance_context(perspective, &shapes, None)
-            .await?
-            .into_values()
-            .flat_map(|instances| instances.into_iter().map(|i| i.id))
-            .collect()
+        abandon_on_err!(
+            crate::perspectives::interpretation::existing_instance_context(
+                perspective,
+                &shapes,
+                None,
+            )
+            .await
+        )
+        .into_values()
+        .flat_map(|instances| instances.into_iter().map(|i| i.id))
+        .collect()
     } else {
         HashSet::new()
     };
 
+    let cursor = InterpretationRunCursor {
+        processor: super::config::processor_node(&cfg.processor_id),
+        sources: item_ids.clone(),
+    };
+    // Build the emit context once so both fork branches can share it.
+    // `cfg.emit_debug_events == true` enables the mid-pass `LlmRequestSent`
+    // / `LlmResponseReceived` events (dev PR #903) — for the classic path
+    // via `run_interpretation_with_strategy_and_model`, for the harness
+    // path we pass this into `run_with_tools` for per-tool-call events
+    // in a follow-up commit on this branch (Nico 2026-08-25).
     let emit_ctx = cfg
         .emit_debug_events
         .then(|| super::events::InterpretationEmitContext {
@@ -717,25 +783,82 @@ pub async fn run_one_pass(
             item_ids: item_ids.clone(),
             batch_key: batch_key_hex.clone(),
         });
-    let outcome = run_interpretation_with_strategy_and_model(
-        perspective,
-        &shapes,
-        &transcript,
-        &base_prefix,
-        context,
-        &dedup,
-        None,
-        cfg.existing_scope.as_ref(),
-        Some(&InterpretationRunCursor {
-            processor: super::config::processor_node(&cfg.processor_id),
-            sources: item_ids.clone(),
-        }),
-        cfg.emit_debug_events,
-        emit_ctx.as_ref(),
-    )
-    .await?;
-    let bases = outcome.bases;
-    let debug = outcome.debug;
+
+    // Fork: harness-dispatched pass when the operator opted in via
+    // `AutoProcessorConfig.max_tool_calls > 0`; otherwise the classic
+    // single-shot LLM+parse+plan pipeline. The two paths converge on the
+    // same overlay-writing gate (`apply_with_overlay`), so downstream
+    // provenance + processed signalling is identical.
+    //
+    // Debug carriage differs by path today:
+    // * classic → `InterpretationOutcome { bases, debug }` — `debug`
+    //   carries the raw prompt/response for persistence on the
+    //   InterpretationRun node.
+    // * harness → `Vec<String>` bases only. The harness path emits
+    //   per-tool-call events via its own logging surface (see harness/mod.rs
+    //   `harness: round=` prints); persisting the full transcript on
+    //   InterpretationRun is a follow-up (there's no single prompt/response
+    //   to snapshot — it's a multi-turn loop).
+    let (bases, debug) = match cfg.max_tool_calls {
+        Some(n) if n > 0 => {
+            let bases = abandon_on_err!(
+                run_interpretation_with_harness_and_model(
+                    perspective,
+                    &shapes,
+                    &transcript,
+                    &base_prefix,
+                    context,
+                    None,
+                    cfg.existing_scope.as_ref(),
+                    Some(&cursor),
+                    n,
+                    // Auto-processor is an internal caller — no per-pass user
+                    // token to bill. MCP admin credential (if configured) is
+                    // read from env inside the harness path.
+                    None,
+                    // `emit_debug_events` gates the same event stream the
+                    // classic path uses; `None` when disabled means the
+                    // per-tool-call events also stay silent.
+                    emit_ctx.as_ref(),
+                    // Dedup on drain: the auto-processor runs indefinitely, so
+                    // re-proposed instances must collapse to updates (not
+                    // unbounded duplicate creates). James Weir PR #911 review.
+                    true,
+                    // No per-pass credit gate on the auto-processor path:
+                    // the watcher runs as an internal service (no user
+                    // session to bill against) and each completion still
+                    // fire-and-forgets bill_prompt_if_authed via AIService.
+                    None,
+                )
+                .await
+            );
+            (bases, None)
+        }
+        _ => {
+            let outcome = abandon_on_err!(
+                run_interpretation_with_strategy_and_model(
+                    perspective,
+                    &shapes,
+                    &transcript,
+                    &base_prefix,
+                    context,
+                    &dedup,
+                    None,
+                    // Existing-instance scope: constrains dedup to a subtree
+                    // when the processor config specifies one, e.g. "existing
+                    // Task instances that live under project X." `None` keeps
+                    // the whole-perspective existing set — the pre-scope-config
+                    // behaviour.
+                    cfg.existing_scope.as_ref(),
+                    Some(&cursor),
+                    cfg.emit_debug_events,
+                    emit_ctx.as_ref(),
+                )
+                .await
+            );
+            (outcome.bases, outcome.debug)
+        }
+    };
 
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the
@@ -750,14 +873,16 @@ pub async fn run_one_pass(
     // mint-scope write succeeds, so observers never see a false "done" state.
     if let Some(mint_scope) = &cfg.mint_scope {
         let created = partition_created(&bases, &pre_existing_uris);
-        write_mint_scope_links(
-            perspective,
-            mint_scope,
-            &created,
-            context,
-            &cfg.processor_id,
-        )
-        .await?;
+        abandon_on_err!(
+            write_mint_scope_links(
+                perspective,
+                mint_scope,
+                &created,
+                context,
+                &cfg.processor_id,
+            )
+            .await
+        );
     }
     // Emit the `Processed` event. Carries the final `bases` list — the
     // LLM prompt + response now travel via the mid-pass `LlmRequestSent`
@@ -785,6 +910,13 @@ pub async fn run_one_pass(
     ))
     .await;
 
+    log::info!(
+        "✅ ⚙️ auto-processor task completed processor={} items={} bases={} latency={}ms",
+        cfg.processor_id,
+        item_ids.len(),
+        bases.len(),
+        pass_started.elapsed().as_millis()
+    );
     Ok(PassOutcome::Won { bases })
 }
 
@@ -871,6 +1003,7 @@ mod tests {
             source_window_ms: None,
             existing_scope: None,
             mint_scope: None,
+            max_tool_calls: None,
             emit_debug_events: false,
         }
     }

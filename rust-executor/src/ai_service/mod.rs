@@ -27,6 +27,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::sleep;
 
 mod error;
+pub mod harness;
 use log::error;
 
 pub type Result<T> = std::result::Result<T, AnyError>;
@@ -63,6 +64,21 @@ pub struct EmbedResult {
 pub(crate) fn estimate_token_count(text: &str) -> usize {
     let chars = text.chars().count();
     (chars + 3) / 4
+}
+
+/// Truncate LLM prompt/response text for debug logging. LOGGING.md: debug
+/// level carries "prompt/response bodies (truncated)" — long enough to
+/// actually debug what the model was asked / returned, bounded so a huge
+/// interpretation prompt doesn't flood the log file. Char-boundary safe.
+const LOG_TEXT_PREVIEW_CHARS: usize = 2000;
+
+pub(crate) fn truncate_for_log(text: &str) -> String {
+    let total = text.chars().count();
+    if total <= LOG_TEXT_PREVIEW_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(LOG_TEXT_PREVIEW_CHARS).collect();
+    format!("{head}… [+{} more chars]", total - LOG_TEXT_PREVIEW_CHARS)
 }
 
 static WHISPER_MODEL: WhisperSource = WhisperSource::Small;
@@ -127,10 +143,13 @@ struct LLMTaskSpawnRequest {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
 struct LLMTaskPromptRequest {
     pub task_id: String,
     pub prompt: String,
+    /// Optional decoding constraint (a tool-call grammar).  `None` ⇒ normal
+    /// unconstrained generation, byte-for-byte the pre-tools behaviour.
+    /// Ignored on the remote path (upstream tool forwarding is a follow-up).
+    pub constraint: Option<ArcParser<()>>,
     pub result_sender: oneshot::Sender<Result<String>>,
 }
 
@@ -161,12 +180,36 @@ struct LLMTaskShutdownRequest {
 /// `done_sender` fires once the model has emitted its final token (or
 /// errored) and carries `PromptResult` for the closing chunk's `usage`.
 #[allow(dead_code)]
-#[derive(Debug)]
 struct LLMTaskPromptStreamRequest {
     pub task_id: String,
     pub prompt: String,
+    /// See [`LLMTaskPromptRequest::constraint`].
+    pub constraint: Option<ArcParser<()>>,
     pub token_sender: mpsc::UnboundedSender<String>,
     pub done_sender: oneshot::Sender<Result<PromptResult>>,
+}
+
+// Manual `Debug` — these structs hold a non-`Debug` `ArcParser` constraint.
+// `LLMTaskRequest` must stay `Debug` so that `SendError<LLMTaskRequest>`
+// converts into `anyhow::Error` via `?` at the channel send sites.
+impl std::fmt::Debug for LLMTaskPromptRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LLMTaskPromptRequest")
+            .field("task_id", &self.task_id)
+            .field("prompt", &self.prompt)
+            .field("constrained", &self.constraint.is_some())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for LLMTaskPromptStreamRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LLMTaskPromptStreamRequest")
+            .field("task_id", &self.task_id)
+            .field("prompt", &self.prompt)
+            .field("constrained", &self.constraint.is_some())
+            .finish()
+    }
 }
 
 #[allow(dead_code)]
@@ -477,16 +520,14 @@ impl AIService {
             let non_accelerated_message =
                 "Could not get accelerated CUDA device. Defaulting to CPU.";
             Device::new_cuda(0).unwrap_or_else(|e| {
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else if cfg!(feature = "metal") {
             Device::new_metal(0).unwrap_or_else(|e| {
                 let non_accelerated_message =
                     "Could not get accelerated Metal device. Defaulting to CPU.";
-                println!("{} {:?}", non_accelerated_message, e);
-                error!("{} {:?}", non_accelerated_message, e);
+                log::warn!("⚠️ 🤖 {} {:?}", non_accelerated_message, e);
                 Device::Cpu
             })
         } else {
@@ -863,7 +904,28 @@ impl AIService {
                                         ));
 
                                         let result = rt.block_on(async {
-                                            task.run(prompt_request.prompt.clone()).all_text().await
+                                            match prompt_request.constraint.clone() {
+                                                // Tool-call grammar: constrain decoding and
+                                                // accumulate the (guaranteed on-grammar) text.
+                                                Some(parser) => {
+                                                    use futures::StreamExt;
+                                                    let mut stream = Box::pin(
+                                                        task.run(prompt_request.prompt.clone())
+                                                            .with_constraints(parser),
+                                                    );
+                                                    let mut acc = String::new();
+                                                    while let Some(token) = stream.next().await {
+                                                        acc.push_str(&token);
+                                                    }
+                                                    acc
+                                                }
+                                                // No tools: unchanged unconstrained path.
+                                                None => {
+                                                    task.run(prompt_request.prompt.clone())
+                                                        .all_text()
+                                                        .await
+                                                }
+                                            }
                                         });
 
                                         rt.block_on(publish_model_status(
@@ -985,14 +1047,33 @@ impl AIService {
                                             // implements `Stream<Item=String>`;
                                             // polling it yields one token
                                             // chunk at a time.
-                                            let mut stream =
-                                                Box::pin(task.run(prompt_clone.clone()));
                                             let mut accumulated = String::new();
-                                            while let Some(token) = stream.next().await {
-                                                accumulated.push_str(&token);
-                                                if token_sender.send(token).is_err() {
-                                                    // consumer dropped — stop generating
-                                                    break;
+                                            match stream_request.constraint.clone() {
+                                                // Tool-call grammar: constrained streaming.
+                                                Some(parser) => {
+                                                    let mut stream = Box::pin(
+                                                        task.run(prompt_clone.clone())
+                                                            .with_constraints(parser),
+                                                    );
+                                                    while let Some(token) = stream.next().await {
+                                                        accumulated.push_str(&token);
+                                                        if token_sender.send(token).is_err() {
+                                                            // consumer dropped — stop generating
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                // No tools: unchanged unconstrained streaming.
+                                                None => {
+                                                    let mut stream =
+                                                        Box::pin(task.run(prompt_clone.clone()));
+                                                    while let Some(token) = stream.next().await {
+                                                        accumulated.push_str(&token);
+                                                        if token_sender.send(token).is_err() {
+                                                            // consumer dropped — stop generating
+                                                            break;
+                                                        }
+                                                    }
                                                 }
                                             }
                                             accumulated
@@ -1234,6 +1315,7 @@ impl AIService {
         model_id: String,
         messages: Vec<(String, String)>,
         auth_token: Option<String>,
+        constraint: Option<ArcParser<()>>,
     ) -> Result<PromptResult> {
         let resolved = Self::replace_model_variables(&model_id)?;
         let (task, final_prompt) = Self::build_ephemeral_task(&resolved, messages);
@@ -1264,12 +1346,23 @@ impl AIService {
             sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
                 task_id: task_id.clone(),
                 prompt: final_prompt.clone(),
+                constraint,
                 result_sender: prompt_tx,
             }))?;
         }
         let prompt_tokens = estimate_token_count(&final_prompt);
+        log::debug!(
+            "🤖 prompt_messages input model={} text={:?}",
+            resolved,
+            truncate_for_log(&final_prompt)
+        );
         let text = prompt_rx.await??;
         let completion_tokens = estimate_token_count(&text);
+        log::debug!(
+            "🤖 prompt_messages output model={} text={:?}",
+            resolved,
+            truncate_for_log(&text)
+        );
 
         // Clean up the ephemeral task entry on the LLM thread.
         let (remove_tx, _) = oneshot::channel();
@@ -1305,11 +1398,17 @@ impl AIService {
     /// Streaming variant of [`Self::prompt_messages`].  Returns a token
     /// stream + a oneshot for the final [`PromptResult`] (carries the
     /// full text + token counts for the closing SSE event).
+    ///
+    /// Billing happens when the stream completes: the worker's final
+    /// result is billed (on success only, matching
+    /// [`Self::prompt_messages`]) in a forwarder task before it reaches
+    /// the caller's `done_rx`.
     pub async fn prompt_messages_stream(
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
         auth_token: Option<String>,
+        constraint: Option<ArcParser<()>>,
     ) -> Result<(
         mpsc::UnboundedReceiver<String>,
         oneshot::Receiver<Result<PromptResult>>,
@@ -1332,6 +1431,10 @@ impl AIService {
         spawn_rx.await??;
 
         let (token_tx, token_rx) = mpsc::unbounded_channel::<String>();
+        // worker -> forwarder -> caller: the billing hook runs between the
+        // worker's final result and the caller's done_rx, so stream:true
+        // requests are charged like the non-stream path (success only).
+        let (worker_done_tx, worker_done_rx) = oneshot::channel::<Result<PromptResult>>();
         let (done_tx, done_rx) = oneshot::channel::<Result<PromptResult>>();
         {
             let llm_channel = self.llm_channel.lock().await;
@@ -1341,10 +1444,23 @@ impl AIService {
             sender.send(LLMTaskRequest::PromptStream(LLMTaskPromptStreamRequest {
                 task_id: task_id.clone(),
                 prompt: final_prompt,
+                constraint,
                 token_sender: token_tx,
-                done_sender: done_tx,
+                done_sender: worker_done_tx,
             }))?;
         }
+
+        let billing_model_id = resolved.clone();
+        tokio::spawn(async move {
+            // The worker always sends Ok/Err; the Err arm only covers a
+            // dropped sender (worker panic).
+            let result = match worker_done_rx.await {
+                Ok(inner) => inner,
+                Err(_) => Err(anyhow!("LLM stream ended without a final result")),
+            };
+            Self::bill_and_forward_stream_result(auth_token, &billing_model_id, result, done_tx)
+                .await;
+        });
 
         // Schedule a Remove for after the prompt completes — best-effort
         // background cleanup so the caller doesn't have to await it.
@@ -1389,23 +1505,76 @@ impl AIService {
         let model_id = Self::replace_model_variables(&task.model_id)?;
 
         let prompt_tokens = estimate_token_count(&prompt);
+        let prompt_chars = prompt.chars().count();
+        log::info!(
+            "🤖 prompt start model={} chars={} tokens_in={}",
+            model_id,
+            prompt_chars,
+            prompt_tokens
+        );
+        // LOGGING.md policy: "prompt/response bodies (truncated)" belong at
+        // debug. The start/done info lines above only carry char/token
+        // counts — this is the only place the actual text is ever logged
+        // (LlmRequestSent/LlmResponseReceived cover the interpretation
+        // engine's own event bus, but that's gated on emit_ctx and never
+        // reaches the `log` crate, so it doesn't show up under RUST_LOG=debug).
+        log::debug!(
+            "🤖 prompt input model={} text={:?}",
+            model_id,
+            truncate_for_log(&prompt)
+        );
+        let started = std::time::Instant::now();
 
-        let llm_channel = self.llm_channel.lock().await;
-        if let Some(sender) = llm_channel.get(&model_id) {
-            sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
-                task_id,
-                prompt,
-                result_sender,
-            }))?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "Model '{}' not found in LLM channel",
-                model_id
-            ));
+        // Symmetry rule (see rust-executor/LOGGING.md): every `start` info
+        // line gets exactly one companion — either `done` on success or a
+        // `failed` line on error. Wrap the fallible section so we can log
+        // the failure before propagating.
+        let text_result: Result<String> = async {
+            let llm_channel = self.llm_channel.lock().await;
+            if let Some(sender) = llm_channel.get(&model_id) {
+                sender.send(LLMTaskRequest::Prompt(LLMTaskPromptRequest {
+                    task_id,
+                    prompt,
+                    result_sender,
+                    constraint: None,
+                }))?;
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found in LLM channel",
+                    model_id
+                ));
+            }
+            drop(llm_channel);
+            Ok(rx.await??)
         }
+        .await;
 
-        let text = rx.await??;
+        let text = match text_result {
+            Ok(t) => t,
+            Err(e) => {
+                log::error!(
+                    "❌ 🤖 prompt failed model={} latency={}ms tokens_in={} err={}",
+                    model_id,
+                    started.elapsed().as_millis(),
+                    prompt_tokens,
+                    e
+                );
+                return Err(e);
+            }
+        };
         let completion_tokens = estimate_token_count(&text);
+        log::info!(
+            "✅ 🤖 prompt done model={} latency={}ms tokens_in={} tokens_out={}",
+            model_id,
+            started.elapsed().as_millis(),
+            prompt_tokens,
+            completion_tokens
+        );
+        log::debug!(
+            "🤖 prompt output model={} text={:?}",
+            model_id,
+            truncate_for_log(&text)
+        );
 
         // Bill via the shared host_rates helper. See prompt_messages.
         Self::bill_prompt_if_authed(
@@ -1421,6 +1590,30 @@ impl AIService {
             completion_tokens,
             model_id,
         })
+    }
+
+    /// Bill a completed stream result (on success only, matching
+    /// [`Self::prompt_messages`]) and relay it to the caller's oneshot.
+    ///
+    /// Runs inside the forwarder spawned by
+    /// [`Self::prompt_messages_stream`]; exposed as an associated function
+    /// so the streaming billing behaviour is unit-testable without a live
+    /// LLM channel.
+    pub(crate) async fn bill_and_forward_stream_result(
+        auth_token: Option<String>,
+        model_id: &str,
+        result: Result<PromptResult>,
+        done_tx: oneshot::Sender<Result<PromptResult>>,
+    ) {
+        if let Ok(pr) = &result {
+            Self::bill_prompt_if_authed(
+                auth_token.as_deref(),
+                model_id,
+                pr.prompt_tokens,
+                pr.completion_tokens,
+            );
+        }
+        let _ = done_tx.send(result);
     }
 
     /// Shared post-compute billing hook for prompt paths.
@@ -1534,6 +1727,18 @@ impl AIService {
         auth_token: Option<String>,
     ) -> Result<EmbedResult> {
         let token_count = estimate_token_count(&text);
+        let text_chars = text.chars().count();
+        // Per-call embed lines are debug: both real callers (dedup +
+        // openai_compat/embeddings) loop one embed() per input, so a
+        // batch of N would double N info lines. Batch-level info is
+        // emitted by the caller. See rust-executor/LOGGING.md.
+        log::debug!(
+            "🤖 embed start model={} chars={} tokens_in={}",
+            model_id,
+            text_chars,
+            token_count
+        );
+        let started = std::time::Instant::now();
         let (result_sender, rx) = oneshot::channel();
         let embedding_channel = self.embedding_channel.lock().await;
         if let Some(sender) = embedding_channel.get(&model_id) {
@@ -1550,6 +1755,13 @@ impl AIService {
         }
 
         let embeddings = rx.await??;
+        log::debug!(
+            "✅ 🤖 embed done model={} latency={}ms tokens_in={} dims={}",
+            model_id,
+            started.elapsed().as_millis(),
+            token_count,
+            embeddings.len()
+        );
 
         // Bill via the shared host_rates helper.
         Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count);
@@ -1757,16 +1969,16 @@ impl AIService {
                             };
 
                             if speech_ratio < 0.33 {
-                                log::info!(
-                                    "VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
+                                log::trace!(
+                                    "🤖 VAD filtered non-speech audio for stream {} (speech_ratio={:.2})",
                                     stream_id_clone,
                                     speech_ratio
                                 );
                                 continue;
                             }
 
-                            log::info!(
-                                "VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
+                            log::trace!(
+                                "🤖 VAD passed audio for stream {} ({} samples, speech_ratio={:.2})",
                                 stream_id_clone,
                                 audio_chunk.len(),
                                 speech_ratio
@@ -1777,11 +1989,17 @@ impl AIService {
                                 Ok(mut segments) => {
                                     while let Some(segment) = segments.next().await {
                             let text = segment.text().to_string();
-                            log::info!(
-                                "Transcription text for stream {}: {:?}",
-                                stream_id_clone,
-                                text
-                            );
+                            {
+                                let preview: String = text.chars().take(40).collect();
+                                let ellipsis = if text.chars().count() > 40 { "…" } else { "" };
+                                log::debug!(
+                                    "🤖 transcription segment stream={} chars={} preview={:?}{}",
+                                    stream_id_clone,
+                                    text.chars().count(),
+                                    preview,
+                                    ellipsis
+                                );
+                            }
 
                             // Bill for transcribed words
                             let word_count = text.split_whitespace().count();

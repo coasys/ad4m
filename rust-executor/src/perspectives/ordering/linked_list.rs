@@ -33,6 +33,26 @@ impl Default for LinkedListStrategy {
     }
 }
 
+/// Rank two entries for the same item.
+///
+/// `pid` decides it, and `after` is the tiebreak that makes the comparison a
+/// **total** order. A pid is `{timestamp}_{seq}_{did}`, so two agents can never
+/// mint the same one — but one agent can: `seq` restarts at zero on every call,
+/// so two separate saves landing in the same millisecond produce equal pids. On
+/// a `>`-only comparison equal pids are resolved by whichever entry the loop
+/// reaches first, i.e. by link arrival order, and peers do not share that. Two
+/// peers would seat the same item differently and stay that way.
+///
+/// Which of the two wins is arbitrary — equal pids carry no information about
+/// which came first — but *every peer choosing the same one* is the invariant
+/// that matters, and it is the one a pid alone does not give.
+fn resolution_key(entry: &OrderingEntry) -> (&str, &str) {
+    (
+        entry.pid.as_str(),
+        entry.after.as_deref().unwrap_or(LIST_HEAD),
+    )
+}
+
 /// Keep one entry per item — the highest `pid` wins.
 ///
 /// This is what resolves a concurrent move: two agents each add an entry for the
@@ -44,7 +64,7 @@ fn latest_per_item(ordering: &[OrderingEntry]) -> Vec<&OrderingEntry> {
         winners
             .entry(entry.item.as_str())
             .and_modify(|best| {
-                if entry.pid > best.pid {
+                if resolution_key(entry) > resolution_key(best) {
                     *best = entry;
                 }
             })
@@ -72,9 +92,14 @@ impl OrderingStrategy for LinkedListStrategy {
             after_map.entry(key).or_default().push(entry);
         }
         // Concurrent inserts at one predecessor are a fork; higher pid first, so
-        // every peer linearises it the same way.
+        // every peer linearises it the same way. `item` breaks a pid tie, which
+        // makes this sort total on its own rather than leaning on
+        // `latest_per_item` having already sorted its output by item — that
+        // holds today, but it is a guarantee established two functions away,
+        // and a tie falling through to a stable sort would resolve by input
+        // order, which here is link arrival order.
         for followers in after_map.values_mut() {
-            followers.sort_by(|a, b| b.pid.cmp(&a.pid));
+            followers.sort_by(|a, b| b.pid.cmp(&a.pid).then_with(|| b.item.cmp(&a.item)));
         }
 
         let mut out: Vec<String> = Vec::new();
@@ -158,19 +183,38 @@ impl OrderingStrategy for LinkedListStrategy {
         // What the order *would* be after this save if no new entry were
         // written: the existing entries, read against the membership the save
         // is establishing. Items being added have no link timestamp yet, so
-        // they sort to the tail — which is where an unpositioned item goes.
+        // they are given the one their links are about to get, which sorts them
+        // to the tail — where an unpositioned item goes.
+        //
+        // Two things about that stand-in matter, because this projection is
+        // what decides whether an entry can be *skipped*, and a projection that
+        // errs optimistically ships a wrong order in silence.
+        //
+        // It is in the link format. `reconstruct` orders the unpositioned tail
+        // by string comparison and links carry RFC3339 milliseconds, so a
+        // zero-padded number sorts before every existing member ('0' < '2')
+        // rather than after them — projecting a new item at the head of the
+        // tail instead of the end of it.
+        //
+        // And every new item gets the *same* value rather than a spread, so the
+        // tail sort falls through to its target-URI tiebreak. That is the worst
+        // case the real write can produce: its links may land on distinct
+        // milliseconds and read back in array order, or collide onto one and
+        // read back by URI. Projecting the collision can write an entry that
+        // turns out to have been unnecessary, which is inert. Projecting the
+        // spread would skip one that turns out to be needed, which is not.
+        let new_item_ts = rfc3339_millis(now_ms);
         let known_ts: HashMap<&str, &str> = current_members
             .iter()
             .map(|(t, ts)| (t.as_str(), ts.as_str()))
             .collect();
         let projected_members: Vec<(String, String)> = desired_items
             .iter()
-            .enumerate()
-            .map(|(i, item)| {
+            .map(|item| {
                 let ts = known_ts
                     .get(item.as_str())
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("{:016}", now_ms.saturating_add(i as u64)));
+                    .unwrap_or_else(|| new_item_ts.clone());
                 (item.clone(), ts)
             })
             .collect();
@@ -247,6 +291,37 @@ impl OrderingStrategy for LinkedListStrategy {
             position: None,
         }
     }
+}
+
+/// A millisecond epoch in the format link timestamps are written in.
+///
+/// Must stay in step with `agent::create_signed_expression`, which stamps every
+/// link with `to_rfc3339_opts(SecondsFormat::Millis, true)`. `diff` compares
+/// projected members against stored ones by string, so a projection in any
+/// other format is not comparable with the data it is standing in for.
+///
+/// The fallback is unreachable for any clock this runs on — it needs a
+/// millisecond epoch outside chrono's calendar range — but it substitutes a
+/// timestamp the caller did not ask for, which would show up as a projection
+/// that silently disagrees with the links it stands in for. Say so if it ever
+/// fires.
+///
+/// The conversion is checked rather than an `as` cast for the same reason: a
+/// `u64` past `i64::MAX` wraps to a negative epoch, which chrono accepts as a
+/// pre-1970 date, so the cast would hand back a plausible timestamp for exactly
+/// the input the fallback is here to catch.
+fn rfc3339_millis(ms: u64) -> String {
+    i64::try_from(ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .unwrap_or_else(|| {
+            log::error!(
+                "ordering: timestamp {ms} is out of range for RFC3339 rendering; \
+                 projecting new members at the current time instead"
+            );
+            chrono::Utc::now()
+        })
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Each item mapped to the item before it in `order` (or the head).

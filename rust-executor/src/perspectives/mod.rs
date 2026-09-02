@@ -1,8 +1,12 @@
 pub mod auto_processor;
+pub(crate) mod flow_classes;
+pub(crate) mod flow_context;
 pub(crate) mod hardwired_class;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
+#[cfg(test)]
+mod interpretation_harness_e2e;
 #[cfg(test)]
 mod interpretation_test_support;
 pub mod memory_diagnostics;
@@ -14,7 +18,7 @@ pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
 pub mod sparql_store;
-pub mod subject_class_of;
+pub mod subject_classes_of;
 pub mod utils;
 use crate::types::{
     LinkQuery, LinkStatus, NeighbourhoodSignalFilter, PerspectiveExpression, PerspectiveHandle,

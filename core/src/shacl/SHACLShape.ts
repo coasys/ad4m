@@ -803,9 +803,9 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "ad4m://ordering"
       );
       if (orderingLink) {
-        prop.ordering = orderingLink.target.startsWith("literal:string:")
-          ? orderingLink.target.slice("literal:string:".length)
-          : orderingLink.target;
+        prop.ordering = orderingLink.target.replace(
+          /^literal:\/\/string:|^literal:string:/, ''
+        );
       }
       
       const nodeKindLink = links.find(l => 

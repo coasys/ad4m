@@ -31,6 +31,7 @@ impl AuthContext {
             is_admin_credential: self.is_admin_credential,
             user_email,
             user_did,
+            cancel_token: None,
         }
     }
 }

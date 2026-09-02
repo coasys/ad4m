@@ -1,4 +1,5 @@
 import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
 import { PerspectiveHandle, PerspectiveState } from './PerspectiveHandle'
@@ -15,7 +16,8 @@ import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 
 import { SHACLShape } from "../shacl/SHACLShape";
-import { SHACLFlow, LinkPattern } from "../shacl/SHACLFlow";
+import { SHACLFlow } from "../shacl/SHACLFlow";
+import { Ad4mModel } from "../model/Ad4mModel";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
@@ -372,6 +374,7 @@ interface Parameter {
  * });
  * ```
  */
+
 export class PerspectiveProxy {
     /** Unique identifier of this perspective */
     uuid: string;
@@ -544,8 +547,8 @@ export class PerspectiveProxy {
      * });
      * ```
      */
-    async get(query: LinkQuery): Promise<LinkExpression[]> {
-        return await this.#client.queryLinks(this.#handle.uuid, query)
+    async get(query: LinkQuery, options?: CallOptions): Promise<LinkExpression[]> {
+        return await this.#client.queryLinks(this.#handle.uuid, query, options)
     }
 
     /**
@@ -588,6 +591,50 @@ export class PerspectiveProxy {
     }
 
     /**
+     * Harness-dispatched interpretation pass over this perspective (design v3
+     * §6 — the tool-calling counterpart to {@link runInterpretation}). The LLM
+     * sees a live per-class tool surface (`{Class}_query`, `{Class}_get`,
+     * `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives
+     * the extraction via tool calls; buffered proposals drain through the
+     * same overlay gate the single-shot path uses.
+     *
+     * @param transcript ordered `{ speaker, text }` turns
+     * @param basePrefix URI namespace new instance identities are minted under
+     * @param maxToolCalls upper bound on tool calls the harness will make in
+     *   one pass (must be > 0 — use {@link runInterpretation} for the
+     *   classic single-shot path)
+     * @param classes local names of the subject classes to extract into; omit for all
+     * @param modelOverride optional model override; omit for the default LLM
+     */
+    async runInterpretationWithHarness(
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        maxToolCalls: number,
+        classes?: string[],
+        modelOverride?: string,
+        // Optional live-debug observability. When both `observationId` and
+        // `emitDebugEvents` are supplied, every dispatched tool call fires
+        // `ToolCall` + `ToolResult` events on the `auto-processor-event`
+        // topic keyed by `observationId`. Subscribe with
+        // {@link addAutoProcessorEventListener} to render the harness loop
+        // live in a UI. Absent = fast headless path (no telemetry cost).
+        observationId?: string,
+        emitDebugEvents?: boolean,
+    ): Promise<string[]> {
+        return await this.#client.runInterpretationWithHarness(
+            this.#handle.uuid,
+            transcript,
+            basePrefix,
+            maxToolCalls,
+            classes,
+            modelOverride,
+            undefined,
+            observationId,
+            emitDebugEvents,
+        )
+    }
+
+    /**
      * Register a neighbourhood auto-processor on this perspective. The executor
      * then runs interpretation automatically over new source items (like Flux
      * per channel), coordinating which peer processes each batch. Returns the
@@ -595,6 +642,25 @@ export class PerspectiveProxy {
      */
     async addAutoProcessor(config: AddAutoProcessorConfig): Promise<string> {
         return await this.#client.addAutoProcessor(this.#handle.uuid, config)
+    }
+
+    /**
+     * Stop an auto-processor by deleting its config.
+     *
+     * The registration is data — the watch loop reads the processor set back out of the
+     * perspective's graph on every tick — so deleting the config is what stops it, and there is
+     * nothing else to unregister. The config is `Shared`, so this stops the processor for the
+     * neighbourhood rather than only for this peer.
+     *
+     * Resolves `true` when there was a processor to remove and `false` when there was not; a
+     * processor another peer has already removed is not an error.
+     *
+     * The processor's `InterpretationRun` nodes stay: they are the record of what it did and the
+     * processed-turn cursor, so a processor later registered under the same id resumes where this
+     * one left off rather than re-reading every turn.
+     */
+    async removeAutoProcessor(processorId: string): Promise<boolean> {
+        return await this.#client.removeAutoProcessor(this.#handle.uuid, processorId)
     }
 
     /**
@@ -664,30 +730,36 @@ export class PerspectiveProxy {
      * `);
      * ```
      */
-    async infer(query: string): Promise<any> {
-        return await this.#client.queryProlog(this.#handle.uuid, query)
+    async infer(query: string, options?: CallOptions): Promise<any> {
+        return await this.#client.queryProlog(this.#handle.uuid, query, options)
     }
 
     /**
      * Executes a SPARQL query against the perspective's link cache.
      * This allows powerful SQL-like queries on the link data stored in SPARQL.
-     * 
+     *
      * **Security Note:** Only read-only queries (SELECT, RETURN, etc.) are permitted.
      * Mutating operations (DELETE, UPDATE, INSERT, CREATE, DROP, DEFINE, etc.) are
      * blocked for security reasons. Use the perspective's add/remove methods to modify links.
-     * 
-     * @param query - SPARQL query string (read-only operations only)
-     * @returns Query results as parsed JSON
-     * 
-     * Executes a SPARQL query against the perspective's RDF (Oxigraph) store.
      *
-     * @param query - SPARQL query string
+     * **Cancellation:** Pass `{ signal }` from an `AbortController` to abort
+     * an in-flight query.  The executor receives `request.cancel` over the
+     * WebSocket and short-circuits the JSON reply.  Caveat: Oxigraph itself
+     * cannot be interrupted mid-evaluation, so an already-running scan will
+     * keep its blocking thread busy until it completes; what's saved is the
+     * serialise + network + client-deserialise tax on the result.  Aborted
+     * calls reject with `DOMException('Aborted', 'AbortError')` — match
+     * `fetch()` for handling. Cached results bypass the round-trip entirely
+     * and are returned synchronously, ignoring the signal.
+     *
+     * @param query - SPARQL query string (read-only operations only)
+     * @param options - Optional call options (e.g. AbortSignal for cancellation)
      * @returns Query results as parsed JSON
      */
-    async querySparql<T = any>(query: string): Promise<T> {
+    async querySparql<T = any>(query: string, options?: CallOptions): Promise<T> {
         const cached = getCachedResult(this.#handle.uuid, query);
         if (cached !== undefined) return cached as T;
-        const result = await this.#client.querySparql(this.#handle.uuid, query);
+        const result = await this.#client.querySparql(this.#handle.uuid, query, options);
         setCachedResult(this.#handle.uuid, query, result);
         return result as T;
     }
@@ -703,32 +775,43 @@ export class PerspectiveProxy {
      * @param queryJson - Structured query as JSON string
      * @returns Object with `instances` array and `totalCount`
      */
-    async modelQuery(className: string, queryJson: string): Promise<{ instances: any[], totalCount: number }> {
-        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson);
+    async modelQuery(className: string, queryJson: string, options?: CallOptions): Promise<{ instances: any[], totalCount: number }> {
+        return await this.#client.modelQuery(this.#handle.uuid, className, queryJson, options);
     }
 
-    /** Resolve each URI to the name of the subject class it is an instance of.
+    /** Resolve each URI to the names of every subject class it is an instance of.
      *
      * The counterpart of {@link isSubjectInstance}, which asks the same question
      * one class at a time. Without this, finding the class of an arbitrary URI
      * meant looping over every registered class — a round trip each — and doing
      * it again for every URI.
      *
-     * URIs that match no registered class are **absent from the result** rather
-     * than mapped to a placeholder: "not a subject instance" and "an instance of
-     * something this perspective cannot name" are different answers.
+     * Class membership in AD4M is structural — a URI belongs to a class when it
+     * carries that class's flags and required properties — so membership is **not
+     * exclusive**: an instance conforms to its parent classes, and to any
+     * unrelated class whose required set happens to be a subset of what it
+     * carries. Every match is returned.
      *
-     * Note that class membership in AD4M is structural — a URI belongs to a class
-     * when it carries that class's flags and required properties — so an instance
-     * conforms to its parent classes too. This returns the most specific match,
-     * meaning the class requiring the most triples; ties resolve alphabetically so
-     * that every peer answers identically.
+     * The list is ordered **most specific first**, meaning by the number of
+     * triples the class requires — a subclass requires everything its parent does
+     * and more — with ties broken alphabetically so that every peer answers
+     * identically. A caller that can only act on one class should take
+     * `classes[0]`, but that head is only a heuristic: it is arbitrary between two
+     * unrelated classes requiring the same number of triples, which is exactly
+     * the case the full list exists to expose.
+     *
+     * A URI is **absent from the result** when no *registered* class matched it.
+     * That covers two situations, and nothing here separates them: the URI may
+     * not be a subject instance at all, or it may be an instance of a class this
+     * perspective has not registered. Absence is used rather than an empty list
+     * because an empty list would claim the stronger thing — that the URI belongs
+     * to no class — which this cannot know.
      *
      * @param uris The expression URIs to classify.
      */
-    async subjectClassOf(uris: string[]): Promise<Record<string, string>> {
+    async subjectClassesOf(uris: string[]): Promise<Record<string, string[]>> {
         if (uris.length === 0) return {};
-        return await this.#client.subjectClassOf(this.#handle.uuid, uris);
+        return await this.#client.subjectClassesOf(this.#handle.uuid, uris);
     }
 
     /**
@@ -1086,108 +1169,45 @@ export class PerspectiveProxy {
         });
     }
 
-    /** Returns all Social DNA flows that can be started from the given expression */
+    /**
+     * Returns all Social DNA flows that can be started from the given expression.
+     *
+     * Post-`flowable` retirement: a flow is a candidate iff its `inputTypes`
+     * declaration is compatible with the expression. Matching rules:
+     * - Empty `inputTypes` or one containing the `"any"` wildcard → always
+     *   matches (same behaviour as the legacy `flowable === "any"` case).
+     * - Otherwise, at least one of the expression's registered subject-class
+     *   URIs (resolved via {@link subjectClassesOf}) must appear in
+     *   `inputTypes`. This is the concrete-type match the design doc's §5
+     *   spawn engine calls for; without it, a flow declaring
+     *   `inputTypes: ["Task"]` was previously *never* returned by
+     *   `availableFlows("some-task-uri")` — the entire point of typed
+     *   flows was silently unreachable (James PR #929 J#3).
+     *
+     * The expression is classified against the perspective's registered
+     * classes only. An expression whose class is not registered on this
+     * perspective matches no typed flow (absence, not falsehood — same
+     * discipline as {@link subjectClassesOf}); typed flows requiring
+     * unknown classes are still returned to their untyped-caller peers.
+     */
     async availableFlows(exprAddr: string): Promise<string[]> {
         const allFlowNames = await this.sdnaFlows();
+        if (allFlowNames.length === 0) return [];
+        const classesOf = await this.subjectClassesOf([exprAddr]);
+        const exprClasses = classesOf[exprAddr] ?? [];
         const available: string[] = [];
         for (const name of allFlowNames) {
             const flow = await this.getFlow(name);
             if (!flow) continue;
-            if (flow.flowable === "any") {
+            if (flow.inputTypes.length === 0 || flow.inputTypes.includes("any")) {
                 available.push(name);
-            } else {
-                // Check if the expression matches the flowable link pattern
-                const pattern = flow.flowable as LinkPattern;
-                const source = pattern.source || exprAddr;
-                const links = await this.get(new LinkQuery({
-                    source,
-                    predicate: pattern.predicate,
-                    target: pattern.target
-                }));
-                if (links.length > 0) {
-                    available.push(name);
-                }
+                continue;
+            }
+            if (exprClasses.some(cls => flow.inputTypes.includes(cls))) {
+                available.push(name);
             }
         }
         return available;
-    }
-
-    /**  Starts the Social DNA flow @param flowName on the expression @param exprAddr */
-    async startFlow(flowName: string, exprAddr: string) {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        if (flow.startAction.length === 0) throw `Flow "${flowName}" has no start action`;
-        await this.executeAction(flow.startAction, exprAddr, undefined)
-    }
-
-    /** Returns all expressions in the given state of given Social DNA flow */
-    async expressionsInFlowState(flowName: string, flowState: number): Promise<string[]> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) return [];
-        // Find the state with the matching value
-        const state = flow.states.find(s => s.value === flowState);
-        if (!state) return [];
-        // Query for expressions matching this state's check pattern
-        const pattern = state.stateCheck;
-        const links = await this.get(new LinkQuery({
-            predicate: pattern.predicate,
-            target: pattern.target
-        }));
-        // Return the sources (expression addresses) - use source if pattern has no explicit source
-        return links.map(l => pattern.source ? l.data.target : l.data.source);
-    }
-
-    /** Returns the given expression's flow state with regard to given Social DNA flow */
-    async flowState(flowName: string, exprAddr: string): Promise<number> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        // Check each state to find which one the expression is in
-        for (const state of flow.states) {
-            const pattern = state.stateCheck;
-            const source = pattern.source || exprAddr;
-            const links = await this.get(new LinkQuery({
-                source,
-                predicate: pattern.predicate,
-                target: pattern.target
-            }));
-            if (links.length > 0) return state.value;
-        }
-        throw `Expression "${exprAddr}" is not in any state of flow "${flowName}"`;
-    }
-
-    /** Returns available action names, with regard to Social DNA flow and expression's flow state */
-    async flowActions(flowName: string, exprAddr: string): Promise<string[]> {
-        const flow = await this.getFlow(flowName);
-        if (!flow) return [];
-        // Determine current state
-        let currentStateName: string | null = null;
-        for (const state of flow.states) {
-            const pattern = state.stateCheck;
-            const source = pattern.source || exprAddr;
-            const links = await this.get(new LinkQuery({
-                source,
-                predicate: pattern.predicate,
-                target: pattern.target
-            }));
-            if (links.length > 0) {
-                currentStateName = state.name;
-                break;
-            }
-        }
-        if (!currentStateName) return [];
-        // Return transitions available from current state
-        return flow.transitions
-            .filter(t => t.fromState === currentStateName)
-            .map(t => t.actionName);
-    }
-
-    /** Runs given Social DNA flow action */
-    async runFlowAction(flowName: string, exprAddr: string, actionName: string) {
-        const flow = await this.getFlow(flowName);
-        if (!flow) throw `Flow "${flowName}" not found`;
-        const transition = flow.transitions.find(t => t.actionName === actionName);
-        if (!transition) throw `Action "${actionName}" not found in flow "${flowName}"`;
-        await this.executeAction(transition.actions, exprAddr, undefined)
     }
 
     /** Returns the perspective's Social DNA code
@@ -1390,122 +1410,47 @@ export class PerspectiveProxy {
     }
     
     /**
-     * Retrieve a SHACL shape by name from this Perspective
+     * Retrieve a SHACL shape by name from this Perspective (one RPC call).
+     * The executor resolves the full shape (including property sub-shapes)
+     * in-process and returns link triples for client-side reconstruction.
      */
     async getShacl(name: string): Promise<SHACLShape | null> {
-        // Find the shape URI from the name mapping
-        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
-        const shapeUriLinks = await this.get(new LinkQuery({
-            source: nameMapping.toUrl(),
-            predicate: "ad4m://shacl_shape_uri"
-        }));
-        
-        if (shapeUriLinks.length === 0) {
-            return null;
-        }
-        
-        const shapeUri = shapeUriLinks[0].data.target;
-        
-        // First get property shape URIs so we can query everything in one go
-        const propertyLinks = await this.get(new LinkQuery({
-            source: shapeUri,
-            predicate: "sh://property"
-        }));
-        
-        // Fetch all links from the shape and its property shapes. These reads are
-        // independent of each other, so fire them concurrently rather than one RPC
-        // round trip at a time — over a remote (non-loopback) connection, a shape with
-        // a dozen properties otherwise pays a dozen sequential round trips just to load.
-        const sourceUris = [shapeUri, ...propertyLinks.map(l => l.data.target)];
-        const linksByUri = await Promise.all(sourceUris.map(uri => this.get(new LinkQuery({ source: uri }))));
-        // Dedupe by (source, predicate, target): a perspective that's accumulated duplicate
-        // SDNA links (e.g. from repeated registration attempts, or executor-side sync bugs)
-        // would otherwise feed the same triple into SHACLShape.fromLinks more than once —
-        // harmless for scalar fields like targetClass (first match wins) but can surface as
-        // visibly duplicated properties for repeated sh://property links. Cheap: this is an
-        // in-memory pass over data already fetched, no extra round trips.
-        const seenLinks = new Set<string>();
-        const allLinks: Array<{source: string, predicate: string, target: string}> = [];
-        for (const links of linksByUri) {
-            for (const l of links) {
-                const key = `${l.data.source} ${l.data.predicate} ${l.data.target}`;
-                if (seenLinks.has(key)) continue;
-                seenLinks.add(key);
-                allLinks.push({
-                    source: l.data.source,
-                    predicate: l.data.predicate,
-                    target: l.data.target
-                });
-            }
-        }
-
-        const shapeLinks = allLinks;
-
-        return SHACLShape.fromLinks(shapeLinks, shapeUri);
+        const result = await this.#client.getShacl(this.#handle.uuid, name);
+        if (!result) return null;
+        return SHACLShape.fromLinks(result.links as any, result.shapeUri);
     }
     
     /**
-     * List the names of every SHACL shape stored in this Perspective, without fetching
-     * each shape's full definition (properties, target class, etc.) — just the cheap
-     * `ad4m://has_shacl` enumeration, one round trip regardless of how many shapes exist.
-     * Use this to check which shapes are actually worth resolving via `getShacl()` before
-     * paying for each one's full (multi-round-trip) fetch.
+     * List the names of every SHACL shape stored in this Perspective (one RPC call).
      */
     async getShaclNames(): Promise<string[]> {
-        const nameLinks = await this.get(new LinkQuery({
-            source: "ad4m://self",
-            predicate: "ad4m://has_shacl"
-        }));
-        // Dedupe: a perspective with duplicate `has_shacl` links (see the dedup note in
-        // getShacl()) would otherwise report the same name more than once, causing callers
-        // to redundantly resolve (or redundantly disambiguate) it multiple times.
-        const names = nameLinks.map((nameLink) => {
-            const name = Literal.fromUrl(nameLink.data.target).get() as string;
-            return name.replace('shacl://', '');
-        });
-        return [...new Set(names)];
+        return this.#client.getShaclNames(this.#handle.uuid);
     }
 
     /**
-     * Resolve just a shape's `sh:targetClass` by name, without fetching its properties —
-     * two round trips (name → shapeUri, then shapeUri's own direct triples) instead of
-     * `getShacl()`'s full walk (which also fetches every property sub-shape). Use this to
-     * disambiguate a shape name that collides with another app's `@Model({ name })` string
-     * (the bare `shacl://{name}` mapping ad4m-core uses is namespace-blind — see
-     * `getShaclNames()` callers for why that matters) before paying for a full fetch.
+     * Resolve a shape's `sh:targetClass` by name (one RPC call).
+     *
+     * `PerspectiveClient.getShaclTargetClass` now returns `undefined` on
+     * "not found" already (see review r3897752023 — the null→undefined
+     * coercion used to happen here and be duplicated one layer down),
+     * so this method is a pure passthrough.
      */
     async getShaclTargetClass(name: string): Promise<string | undefined> {
-        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
-        const shapeUriLinks = await this.get(new LinkQuery({
-            source: nameMapping.toUrl(),
-            predicate: "ad4m://shacl_shape_uri"
-        }));
-        if (shapeUriLinks.length === 0) {
-            return undefined;
-        }
-        const shapeUri = shapeUriLinks[0].data.target;
-
-        const shapeOwnLinks = await this.get(new LinkQuery({ source: shapeUri }));
-        return shapeOwnLinks.find(l => l.data.predicate === "sh://targetClass")?.data.target;
+        return this.#client.getShaclTargetClass(this.#handle.uuid, name);
     }
 
     /**
-     * Get all SHACL shapes stored in this Perspective
+     * Get all SHACL shapes stored in this Perspective (one RPC call).
+     * The executor resolves all shapes in-process and returns them in bulk.
      */
     async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
-        const shapeNames = await this.getShaclNames();
-
-        // Each shape is fetched independently of the others — resolve them concurrently.
-        // Sequentially awaiting getShacl() per shape means a perspective with N SDNA
-        // models pays N times getShacl()'s own multi-round-trip cost one after another;
-        // over a remote connection with real per-call latency that compounds into the
-        // dominant cost of switching into a perspective at all.
-        const results = await Promise.all(shapeNames.map(async (shapeName) => {
-            const shape = await this.getShacl(shapeName);
-            return shape ? { name: shapeName, shape } : null;
-        }));
-
-        return results.filter((s): s is { name: string, shape: SHACLShape } => s !== null);
+        const entries = await this.#client.getAllShacl(this.#handle.uuid);
+        return entries
+            .map(({ name, shapeUri, links }) => {
+                const shape = SHACLShape.fromLinks(links as any, shapeUri);
+                return shape ? { name, shape } : null;
+            })
+            .filter((s): s is { name: string; shape: SHACLShape } => s !== null);
     }
 
     /**
@@ -1520,29 +1465,27 @@ export class PerspectiveProxy {
      * @example
      * ```typescript
      * import { SHACLFlow } from '@coasys/ad4m';
-     * 
-     * const todoFlow = new SHACLFlow('TODO', 'todo://');
-     * todoFlow.flowable = 'any';
-     * 
-     * // Define states
-     * todoFlow.addState({ name: 'ready', value: 0, stateCheck: { predicate: 'todo://state', target: 'todo://ready' }});
-     * todoFlow.addState({ name: 'done', value: 1, stateCheck: { predicate: 'todo://state', target: 'todo://done' }});
-     * 
-     * // Define start action
-     * todoFlow.startAction = [{ action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }];
-     * 
-     * // Define transitions
-     * todoFlow.addTransition({
-     *   actionName: 'Complete',
-     *   fromState: 'ready',
-     *   toState: 'done',
-     *   actions: [
-     *     { action: 'addLink', source: 'this', predicate: 'todo://state', target: 'todo://done' },
-     *     { action: 'removeLink', source: 'this', predicate: 'todo://state', target: 'todo://ready' }
-     *   ]
-     * });
-     * 
-     * await perspective.addFlow('TODO', todoFlow);
+     *
+     * const deliveryFlow = new SHACLFlow('Delivery', 'delivery://');
+     * deliveryFlow.inputTypes = ['Task'];
+     * deliveryFlow.interpretationHint =
+     *   'Advance a Task through delivery: Identified → Scoped → InProgress → Review → Done.';
+     *
+     * deliveryFlow.addState({ name: 'Identified', value: 0 });
+     * deliveryFlow.addState({ name: 'Scoped',     value: 1 });
+     * deliveryFlow.addState({ name: 'InProgress', value: 2 });
+     * deliveryFlow.addState({ name: 'Review',     value: 3 });
+     * deliveryFlow.addState({ name: 'Done',       value: 4 });
+     *
+     * deliveryFlow.addTransition({ actionName: 'Scope',  fromState: 'Identified', toState: 'Scoped',     actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Start',  fromState: 'Scoped',     toState: 'InProgress', actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Submit', fromState: 'InProgress', toState: 'Review',     actions: [] });
+     * deliveryFlow.addTransition({ actionName: 'Accept', fromState: 'Review',     toState: 'Done',       actions: [] });
+     *
+     * // Optional: n distinct DIDs must co-sign a proposal before it fires.
+     * deliveryFlow.consensusRule = { n: 2 };
+     *
+     * await perspective.addFlow('Delivery', deliveryFlow);
      * ```
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
@@ -1594,7 +1537,7 @@ export class PerspectiveProxy {
 
         const flowUri = flowUriLinks[0].data.target;
 
-        // Fetch flow-level links (hasState, hasTransition, flowable, startAction)
+        // Fetch flow-level links (hasState, hasTransition, startAction, inputTypes/outputTypes/…)
         const flowLevelLinks = await this.get(new LinkQuery({ source: flowUri }));
 
         // Collect state and transition URIs, then fetch their child links

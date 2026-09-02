@@ -2693,7 +2693,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -2727,7 +2727,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -2761,7 +2761,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -2792,7 +2792,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -2808,7 +2808,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -2828,7 +2828,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -5395,17 +5395,17 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
     );
 }
 
-/// `subjectClassOf` classifies a batch of URIs, preferring the most specific
-/// class and falling back to conformance where a class has no flag.
+/// `subjectClassesOf` classifies a batch of URIs, finding flagged and flagless
+/// classes alike.
 #[tokio::test]
-async fn test_subject_class_of_batch() {
-    use crate::perspectives::subject_class_of::subject_class_of;
+async fn test_subject_classes_of_batch() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
 
     let store = SparqlStore::new(None).unwrap();
 
     // Register three classes. TextBlock and ImageBlock are flagged; Untagged
-    // has no flag, only a required property, so it can only be found by
-    // conformance.
+    // has no flag, only a required property, so nothing type-tag-like points at
+    // it and it can only be found structurally.
     for (uri, shape_uri) in [
         ("ns://models/TextBlock", "ns://models/TextBlockShape"),
         ("ns://models/ImageBlock", "ns://models/ImageBlockShape"),
@@ -5477,14 +5477,14 @@ async fn test_subject_class_of_batch() {
         "ns://c".to_string(),
         "ns://nothing".to_string(),
     ];
-    let result = subject_class_of(&store, &resolver, &uris).unwrap();
+    let result = subject_classes_of(&store, &resolver, &uris).unwrap();
 
-    assert_eq!(result.get("ns://a").map(String::as_str), Some("TextBlock"));
-    assert_eq!(result.get("ns://b").map(String::as_str), Some("ImageBlock"));
+    assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
+    assert_eq!(result.get("ns://b"), Some(&vec!["ImageBlock".to_string()]));
     assert_eq!(
-        result.get("ns://c").map(String::as_str),
-        Some("Untagged"),
-        "a flagless class is still reachable through the conformance pass",
+        result.get("ns://c"),
+        Some(&vec!["Untagged".to_string()]),
+        "a flagless class is still found, by its required properties alone",
     );
     assert!(
         !result.contains_key("ns://nothing"),
@@ -5492,10 +5492,169 @@ async fn test_subject_class_of_batch() {
     );
 }
 
-/// Structural membership is not exclusive, so the most specific class wins.
+/// A URI that cannot be emitted as an IRIREF costs only itself.
+///
+/// Relative references and empty strings are a SPARQL *parse* error inside a
+/// `VALUES` clause, not a non-match, so letting one through would fail the whole
+/// batch's query and every well-formed URI alongside it.
 #[tokio::test]
-async fn test_subject_class_of_prefers_the_more_specific_class() {
-    use crate::perspectives::subject_class_of::subject_class_of;
+async fn test_subject_classes_of_mixed_absolute_and_unusable_uris() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "ns://models/TextBlock",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://b", "ns://flag", "ns://text_block", "3"))
+        .unwrap();
+
+    let uris = vec![
+        "ns://a".to_string(),
+        "active".to_string(), // relative — no scheme
+        "".to_string(),       // empty
+        ":leading-colon".to_string(),
+        "ns://b".to_string(),
+    ];
+    let result = subject_classes_of(&store, &resolver, &uris).expect("the batch still resolves");
+
+    assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
+    assert_eq!(
+        result.get("ns://b"),
+        Some(&vec!["TextBlock".to_string()]),
+        "a well-formed URI keeps its answer despite unusable neighbours",
+    );
+    assert_eq!(
+        result.len(),
+        2,
+        "the unusable URIs are absent, not classified and not fatal",
+    );
+}
+
+/// A class whose SHACL names a relative predicate is skipped, not fatal.
+///
+/// The predicate would go into the same `VALUES` clause, so admitting it would
+/// break `subjectClassesOf` for every URI in the perspective, not just for
+/// instances of that class.
+#[tokio::test]
+async fn test_subject_classes_of_skips_class_with_unusable_predicate() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    for uri in ["ns://models/Broken", "ns://models/TextBlock"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "Broken",
+        parse_shape_from_json(
+            r#"{"className":"Broken","properties":{
+                 "title":{"predicate":"title","required":true}
+               },"relations":{}}"#,
+            "Broken",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("ns://a", "title", "literal:string:hi", "2"))
+        .unwrap();
+
+    let result =
+        subject_classes_of(&store, &resolver, &["ns://a".to_string()]).expect("the batch resolves");
+
+    assert_eq!(
+        result.get("ns://a"),
+        Some(&vec!["TextBlock".to_string()]),
+        "the sound class still answers; the broken one is dropped, not matched",
+    );
+}
+
+/// A flag is not on its own proof of membership: a class is only matched when
+/// *every* triple it requires is present, which is what `isSubjectInstance`
+/// asks and therefore what this has to agree with.
+#[tokio::test]
+async fn test_subject_classes_of_requires_every_triple_not_just_a_flag() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
+
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "ns://models/TextBlock",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+
+    let resolver = StaticShapeResolver::new();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://text_block"},
+                 "text":{"predicate":"ns://text","required":true}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    // Carries the flag but not the required `text`, so it is not a TextBlock.
+    store
+        .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
+        .unwrap();
+
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+
+    assert!(
+        !result.contains_key("ns://a"),
+        "the flag alone does not make it an instance",
+    );
+}
+
+/// Structural membership is not exclusive, so every class the URI conforms to
+/// is returned — ordered most specific first, but none of them dropped.
+#[tokio::test]
+async fn test_subject_classes_of_returns_every_class_most_specific_first() {
+    use crate::perspectives::subject_classes_of::subject_classes_of;
 
     let store = SparqlStore::new(None).unwrap();
     for uri in ["ns://models/Post", "ns://models/ImagePost"] {
@@ -5540,13 +5699,1689 @@ async fn test_subject_class_of_prefers_the_more_specific_class() {
         .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
         .unwrap();
 
-    let result = subject_class_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+
+    let classes = result.get("ns://a").expect("ns://a is classified");
+    assert_eq!(
+        classes,
+        &vec!["ImagePost".to_string(), "Post".to_string()],
+        "the instance is a Post as well as an ImagePost, and both are reported",
+    );
+    assert_eq!(
+        classes.first().map(String::as_str),
+        Some("ImagePost"),
+        "callers that can only act on one class take the head and get the derived one",
+    );
+}
+
+/// A disjunction filters in SPARQL, and keeps its ordering and limit.
+///
+/// Before the where clause was compiled as one tree, `OR` was skipped by the
+/// emitter and evaluated post-hydration — which also disabled the SPARQL
+/// pagination pushdown entirely, because `all_where_pushable` returned false on
+/// sight of a combinator. The rows were right (the Rust filter ran) but the
+/// `ORDER BY` was not applied at the SPARQL level and the whole class was
+/// hydrated to answer a two-row query.
+///
+/// This is the shape the documented cross-field search box compiles to.
+#[tokio::test]
+async fn test_or_where_filters_in_sparql_with_order_and_limit() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for (base, title, body, ts) in [
+        ("we://post/1", "Alpha", "about cats", "1700000000000"),
+        ("we://post/2", "Beta", "about dogs", "1700000000001"),
+        ("we://post/3", "Gamma", "about cats", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://post", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                ts,
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://body",
+                &format!("literal:string:{}", literal_percent_encode(body)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            },
+            "title": { "predicate": "we://title", "resolveLanguage": "literal" },
+            "body": { "predicate": "we://body", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    // title == "Alpha" OR body == "about dogs"  → posts 1 and 2, not 3.
+    let or_clause = super::types::WhereCondition::SubClauses(vec![
+        BTreeMap::from([(
+            "title".to_string(),
+            super::types::WhereCondition::String("Alpha".to_string()),
+        )]),
+        BTreeMap::from([(
+            "body".to_string(),
+            super::types::WhereCondition::String("about dogs".to_string()),
+        )]),
+    ]);
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([("OR".to_string(), or_clause)])),
+        order: Some(vec![(
+            "title".to_string(),
+            super::types::OrderDirection::DESC,
+        )]),
+        limit: Some(10),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .unwrap();
+
+    let titles: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["title"].as_str().unwrap())
+        .collect();
 
     assert_eq!(
-        result.get("ns://a").map(String::as_str),
-        Some("ImagePost"),
-        "the instance conforms to Post too, but the derived class is the answer",
+        titles,
+        vec!["Beta", "Alpha"],
+        "the disjunction must match exactly posts 1 and 2, ordered by title DESC",
     );
+}
+
+/// A negation filters in SPARQL.
+#[tokio::test]
+async fn test_not_where_filters_in_sparql() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for (base, title, ts) in [
+        ("we://post/1", "keep", "1700000000000"),
+        ("we://post/2", "drop", "1700000000001"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://post", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            },
+            "title": { "predicate": "we://title", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "NOT".to_string(),
+            super::types::WhereCondition::SubClause(BTreeMap::from([(
+                "title".to_string(),
+                super::types::WhereCondition::String("drop".to_string()),
+            )])),
+        )])),
+        limit: Some(10),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .unwrap();
+
+    let titles: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["title"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(titles, vec!["keep"]);
+}
+
+/// Two conditions on one property, inside a combinator, must not collide.
+///
+/// Variable names are derived from the property name. That is safe while a where
+/// clause is a flat map — keys are unique — but a combinator lets the same
+/// property appear twice, and both leaves then emit `BIND(… AS ?_pw_title_v)`
+/// into the same group. SPARQL forbids binding a variable already in scope, so
+/// this did not return the wrong rows: the query failed to parse
+/// ("Query is not valid read-only SPARQL … expected [_]").
+#[tokio::test]
+async fn test_and_with_two_conditions_on_one_property() {
+    let store = SparqlStore::new(None).unwrap();
+    for (base, title) in [("ns://p/1", "alpha beta"), ("ns://p/2", "alpha only")] {
+        store
+            .add_link(&make_link(base, "ns://flag", "ns://post", "1"))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "ns://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                "1",
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{"className":"Post","properties":{
+        "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://post"},
+        "title":{"predicate":"ns://title","resolveLanguage":"literal"}},"relations":{}}"#;
+
+    let contains = |v: &str| {
+        super::types::WhereCondition::Ops(super::types::WhereOps {
+            contains: Some(serde_json::Value::String(v.to_string())),
+            ..Default::default()
+        })
+    };
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "AND".to_string(),
+            super::types::WhereCondition::SubClauses(vec![
+                BTreeMap::from([("title".to_string(), contains("alpha"))]),
+                BTreeMap::from([("title".to_string(), contains("beta"))]),
+            ]),
+        )])),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .expect("the clause must compile to valid SPARQL");
+
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["ns://p/1"],
+        "only the title containing both terms matches",
+    );
+}
+
+/// A `NOT` branch constraining a property the outer clause also constrains.
+///
+/// Not a bug that was observed — `FILTER NOT EXISTS` opens its own group, so this
+/// case survived the collision above and returns the right rows either way. Kept
+/// as a guard, because it is the shape most likely to break if the uniquifying
+/// ever regresses.
+#[tokio::test]
+async fn test_not_on_a_property_also_constrained_outside() {
+    let store = SparqlStore::new(None).unwrap();
+    for (base, title) in [("ns://p/1", "alpha beta"), ("ns://p/2", "alpha only")] {
+        store
+            .add_link(&make_link(base, "ns://flag", "ns://post", "1"))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "ns://title",
+                &format!("literal:string:{}", literal_percent_encode(title)),
+                "1",
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{"className":"Post","properties":{
+        "flag":{"predicate":"ns://flag","required":true,"flag":true,"initial":"ns://post"},
+        "title":{"predicate":"ns://title","resolveLanguage":"literal"}},"relations":{}}"#;
+
+    let contains = |v: &str| {
+        super::types::WhereCondition::Ops(super::types::WhereOps {
+            contains: Some(serde_json::Value::String(v.to_string())),
+            ..Default::default()
+        })
+    };
+
+    // title contains "alpha" AND NOT title contains "beta"
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([
+            ("title".to_string(), contains("alpha")),
+            (
+                "NOT".to_string(),
+                super::types::WhereCondition::SubClause(BTreeMap::from([(
+                    "title".to_string(),
+                    contains("beta"),
+                )])),
+            ),
+        ])),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+        .await
+        .expect("the clause must compile to valid SPARQL");
+
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["ns://p/2"], "the one without \"beta\"");
+}
+
+/// `some` / `none` filter on the existence of *linked records*, in SPARQL.
+///
+/// This is the question `include`'s own `where` cannot answer: that one filters
+/// the children it returns, never the parents it returns them for. "Posts with
+/// no comments" was therefore not expressible at all — the caller had to fetch
+/// every post with its comments and count in JS.
+#[tokio::test]
+async fn test_relation_quantifiers_filter_by_linked_records() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // post/1 has a spam comment, post/2 has an ordinary one, post/3 has none.
+    for (base, ts) in [
+        ("we://post/1", "1700000000000"),
+        ("we://post/2", "1700000000001"),
+        ("we://post/3", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://post", ts))
+            .unwrap();
+    }
+    for (comment, body, ts) in [
+        ("we://comment/1", "spam", "1700000000010"),
+        ("we://comment/2", "hello", "1700000000011"),
+    ] {
+        store
+            .add_link(&make_link(comment, "we://cflag", "we://comment", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                comment,
+                "we://body",
+                &format!("literal:string:{}", literal_percent_encode(body)),
+                ts,
+            ))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://post/1",
+            "we://comment",
+            "we://comment/1",
+            "1700000000020",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://post/2",
+            "we://comment",
+            "we://comment/2",
+            "1700000000021",
+        ))
+        .unwrap();
+
+    let post_shape_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            }
+        },
+        "relations": {
+            "comments": {
+                "predicate": "we://comment",
+                "kind": "hasMany",
+                "targetClassName": "Comment"
+            }
+        }
+    }"#;
+    let comment_shape_json = r#"{
+        "className": "Comment",
+        "properties": {
+            "cflag": {
+                "predicate": "we://cflag",
+                "required": true,
+                "flag": true,
+                "initial": "we://comment"
+            },
+            "body": { "predicate": "we://body", "resolveLanguage": "literal" }
+        },
+        "relations": {}
+    }"#;
+
+    let (resolver, post_shape) = StaticShapeResolver::from_json("Post", post_shape_json).unwrap();
+    resolver.register(
+        "Comment",
+        parse_shape_from_json(comment_shape_json, "Comment").unwrap(),
+    );
+
+    let quantifier =
+        |some: Option<BTreeMap<String, super::types::WhereCondition>>,
+         none: Option<BTreeMap<String, super::types::WhereCondition>>| {
+            ModelQueryInput {
+                where_clause: Some(BTreeMap::from([(
+                    "comments".to_string(),
+                    super::types::WhereCondition::Ops(super::types::WhereOps {
+                        some,
+                        none,
+                        ..Default::default()
+                    }),
+                )])),
+                ..Default::default()
+            }
+        };
+
+    let ids = |result: &super::types::ModelQueryResult| -> Vec<String> {
+        let mut v: Vec<String> = result
+            .instances
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+
+    // "has no comments at all"
+    let none_any = super::query::execute_model_query(
+        &store,
+        post_shape.as_ref(),
+        &quantifier(None, Some(BTreeMap::new())),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&none_any), vec!["we://post/3".to_string()]);
+
+    // "has at least one comment"
+    let some_any = super::query::execute_model_query(
+        &store,
+        post_shape.as_ref(),
+        &quantifier(Some(BTreeMap::new()), None),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ids(&some_any),
+        vec!["we://post/1".to_string(), "we://post/2".to_string()]
+    );
+
+    // "has a comment whose body is spam" — the nested clause names a property
+    // of Comment, so it only resolves because the target class is known.
+    let some_spam = super::query::execute_model_query(
+        &store,
+        post_shape.as_ref(),
+        &quantifier(
+            Some(BTreeMap::from([(
+                "body".to_string(),
+                super::types::WhereCondition::String("spam".to_string()),
+            )])),
+            None,
+        ),
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&some_spam), vec!["we://post/1".to_string()]);
+}
+
+/// A getter relation that names a target class hydrates through `include`.
+///
+/// This is the traversal a link-shaped relation cannot express: the connection
+/// between two nodes is itself a record (a reified edge), so there is no single
+/// predicate for `through` to name. A getter walks the two hops; `targetClassName`
+/// is what lets the result become typed instances rather than bare URIs.
+///
+/// The two were mutually exclusive in the TypeScript decorator until this change,
+/// even though every layer beneath — SHACL emission, shape parsing, getter
+/// evaluation, include resolution — already supported the pair.
+#[tokio::test]
+async fn test_getter_relation_with_target_class_hydrates_via_include() {
+    let store = SparqlStore::new(None).unwrap();
+
+    let node_a = "we://node/a";
+    let node_b = "we://node/b";
+    let edge = "we://rel/1";
+
+    // Two nodes of the same class.
+    for (base, text, ts) in [
+        (node_a, "Node A", "1700000000000"),
+        (node_b, "Node B", "1700000000002"),
+    ] {
+        store
+            .add_link(&make_link(base, "we://flag", "we://text_block", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "we://text",
+                &format!("literal:string:{}", literal_percent_encode(text)),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    // The edge: a record whose two to-one relations name the ends it joins.
+    store
+        .add_link(&make_link(
+            edge,
+            "we://relationship_source",
+            node_a,
+            "1700000000004",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            edge,
+            "we://relationship_target",
+            node_b,
+            "1700000000005",
+        ))
+        .unwrap();
+
+    // `related` is defined by a two-hop traversal through the edge record, and
+    // names its own class so the values can be hydrated. Self-referential —
+    // a node relates to other nodes — which also exercises the target shape
+    // resolving to the shape currently being queried.
+    let shape_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {
+                "predicate": "we://flag",
+                "required": true,
+                "flag": true,
+                "initial": "we://text_block"
+            },
+            "text": { "predicate": "we://text", "resolveLanguage": "literal" }
+        },
+        "relations": {
+            "related": {
+                "kind": "hasMany",
+                "getter": "SELECT ?target WHERE { ?rel <we://relationship_source> <Base> . ?rel <we://relationship_target> ?target . }",
+                "targetClassName": "TextBlock"
+            }
+        }
+    }"#;
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "id".to_string(),
+            super::types::WhereCondition::String(node_a.to_string()),
+        )])),
+        include: Some(HashMap::from([(
+            "related".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let result = execute_model_query_from_json(&store, "TextBlock", &query, shape_json)
+        .await
+        .unwrap();
+
+    assert_eq!(result.instances.len(), 1, "expected node A");
+    let related = result.instances[0]["related"]
+        .as_array()
+        .expect("related must hydrate as an array");
+
+    assert_eq!(related.len(), 1, "A is joined to exactly one node");
+    assert_eq!(
+        related[0]["id"].as_str().unwrap(),
+        node_b,
+        "the traversal must land on the far end of the edge",
+    );
+    assert_eq!(
+        related[0]["text"].as_str().unwrap(),
+        "Node B",
+        "and it must be a hydrated instance, not a bare URI — which is what \
+         naming the target class buys",
+    );
+}
+
+#[tokio::test]
+async fn test_relation_quantifier_requires_the_target_class() {
+    // A relation quantifier asks "does this Post have a Comment whose body is
+    // 'spam'". Being linked by `we://comment` is not the same as being a
+    // Comment, and hydration knows the difference — it resolves `comments`
+    // through Comment's own query, which applies that class's conformance. A
+    // quantifier that asks only about the predicate matches a Post whose
+    // `comments` then comes back without the node that matched: the filter and
+    // the row disagreeing about one link.
+    let store = SparqlStore::new(None).unwrap();
+
+    let spam = format!("literal:string:{}", literal_percent_encode("spam"));
+
+    // Post A is linked only to a node carrying the body but not the flag.
+    let post_a = "we://postA";
+    let imposter = "we://imposter";
+    store
+        .add_link(&make_link(
+            post_a,
+            "ad4m://type",
+            "we://post",
+            "1700000000000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            post_a,
+            "we://comment",
+            imposter,
+            "1700000000001",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(imposter, "we://body", &spam, "1700000000002"))
+        .unwrap();
+
+    // Post B is linked to a real Comment with the same body.
+    let post_b = "we://postB";
+    let comment = "we://comment1";
+    store
+        .add_link(&make_link(
+            post_b,
+            "ad4m://type",
+            "we://post",
+            "1700000000003",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(post_b, "we://comment", comment, "1700000000004"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            comment,
+            "ad4m://type",
+            "we://comment",
+            "1700000000005",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(comment, "we://body", &spam, "1700000000006"))
+        .unwrap();
+
+    let post_json = r#"{
+        "className": "Post",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "we://post"
+            }
+        },
+        "relations": {
+            "comments": {
+                "predicate": "we://comment",
+                "targetClassName": "Comment"
+            }
+        }
+    }"#;
+    let comment_json = r#"{
+        "className": "Comment",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "we://comment"
+            },
+            "body": {
+                "predicate": "we://body",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    let resolver = StaticShapeResolver::new();
+    let post_shape = parse_shape_from_json(post_json, "Post").unwrap();
+    resolver.register(
+        "Comment",
+        parse_shape_from_json(comment_json, "Comment").unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "comments".to_string(),
+            WhereCondition::Ops(super::types::WhereOps {
+                some: Some(BTreeMap::from([(
+                    "body".to_string(),
+                    WhereCondition::String("spam".to_string()),
+                )])),
+                ..Default::default()
+            }),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, &post_shape, &query, &resolver)
+        .await
+        .unwrap();
+
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![post_b],
+        "only the Post linked to a real Comment matches — the imposter carries \
+         the body but not the class",
+    );
+}
+
+// --- Polymorphic includes -------------------------------------------------
+//
+// A note on the fixtures below, since they differ on purpose. A class is a set
+// of required triples, and `required_triples` builds that set from flags and
+// required properties alike — a flag contributes `(predicate, Some(value))`
+// where a required property contributes `(predicate, None)`, and nothing past
+// that point can tell them apart. So none of this machinery depends on flags.
+//
+// The first test discriminates its classes by flag, because that is what the
+// consumers of this API ship today and it should keep being covered. The two
+// overlap tests discriminate by required property, because what they assert is
+// about class membership itself and a fixture built from marker flags reads as
+// contrived — two classes needing an overlapping set of ordinary predicates is
+// how overlap actually arises.
+
+/// A heterogeneous relation hydrates each target as the class it actually is.
+///
+/// Without this the collection has no good answer. Declaring the base class
+/// loses every subclass property — `hydrate_one` only reads predicates present
+/// in the shape it is handed, so a subclass read as its parent arrives with
+/// `text` *absent*, not merely mislabelled — and declaring nothing leaves the
+/// include with no shape to resolve at all.
+#[tokio::test]
+async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // Register the classes so `subject_class_of` can enumerate them.
+    for uri in [
+        "we://models/Collection",
+        "we://models/TextBlock",
+        "we://models/ImageBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    // One collection holding one text block and one image block.
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://i/1", "4"))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "5",
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://i/1", "we://flag", "we://image_block", "6"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://i/1",
+            "we://src",
+            "literal:string:cat.png",
+            "6",
+        ))
+        .unwrap();
+
+    // The collection's `children` names no target class — which is exactly why
+    // it needs this: its members are of genuinely different types.
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
+                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImageBlock",
+        parse_shape_from_json(
+            r#"{"className":"ImageBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://image_block"},
+                 "src":{"predicate":"we://src","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "ImageBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 2, "both children hydrate");
+
+    let text = children
+        .iter()
+        .find(|c| c["id"] == "we://t/1")
+        .expect("the text block");
+    let image = children
+        .iter()
+        .find(|c| c["id"] == "we://i/1")
+        .expect("the image block");
+
+    assert_eq!(text["__subjectClass"].as_str(), Some("TextBlock"));
+    assert_eq!(image["__subjectClass"].as_str(), Some("ImageBlock"));
+    // The property that only exists on the concrete class — the thing a
+    // base-class hydration silently drops.
+    assert_eq!(text["text"].as_str(), Some("hello"));
+    assert_eq!(image["src"].as_str(), Some("cat.png"));
+}
+
+/// A target conforming to both a class and its parent hydrates as the class.
+///
+/// This is the case the specificity ranking exists for, and the one where it has
+/// a real answer rather than a convention: a subclass requires everything its
+/// parent requires and more, so "matched more triples" and "more derived" are the
+/// same ordering. Nothing exercised it end to end before — the sibling test's
+/// two classes match one shape each, so the head of the set was never contested.
+///
+/// Discriminated by required properties rather than by flags, so the superset
+/// relation the ranking depends on is visible in the shapes themselves: `Block`
+/// requires a title, `TextBlock` requires a title *and* a body.
+#[tokio::test]
+async fn test_polymorphic_include_hydrates_the_most_derived_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Collection",
+        "we://models/Block",
+        "we://models/TextBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://name",
+            "literal:string:reading list",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    // The child carries what `Block` requires *and* what `TextBlock` requires,
+    // which is what being a subclass looks like when membership is structural:
+    // it satisfies both, and satisfies the subclass by more.
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://title",
+            "literal:string:Chapter one",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "4",
+        ))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "Block",
+        parse_shape_from_json(
+            r#"{"className":"Block","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Block",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"},
+                 "text":{"predicate":"we://text","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1, "one link, one child");
+
+    let child = &children[0];
+    assert_eq!(child["__subjectClass"].as_str(), Some("TextBlock"));
+    // `text` exists only on the subclass, so its presence is the proof that the
+    // subclass's shape did the hydrating and not the parent's.
+    assert_eq!(child["text"].as_str(), Some("hello"));
+    // Conforming to the parent as well is not an error to be hidden — it is
+    // simply true, and it is reported.
+    assert_eq!(
+        child["__subjectClasses"],
+        serde_json::json!(["TextBlock", "Block"]),
+        "the whole set, most specific first"
+    );
+}
+
+/// A target conforming to two *unrelated* classes is still one member.
+///
+/// Links decide how many children a collection has; classes decide only how each
+/// one is read. A class is a set of required triples, so a node carrying what two
+/// independently authored classes each require belongs to both — which is not a
+/// contrived arrangement but the ordinary consequence of two communities modelling
+/// overlapping things. It appears once, read as one of them, with the other
+/// reported rather than dropped.
+///
+/// Which one wins is a convention here, not a fact: the two classes require one
+/// triple each, so the specificity ranking ties and the alphabetical tie-break
+/// decides. Arbitrary, but the same arbitrary answer on every peer, which is the
+/// property worth having when there is no `rdf:type` triple to appeal to.
+#[tokio::test]
+async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_target() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Collection",
+        "we://models/Bookmark",
+        "we://models/TextBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://name",
+            "literal:string:reading list",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://b/1", "3"))
+        .unwrap();
+
+    // One node holding what each class requires: somebody saved a link and wrote
+    // a note on it. Neither reading is wrong, and nothing marks it as either.
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://url",
+            "literal:string:https://ad4m.dev",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://text",
+            "literal:string:hello",
+            "4",
+        ))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "Bookmark",
+        parse_shape_from_json(
+            r#"{"className":"Bookmark","properties":{
+                 "url":{"predicate":"we://url","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Bookmark",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "text":{"predicate":"we://text","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+
+    let children = result.instances[0]["children"].as_array().unwrap();
+    // The point of the test: two readings, one link, one member. Hydrating the
+    // node once per class it matches would make a three-link collection arrive
+    // with more than three children.
+    assert_eq!(
+        children.len(),
+        1,
+        "two readings of one node is still one node"
+    );
+
+    let child = &children[0];
+    assert_eq!(child["id"].as_str(), Some("we://b/1"));
+    assert_eq!(
+        child["__subjectClass"].as_str(),
+        Some("Bookmark"),
+        "the ranking ties, so the tie-break decides — and decides the same way everywhere"
+    );
+    assert_eq!(child["url"].as_str(), Some("https://ad4m.dev"));
+    // The reading that lost. A caller wanting it has the id and can ask
+    // `TextBlock` for it directly.
+    assert_eq!(
+        child["__subjectClasses"],
+        serde_json::json!(["Bookmark", "TextBlock"])
+    );
+}
+
+/// `limit` on a polymorphic include is refused, not quietly ignored.
+///
+/// The read runs one sub-query per class present, so a limit would apply to each
+/// group separately: the same `limit: 5` returns five rows or fifteen depending
+/// on how many classes the data happens to contain, which the caller cannot see.
+/// Dropping it silently hands back every row to someone who asked for five —
+/// wrong in a way that surfaces much later, and only as slowness.
+#[tokio::test]
+async fn test_limit_on_a_polymorphic_include_is_rejected() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in ["we://models/Collection", "we://models/TextBlock"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "4"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                limit: Some(5),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let err =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .expect_err("a limit that cannot be honoured must not be dropped in silence");
+    let msg = err.to_string();
+    assert!(msg.contains("children"), "names the relation: {msg}");
+    assert!(msg.contains("limit"), "names what was refused: {msg}");
+}
+
+/// A named class wins over a more specific one the caller did not ask for.
+///
+/// The case the specificity default gets wrong. A relation declares it holds
+/// `Post`s; a target is an `ImagePost`, so it conforms to both and `ImagePost`
+/// matched more. Read as an `ImagePost` it arrives as a class the caller has
+/// never heard of, and no client-side repair is possible for the general shape
+/// of this — a class whose shape does not declare the other's predicates
+/// projects those values out of the payload before anyone sees them.
+///
+/// Naming `Post` says what the read is for, and the answer follows.
+#[tokio::test]
+async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/Feed",
+        "we://models/Post",
+        "we://models/ImagePost",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://f/1",
+            "we://name",
+            "literal:string:the feed",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://p/1", "3"))
+        .unwrap();
+
+    // An ImagePost: everything a Post requires, and an image besides.
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://title",
+            "literal:string:Chocolate Cake",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://src",
+            "literal:string:cake.png",
+            "4",
+        ))
+        .unwrap();
+
+    let feed_json = r#"{
+        "className": "Feed",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "entries": { "predicate": "we://entry", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, feed_shape) = StaticShapeResolver::from_json("Feed", feed_json).unwrap();
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "ImagePost",
+        parse_shape_from_json(
+            r#"{"className":"ImagePost","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"},
+                 "src":{"predicate":"we://src","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "ImagePost",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "entries".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                prefer_classes: Some(vec!["Post".to_string()]),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let entries = result.instances[0]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+
+    assert_eq!(
+        entry["__subjectClass"].as_str(),
+        Some("Post"),
+        "the caller named Post, and the target is one"
+    );
+    assert_eq!(entry["title"].as_str(), Some("Chocolate Cake"));
+    // Ranked by specificity regardless of what was preferred, so it stays a fact
+    // about the node rather than about the request — and a reader can see a
+    // preference was applied precisely because the head is not the chosen class.
+    assert_eq!(
+        entry["__subjectClasses"],
+        serde_json::json!(["ImagePost", "Post"]),
+        "the whole set, still most specific first"
+    );
+}
+
+/// Preferring classes never narrows what a relation returns.
+///
+/// A heterogeneous relation is open by definition, so a caller listing the
+/// classes it can use must not thereby drop the ones it cannot. Anything
+/// unnamed still arrives, hydrated as whatever it actually is — which is what
+/// keeps the declaration a preference rather than a scope, and what stops a
+/// model's class list from freezing which classes a collection may hold.
+#[tokio::test]
+async fn test_preferring_classes_does_not_drop_the_ones_not_named() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in ["we://models/Feed", "we://models/Post", "we://models/Recipe"] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    store
+        .add_link(&make_link(
+            "we://f/1",
+            "we://name",
+            "literal:string:the feed",
+            "2",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://p/1", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://f/1", "we://entry", "we://r/1", "3"))
+        .unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://p/1",
+            "we://title",
+            "literal:string:a post",
+            "4",
+        ))
+        .unwrap();
+    // A class the caller never names, and could not have: somebody defined it
+    // after this relation was written.
+    store
+        .add_link(&make_link(
+            "we://r/1",
+            "we://ingredients",
+            "literal:string:flour, sugar",
+            "4",
+        ))
+        .unwrap();
+
+    let feed_json = r#"{
+        "className": "Feed",
+        "properties": {
+            "name": {"predicate":"we://name","required":true,"resolveLanguage":"literal"}
+        },
+        "relations": {
+            "entries": { "predicate": "we://entry", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, feed_shape) = StaticShapeResolver::from_json("Feed", feed_json).unwrap();
+    resolver.register(
+        "Post",
+        parse_shape_from_json(
+            r#"{"className":"Post","properties":{
+                 "title":{"predicate":"we://title","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Post",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Recipe",
+        parse_shape_from_json(
+            r#"{"className":"Recipe","properties":{
+                 "ingredients":{"predicate":"we://ingredients","required":true,"resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Recipe",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "entries".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                prefer_classes: Some(vec!["Post".to_string()]),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let entries = result.instances[0]["entries"].as_array().unwrap();
+    assert_eq!(
+        entries.len(),
+        2,
+        "both links, though only one class was named"
+    );
+
+    let recipe = entries
+        .iter()
+        .find(|e| e["id"] == "we://r/1")
+        .expect("the unnamed class is still a member");
+    assert_eq!(recipe["__subjectClass"].as_str(), Some("Recipe"));
+    assert_eq!(recipe["ingredients"].as_str(), Some("flour, sugar"));
+}
+
+/// The same refusal on a relation that happens to hold nothing.
+///
+/// Both resolvers return early once they find no targets, so a check made during
+/// hydration would accept `limit: 5` on an empty collection and reject it on a
+/// full one — the query's validity decided by the data it is asking about.
+/// Whether a request can be answered is a property of the request.
+#[tokio::test]
+async fn test_limit_on_a_polymorphic_include_is_rejected_even_with_no_targets() {
+    let store = SparqlStore::new(None).unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://models/Collection",
+            "rdf://type",
+            "ad4m://SubjectClass",
+            "1",
+        ))
+        .unwrap();
+    // A collection, and deliberately no `children` links at all.
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" },
+            "markedBy": { "predicate": "we://marks", "kind": "belongsToMany", "targetClassName": "", "direction": "reverse" }
+        }
+    }"#;
+
+    for relation in ["children", "markedBy"] {
+        let (resolver, shape) =
+            StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+        let query = ModelQueryInput {
+            include: Some(HashMap::from([(
+                relation.to_string(),
+                super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                    polymorphic: Some(true),
+                    offset: Some(2),
+                    ..Default::default()
+                })),
+            )])),
+            ..Default::default()
+        };
+
+        let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+            .await
+            .expect_err("an empty relation must not make an unanswerable query answerable");
+        let msg = err.to_string();
+        assert!(msg.contains(relation), "names the relation: {msg}");
+        assert!(msg.contains("offset"), "names what was refused: {msg}");
+    }
+}
+
+/// An untyped relation read without `polymorphic` fails with an actionable
+/// message rather than a shape lookup for the empty string.
+#[tokio::test]
+async fn test_untyped_include_without_polymorphic_explains_itself() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" }
+        }
+    }"#;
+    let (resolver, shape) = StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("must not silently succeed");
+    let msg = err.to_string();
+    assert!(msg.contains("children"), "names the relation: {msg}");
+    assert!(msg.contains("polymorphic"), "names the fix: {msg}");
+}
+
+/// The inverse side of a heterogeneous relation is heterogeneous too: whatever
+/// points *at* an instance is whatever somebody linked it into. A reverse
+/// include has to honour `polymorphic` for the same reason the forward one does.
+#[tokio::test]
+async fn test_polymorphic_reverse_include_hydrates_each_source_as_its_own_class() {
+    let store = SparqlStore::new(None).unwrap();
+
+    for uri in [
+        "we://models/TextBlock",
+        "we://models/Collection",
+        "we://models/Board",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+
+    // One block, held by two containers of different classes.
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://t/1",
+            "we://text",
+            "literal:string:hello",
+            "2",
+        ))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://c/1",
+            "we://title",
+            "literal:string:Reading list",
+            "3",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "4"))
+        .unwrap();
+
+    store
+        .add_link(&make_link("we://b/1", "we://flag", "we://board", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://b/1",
+            "we://label",
+            "literal:string:Sprint 3",
+            "5",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://b/1", "we://children", "we://t/1", "6"))
+        .unwrap();
+
+    // `containers` names no target class — a block does not know what kinds of
+    // thing may hold it, which is the case `polymorphic` exists for.
+    let block_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"},
+            "text": {"predicate":"we://text","resolveLanguage":"literal"}
+        },
+        "relations": {
+            "containers": {
+                "predicate": "we://children",
+                "kind": "belongsToMany",
+                "direction": "reverse",
+                "targetClassName": ""
+            }
+        }
+    }"#;
+    let (resolver, block_shape) = StaticShapeResolver::from_json("TextBlock", block_json).unwrap();
+    resolver.register(
+        "Collection",
+        parse_shape_from_json(
+            r#"{"className":"Collection","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"},
+                 "title":{"predicate":"we://title","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Collection",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Board",
+        parse_shape_from_json(
+            r#"{"className":"Board","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://board"},
+                 "label":{"predicate":"we://label","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Board",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "containers".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(ModelQueryInput {
+                polymorphic: Some(true),
+                ..Default::default()
+            })),
+        )])),
+        ..Default::default()
+    };
+
+    let result = super::query::execute_model_query(&store, block_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let containers = result.instances[0]["containers"].as_array().unwrap();
+    assert_eq!(containers.len(), 2, "both containers hydrate");
+
+    let collection = containers
+        .iter()
+        .find(|c| c["id"] == "we://c/1")
+        .expect("the collection");
+    let board = containers
+        .iter()
+        .find(|c| c["id"] == "we://b/1")
+        .expect("the board");
+
+    assert_eq!(collection["__subjectClass"].as_str(), Some("Collection"));
+    assert_eq!(board["__subjectClass"].as_str(), Some("Board"));
+    // The property that exists only on the concrete class — before this, both
+    // took the same path through the declared target class and arrived empty.
+    assert_eq!(collection["title"].as_str(), Some("Reading list"));
+    assert_eq!(board["label"].as_str(), Some("Sprint 3"));
+}
+
+/// An untyped *reverse* relation read without `polymorphic` gets the same
+/// actionable message the forward path gives, rather than a shape lookup for
+/// the empty string.
+#[tokio::test]
+async fn test_untyped_reverse_include_without_polymorphic_explains_itself() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+
+    let block_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+        },
+        "relations": {
+            "containers": {
+                "predicate": "we://children",
+                "kind": "belongsToMany",
+                "direction": "reverse",
+                "targetClassName": ""
+            }
+        }
+    }"#;
+    let (resolver, shape) = StaticShapeResolver::from_json("TextBlock", block_json).unwrap();
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "containers".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("must not silently succeed");
+    let msg = err.to_string();
+    assert!(msg.contains("containers"), "names the relation: {msg}");
+    assert!(msg.contains("polymorphic"), "names the fix: {msg}");
 }
 
 /// An ordered collection comes back in CRDT order through the ORM read path.

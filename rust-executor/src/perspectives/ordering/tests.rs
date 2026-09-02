@@ -120,6 +120,60 @@ fn concurrent_moves_of_one_item_resolve_last_write_wins() {
     assert_eq!(s().reconstruct(&m, &peer1), vec!["a", "c", "d", "b"]);
 }
 
+#[test]
+fn two_moves_sharing_a_pid_still_converge() {
+    // The same agent moving one item twice inside a millisecond. `seq` restarts
+    // at zero on every call, so the two entries carry an identical pid — the
+    // one case a pid cannot separate, and the case that used to leave the
+    // winner to whichever entry arrived first.
+    let base = vec![
+        entry("a", LIST_HEAD, "0000000000000001_0000000000000000_did:x"),
+        entry("c", "a", "0000000000000002_0000000000000000_did:x"),
+        entry("d", "c", "0000000000000003_0000000000000000_did:x"),
+        entry("b", "a", "0000000000000004_0000000000000000_did:x"),
+    ];
+    let same_pid = "0000000000000010_0000000000000000_did:A";
+    let move_after_c = entry("b", "c", same_pid);
+    let move_after_d = entry("b", "d", same_pid);
+
+    let mut peer1 = base.clone();
+    peer1.push(move_after_c.clone());
+    peer1.push(move_after_d.clone());
+
+    let mut peer2 = base.clone();
+    // Same entries, opposite arrival order.
+    peer2.push(move_after_d);
+    peer2.push(move_after_c);
+
+    let m = members(&["a", "b", "c", "d"]);
+    assert_eq!(
+        s().reconstruct(&m, &peer1),
+        s().reconstruct(&m, &peer2),
+        "equal pids must resolve the same way on every peer — which entry wins \
+         is arbitrary, agreement is not",
+    );
+}
+
+#[test]
+fn two_items_sharing_a_pid_at_one_predecessor_still_converge() {
+    // The same collision one level down: two *different* items forked off `a`
+    // with the same pid. This one already held before the tiebreak went in —
+    // `latest_per_item` sorts its output by item, so the fork arrives at the
+    // sort in a deterministic order and a stable sort keeps it. Pinned because
+    // that is an invariant established two functions away from the sort that
+    // depends on it.
+    let same_pid = "0000000000000010_0000000000000000_did:A";
+    let b = entry("b", "a", same_pid);
+    let c = entry("c", "a", same_pid);
+
+    let head = entry("a", LIST_HEAD, "0000000000000001_0000000000000000_did:x");
+    let peer1 = vec![head.clone(), b.clone(), c.clone()];
+    let peer2 = vec![head, c, b];
+
+    let m = members(&["a", "b", "c"]);
+    assert_eq!(s().reconstruct(&m, &peer1), s().reconstruct(&m, &peer2));
+}
+
 // ---- deletion, without tombstones ----------------------------------------
 
 mod deletion {
@@ -236,6 +290,27 @@ fn generate_full_chains_the_array() {
 }
 
 #[test]
+fn a_pid_keeps_its_sequence_out_of_its_timestamp() {
+    // Folded into the timestamp, the last entry of a batch minted at t and the
+    // first of one minted a millisecond later would be the same pid — and
+    // `latest_per_item` resolves equal pids by arrival order, which is exactly
+    // the machine-dependent tiebreak the padding exists to rule out.
+    assert_ne!(
+        make_pid(1_000, 1, "did:x"),
+        make_pid(1_001, 0, "did:x"),
+        "different (timestamp, seq) pairs must never collide",
+    );
+    assert!(
+        make_pid(1_000, 1, "did:x") < make_pid(1_001, 0, "did:x"),
+        "and the later timestamp still sorts higher",
+    );
+    assert!(
+        make_pid(1_000, 2, "did:x") < make_pid(1_000, 10, "did:x"),
+        "seq is padded too, so its string order is numeric order",
+    );
+}
+
+#[test]
 fn diff_of_an_unchanged_array_writes_nothing() {
     let ordering = s().generate_full(&["a".into(), "b".into(), "c".into()], PRED, "did:x", 1_000);
     let m = members(&["a", "b", "c"]);
@@ -310,6 +385,66 @@ fn diff_positions_a_new_item() {
 }
 
 #[test]
+fn diff_projects_a_new_item_the_way_its_link_will_read_back() {
+    // The projection stands in for members whose links do not exist yet, and it
+    // is what decides whether an entry can be skipped — so it has to be in the
+    // format `reconstruct` will actually compare, RFC3339 milliseconds. As a
+    // zero-padded number it sorted *ahead* of every real timestamp, so a new
+    // item was projected at the head of the unpositioned tail.
+    //
+    // `n` is asked for last, which is where its link will read back. Projected
+    // first, `projected != desired` and diff writes entries that pin an order
+    // the data already gives — and, worse, the mirror case (`n` asked for
+    // first) compared equal and wrote nothing, leaving the save to hydrate as
+    // [a, b, n].
+    let existing = vec![
+        ("a".to_string(), "2026-08-31T10:00:00.000Z".to_string()),
+        ("b".to_string(), "2026-08-31T10:00:01.000Z".to_string()),
+    ];
+    // The save happens after both of them. Its RFC3339 form is spelled out
+    // rather than derived, so this test pins the format `diff` must project in
+    // — the one `agent::create_signed_expression` stamps on every link.
+    let now_ms = 1_788_220_800_000;
+    let now_rfc3339 = "2026-09-01T00:00:00.000Z";
+
+    let appended = s().diff(
+        &[],
+        &existing,
+        &["a".into(), "b".into(), "n".into()],
+        PRED,
+        "did:x",
+        now_ms,
+    );
+    assert!(
+        appended.add.is_empty(),
+        "appending to an unordered collection is already what hydration gives, \
+         so it costs nothing: {:?}",
+        appended.add,
+    );
+
+    let prepended = s().diff(
+        &[],
+        &existing,
+        &["n".into(), "a".into(), "b".into()],
+        PRED,
+        "did:x",
+        now_ms,
+    );
+    assert!(
+        !prepended.add.is_empty(),
+        "but putting the new item first contradicts its link timestamp, so that \
+         has to be written down",
+    );
+    let mut members_after: Vec<(String, String)> = existing.clone();
+    members_after.push(("n".to_string(), now_rfc3339.to_string()));
+    assert_eq!(
+        s().reconstruct(&members_after, &prepended.add),
+        vec!["n", "a", "b"],
+        "and the entries produce the requested order once the link is stored",
+    );
+}
+
+#[test]
 fn diff_needs_no_entry_to_remove_an_item() {
     let ordering = s().generate_full(&["a".into(), "b".into(), "c".into()], PRED, "did:x", 1_000);
     let diff = s().diff(
@@ -377,6 +512,20 @@ fn an_unparseable_entry_is_skipped_not_fatal() {
 #[test]
 fn entries_round_trip_through_their_link_target() {
     let e = entry("a", LIST_HEAD, "0000000000000001_did:x");
+    let encoded = encode_ordering_entry(&e).unwrap();
+    assert_eq!(parse_ordering_entries(&[encoded], PRED), vec![e]);
+}
+
+#[test]
+fn an_item_uri_holding_a_percent_sequence_survives_the_round_trip() {
+    // The reader percent-decodes, so an unencoded payload would hand back
+    // "ad4m://item one" — an item that matches no membership link, silently
+    // demoting it to the by-timestamp tail.
+    let e = entry(
+        "ad4m://item%20one",
+        "ad4m://after%2Fslash",
+        "0000000000000001_did:x",
+    );
     let encoded = encode_ordering_entry(&e).unwrap();
     assert_eq!(parse_ordering_entries(&[encoded], PRED), vec![e]);
 }

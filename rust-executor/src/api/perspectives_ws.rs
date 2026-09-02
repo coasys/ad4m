@@ -1,5 +1,6 @@
 //! Perspective WS-native handlers.
 
+use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,6 +85,44 @@ fn reserve_credits(user_email: &Option<String>, amount: f64) -> Result<(), WsRpc
 }
 
 const DEFAULT_LINK_WRITE: f64 = 0.25;
+
+/// Adapter that implements the harness's `CreditGate` trait against the
+/// per-user credit ledger. Each `check()` (a) refuses if the ledger says
+/// insufficient, and (b) reserves `DEFAULT_LINK_WRITE` from the ledger
+/// so the mid-loop opportunity cost is accounted for — not just the
+/// bases the pass eventually lands.
+///
+/// Rationale (James's review 2026-08-25): the old shape was
+/// `check_credits` once at entry, then `reserve_credits(bases.len() * DEFAULT_LINK_WRITE)`
+/// at exit. Up-to-`max_tool_calls + 1` completions in between hit
+/// neither, and `AIService::bill_prompt_if_authed` is a
+/// fire-and-forget deduction that logs on `InsufficientCredits` but
+/// doesn't halt the loop. A pass that ends with zero bases used to be
+/// free regardless of how many completions it burned.
+struct WsHarnessCreditGate {
+    user_email: Option<String>,
+}
+
+impl WsHarnessCreditGate {
+    fn new(user_email: Option<String>) -> Self {
+        Self { user_email }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ai_service::harness::CreditGate for WsHarnessCreditGate {
+    async fn check(&self) -> anyhow::Result<()> {
+        // Pre-check: cheap "credits > 0" gate. Free hosting / free-access
+        // paths short-circuit inside `check_credits`.
+        check_credits(&self.user_email).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        // Reserve the per-completion opportunity cost. Fire-and-forget
+        // wrt success — the ledger deduction happens atomically and any
+        // downstream `InsufficientCredits` will fail the NEXT `check`.
+        reserve_credits(&self.user_email, DEFAULT_LINK_WRITE)
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        Ok(())
+    }
+}
 
 fn parse_link_status(s: Option<&str>) -> LinkStatus {
     match s {
@@ -304,8 +343,14 @@ async fn add_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     if let Err(e) = reserve_credits(&ctx.user_email, DEFAULT_LINK_WRITE) {
+        // KEEP AT warn (Nico + CodeRabbit, PR #942 round 2): money-losing
+        // credit-ledger failures at debug hide ledger inconsistency. The
+        // link write already committed, so this is not fatal to the
+        // request — but the missed deduction is a real accounting drift
+        // that ops needs to see. Do not downgrade in future cleanups.
+        // See rust-executor/LOGGING.md.
         log::warn!(
-            "Credit deduction failed (operation already committed): {}",
+            "⚠️ 💳 credit deduction failed (link write already committed): {}",
             e
         );
     }
@@ -541,6 +586,15 @@ const SPARQL_QUERY_TIMEOUT_SECS: u64 = 30;
 /// forever (a slot held past this bound returns a 408 to the caller).
 const RUN_INTERPRETATION_TIMEOUT_SECS: u64 = 300;
 
+/// Longer server budget for the harness (tool-calling) path. A single
+/// harness pass is N tool round-trips plus a final answer, so it
+/// legitimately takes longer than a single-shot generation. Matches the
+/// 20-minute RPC timeout the client (`PerspectiveClient
+/// .runInterpretationWithHarness`) sets on this method; if the server
+/// budget were shorter, slow local models would 408 on the server while
+/// the client still waited.
+const RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS: u64 = 1200;
+
 async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -557,18 +611,47 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
     match engine.as_str() {
         "sparql" => {
-            // Run the synchronous SPARQL query on a blocking thread with a timeout
-            // so it doesn't block the async runtime or hang indefinitely.
-            let result = tokio::time::timeout(
-                Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-                tokio::task::spawn_blocking(move || perspective.sparql_query(query)),
-            )
-            .await;
+            // Run the synchronous SPARQL query on a blocking thread with a
+            // hard timeout (so the executor doesn't hang indefinitely on
+            // a pathological query) and a soft cancellation token (so the
+            // client can abort with `request.cancel`).
+            //
+            // When `ctx.cancel_token` is present (always true under the
+            // WS dispatcher), we use `sparql_query_cancellable` which
+            // races the eval against `cancel.cancelled()`.  When it's
+            // None (internal callers / tests), fall back to the
+            // historical timeout + spawn_blocking shape.
+            let timeout = Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS);
+            let result = if let Some(cancel) = ctx.cancel_token.clone() {
+                tokio::time::timeout(timeout, perspective.sparql_query_cancellable(query, cancel))
+                    .await
+            } else {
+                let join = tokio::task::spawn_blocking(move || perspective.sparql_query(query));
+                tokio::time::timeout(timeout, async move {
+                    join.await
+                        .map_err(|e| deno_core::anyhow::anyhow!("Task join error: {}", e))?
+                })
+                .await
+            };
 
             match result {
-                Ok(Ok(Ok(json))) => Ok(serde_json::to_value(json)?),
-                Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
-                Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+                Ok(Ok(json)) => Ok(serde_json::to_value(json)?),
+                Ok(Err(e)) => {
+                    // Surface client cancellation as 499 so the dispatcher
+                    // doesn't have to special-case it — same wire shape as
+                    // the racing branch in `ws_rpc::handle_ws`.  Other
+                    // errors (anyhow string, including "query cancelled")
+                    // surface as 500 unless we recognise the cancel marker.
+                    let msg = e.to_string();
+                    if msg.contains("query cancelled") {
+                        Err(WsRpcError {
+                            code: 499,
+                            message: "Request cancelled by client".to_string(),
+                        })
+                    } else {
+                        Err(WsRpcError::internal(msg))
+                    }
+                }
                 Err(_) => {
                     log::warn!(
                         "SPARQL query timed out after {}s",
@@ -892,7 +975,7 @@ async fn get_subject_data(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(Value::String(data))
 }
 
-async fn subject_class_of_handler(
+async fn subject_classes_of_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
@@ -903,22 +986,53 @@ async fn subject_class_of_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let uris: Vec<String> = params
-        .get("uris")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+    // A malformed element cannot be dropped here. The result map omits URIs that
+    // matched no class, so a silently discarded input would be indistinguishable
+    // from a URI that is simply not a subject instance — the caller would read a
+    // shape error as a legitimate answer. Absent (or null, which is how an
+    // undefined field arrives from JS) keeps the empty default; anything present
+    // has to be an array of strings.
+    let uris: Vec<String> = match params.get("uris") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+            WsRpcError::bad_request(format!(
+                "Invalid parameter 'uris': expected string[]: {}",
+                e
+            ))
+        })?,
+    };
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    perspective
-        .subject_class_of(&uris)
-        .map(|map| serde_json::to_value(map).unwrap_or(Value::Null))
-        .map_err(|e| WsRpcError::internal(e.to_string()))
+    // Classification is synchronous SPARQL plus in-memory containment over every
+    // class × every URI, so it runs on a blocking thread with the same timeout as
+    // the other store-backed queries rather than holding a runtime worker.
+    let result = tokio::time::timeout(
+        Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(move || perspective.subject_classes_of(&uris)),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(Ok(map))) => {
+            serde_json::to_value(map).map_err(|e| WsRpcError::internal(e.to_string()))
+        }
+        Ok(Ok(Err(e))) => Err(WsRpcError::internal(e.to_string())),
+        Ok(Err(e)) => Err(WsRpcError::internal(format!("Task join error: {}", e))),
+        Err(_) => {
+            log::warn!(
+                "Subject classification timed out after {}s",
+                SPARQL_QUERY_TIMEOUT_SECS
+            );
+            Err(WsRpcError {
+                code: 408,
+                message: format!(
+                    "Subject classification timed out after {}s",
+                    SPARQL_QUERY_TIMEOUT_SECS
+                ),
+            })
+        }
+    }
 }
 
 async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -1301,6 +1415,196 @@ async fn run_interpretation_handler(
     Ok(serde_json::to_value(bases)?)
 }
 
+/// Harness-dispatched interpretation pass over WS-RPC — the tool-calling
+/// counterpart to `perspective.runInterpretation`. Wraps
+/// [`run_interpretation_with_harness_and_model`] with the same guardrails
+/// (capability + credit checks, class resolution, timeout, credit
+/// reservation). The LLM sees a live tool surface (`{Class}_query`,
+/// `{Class}_propose_create`, `{Class}_propose_link_child`, …) and drives
+/// the extraction by tool calls; buffered proposals drain through the
+/// same overlay gate the single-shot path uses.
+async fn run_interpretation_with_harness_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    check_credits(&ctx.user_email)?;
+
+    let body: RunInterpretationWithHarnessRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    // `max_tool_calls == 0` would collapse the harness loop to a no-op
+    // final-answer step. Callers wanting the classic path should use
+    // `perspective.runInterpretation` instead — bounce it here so the
+    // mistake surfaces at the boundary.
+    if body.max_tool_calls == 0 {
+        return Err(WsRpcError::bad_request(
+            "`maxToolCalls` must be > 0; use `perspective.runInterpretation` for the single-shot path",
+        ));
+    }
+
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+
+    // Class resolution mirrors `run_interpretation_handler`: explicit
+    // selection if provided, otherwise every registered subject class in
+    // the perspective. Explicit-selection failure surfaces the actual
+    // cause rather than the "no subject classes" default-path message.
+    let explicit_selection = matches!(&body.classes, Some(sel) if !sel.is_empty());
+    let class_names = match &body.classes {
+        Some(sel) if !sel.is_empty() => sel.clone(),
+        _ => perspective
+            .get_subject_classes_from_shacl()
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?,
+    };
+    let mut shapes = Vec::with_capacity(class_names.len());
+    let mut unresolved: Vec<String> = Vec::new();
+    for name in &class_names {
+        match perspective.get_shape(name) {
+            Ok(shape) => shapes.push((*shape).clone()),
+            Err(e) => {
+                log::warn!(
+                    "runInterpretationWithHarness: skipping class '{}': {}",
+                    name,
+                    e
+                );
+                unresolved.push(name.clone());
+            }
+        }
+    }
+    if explicit_selection && !unresolved.is_empty() && shapes.is_empty() {
+        return Err(WsRpcError::bad_request(format!(
+            "runInterpretationWithHarness: none of the requested classes could be resolved: [{}]",
+            unresolved.join(", ")
+        )));
+    }
+    if shapes.is_empty() {
+        return Err(WsRpcError::bad_request(
+            "perspective has no subject classes to extract into",
+        ));
+    }
+
+    // Same as the single-shot path: WS turns carry speaker + text only.
+    let transcript: Vec<crate::perspectives::interpretation::TranscriptTurn> = body
+        .transcript
+        .into_iter()
+        .map(|t| {
+            crate::perspectives::interpretation::TranscriptTurn::from_speaker_text(
+                t.speaker, t.text,
+            )
+        })
+        .collect();
+
+    // Thread the caller's auth token into the harness so `Ad4mMcpHandler`'s
+    // tool dispatch executes with the caller's capabilities — same
+    // principle as the `/v1` openai-compat path. Empty string means an
+    // unauthenticated caller: don't propagate that as a phantom token
+    // (Ad4mMcpHandler treats `None` as "no user session; fall back to
+    // admin credential if configured").
+    let auth_token = if ctx.auth_token.is_empty() {
+        None
+    } else {
+        Some(ctx.auth_token.clone())
+    };
+
+    // Live-debug event surface: same shape as the classic single-shot
+    // handler. `observation_id` names both `processor_id` and `batch_key`
+    // on the emitted events so a subscribed UI can correlate this pass's
+    // events to the caller-supplied id. `emit_debug_events` is a
+    // dead-letter without an observation_id (nothing to key against), so
+    // gate on both.
+    let observer_did = match &body.observation_id {
+        Some(_) => crate::agent::did_for_context(&agent_context).ok(),
+        None => None,
+    };
+    let emit_ctx = body
+        .observation_id
+        .as_ref()
+        .zip(observer_did.as_ref())
+        .filter(|_| body.emit_debug_events.unwrap_or(false))
+        .map(|(id, did)| {
+            crate::perspectives::auto_processor::events::InterpretationEmitContext {
+                perspective_uuid: uuid.clone(),
+                processor_id: id.clone(),
+                agent_did: did.clone(),
+                // No source item ids — WS-RPC caller supplies the transcript
+                // directly rather than the watcher gathering it. `batch_key`
+                // carries the identity instead.
+                item_ids: Vec::new(),
+                batch_key: id.clone(),
+            }
+        });
+
+    // Per-completion credit gate — bounds the pass to the caller's
+    // available budget across the whole tool-calling loop. Replaces the
+    // entry-only `check_credits` guard which used to leave up-to-
+    // `max_tool_calls + 1` completions unmetered after credits ran out.
+    // Reserves `DEFAULT_LINK_WRITE` per gate call (same rate the pass'
+    // exit accounting uses for each landed base) so the accounting
+    // stays proportional to the mid-loop opportunity cost.
+    let credit_gate: Option<std::sync::Arc<dyn crate::ai_service::harness::CreditGate>> = Some(
+        std::sync::Arc::new(WsHarnessCreditGate::new(ctx.user_email.clone())),
+    );
+
+    let bases = match tokio::time::timeout(
+        Duration::from_secs(RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS),
+        crate::perspectives::interpretation::run_interpretation_with_harness_and_model(
+            &mut perspective,
+            &shapes,
+            &transcript,
+            &body.base_prefix,
+            &agent_context,
+            body.model_override.as_deref(),
+            body.existing_scope.as_ref(),
+            None,
+            body.max_tool_calls,
+            auth_token,
+            emit_ctx.as_ref(),
+            // WS-RPC is the one-shot path — dedup-on-drain stays off; the
+            // caller reaches for the harness specifically to trust the LLM
+            // to `_query` before proposing. The auto-processor watcher is
+            // the caller that passes `true`.
+            false,
+            credit_gate,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(bases)) => bases,
+        Ok(Err(e)) => return Err(WsRpcError::internal(e.to_string())),
+        Err(_) => {
+            log::warn!(
+                "run_interpretation_with_harness timed out after {}s",
+                RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS
+            );
+            return Err(WsRpcError {
+                code: 408,
+                message: format!(
+                    "runInterpretationWithHarness timed out after {}s",
+                    RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS
+                ),
+            });
+        }
+    };
+
+    if !bases.is_empty() {
+        if let Err(e) = reserve_credits(&ctx.user_email, bases.len() as f64 * DEFAULT_LINK_WRITE) {
+            log::warn!(
+                "Credit deduction failed for runInterpretationWithHarness (operation already committed): {}",
+                e
+            );
+        }
+    }
+
+    Ok(serde_json::to_value(bases)?)
+}
+
 /*
    One-shot telemetry helpers.
 
@@ -1387,6 +1691,19 @@ async fn emit_one_shot_abandoned(uuid: &str, observation_id: &str, did: &str, re
 /// `AutoProcessorConfig` into the shared graph; the executor watch loop reads it
 /// back and starts running interpretation automatically over new source items,
 /// emitting step signals on the events WebSocket (`auto-processor-event`).
+///
+/// **Registering is not idempotent in its class list.** Scalars overwrite through their
+/// `setSingleTarget` setters, but `interpretationClasses` is a collection written with the shape's
+/// `addLink` setter, so a second registration under the same `processorId` *unions* its classes
+/// with what is already stored rather than replacing them. Registering `[A]` and then `[B]` leaves
+/// a processor materializing both.
+///
+/// This endpoint is therefore for **creating** a processor. To change what an existing one
+/// extracts, edit its `AutoProcessorConfig` through the model API, where a collection can be set to
+/// exactly the values given; to stop it, use `perspective.removeAutoProcessor`. A client that
+/// re-registers on reconnect should check whether the config already exists first — the config is
+/// shared graph state that outlives any one agent's session, so "ensure it exists" is the shape
+/// that wants, not "register it again".
 async fn add_auto_processor_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -1410,6 +1727,14 @@ async fn add_auto_processor_handler(
     // back at the boundary instead. Ranges mirror
     // `AutoProcessorConfig::config_from_instance` (rust-executor/src/
     // perspectives/auto_processor/config.rs).
+    //
+    // `scalar_string` treats an empty scalar as absent, so `config_from_instance` rejects a config
+    // whose `processorId` is `""` — it writes, reports success, and never loads. It is also the
+    // identity: the node URI, the claim's batch nodes and the processed-turn cursor are all derived
+    // from it, so an empty one is not a processor that runs badly but a processor with no name.
+    if body.processor_id.is_empty() {
+        return Err(WsRpcError::bad_request("`processorId` must be non-empty"));
+    }
     if body.interpretation_classes.is_empty() {
         return Err(WsRpcError::bad_request(
             "`interpretationClasses` must be non-empty",
@@ -1451,6 +1776,7 @@ async fn add_auto_processor_handler(
         source_window_ms: body.source_window_ms,
         existing_scope: body.existing_scope,
         mint_scope: body.mint_scope,
+        max_tool_calls: body.max_tool_calls,
         emit_debug_events: emit_debug_events_write.unwrap_or(false),
     };
     write_processor(
@@ -1463,6 +1789,46 @@ async fn add_auto_processor_handler(
     .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(serde_json::to_value(body.processor_id)?)
+}
+
+/// `perspective.removeAutoProcessor` — delete a processor's config instance, which is what stops
+/// its watch: the loop reads the processor set back out of the perspective's graph on every tick.
+///
+/// Answers `true` when there was a processor to remove and `false` when there was not, rather than
+/// erroring on the second case — a caller tidying up after a processor a peer has already removed
+/// has done the right thing, and a teardown path is the worst place to raise an avoidable failure.
+///
+/// Deliberately validates less than its `add` counterpart, which rejects an empty `processorId`.
+/// Strictness belongs on the way in: registration decides what may exist, and removal is how
+/// anything already there is recovered from. A config written before that validation existed — or
+/// by any writer that is not this handler — must stay removable, and refusing the id here would
+/// leave junk on the graph with no API able to take it away. The id is used verbatim to derive one
+/// node URI, so an empty one addresses exactly the node an empty-id write produced and nothing else.
+///
+/// Takes the same `update` capability as registering one. Deleting a processor is not a read: it
+/// changes what the neighbourhood extracts, for everyone.
+async fn remove_auto_processor_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    use crate::api::types::RemoveAutoProcessorRequest;
+    use crate::perspectives::auto_processor::config::remove_processor;
+
+    let body: RemoveAutoProcessorRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![body.uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let mut perspective = get_perspective_with_access(&body.uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let removed = remove_processor(&mut perspective, &body.processor_id, &agent_context)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(removed))
 }
 
 /// `perspective.acceptInterpretation` — materialize the overlay's staged
@@ -1548,6 +1914,361 @@ async fn interpretation_overlays_handler(
     Ok(serde_json::to_value(overlays)?)
 }
 
+// ── SHACL resolution endpoints ──
+//
+// These handlers move SHACL shape resolution from the TypeScript SDK (which paid
+// N×M queryLinks round trips per shape) into the executor, where link reads hit
+// the local SQLite store directly.  A perspective with 26 shapes that previously
+// generated ~261 WS-RPC round trips now resolves in a single call to
+// `perspective.getAllShacl`.
+
+/// Hard cap on the number of shapes `perspective.getAllShacl` will serialise
+/// in a single response. The endpoint returns the entire shape corpus in one
+/// WS message with no pagination — fine for the 26-shape WE dataset that
+/// motivates this PR, but a perspective with a few hundred shapes at ~10
+/// properties each is a multi-MB response inside one WS frame that either
+/// fails at the transport limit or (worse) silently truncates on some
+/// clients. Fail loudly at this ceiling until a paginated variant lands.
+/// See PR #935 review comment r3897752009.
+pub(crate) const MAX_SHACL_SHAPES_PER_RESPONSE: usize = 500;
+
+/// Helper: build a LinkQuery with only `source` and optionally `predicate` set.
+pub(crate) fn shacl_link_query(source: &str, predicate: Option<&str>) -> LinkQuery {
+    LinkQuery {
+        source: Some(source.to_string()),
+        predicate: predicate.map(|p| p.to_string()),
+        ..Default::default()
+    }
+}
+
+/// Simplified link triple returned by SHACL resolution endpoints.
+/// Matches the `{source, predicate, target}` shape that
+/// `SHACLShape.fromLinks()` in the TypeScript SDK expects.
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+pub(crate) struct ShaclLinkTriple {
+    pub source: String,
+    pub predicate: String,
+    pub target: String,
+}
+
+/// Extract a SHACL shape name from a `has_shacl` link target.
+///
+/// The `has_shacl` target is a `literal:string:` URL. The TypeScript SDK
+/// writes it as `literal:string:shacl://<Name>` verbatim (via
+/// `Literal.fromUrl(...).toUrl()`), but the SPARQL store canonicalises
+/// every `literal:string:` target through the typed-literal round-trip
+/// — the payload lands as a URL-decoded `xsd:string` and is re-encoded
+/// on read (`storage_term_to_target_string`). That flips the wire form
+/// to `literal:string:shacl%3A%2F%2F<Name>`, so a plain
+/// `strip_prefix("literal:string:shacl://")` misses every entry.
+///
+/// Accept both shapes so this helper survives store canonicalisation and
+/// any future SDK write path that uses the un-encoded form directly.
+pub(crate) fn shape_name_from_has_shacl_target(target: &str) -> Option<String> {
+    let body = target.strip_prefix("literal:string:")?;
+    // Fast path: raw form, no encoding.
+    if let Some(name) = body.strip_prefix("shacl://") {
+        return Some(name.to_string());
+    }
+    // Canonicalised form: percent-decode then re-check the scheme prefix.
+    let decoded = percent_encoding::percent_decode_str(body)
+        .decode_utf8()
+        .ok()?;
+    decoded
+        .strip_prefix("shacl://")
+        .map(|name| name.to_string())
+}
+
+/// Enumerate every SHACL shape name registered on `ad4m://self` via
+/// `ad4m://has_shacl` links. Extracted so both the WS handler and the
+/// in-crate integration tests exercise the exact same walk.
+pub(crate) async fn resolve_shacl_names(
+    perspective: &PerspectiveInstance,
+) -> Result<Vec<String>, WsRpcError> {
+    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
+    let links = perspective
+        .get_links(&query)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let mut seen = std::collections::HashSet::new();
+    let names: Vec<String> = links
+        .iter()
+        .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
+        .filter(|name| seen.insert(name.clone()))
+        .collect();
+    Ok(names)
+}
+
+/// Resolve a shape name to its `sh://targetClass` URI (or `None` when the
+/// name is unknown, or the shape has no target class). Returned as
+/// `Option` so callers can pin the wire representation (JSON `null` vs
+/// absent) at their own boundary.
+pub(crate) async fn resolve_shacl_target_class(
+    perspective: &PerspectiveInstance,
+    name: &str,
+) -> Result<Option<String>, WsRpcError> {
+    let literal_url = format!("literal:string:shacl://{}", name);
+    let uri_links = perspective
+        .get_links(&shacl_link_query(
+            &literal_url,
+            Some("ad4m://shacl_shape_uri"),
+        ))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let shape_uri = match uri_links.first() {
+        Some(link) => link.data.target.clone(),
+        None => return Ok(None),
+    };
+
+    let shape_links = perspective
+        .get_links(&shacl_link_query(&shape_uri, None))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let target_class = shape_links
+        .iter()
+        .find(|l| l.data.predicate.as_deref() == Some("sh://targetClass"))
+        .map(|l| l.data.target.clone());
+
+    Ok(target_class)
+}
+
+/// List the names of every SHACL shape stored in a perspective.
+/// Equivalent to the SDK's `PerspectiveProxy.getShaclNames()` but resolved
+/// in-process — one handler call replaces one `queryLinks` round trip, plus
+/// deduplication happens server-side.
+async fn get_shacl_names(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let names = resolve_shacl_names(&perspective).await?;
+    Ok(serde_json::to_value(names)?)
+}
+
+/// Resolve a shape's `sh:targetClass` by name without fetching its properties.
+/// Equivalent to the SDK's `PerspectiveProxy.getShaclTargetClass(name)` — two
+/// in-process link reads instead of two WS-RPC round trips.
+async fn get_shacl_target_class(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let name = params.require_str("name")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let target_class = resolve_shacl_target_class(&perspective, &name).await?;
+    // `null` when the shape (or its `sh://targetClass`) is absent — pins
+    // the wire contract the TS client already relies on
+    // (`PerspectiveProxy.getShaclTargetClass` maps this null to
+    // `undefined` at the proxy boundary).
+    Ok(serde_json::to_value(target_class)?)
+}
+
+/// Collect all link triples that define a shape and its property sub-shapes.
+/// Used by both `get_shacl` and `get_all_shacl` to avoid duplicating the
+/// multi-step resolution logic.
+pub(crate) async fn resolve_shacl_links(
+    perspective: &PerspectiveInstance,
+    name: &str,
+) -> Result<Option<(String, Vec<ShaclLinkTriple>)>, WsRpcError> {
+    // Step 1: name → shapeUri
+    let literal_url = format!("literal:string:shacl://{}", name);
+    let uri_links = perspective
+        .get_links(&shacl_link_query(
+            &literal_url,
+            Some("ad4m://shacl_shape_uri"),
+        ))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let shape_uri = match uri_links.first() {
+        Some(link) => link.data.target.clone(),
+        None => {
+            // Diagnostic for the race Nico flagged in review r3897752007:
+            // the caller enumerated this name from `has_shacl` but the
+            // `shacl_shape_uri` edge is gone by the time we resolve it
+            // (concurrent unlink between the two reads). Debug-level:
+            // expected-in-race behaviour, not a bug — the caller's
+            // returned list simply omits the vanished shape.
+            log::debug!(
+                "🔎 🔗 shacl: name={name} resolved to no shape uri, skipping (concurrent unlink?)"
+            );
+            return Ok(None);
+        }
+    };
+
+    // Step 2: get all links from the shape node (targetClass, properties, etc.)
+    let shape_links = perspective
+        .get_links(&shacl_link_query(&shape_uri, None))
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    // Step 3: find property shape URIs
+    let prop_uris: Vec<String> = shape_links
+        .iter()
+        .filter(|l| l.data.predicate.as_deref() == Some("sh://property"))
+        .map(|l| l.data.target.clone())
+        .collect();
+
+    // Step 4: fetch links from each property sub-shape. These reads are
+    // independent, so we drive them concurrently with `try_join_all` (the
+    // old TypeScript client used `Promise.all` for the same reason; the
+    // first cut of this handler regressed to sequential `.await`s and
+    // paid one round trip per property in serial). See PR #935 review
+    // (r3897752002).
+    //
+    // The queries are materialised into an owned Vec first so each future
+    // borrows a value that outlives the join; borrowing a temporary
+    // built inside `.map(|_| ...)` would fail E0515.
+    let prop_queries: Vec<LinkQuery> = prop_uris
+        .iter()
+        .map(|prop_uri| shacl_link_query(prop_uri, None))
+        .collect();
+    let all_prop_links: Vec<DecoratedLinkExpression> =
+        futures::future::try_join_all(prop_queries.iter().map(|q| perspective.get_links(q)))
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?
+            .into_iter()
+            .flatten()
+            .collect();
+
+    // Step 5: merge shape links + property links, deduplicate
+    let mut seen = std::collections::HashSet::new();
+    let mut triples = Vec::new();
+    for link in shape_links.iter().chain(all_prop_links.iter()) {
+        let source = link.data.source.clone();
+        let predicate = link.data.predicate.clone().unwrap_or_default();
+        let target = link.data.target.clone();
+        let key = format!("{} {} {}", source, predicate, target);
+        if seen.insert(key) {
+            triples.push(ShaclLinkTriple {
+                source,
+                predicate,
+                target,
+            });
+        }
+    }
+
+    Ok(Some((shape_uri, triples)))
+}
+
+/// Retrieve a single SHACL shape by name.  Returns the shape URI and all link
+/// triples needed to reconstruct the shape via `SHACLShape.fromLinks()`.
+/// Equivalent to the SDK's `PerspectiveProxy.getShacl(name)` — one handler
+/// call replaces 3+N `queryLinks` round trips.
+async fn get_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let name = params.require_str("name")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+
+    match resolve_shacl_links(&perspective, &name).await? {
+        Some((shape_uri, links)) => {
+            Ok(serde_json::json!({ "shapeUri": shape_uri, "links": links }))
+        }
+        None => Ok(Value::Null),
+    }
+}
+
+/// Retrieve all SHACL shapes in one call.  Returns an array of
+/// `{name, shapeUri, links}` objects — the client reconstructs each shape
+/// with `SHACLShape.fromLinks(entry.links, entry.shapeUri)`.  Equivalent to
+/// the SDK's `PerspectiveProxy.getAllShacl()` — one handler call replaces
+/// 1 + N×(3+M) `queryLinks` round trips (N shapes, M properties each).
+async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+
+    // Step 1: get all shape names
+    let query = shacl_link_query("ad4m://self", Some("ad4m://has_shacl"));
+    let name_links = perspective
+        .get_links(&query)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    let mut seen_names = std::collections::HashSet::new();
+    let names: Vec<String> = name_links
+        .iter()
+        .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
+        .filter(|name| seen_names.insert(name.clone()))
+        .collect();
+
+    // Step 2: resolve each shape's full link set. Concurrent per-shape
+    // walk — each `resolve_shacl_links` call is independent, so we let
+    // them race and preserve original name order after joining. Recovers
+    // the concurrency the old TS client had via `Promise.all` (review
+    // r3897752002).
+    // Cheap fail-loud gate before the fan-out: if the name enumeration
+    // already exceeds the response cap there's no point resolving every
+    // shape only to reject the serialisation. Post-walk check below
+    // catches the race where extra names arrive between enumeration and
+    // response (e.g. via subscription).
+    if names.len() > MAX_SHACL_SHAPES_PER_RESPONSE {
+        return Err(WsRpcError::bad_request(format!(
+            "getAllShacl exceeds MAX_SHACL_SHAPES_PER_RESPONSE ({} > {}), use paginated variant (TODO: not yet implemented)",
+            names.len(),
+            MAX_SHACL_SHAPES_PER_RESPONSE,
+        )));
+    }
+
+    let resolved = futures::future::try_join_all(
+        names
+            .iter()
+            .map(|name| resolve_shacl_links(&perspective, name)),
+    )
+    .await?;
+
+    let mut results: Vec<Value> = Vec::with_capacity(names.len());
+    for (name, maybe) in names.iter().zip(resolved.into_iter()) {
+        match maybe {
+            Some((shape_uri, links)) => results.push(serde_json::json!({
+                "name": name,
+                "shapeUri": shape_uri,
+                "links": links,
+            })),
+            None => {
+                // `resolve_shacl_links` already logged the specific
+                // per-name drop at debug level; nothing to add here —
+                // this arm is just the filter that keeps the bulk
+                // response array clean.
+            }
+        }
+    }
+
+    if results.len() > MAX_SHACL_SHAPES_PER_RESPONSE {
+        return Err(WsRpcError::bad_request(format!(
+            "getAllShacl exceeds MAX_SHACL_SHAPES_PER_RESPONSE ({} > {}), use paginated variant (TODO: not yet implemented)",
+            results.len(),
+            MAX_SHACL_SHAPES_PER_RESPONSE,
+        )));
+    }
+
+    Ok(Value::Array(results))
+}
+
 // ── Registration ──
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -1581,11 +2302,19 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.keepAliveSparql", keep_alive_query);
     map.register("perspective.disposeSparql", dispose_query);
     map.register("perspective.modelQuery", model_query_handler);
-    map.register("perspective.subjectClassOf", subject_class_of_handler);
+    map.register("perspective.subjectClassesOf", subject_classes_of_handler);
     map.register("perspective.modelSubscribe", model_subscribe_handler);
     map.register("perspective.evaluateGetters", evaluate_getters_handler);
     map.register("perspective.runInterpretation", run_interpretation_handler);
+    map.register(
+        "perspective.runInterpretationWithHarness",
+        run_interpretation_with_harness_handler,
+    );
     map.register("perspective.addAutoProcessor", add_auto_processor_handler);
+    map.register(
+        "perspective.removeAutoProcessor",
+        remove_auto_processor_handler,
+    );
     map.register(
         "perspective.acceptInterpretation",
         accept_interpretation_handler,
@@ -1598,4 +2327,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "perspective.interpretationOverlays",
         interpretation_overlays_handler,
     );
+    map.register("perspective.getShaclNames", get_shacl_names);
+    map.register("perspective.getShaclTargetClass", get_shacl_target_class);
+    map.register("perspective.getShacl", get_shacl);
+    map.register("perspective.getAllShacl", get_all_shacl);
 }
