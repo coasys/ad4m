@@ -672,9 +672,9 @@ fn set_requires(state: &mut FlowState, requires: Vec<ModelQuery>) {
     state.requires = Some(requires);
 }
 
-fn record(flow: &str, uri: &str, subject: &str, state: &str) -> FlowInstanceRecord {
+fn record(flow_uri: &str, uri: &str, subject: &str, state: &str) -> FlowInstanceRecord {
     FlowInstanceRecord {
-        flow_name: flow.into(),
+        flow_uri: flow_uri.into(),
         instance_uri: uri.into(),
         subject: subject.into(),
         current_state: state.into(),
@@ -687,9 +687,9 @@ async fn flow_transitions_emits_one_satisfied_per_reachable_state() {
     let mut flow = simple_flow("Delivery", &[("identified", "scoped")]);
     let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
     set_requires(scoped, vec![mq("ns://Task")]);
-    let flows = HashMap::from([("Delivery".into(), flow)]);
+    let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
     let recs = vec![record(
-        "Delivery",
+        "delivery://DeliveryFlow",
         "ad4m://flow/instance/1",
         "ad4m://task/1",
         "identified",
@@ -711,9 +711,9 @@ async fn flow_transitions_skips_state_when_requires_unsatisfied() {
     let mut flow = simple_flow("Delivery", &[("identified", "scoped")]);
     let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
     set_requires(scoped, vec![mq("ns://Task")]);
-    let flows = HashMap::from([("Delivery".into(), flow)]);
+    let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
     let recs = vec![record(
-        "Delivery",
+        "delivery://DeliveryFlow",
         "ad4m://flow/instance/1",
         "ad4m://task/1",
         "identified",
@@ -728,9 +728,9 @@ async fn flow_transitions_skips_states_without_requires() {
     // No `requires` = no deterministic guard; the semanticCheck gate is
     // a separate concern and doesn't fire here.
     let flow = simple_flow("Delivery", &[("identified", "scoped")]);
-    let flows = HashMap::from([("Delivery".into(), flow)]);
+    let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
     let recs = vec![record(
-        "Delivery",
+        "delivery://DeliveryFlow",
         "ad4m://flow/instance/1",
         "ad4m://task/1",
         "identified",
@@ -746,15 +746,20 @@ async fn flow_transitions_skips_states_without_requires() {
 async fn flow_transitions_skips_records_with_unknown_flow_name() {
     // Definition unpublished or not yet synced — must not blow up.
     let flow = simple_flow("Delivery", &[("identified", "scoped")]);
-    let flows = HashMap::from([("Delivery".into(), flow)]);
+    let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
     let recs = vec![
         record(
-            "Delivery",
+            "delivery://DeliveryFlow",
             "ad4m://flow/instance/1",
             "ad4m://task/1",
             "identified",
         ),
-        record("Unknown", "ad4m://flow/instance/2", "ad4m://task/2", "some"),
+        record(
+            "unknown://UnknownFlow",
+            "ad4m://flow/instance/2",
+            "ad4m://task/2",
+            "some",
+        ),
     ];
     let stub = StubPerspective::new();
     let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
@@ -781,18 +786,18 @@ async fn flow_transitions_swallows_query_error_at_debug_and_continues() {
         .unwrap();
     set_requires(tension, vec![mq("ns://Perspective")]);
     let flows = HashMap::from([
-        ("Delivery".into(), delivery),
-        ("Deliberation".into(), deliberation),
+        ("delivery://DeliveryFlow".into(), delivery),
+        ("deliberation://DeliberationFlow".into(), deliberation),
     ]);
     let recs = vec![
         record(
-            "Delivery",
+            "delivery://DeliveryFlow",
             "ad4m://flow/instance/1",
             "ad4m://task/1",
             "identified",
         ),
         record(
-            "Deliberation",
+            "deliberation://DeliberationFlow",
             "ad4m://flow/instance/2",
             "ad4m://proposal/1",
             "proposal",
@@ -820,9 +825,9 @@ async fn flow_transitions_uses_state_consensus_over_flow_default() {
         n: 3,
         from_role: None,
     });
-    let flows = HashMap::from([("Delivery".into(), flow)]);
+    let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
     let recs = vec![record(
-        "Delivery",
+        "delivery://DeliveryFlow",
         "ad4m://flow/instance/1",
         "ad4m://task/1",
         "identified",
@@ -842,9 +847,9 @@ async fn flow_transitions_falls_back_to_flow_consensus_when_state_unset() {
     });
     let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
     set_requires(scoped, vec![mq("ns://Task")]);
-    let flows = HashMap::from([("Delivery".into(), flow)]);
+    let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
     let recs = vec![record(
-        "Delivery",
+        "delivery://DeliveryFlow",
         "ad4m://flow/instance/1",
         "ad4m://task/1",
         "identified",
