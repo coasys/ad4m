@@ -15,6 +15,17 @@
 //! order-independent SHA256 in [`evidence_hash`] so a later verification
 //! can detect evidence that no longer resolves.
 //!
+//! Two optional refinements sit between evaluation and the write:
+//!
+//! - A state with a `semanticCheck` hint is confirmed by a second, small
+//!   LLM call (see `flow_semantic_check`); anything but a clear YES
+//!   discards the transition.
+//! - The LLM's own flow proposals (from the strategy path's JSON output or
+//!   the harness's `{Flow}_propose_transition` tool) never fire a
+//!   transition on their own. When one names a transition the guard has
+//!   already satisfied, its `reason` becomes the proposal's `rationale`;
+//!   otherwise it is dropped.
+//!
 //! Every failure here is a skip, never an error: a broken flow
 //! definition, an unregistered class or a transient query failure drops
 //! one transition and the extraction pass carries on.
@@ -25,6 +36,10 @@ use crate::perspectives::flow_context::{
     load_all_flow_instances, load_flow_instances, load_shacl_flows, reachable_next_states,
     scope_subject, FlowInstanceRecord,
 };
+use crate::perspectives::flow_semantic_check::{
+    build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
+};
+use crate::perspectives::interpretation::LlmFlowProposal;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
@@ -48,6 +63,8 @@ pub struct SatisfiedTransition {
     pub evidence_ids: Vec<String>,
     /// See [`evidence_hash`].
     pub evidence_hash: String,
+    /// The target state's `semanticCheck` hint, if it declares one.
+    pub semantic_check: Option<String>,
 }
 
 /// Order-independent seal over a satisfied guard's evidence: SHA256 of the
@@ -224,6 +241,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                     to_state: state.name.clone(),
                     evidence_hash: evidence_hash(&class_names, &evidence_ids),
                     evidence_ids,
+                    semantic_check: state.semantic_check.clone(),
                 }),
                 Ok(None) => {}
                 Err(e) => log::debug!(
@@ -238,15 +256,24 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     out
 }
 
-/// Load → evaluate → write, called by the extraction pass once its own
-/// writes are committed. `scope` narrows the FlowInstance load to the
-/// pass's anchor; `None` sweeps every live instance. Returns the URIs of
-/// the proposals minted. Never fails: loader errors yield an empty result
-/// and a failed write drops only that proposal.
+/// Load → evaluate → (confirm) → write, called by the extraction pass once
+/// its own writes are committed. `scope` narrows the FlowInstance load to
+/// the pass's anchor; `None` sweeps every live instance.
+///
+/// `llm_proposals` are the LLM's own transition proposals: one that names a
+/// satisfied transition contributes its `reason` as the proposal's
+/// `rationale`, the rest are ignored. `semantic_check`, when given, runs
+/// the confirmation LLM for every transition whose target state has a
+/// `semanticCheck` hint; only a YES lets it through.
+///
+/// Returns the URIs of the proposals minted. Never fails: loader errors
+/// yield an empty result and a failed write drops only that proposal.
 pub async fn run_engine_proposal_pass(
     perspective: &mut PerspectiveInstance,
     scope: Option<&Scope>,
     context: &AgentContext,
+    llm_proposals: &[LlmFlowProposal],
+    semantic_check: Option<&dyn SemanticCheckLlm>,
 ) -> Vec<String> {
     let loaded = async {
         let flows_by_uri = load_shacl_flows(perspective).await?;
@@ -271,14 +298,45 @@ pub async fn run_engine_proposal_pass(
 
     let mut minted = Vec::with_capacity(satisfied.len());
     for transition in &satisfied {
-        match write_proposal(perspective, transition, &acting_did, context).await {
+        let label = format!(
+            "{}.{}→{}",
+            transition.flow_name, transition.from_state, transition.to_state
+        );
+
+        if let (Some(llm), Some(hint)) = (semantic_check, transition.semantic_check.as_deref()) {
+            let flow_hint = records
+                .iter()
+                .find(|r| r.instance_uri == transition.instance_uri)
+                .and_then(|r| flows_by_uri.get(&r.flow_uri))
+                .and_then(|f| f.interpretation_hint.as_deref());
+            let prompt = build_semantic_check_prompt(transition, hint, flow_hint);
+            match llm.confirm(&prompt).await {
+                Ok(answer) if semantic_check_passed(&answer) => {}
+                Ok(answer) => {
+                    log::debug!(
+                        "run_engine_proposal_pass: {label} semantic check answered {answer:?}; discarding"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::debug!(
+                        "run_engine_proposal_pass: {label} semantic check failed: {e:#}; discarding"
+                    );
+                    continue;
+                }
+            }
+        }
+
+        let rationale = llm_proposals
+            .iter()
+            .find(|p| p.instance == transition.instance_uri && p.to_state == transition.to_state)
+            .and_then(|p| p.reason.as_deref())
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+
+        match write_proposal(perspective, transition, &acting_did, rationale, context).await {
             Ok(uri) => minted.push(uri),
-            Err(e) => log::debug!(
-                "run_engine_proposal_pass: {}.{}→{} not written: {e:#}",
-                transition.flow_name,
-                transition.from_state,
-                transition.to_state
-            ),
+            Err(e) => log::debug!("run_engine_proposal_pass: {label} not written: {e:#}"),
         }
     }
     minted
@@ -290,6 +348,7 @@ async fn write_proposal(
     perspective: &mut PerspectiveInstance,
     transition: &SatisfiedTransition,
     proposer_did: &str,
+    rationale: Option<&str>,
     context: &AgentContext,
 ) -> Result<String> {
     let batch_id = perspective.create_batch().await;
@@ -302,7 +361,7 @@ async fn write_proposal(
         &transition.to_state,
         &transition.evidence_ids,
         &transition.evidence_hash,
-        None,
+        rationale,
         Some(batch_id.clone()),
         context,
     )
@@ -570,7 +629,8 @@ mod tests {
 
     #[tokio::test]
     async fn satisfied_guard_yields_one_transition_with_sealed_evidence() {
-        let flows = delivery(vec![mq("ns://Task")]);
+        let mut flows = delivery(vec![mq("ns://Task")]);
+        flows.get_mut(DELIVERY).unwrap().states[1].semantic_check = Some("Agreed?".into());
         let recs = vec![record(DELIVERY, "ad4m://flow/instance/1", "identified")];
         let stub = StubPerspective::default().with_instances("ns://Task", &["ad4m://task/1"]);
         let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x").await;
@@ -583,6 +643,7 @@ mod tests {
                 to_state: "scoped".into(),
                 evidence_ids: vec!["ad4m://task/1".into()],
                 evidence_hash: evidence_hash(&["ns://Task".into()], &["ad4m://task/1".into()]),
+                semantic_check: Some("Agreed?".into()),
             }]
         );
     }

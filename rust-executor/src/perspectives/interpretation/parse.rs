@@ -1,4 +1,4 @@
-use super::ProposedInstance;
+use super::{InterpretationOutput, ProposedInstance};
 
 /// Parse a raw LLM response into proposed instances.
 ///
@@ -6,14 +6,32 @@ use super::ProposedInstance;
 /// common wrappers (mirrors Flux `LLMutils.ts`): `<think>…</think>` blocks,
 /// ```-fences, and trailing commas. Then parse as a JSON array.
 pub fn parse_interpretation_response(raw: &str) -> anyhow::Result<Vec<ProposedInstance>> {
+    parse_interpretation_output(raw).map(|out| out.instances)
+}
+
+/// Parse a raw LLM response into instances plus flow proposals. Accepts the
+/// wrapping object `{ "instances": [...], "flow_proposals": [...] }` as well
+/// as a bare array of instances.
+pub fn parse_interpretation_output(raw: &str) -> anyhow::Result<InterpretationOutput> {
     let cleaned = clean_llm_json(raw);
-    let instances: Vec<ProposedInstance> = serde_json::from_str(&cleaned).map_err(|e| {
+    let value: serde_json::Value = serde_json::from_str(&cleaned).map_err(|e| {
         anyhow::anyhow!(
             "interpretation JSON parse failed: {e}; cleaned payload length: {} bytes",
             cleaned.len()
         )
     })?;
-    Ok(instances)
+    match value {
+        serde_json::Value::Array(_) => Ok(InterpretationOutput {
+            instances: serde_json::from_value(value)
+                .map_err(|e| anyhow::anyhow!("interpretation JSON parse failed: {e}"))?,
+            flow_proposals: Vec::new(),
+        }),
+        serde_json::Value::Object(_) => serde_json::from_value(value)
+            .map_err(|e| anyhow::anyhow!("interpretation JSON parse failed: {e}")),
+        _ => Err(anyhow::anyhow!(
+            "interpretation JSON must be an array or an object at the top level"
+        )),
+    }
 }
 
 /// Strip the reasoning/markdown noise local models add around JSON.
@@ -42,13 +60,21 @@ fn clean_llm_json(raw: &str) -> String {
     //    comma inside a genuine string value could be dropped. Extracting the
     //    bracketed block first confines the string-scanner to actual JSON.
     let candidate = s.trim();
-    // Prefer a strict parse from the first `[` so prose after the JSON is
-    // dropped; fall back to the greedy bracket span when the JSON is not
-    // valid on its own (trailing commas are repaired below).
-    let extracted = extract_first_json_value(candidate, '[')
-        .or_else(|| extract_bracketed(candidate, '[', ']'))
-        .or_else(|| extract_bracketed(candidate, '{', '}'))
-        .unwrap_or_else(|| candidate.to_string());
+    // Prefer a strict parse from the first bracket so prose after the JSON
+    // is dropped; fall back to the greedy span of that bracket type when the
+    // JSON is not valid on its own (trailing commas are repaired below).
+    let extracted = match candidate.find(['[', '{']) {
+        Some(start) => {
+            let (open, close) = match &candidate[start..start + 1] {
+                "[" => ('[', ']'),
+                _ => ('{', '}'),
+            };
+            extract_first_json_value(candidate, start)
+                .or_else(|| extract_bracketed(candidate, open, close))
+                .unwrap_or_else(|| candidate.to_string())
+        }
+        None => candidate.to_string(),
+    };
 
     // 4. Remove trailing commas before a closing } or ] (invalid JSON, common),
     //    now scoped to the extracted JSON. Skips commas inside string literals
@@ -56,10 +82,9 @@ fn clean_llm_json(raw: &str) -> String {
     strip_trailing_commas(&extracted)
 }
 
-/// Strictly parse one JSON value starting at the first `open` and return
-/// exactly its span, so trailing prose is not swallowed into the payload.
-fn extract_first_json_value(s: &str, open: char) -> Option<String> {
-    let start = s.find(open)?;
+/// Strictly parse one JSON value starting at `start` and return exactly its
+/// span, so trailing prose is not swallowed into the payload.
+fn extract_first_json_value(s: &str, start: usize) -> Option<String> {
     let mut stream =
         serde_json::Deserializer::from_str(&s[start..]).into_iter::<serde_json::Value>();
     stream.next()?.ok()?;
@@ -124,6 +149,7 @@ fn strip_trailing_commas(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perspectives::interpretation::LlmFlowProposal;
     use crate::perspectives::interpretation::*;
     use crate::perspectives::interpretation_test_support::*;
 
@@ -289,7 +315,8 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.instances.len(), 1);
+        assert!(out.flow_proposals.is_empty());
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -312,7 +339,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.instances.len(), 1);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
@@ -322,7 +349,7 @@ mod tests {
         // and propagate the last parse error rather than looping forever.
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
         let attempts_clone = attempts.clone();
-        let result: anyhow::Result<Vec<ProposedInstance>> = retry_interpretation_parse(move |_| {
+        let result: anyhow::Result<InterpretationOutput> = retry_interpretation_parse(move |_| {
             let a = attempts_clone.clone();
             async move {
                 a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -335,5 +362,51 @@ mod tests {
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             INTERPRETATION_MAX_ATTEMPTS
         );
+    }
+
+    #[test]
+    fn output_wrapping_object_carries_instances_and_flow_proposals() {
+        let raw = r#"Here you go:
+        {
+          "instances": [ {"class":"Task","title":"Ship the PR"} ],
+          "flow_proposals": [
+            {"instance":"ad4m://flow/instance/delivery-42","toState":"review","reason":"PR is up"}
+          ]
+        }
+        Let me know if you need more."#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+        assert_eq!(
+            out.flow_proposals,
+            vec![LlmFlowProposal {
+                instance: "ad4m://flow/instance/delivery-42".into(),
+                to_state: "review".into(),
+                reason: Some("PR is up".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn output_accepts_bare_array_and_object_without_flow_proposals() {
+        let bare =
+            parse_interpretation_output(r#"[{"class":"Intention","title":"Do X"}]"#).unwrap();
+        assert_eq!(bare.instances.len(), 1);
+        assert!(bare.flow_proposals.is_empty());
+
+        let wrapped =
+            parse_interpretation_output(r#"{"instances":[{"class":"Belief","title":"X"}]}"#)
+                .unwrap();
+        assert_eq!(wrapped.instances.len(), 1);
+        assert!(wrapped.flow_proposals.is_empty());
+    }
+
+    #[test]
+    fn output_rejects_lone_instance_object_and_malformed_proposal() {
+        assert!(parse_interpretation_output(r#"{"class":"Belief","title":"X"}"#).is_err());
+        assert!(parse_interpretation_output(
+            r#"{"instances":[],"flow_proposals":[{"toState":"review"}]}"#
+        )
+        .is_err());
     }
 }

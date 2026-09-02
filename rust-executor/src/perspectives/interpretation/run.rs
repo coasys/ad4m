@@ -1,12 +1,13 @@
 use super::{
     apply_with_overlay, build_interpretation_input, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
-    identity_property, normalize_identity, parse_interpretation_response,
+    identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
-    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationRunCursor, ProposedInstance,
-    TranscriptTurn,
+    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationOutput,
+    InterpretationRunCursor, TranscriptTurn,
 };
 use crate::agent::AgentContext;
+use crate::ai_service::harness::flow_propose::{FlowProposalBuffer, FlowTransitionProposeProvider};
 use crate::ai_service::harness::propose::{
     class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
 };
@@ -25,8 +26,8 @@ use std::sync::Arc;
 /// again a few times before giving up on the whole call.
 pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 
-/// run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
-/// response as an interpretation JSON payload. Returns the first successful parse;
+/// Run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
+/// response as an [`InterpretationOutput`] (instances plus flow proposals). Returns the first successful parse;
 /// the last parse error propagates if every attempt fails. `prompt_fn` is an
 /// async closure so callers can inject anything (real `AIService`, a canned
 /// script, a mock) without a live LLM.
@@ -36,7 +37,7 @@ pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 /// fail deterministically in [`build_interpretation_input`], not here.
 pub async fn retry_interpretation_parse<F, Fut>(
     mut prompt_fn: F,
-) -> anyhow::Result<Vec<ProposedInstance>>
+) -> anyhow::Result<InterpretationOutput>
 where
     F: FnMut(u8) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<String>>,
@@ -51,8 +52,8 @@ where
                 continue;
             }
         };
-        match parse_interpretation_response(&raw) {
-            Ok(instances) => return Ok(instances),
+        match parse_interpretation_output(&raw) {
+            Ok(output) => return Ok(output),
             Err(e) => {
                 log::warn!(
                     "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
@@ -682,7 +683,10 @@ pub async fn run_interpretation_with_strategy_and_model(
         // succeeds is by construction the final (parse-successful) attempt.
         let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
-        let instances = retry_interpretation_parse(|_attempt| {
+        let InterpretationOutput {
+            instances,
+            flow_proposals: llm_proposals,
+        } = retry_interpretation_parse(|_attempt| {
             let service = service.clone();
             let task_id = task.task_id.clone();
             let prompt = prompt.clone();
@@ -804,11 +808,18 @@ pub async fn run_interpretation_with_strategy_and_model(
         // The affected instance base URIs (created, updated, or given new
         // relations). Links are owned by `create_subject` / `update_subject`.
         // The LLM's writes are on the graph now, so re-evaluate every active
-        // flow's `requires` guards against the fresh evidence.
+        // flow's `requires` guards against the fresh evidence. The LLM's own
+        // proposals only contribute a rationale; the semantic check reuses
+        // the extraction task so both share one worker and billing scope.
+        let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
+            task_id: task.task_id.clone(),
+        };
         let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
             perspective,
             scope,
             context,
+            &llm_proposals,
+            Some(&semantic_check),
         )
         .await;
 
@@ -992,11 +1003,19 @@ pub async fn run_interpretation_with_harness_and_model(
     // not "mutate the graph." The buffer is drained after the loop.
     let buffer = ProposalBuffer::new();
     let classes_offered = propose_shapes.len();
-    let provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
+    let write_provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
         ad4m_filtered,
         propose_shapes,
         buffer.clone(),
         base_prefix.to_string(),
+    ));
+    // One `{Flow}_propose_transition` tool per active flow; calls are
+    // validated against the flow's reachable states and buffered.
+    let flow_buffer = FlowProposalBuffer::new();
+    let provider: Arc<dyn ToolProvider> = Arc::new(FlowTransitionProposeProvider::new(
+        write_provider,
+        active_flows,
+        flow_buffer.clone(),
     ));
 
     // OpenAI-compat bridge: real CompletionSource that talks to AIService
@@ -1078,9 +1097,17 @@ pub async fn run_interpretation_with_harness_and_model(
 
     // Same flow post-processing as the single-shot path. The harness
     // returns bases only, so the minted proposals are just logged here.
-    let flow_proposals =
-        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, scope, context)
-            .await;
+    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
+        task_id: task.task_id.clone(),
+    };
+    let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+        perspective,
+        scope,
+        context,
+        &flow_buffer.drain(),
+        Some(&semantic_check),
+    )
+    .await;
     if !flow_proposals.is_empty() {
         log::warn!(
             "harness: flow pass minted {} proposal(s): {flow_proposals:?}",

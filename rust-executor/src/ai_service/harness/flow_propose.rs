@@ -4,7 +4,7 @@
 //! `<class>_propose_create` / `<class>_propose_link_child` tools that
 //! accumulate SHACL-instance writes, this module gives the LLM
 //! `<flow>_propose_transition` tools that accumulate
-//! [`crate::perspectives::flow_evaluator::LlmProposalHint`]s.
+//! [`crate::perspectives::flow_evaluator::LlmFlowProposal`]s.
 //!
 //! Symmetry with `propose`:
 //!  * per-flow surface (one tool per active [`FlowContext`]) instead of
@@ -27,13 +27,13 @@
 
 use super::provider::ToolSchema;
 use crate::perspectives::flow_context::FlowContext;
-use crate::perspectives::flow_evaluator::LlmProposalHint;
+use crate::perspectives::interpretation::LlmFlowProposal;
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
 // ── buffer ────────────────────────────────────────────────────────────────
 
-/// Per-pass accumulator for [`LlmProposalHint`]s emitted by
+/// Per-pass accumulator for [`LlmFlowProposal`]s emitted by
 /// `_propose_transition` tool calls. Cloneable `Arc` so the ToolProvider
 /// decorator (which the harness owns for the duration of the loop) and the
 /// engine (which drains at pass end and threads the hints into
@@ -44,7 +44,7 @@ use std::sync::{Arc, Mutex};
 /// serialised through the harness loop anyway, so contention is nil.
 #[derive(Debug, Clone, Default)]
 pub struct FlowProposalBuffer {
-    inner: Arc<Mutex<Vec<LlmProposalHint>>>,
+    inner: Arc<Mutex<Vec<LlmFlowProposal>>>,
 }
 
 impl FlowProposalBuffer {
@@ -53,12 +53,12 @@ impl FlowProposalBuffer {
     }
 
     /// Recover-on-poison lock: if the mutex was poisoned by an earlier
-    /// panic during dispatch, take the guard anyway. `Vec<LlmProposalHint>`
+    /// panic during dispatch, take the guard anyway. `Vec<LlmFlowProposal>`
     /// is plain data — a panic mid-`push` can't have left it in a torn
     /// state, only in whatever state it was in when the panic fired.
     /// Same policy as [`super::propose::ProposalBuffer`] (Lal's PR #911
     /// review notes).
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<LlmProposalHint>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<LlmFlowProposal>> {
         self.inner.lock().unwrap_or_else(|poisoned| {
             log::warn!(
                 "harness: FlowProposalBuffer mutex was poisoned by an earlier panic; \
@@ -69,11 +69,11 @@ impl FlowProposalBuffer {
         })
     }
 
-    pub fn push(&self, hint: LlmProposalHint) {
+    pub fn push(&self, hint: LlmFlowProposal) {
         self.lock().push(hint);
     }
 
-    pub fn drain(&self) -> Vec<LlmProposalHint> {
+    pub fn drain(&self) -> Vec<LlmFlowProposal> {
         std::mem::take(&mut *self.lock())
     }
 
@@ -109,7 +109,7 @@ pub fn strip_flow_suffix(tool_name: &str) -> Option<&str> {
 
 /// Build the `_propose_transition` [`ToolSchema`] for one active flow.
 ///
-/// The schema mirrors [`LlmProposalHint`] shape:
+/// The schema mirrors [`LlmFlowProposal`] shape:
 ///  * `instance` (required, string) — must equal `context.instance_uri`.
 ///    Locked in via the JSON Schema `const` keyword so the LLM can't
 ///    address a different instance by mistake; the decorator (slice
@@ -234,7 +234,7 @@ impl std::fmt::Display for ArgError {
 impl std::error::Error for ArgError {}
 
 /// Parse the JSON args the LLM sent for a `_propose_transition` call into
-/// an [`LlmProposalHint`]. Pure — the decorator (slice 10.7b) is
+/// an [`LlmFlowProposal`]. Pure — the decorator (slice 10.7b) is
 /// responsible for pushing the result into a [`FlowProposalBuffer`].
 ///
 /// `instance` and `toState` are required strings; `reason` is optional
@@ -244,11 +244,11 @@ impl std::error::Error for ArgError {}
 /// not a validation gate. Grammar-decoding models honour the schema
 /// exactly, chat models may add noise; either way, we take what we can
 /// use.
-pub fn parse_propose_transition_args(args: &Value) -> Result<LlmProposalHint, ArgError> {
+pub fn parse_propose_transition_args(args: &Value) -> Result<LlmFlowProposal, ArgError> {
     let obj = args.as_object().ok_or(ArgError::NotAnObject)?;
 
     let instance_val = obj.get("instance").ok_or(ArgError::MissingInstance)?;
-    let instance_uri = instance_val
+    let instance = instance_val
         .as_str()
         .ok_or(ArgError::InstanceNotString)?
         .to_string();
@@ -265,8 +265,8 @@ pub fn parse_propose_transition_args(args: &Value) -> Result<LlmProposalHint, Ar
         Some(v) => Some(v.as_str().ok_or(ArgError::ReasonNotString)?.to_string()),
     };
 
-    Ok(LlmProposalHint {
-        instance_uri,
+    Ok(LlmFlowProposal {
+        instance,
         to_state,
         reason,
     })
@@ -284,7 +284,7 @@ use async_trait::async_trait;
 ///  * `tools()` = inner.tools() + [`propose_transition_tool_schemas`]
 ///  * `call()` intercepts the `_propose_transition` suffix, validates the
 ///    args against the pass's active FlowContexts, and pushes an
-///    [`LlmProposalHint`] into the shared [`FlowProposalBuffer`]
+///    [`LlmFlowProposal`] into the shared [`FlowProposalBuffer`]
 ///
 /// The FlowContext list is fixed at construction — new flow instances
 /// minted mid-pass will NOT appear until the next pass. Matches the
@@ -379,7 +379,7 @@ impl<P: ToolProvider + ?Sized> FlowTransitionProposeProvider<P> {
         // reject early with an actionable error the LLM can recover from.
         let ctx = matching
             .iter()
-            .find(|c| c.instance_uri == hint.instance_uri)
+            .find(|c| c.instance_uri == hint.instance)
             .ok_or_else(|| {
                 let valid = matching
                     .iter()
@@ -390,7 +390,7 @@ impl<P: ToolProvider + ?Sized> FlowTransitionProposeProvider<P> {
                     "{flow_name}_propose_transition: `instance` `{}` is not an active \
                      `{flow_name}` FlowInstance in this pass. Valid instance URIs: {valid}. \
                      Copy the URI verbatim from the `## Active flows` prompt block.",
-                    hint.instance_uri
+                    hint.instance
                 )
             })?;
 
@@ -425,7 +425,7 @@ impl<P: ToolProvider + ?Sized> FlowTransitionProposeProvider<P> {
         // Buffered hint is a plain data record; the deterministic
         // post-processor (`run_engine_proposal_pass`) decides whether it
         // actually turns into a FlowTransitionProposal on the graph.
-        let ack_uri = hint.instance_uri.clone();
+        let ack_uri = hint.instance.clone();
         let ack_to_state = hint.to_state.clone();
         self.buffer.push(hint);
 
@@ -614,8 +614,8 @@ mod tests {
         let hint = parse_propose_transition_args(&args).expect("valid args should parse");
         assert_eq!(
             hint,
-            LlmProposalHint {
-                instance_uri: "ad4m://flow/instance/abc".to_string(),
+            LlmFlowProposal {
+                instance: "ad4m://flow/instance/abc".to_string(),
                 to_state: "Scoped".to_string(),
                 reason: None,
             }
@@ -695,13 +695,13 @@ mod tests {
     #[test]
     fn buffer_push_then_drain_returns_hints_in_order_and_clears() {
         let buf = FlowProposalBuffer::new();
-        buf.push(LlmProposalHint {
-            instance_uri: "a".into(),
+        buf.push(LlmFlowProposal {
+            instance: "a".into(),
             to_state: "S".into(),
             reason: None,
         });
-        buf.push(LlmProposalHint {
-            instance_uri: "b".into(),
+        buf.push(LlmFlowProposal {
+            instance: "b".into(),
             to_state: "T".into(),
             reason: Some("r".into()),
         });
@@ -709,8 +709,8 @@ mod tests {
 
         let drained = buf.drain();
         assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].instance_uri, "a");
-        assert_eq!(drained[1].instance_uri, "b");
+        assert_eq!(drained[0].instance, "a");
+        assert_eq!(drained[1].instance, "b");
         assert_eq!(drained[1].reason.as_deref(), Some("r"));
         assert_eq!(buf.len(), 0, "drain should empty the buffer");
     }
@@ -719,8 +719,8 @@ mod tests {
     fn buffer_arc_clones_share_state() {
         let buf = FlowProposalBuffer::new();
         let buf2 = buf.clone();
-        buf.push(LlmProposalHint {
-            instance_uri: "x".into(),
+        buf.push(LlmFlowProposal {
+            instance: "x".into(),
             to_state: "Y".into(),
             reason: None,
         });
@@ -817,7 +817,7 @@ mod tests {
 
         let drained = buf.drain();
         assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].instance_uri, "ad4m://flow/instance/abc");
+        assert_eq!(drained[0].instance, "ad4m://flow/instance/abc");
         assert_eq!(drained[0].to_state, "Scoped");
         assert_eq!(
             drained[0].reason.as_deref(),
@@ -968,7 +968,7 @@ mod tests {
         .expect("routed to second instance");
         let drained = buf.drain();
         assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].instance_uri, "ad4m://flow/instance/second");
+        assert_eq!(drained[0].instance, "ad4m://flow/instance/second");
 
         // And confirm the FIRST instance still refuses `InProgress` when
         // called with its own URI — it accepts `Scoped` OR `InProgress`
