@@ -121,7 +121,7 @@ async fn evaluate_flow_transitions_wires_definition_and_evidence_e2e() {
     let base_uri = "ad4m://task/onboarding";
     let inst_uri = mint_flow_instance(
         &mut perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         base_uri,
         "identified",
         "e2e-inst-1",
@@ -278,7 +278,7 @@ async fn write_engine_proposal_lands_all_declared_predicates_e2e() {
     let base_uri = "ad4m://task/onboarding";
     let inst_uri = mint_flow_instance(
         &mut perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         base_uri,
         "identified",
         "e2e-inst-writer",
@@ -478,7 +478,7 @@ async fn run_engine_proposal_pass_lands_a_proposal_e2e() {
     let base_uri = "ad4m://task/onboarding";
     let inst_uri = mint_flow_instance(
         &mut perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         base_uri,
         "identified",
         "e2e-10.4c-inst",
@@ -708,7 +708,7 @@ async fn seed_semantic_check_e2e_fixture(
     let base_uri = "ad4m://task/onboarding-10.5b";
     let inst_uri = mint_flow_instance(
         &mut perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         base_uri,
         "identified",
         "e2e-10.5b-inst",
@@ -862,7 +862,7 @@ async fn semantic_check_absent_hint_autopasses_no_llm_call_e2e() {
         .expect("add_link(scoped.requires)");
     let _ = mint_flow_instance(
         &mut perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         "ad4m://task/no-hint",
         "identified",
         "e2e-10.5b-no-hint-inst",

@@ -129,16 +129,23 @@ fn clean_llm_json(raw: &str) -> String {
     let candidate = s.trim();
     let first_obj = candidate.find('{');
     let first_arr = candidate.find('[');
+    // Fallback ordering: exhaust the preferred-bracket path (serde first,
+    // then hand-rolled bracket-matching for trailing-comma payloads) BEFORE
+    // trying the other bracket kind. Otherwise a trailing-comma-riddled
+    // array would fall through to `extract_first_json_value('{')`, which
+    // happily consumes the first well-formed inner object and truncates
+    // the payload — the exact regression
+    // `trailing_comma_cleanup_preserves_commas_inside_strings` catches.
     let extracted = match (first_obj, first_arr) {
         (Some(o), Some(a)) if o < a => extract_first_json_value(candidate, '{')
-            .or_else(|| extract_first_json_value(candidate, '['))
             .or_else(|| extract_bracketed(candidate, '{', '}'))
+            .or_else(|| extract_first_json_value(candidate, '['))
             .or_else(|| extract_bracketed(candidate, '[', ']')),
         (Some(_), None) => extract_first_json_value(candidate, '{')
             .or_else(|| extract_bracketed(candidate, '{', '}')),
         _ => extract_first_json_value(candidate, '[')
-            .or_else(|| extract_first_json_value(candidate, '{'))
             .or_else(|| extract_bracketed(candidate, '[', ']'))
+            .or_else(|| extract_first_json_value(candidate, '{'))
             .or_else(|| extract_bracketed(candidate, '{', '}')),
     }
     .unwrap_or_else(|| candidate.to_string());
