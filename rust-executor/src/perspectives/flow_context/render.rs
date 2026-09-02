@@ -26,6 +26,14 @@ use crate::perspectives::shacl_parser::{
 /// callers that render outside a flow instance context (unit tests,
 /// generic prompt scaffolding) use it to keep behaviour byte-identical
 /// to pre-substitution renderings.
+// Forward-staging for the post-LLM substitution engine (slice 10.6+):
+// the prompt path today preserves `$flow.base`/`$flow.instance` verbatim
+// so the LLM sees the tokens (per the J#4 revert to the legend
+// approach); this substitution helper is where the engine will resolve
+// them post-parse. Kept behind `#[allow(dead_code)]` so it's visible in
+// the public API for tests and so `flow_arc slice 10.6c` doesn't have
+// to reintroduce it — but doesn't add a warning today.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FlowTokens<'a> {
     /// Base subject URI the flow instance is anchored to. `$flow.base`
@@ -38,12 +46,15 @@ pub struct FlowTokens<'a> {
 
 /// The `$flow.base` prompt token — resolves to the flow instance's
 /// `subject` (the item the flow is anchored to, e.g. a Task URI).
+#[allow(dead_code)]
 pub const FLOW_BASE_TOKEN: &str = "$flow.base";
 
 /// The `$flow.instance` prompt token — resolves to the flow instance's
 /// on-graph URI.
+#[allow(dead_code)]
 pub const FLOW_INSTANCE_TOKEN: &str = "$flow.instance";
 
+#[allow(dead_code)]
 impl<'a> FlowTokens<'a> {
     /// No-op token context — every substitution passes strings through
     /// unchanged. Use in unit tests and any render path that isn't
@@ -105,10 +116,9 @@ pub fn reachable_next_states<'a>(flow: &'a SHACLFlow, current_state: &str) -> Ve
 /// renderings preserve their `$flow.base` / `$flow.instance` /
 /// `$did` tokens verbatim — the prompt-builder pairs them with a
 /// per-flow `tokens` legend so the LLM can look up what each token
-/// resolves to (Nico 2026-08-31: tokens in, tokens out, engine
-/// substitutes post-LLM). Slice 10.6 will call [`FlowTokens::substitute`]
-/// on any tokenised value the LLM emits back before it hits a query
-/// or a link.
+/// resolves to (tokens in, tokens out; engine substitutes post-LLM).
+/// The post-LLM engine calls [`FlowTokens::substitute`] on any tokenised
+/// value the LLM emits back before it hits a query or a link.
 pub fn summarize_next_state(state: &FlowState) -> NextStateSummary {
     NextStateSummary {
         name: state.name.clone(),
@@ -222,6 +232,22 @@ pub fn render_model_query(q: &ModelQuery) -> String {
         out.push_str(&format!(" (signed by the acting DID via {did_prop})"));
     }
 
+    // `linkedTo` — how the matched instance connects back to the flow.
+    // Design doc §6.1 uses this to distinguish evidence bound to the
+    // flow instance from evidence dangling off the base expression;
+    // without rendering it the LLM can't tell the difference (James
+    // PR #929 R10). Shapes on the wire:
+    //   "flow"                                 → linked to the flow instance
+    //   "base"                                 → linked to the base
+    //   { "via": <pred>, "to": "flow"|"base" } → linked via <pred> to ...
+    if let Some(linked) = q.linked_to.as_ref() {
+        let clause = render_linked_to(linked);
+        if !clause.is_empty() {
+            out.push(' ');
+            out.push_str(&clause);
+        }
+    }
+
     // OR composition — recurse (tokens preserved through)
     if let Some(alts) = q.or.as_ref() {
         if !alts.is_empty() {
@@ -259,6 +285,31 @@ fn render_property_condition(cond: &PropertyCondition) -> String {
             }
         }
         PropertyCondition::Matches { matches } => format!("matches /{matches}/"),
+    }
+}
+
+/// English rendering of the `linkedTo` field (James PR #929 R10).
+/// Unknown shapes render as an empty string rather than throwing —
+/// the prompt path must not break on a malformed value.
+fn render_linked_to(linked: &serde_json::Value) -> String {
+    match linked {
+        serde_json::Value::String(s) => match s.as_str() {
+            "flow" => "linked to the flow instance".to_string(),
+            "base" => "linked to the base".to_string(),
+            _ => String::new(),
+        },
+        serde_json::Value::Object(obj) => {
+            let via = obj.get("via").and_then(|v| v.as_str());
+            let to = obj.get("to").and_then(|v| v.as_str());
+            match (via, to) {
+                (Some(v), Some("flow")) => {
+                    format!("linked via {v} to the flow instance")
+                }
+                (Some(v), Some("base")) => format!("linked via {v} to the base"),
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
     }
 }
 
@@ -528,6 +579,71 @@ mod tests {
     }
 
     #[test]
+    fn render_model_query_linked_to_flow_variant() {
+        let q = ModelQuery {
+            class_name: "ad4m://Perspective".to_string(),
+            linked_to: Some(serde_json::json!("flow")),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_model_query(&q),
+            "at least 1 match of ad4m://Perspective linked to the flow instance"
+        );
+    }
+
+    #[test]
+    fn render_model_query_linked_to_base_variant() {
+        let q = ModelQuery {
+            class_name: "ad4m://Perspective".to_string(),
+            linked_to: Some(serde_json::json!("base")),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_model_query(&q),
+            "at least 1 match of ad4m://Perspective linked to the base"
+        );
+    }
+
+    #[test]
+    fn render_model_query_linked_to_via_object_flow() {
+        let q = ModelQuery {
+            class_name: "ad4m://Perspective".to_string(),
+            linked_to: Some(serde_json::json!({ "via": "ns://supports", "to": "flow" })),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_model_query(&q),
+            "at least 1 match of ad4m://Perspective linked via ns://supports to the flow instance"
+        );
+    }
+
+    #[test]
+    fn render_model_query_linked_to_via_object_base() {
+        let q = ModelQuery {
+            class_name: "ad4m://Objection".to_string(),
+            linked_to: Some(serde_json::json!({ "via": "ns://about", "to": "base" })),
+            ..Default::default()
+        };
+        assert_eq!(
+            render_model_query(&q),
+            "at least 1 match of ad4m://Objection linked via ns://about to the base"
+        );
+    }
+
+    #[test]
+    fn render_model_query_linked_to_unknown_shape_is_silent() {
+        // A malformed value must never break prompt rendering. Empty
+        // clause = renderer degrades gracefully, matches the silent-
+        // fallback discipline of the flow-context module.
+        let q = ModelQuery {
+            class_name: "ad4m://Thing".to_string(),
+            linked_to: Some(serde_json::json!(42)),
+            ..Default::default()
+        };
+        assert_eq!(render_model_query(&q), "at least 1 match of ad4m://Thing");
+    }
+
+    #[test]
     fn render_model_query_or_recurses_and_composes() {
         let alt1 = ModelQuery {
             class_name: "ad4m://Owner".to_string(),
@@ -601,10 +717,9 @@ mod tests {
 
     #[test]
     fn render_model_query_preserves_flow_tokens_in_where_string_value() {
-        // Nico 2026-08-31: tokens in, tokens out. `$flow.base` and
-        // `$flow.instance` survive rendering verbatim so the prompt-builder
-        // can carry the concrete URIs in a separate legend and the engine
-        // can substitute post-LLM.
+        // Tokens in, tokens out. `$flow.base` and `$flow.instance` survive
+        // rendering verbatim so the prompt-builder can carry the concrete
+        // URIs in a separate legend and the engine substitutes post-LLM.
         let mut where_map: BTreeMap<String, PropertyCondition> = BTreeMap::new();
         where_map.insert(
             "forTask".to_string(),
@@ -829,11 +944,11 @@ mod tests {
 
     #[test]
     fn summarize_flow_instance_preserves_tokens_in_reachable_states_requires() {
-        // Nico 2026-08-31: `requires` renderings on reachable next-states
-        // preserve `$flow.base` / `$flow.instance` verbatim. The prompt-
-        // builder pairs each flow entry with a per-instance `tokens`
-        // legend so the LLM can resolve the symbolic reference; the
-        // post-LLM engine substitutes on the way out.
+        // `requires` renderings on reachable next-states preserve
+        // `$flow.base` / `$flow.instance` verbatim. The prompt-builder
+        // pairs each flow entry with a per-instance `tokens` legend so
+        // the LLM can resolve the symbolic reference; the post-LLM engine
+        // substitutes on the way out.
         let mut flow = delivery_flow();
         let mut where_map: BTreeMap<String, PropertyCondition> = BTreeMap::new();
         where_map.insert(

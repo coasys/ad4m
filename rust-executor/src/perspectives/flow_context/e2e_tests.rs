@@ -1,4 +1,4 @@
-//! End-to-end integration test — the onion-shell test cut. Unit tests
+//! End-to-end integration test — the onion-shell test cut. The unit tests
 //! in `render.rs` cover the pure halves of the module against hand-built
 //! inputs; this file covers the composition against a real
 //! [`PerspectiveInstance`].
@@ -114,9 +114,13 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    9 — it also idempotently registers the FlowInstance model
     //    class, which is the class `load_flow_instances` queries.
     let base_uri = "ad4m://task/onboarding";
+    // Pass the flow's canonical URI (`${namespace}${name}Flow`), not the
+    // bare name — `mint_flow_instance` writes into the record's
+    // `flowUri` property, which `build_flow_contexts` joins on
+    // (James PR #929 R5).
     let inst_uri = mint_flow_instance(
         &mut perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         base_uri,
         "identified",
         "e2e-inst-1",
@@ -196,7 +200,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
 
     // 7) The real payoff: feed the gathered context into the
     //    interpretation prompt builder — the same call `run.rs`
-    //    makes after slice 10.3c substituted this vector for `&[]`.
+    //    makes now that this vector replaces the earlier `&[]`.
     //    The prompt must carry an `active_flows` array whose only
     //    element identifies our Delivery instance by name.
     let existing = ExistingInstances::new();

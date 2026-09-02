@@ -71,9 +71,13 @@ pub struct NextStateSummary {
 /// The two are joined by [`super::loader::build_flow_contexts`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowInstanceRecord {
-    /// The flow-name discriminator — matches `SHACLFlow.name` and is
-    /// the identity property of the `FlowInstance` @Model class.
-    pub flow_name: String,
+    /// Canonical URI of the `SHACLFlow` this instance runs — matches
+    /// `SHACLFlow.flow_uri()` (`${namespace}${name}Flow`, e.g.
+    /// `coasys://DeliveryFlow`) and is the identity property of the
+    /// `FlowInstance` @Model class. URI-keyed rather than name-keyed so
+    /// social-DNA modules from different communities can't collide on a
+    /// shared name (James PR #929 R5).
+    pub flow_uri: String,
     /// Instance URI — `ad4m://flow/instance/{id}` (see
     /// [`super::super::flow_classes::flow_instance_uri`]).
     pub instance_uri: String,
