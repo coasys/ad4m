@@ -164,7 +164,7 @@ function makeLink(overrides?: Partial<LinkExpression["data"]>): LinkExpression {
 }
 
 describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
-    it("round-trips a link's data through the room key", () => {
+    it("round-trips a link through the room key (full encryption)", () => {
         const roomKey = generateRoomKey();
         const link = makeLink();
 
@@ -172,20 +172,23 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
         assert.ok(isEncryptedLinkData(wire.data));
         assert.equal(typeof (wire.data as any).ciphertext, "string");
         assert.equal(typeof (wire.data as any).nonce, "string");
-        assert.equal(wire.author, link.author);
-        assert.equal(wire.timestamp, link.timestamp);
-        assert.deepEqual(wire.proof, link.proof);
+        assert.equal(wire.author, undefined);
+        assert.equal(wire.timestamp, undefined);
+        assert.equal(wire.proof, undefined);
+        assert.equal(typeof wire.link_hash, "string");
 
         const decrypted = decryptLinkFromWire(wire, roomKey);
         assert.deepEqual(decrypted, link);
     });
 
-    it("leaves author/timestamp/proof in the clear (metadata, not payload)", () => {
+    it("encrypts everything — no metadata in the clear", () => {
         const roomKey = generateRoomKey();
         const link = makeLink({ source: "s3cr3t://topic" });
         const wire = encryptLinkForWire(link, roomKey);
 
-        // The plaintext source string must not appear anywhere in the ciphertext blob.
+        assert.equal(wire.author, undefined);
+        assert.equal(wire.timestamp, undefined);
+        assert.equal(wire.proof, undefined);
         assert.equal((wire.data as any).ciphertext.includes(Buffer.from("s3cr3t").toString("hex")), false);
     });
 
@@ -205,6 +208,6 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
 
     it("throws when asked to decrypt a wire link with no encrypted data in data field", () => {
         const roomKey = generateRoomKey();
-        assert.throws(() => decryptLinkFromWire({ author: "a", timestamp: "t", proof: { signature: "s", key: "k" } }, roomKey));
+        assert.throws(() => decryptLinkFromWire({ author: "a", timestamp: "t", proof: { signature: "s", key: "k" } } as any, roomKey));
     });
 });

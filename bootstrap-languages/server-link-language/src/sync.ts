@@ -80,9 +80,9 @@ function fromWireLink(wireLink: WireLinkExpression): LinkExpression {
         );
     }
     return {
-        author: wireLink.author,
-        timestamp: wireLink.timestamp,
-        proof: wireLink.proof,
+        author: wireLink.author ?? "",
+        timestamp: wireLink.timestamp ?? "",
+        proof: wireLink.proof ?? { signature: "", key: "" },
         ...statusField(wireLink.status),
         data: (wireLink.data as Link) ?? { source: "", target: "" },
     };
@@ -184,9 +184,12 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
 const MAX_COMMIT_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 200;
 
+const MAX_RETRY_DELAY_MS = 5 * 60 * 1000;
 let _pendingQueue: PerspectiveDiff[] = [];
 let _flushScheduled = false;
 let _inflight: Promise<void> = Promise.resolve();
+let _retryTimer: ReturnType<typeof setTimeout> | null = null;
+let _retryDelay = 2_500;
 
 /** Enqueue a diff to be flushed on the next microtask. */
 export function enqueueCommitBatched(diff: PerspectiveDiff): void {
@@ -239,16 +242,28 @@ async function flushBatch(): Promise<void> {
                 `for next flush cycle:\n${requeueSummary}`,
             );
             _pendingQueue.unshift(...requeue);
-            // Do NOT auto-schedule a re-flush here. The failed segments
-            // stay in _pendingQueue and get picked up naturally when the
-            // next enqueueCommitBatched arrives (which schedules a flush
-            // that includes them via coalescing). This prevents unbounded
-            // retry storms when the server stays down — the sync state
-            // emission below lets the executor know we lag.
+            if (!_retryTimer) {
+                _retryDelay = Math.min(_retryDelay * 2, MAX_RETRY_DELAY_MS);
+                _retryTimer = setTimeout(() => {
+                    _retryTimer = null;
+                    if (_pendingQueue.length > 0 && !_flushScheduled) {
+                        _flushScheduled = true;
+                        _inflight = _inflight
+                            .then(() => flushBatch())
+                            .catch((err) => {
+                                console.error(
+                                    "[server-link-language] retry flush crashed; keeping the flush chain live:",
+                                    err,
+                                );
+                            });
+                    }
+                }, _retryDelay);
+            }
             emitSyncStateSafe("LinkLanguageInstalledButNotSynced");
             return;
         }
     }
+    _retryDelay = 2_500;
 }
 
 /**
@@ -391,6 +406,8 @@ export function _resetBatchStateForTests(): void {
     _pendingQueue = [];
     _flushScheduled = false;
     _inflight = Promise.resolve();
+    if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
+    _retryDelay = 2_500;
 }
 
 /** Test-only: await the current in-flight flush without the drain loop.

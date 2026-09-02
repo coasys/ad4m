@@ -337,7 +337,7 @@ export class FederationManager {
       if (this.reconcileInFlight) return;
       this.reconcileInFlight = this.reconcileAll()
         .catch((err) => {
-          console.error("[federation] reconcileAll failed:", err);
+          this.log("[federation] reconcileAll failed:", err);
         })
         .finally(() => {
           this.reconcileInFlight = null;

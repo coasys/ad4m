@@ -67,7 +67,10 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   directly. This is what makes every module under `tests/` runnable in
   plain Node with mocks. **Import rules:** `src/adapters-deno.ts` is the only
   file allowed to import runtime-specific APIs (`ad4m:host`, Deno globals).
-  Only `index.ts` is allowed to import `adapters-deno.ts`. Pure library
+  Only `index.ts` is allowed to import `adapters-deno.ts`. `index.ts` also
+  imports `defineLanguage` and `hash` directly from `@coasys/ad4m-ldk` —
+  these are module-surface exports (not I/O adapters), so the direct import
+  does not break the swappable-adapter guarantee. Pure library
   imports (`@noble/curves`, `@noble/ciphers`, `@noble/hashes`) are fine
   anywhere — they contain no runtime coupling.
 - **`applyInboundWireDiff` (src/sync.ts) is the only place that calls

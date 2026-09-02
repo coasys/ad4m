@@ -53,12 +53,16 @@ export interface ExpressionProof {
 }
 
 export interface LinkExpression {
-  /** DID of the signing agent, e.g. "did:key:z6Mk..." */
-  author: string;
-  /** ISO-8601 timestamp */
-  timestamp: string;
+  /** DID of the signing agent — absent for fully-encrypted links. */
+  author?: string;
+  /** ISO-8601 timestamp — absent for fully-encrypted links. */
+  timestamp?: string;
   data: LinkData | EncryptedLinkData;
-  proof: ExpressionProof;
+  /** Expression proof — absent for fully-encrypted links. */
+  proof?: ExpressionProof;
+  /** Client-computed SHA-256 of the canonical plaintext, for OR-Set
+   * dedup/removal when author/timestamp are encrypted away. */
+  link_hash?: string;
 }
 
 export interface PerspectiveDiff {
@@ -90,27 +94,31 @@ export type ClientWsMessage =
   | { type: "set-online-status"; status: unknown };
 
 /**
- * Canonical, order-stable JSON payload used for both signing and hashing a
- * LinkExpression. For plaintext links this covers {source,predicate,target,
- * author,timestamp}; for encrypted links the ciphertext/nonce stand in for
- * source/predicate/target so the server can still content-address the link
- * (OR-Set merge) without ever seeing plaintext.
+ * Canonical, order-stable JSON payload used for hashing a LinkExpression.
+ * For plaintext links: {source,predicate,target,author,timestamp}.
+ * For encrypted links with visible metadata: {ciphertext,nonce,author,timestamp}.
+ * For fully-encrypted links (link_hash present): returns the client-supplied
+ * hash directly — the server cannot compute the canonical form because all
+ * fields are encrypted.
  */
 export function canonicalLinkPayload(link: LinkExpression): string {
+  if (link.link_hash) {
+    return link.link_hash;
+  }
   if (isEncryptedLinkData(link.data)) {
     return JSON.stringify({
       ciphertext: link.data.ciphertext,
       nonce: link.data.nonce,
-      author: link.author,
-      timestamp: link.timestamp,
+      author: link.author ?? "",
+      timestamp: link.timestamp ?? "",
     });
   }
   return JSON.stringify({
     source: link.data.source,
     predicate: link.data.predicate ?? null,
     target: link.data.target,
-    author: link.author,
-    timestamp: link.timestamp,
+    author: link.author ?? "",
+    timestamp: link.timestamp ?? "",
   });
 }
 
@@ -120,6 +128,7 @@ export function sha256Hex(input: string): string {
 
 /** Deterministic content hash of a LinkExpression (used for OR-Set membership). */
 export function linkHash(link: LinkExpression): string {
+  if (link.link_hash) return link.link_hash;
   return sha256Hex(canonicalLinkPayload(link));
 }
 

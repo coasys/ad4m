@@ -34,7 +34,9 @@ export function parseJwtExpiryMs(token: string): number | null {
     try {
         const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
         const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-        const payload = JSON.parse(atob(padded)) as { exp?: number };
+        const binary = atob(padded);
+        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+        const payload = JSON.parse(new TextDecoder().decode(bytes)) as { exp?: number };
         return typeof payload.exp === "number" ? payload.exp * 1000 : null;
     } catch {
         return null;

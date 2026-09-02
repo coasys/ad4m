@@ -42,13 +42,15 @@
  * ## Link confidentiality
  *
  * Once a room key is available, `encryptLinkForWire` / `decryptLinkFromWire`
- * protect the semantic payload (`{source, predicate, target}`) of every
- * LinkExpression crossing the wire. `author`, `timestamp`, and `proof` stay
- * in the clear — they're needed for signature verification and routing,
- * and the AD4M runtime's own signature was computed over the *plaintext*
- * data before it ever reached this language. The local store always holds
- * decrypted links (see src/sync.ts); only the wire representation is
- * ciphertext.
+ * protect the ENTIRE LinkExpression (author, timestamp, proof, and data)
+ * crossing the wire. No metadata leaks — the server only sees ciphertext
+ * plus a client-computed `link_hash` for OR-Set dedup. The local store
+ * always holds decrypted links (see src/sync.ts); only the wire
+ * representation is ciphertext.
+ *
+ * `decryptLinkFromWire` handles both the current full-encryption format and
+ * the legacy data-only format (for backward compatibility with links
+ * encrypted before the full-encryption change).
  */
 
 import { x25519 } from "@noble/curves/ed25519";
@@ -250,32 +252,46 @@ export function statusField(status: string | undefined): { status?: string } {
 }
 
 /**
- * Encrypts a LinkExpression's `{source, predicate, target}` payload for
- * the wire. `author` / `timestamp` / `proof` are left untouched — they are
- * plaintext metadata needed for routing and signature verification, and
- * were already signed by the runtime before this language ever saw the
- * diff. Uses a fresh random nonce per call (required for AES-GCM safety —
- * the room key is long-lived and shared across every link in the room).
- * The encrypted payload is placed in the `data` field as
- * `{ciphertext, nonce}` (matching link-server's EncryptedLinkData shape).
+ * Encrypts the entire LinkExpression (author, timestamp, proof, data) for
+ * the wire. No metadata remains in cleartext — the server receives only
+ * `{data: {ciphertext, nonce}, link_hash}`. The `link_hash` is a SHA-256
+ * of the canonical plaintext fields, computed client-side so the server
+ * can still content-address links for OR-Set dedup/removal matching
+ * without seeing the plaintext.
  */
 export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array): WireLinkExpression {
-    const plaintext = utf8ToBytes(JSON.stringify(link.data));
+    const canonical = JSON.stringify({
+        source: link.data.source,
+        predicate: link.data.predicate ?? null,
+        target: link.data.target,
+        author: link.author,
+        timestamp: link.timestamp,
+    });
+    const linkHashHex = bytesToHex(sha256(utf8ToBytes(canonical)));
+
+    const fullPayload: Record<string, unknown> = {
+        author: link.author,
+        timestamp: link.timestamp,
+        proof: link.proof,
+        data: link.data,
+    };
+    if (link.status !== undefined) fullPayload.status = link.status;
+    const plaintext = utf8ToBytes(JSON.stringify(fullPayload));
     const nonce = randomBytes(AES_NONCE_BYTES);
     const ciphertext = gcm(roomKey, nonce).encrypt(plaintext);
 
     return {
-        author: link.author,
-        timestamp: link.timestamp,
-        proof: link.proof,
-        ...statusField(link.status),
         data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
+        link_hash: linkHashHex,
     };
 }
 
 /**
- * Reverses encryptLinkForWire. Throws if `roomKey` is wrong or the
- * ciphertext was tampered with (AES-GCM auth tag failure).
+ * Reverses encryptLinkForWire. Handles both formats:
+ * - Full encryption (current): ciphertext contains `{author, timestamp, proof, data}`
+ * - Legacy data-only: ciphertext contains `{source, predicate, target}`
+ * Throws if `roomKey` is wrong or the ciphertext was tampered with
+ * (AES-GCM auth tag failure).
  */
 export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKey: Uint8Array): LinkExpression {
     if (!isEncryptedLinkData(wireLink.data)) {
@@ -284,13 +300,23 @@ export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKey: Uint8
     const nonce = hexToBytes(wireLink.data.nonce);
     const ciphertext = hexToBytes(wireLink.data.ciphertext);
     const plaintext = gcm(roomKey, nonce).decrypt(ciphertext);
-    const data = JSON.parse(bytesToUtf8(plaintext)) as Link;
+    const parsed = JSON.parse(bytesToUtf8(plaintext));
+
+    if (parsed.author && parsed.data && typeof parsed.data === "object") {
+        return {
+            author: parsed.author,
+            timestamp: parsed.timestamp,
+            proof: parsed.proof,
+            ...statusField(parsed.status),
+            data: parsed.data as Link,
+        };
+    }
 
     return {
-        author: wireLink.author,
-        timestamp: wireLink.timestamp,
-        proof: wireLink.proof,
+        author: wireLink.author ?? "",
+        timestamp: wireLink.timestamp ?? "",
+        proof: wireLink.proof ?? { signature: "", key: "" },
         ...statusField(wireLink.status),
-        data,
+        data: parsed as Link,
     };
 }

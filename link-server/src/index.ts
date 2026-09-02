@@ -30,7 +30,12 @@ function envBool(key: string): boolean {
 function parseArgs(argv: string[]): CliArgs {
   // Environment variables provide defaults; CLI args override.
   let port = Number(process.env.PORT ?? "3456");
-  if (!Number.isInteger(port) || port < 0 || port > 65535) port = 3456;
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    if (process.env.PORT) {
+      console.error(`[link-server] PORT="${process.env.PORT}" is not a valid port number; falling back to 3456`);
+    }
+    port = 3456;
+  }
   let host = process.env.HOST ?? "0.0.0.0";
   let dataDir = process.env.DATA_DIR ?? "./data";
   let selfUrl: string | undefined = process.env.SELF_URL;
