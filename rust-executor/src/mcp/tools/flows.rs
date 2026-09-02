@@ -182,6 +182,13 @@ impl Ad4mMcpHandler {
     /// match against the catalogue. When neither matches (definition removed
     /// but instances remain) the reference is passed through unchanged so the
     /// caller still gets a "not in any state" answer instead of an error.
+    ///
+    /// A bare name matching *several* flows is rejected rather than resolved.
+    /// The name isn't the identity precisely because social-DNA modules from
+    /// different communities may share one (PR #929 R5) — picking a winner
+    /// would read some other community's flow, and since the catalogue is a
+    /// `HashMap` the winner wouldn't even be stable between calls. The error
+    /// lists the candidates so the caller can retry with a canonical URI.
     async fn resolve_flow(
         perspective: &PerspectiveInstance,
         flow_ref: &str,
@@ -190,16 +197,24 @@ impl Ad4mMcpHandler {
         if let Some(flow) = flows.remove(flow_ref) {
             return Ok((flow_ref.to_string(), Some(flow)));
         }
-        let by_name = flows
+        let mut by_name: Vec<String> = flows
             .iter()
-            .find(|(_, flow)| flow.name == flow_ref)
-            .map(|(uri, _)| uri.clone());
-        match by_name {
-            Some(uri) => {
+            .filter(|(_, flow)| flow.name == flow_ref)
+            .map(|(uri, _)| uri.clone())
+            .collect();
+        by_name.sort();
+        match by_name.len() {
+            0 => Ok((flow_ref.to_string(), None)),
+            1 => {
+                let uri = by_name.remove(0);
                 let flow = flows.remove(&uri);
                 Ok((uri, flow))
             }
-            None => Ok((flow_ref.to_string(), None)),
+            _ => Err(anyhow::anyhow!(
+                "flow name `{flow_ref}` is ambiguous on this perspective — \
+                 it matches {}. Pass one of those canonical URIs instead.",
+                by_name.join(", ")
+            )),
         }
     }
 
@@ -354,9 +369,15 @@ mod tests {
     /// for at least one state. That difference is exactly what the old
     /// unfiltered implementation erased.
     fn delivery_flow_json() -> String {
+        delivery_flow_json_in("delivery://")
+    }
+
+    /// Same flow shape under a caller-chosen namespace, so a test can seed
+    /// two flows that share the name `Delivery` but not their identity.
+    fn delivery_flow_json_in(namespace: &str) -> String {
         serde_json::json!({
             "name": "Delivery",
-            "namespace": "delivery://",
+            "namespace": namespace,
             "start_action": [],
             "states": [
                 { "name": "identified", "value": 0.0 },
@@ -405,6 +426,45 @@ mod tests {
             Ad4mMcpHandler::available_transitions(&flow, "no-such-state").is_empty(),
             "unknown state must offer no actions"
         );
+    }
+
+    /// A bare name that two namespaces both claim must be rejected, not
+    /// silently resolved to whichever one the catalogue's `HashMap` happens to
+    /// yield first — reading a different community's flow is the failure the
+    /// URI-keyed identity (PR #929 R5) exists to prevent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ambiguous_bare_flow_name_is_rejected_with_its_candidates() {
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        for namespace in ["delivery://", "othercommunity://"] {
+            for link in parse_flow_to_links(&delivery_flow_json_in(namespace), "Delivery")
+                .expect("parse_flow_to_links")
+            {
+                perspective
+                    .add_link(link, LinkStatus::Local, None, &ctx)
+                    .await
+                    .expect("add_link(flow definition)");
+            }
+        }
+
+        let err = Ad4mMcpHandler::resolve_flow(&perspective, "Delivery")
+            .await
+            .expect_err("two flows named Delivery ⇒ the bare name must not resolve");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("delivery://DeliveryFlow")
+                && msg.contains("othercommunity://DeliveryFlow"),
+            "the error must name both candidates so the caller can retry with a URI, got: {msg}"
+        );
+
+        // Each canonical URI still resolves unambiguously.
+        for uri in ["delivery://DeliveryFlow", "othercommunity://DeliveryFlow"] {
+            let (resolved, flow) = Ad4mMcpHandler::resolve_flow(&perspective, uri)
+                .await
+                .unwrap_or_else(|e| panic!("resolve_flow({uri}) must succeed: {e:#}"));
+            assert_eq!(resolved, uri);
+            assert!(flow.is_some(), "{uri} must carry its parsed definition");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
