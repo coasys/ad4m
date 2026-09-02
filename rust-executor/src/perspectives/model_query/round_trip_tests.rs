@@ -426,3 +426,320 @@ fn round_trip_preserves_empty_resolve_language() {
         "empty-string resolveLanguage must survive SHACL round-trip (not be coerced to None)",
     );
 }
+
+/// S1 (generic-interpretation): the natural-language interpretation hint declared on a
+/// subject class and its properties must survive the writer → store → loader
+/// round-trip and surface on `ModelShape.interpretation_hint` /
+/// `ShapeProperty.interpretation_hint`, so the generic LLM extractor can read them
+/// via `get_shape` without re-querying the SHACL graph.
+#[test]
+fn round_trip_surfaces_interpretation_hint_on_class_and_property() {
+    let shacl_json = r#"{
+        "target_class": "ns://Intention",
+        "interpretation_hint": "A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations.",
+        "properties": [
+            {
+                "path": "ns://title",
+                "name": "title",
+                "datatype": "xsd://string",
+                "min_count": 1,
+                "max_count": 1,
+                "interpretation_hint": "Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'."
+            }
+        ]
+    }"#;
+    let shape = round_trip("Intention", shacl_json);
+
+    assert_eq!(
+        shape.interpretation_hint.as_deref(),
+        Some("A concrete unit of work someone intends to do. Extract when there is an actionable outcome with a plausible owner; ignore vague aspirations."),
+        "class-level interpretation hint should surface on ModelShape",
+    );
+
+    let title = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "title")
+        .expect("title property");
+    assert_eq!(
+        title.interpretation_hint.as_deref(),
+        Some("Imperative one-line summary of the work, e.g. 'Extract LLM processing from Flux'."),
+        "per-property interpretation hint should surface on ShapeProperty",
+    );
+}
+
+/// Absence of a hint must round-trip to `None` (no spurious link, no empty
+/// string) — the extractor treats `None` as "no guidance for this field".
+#[test]
+fn round_trip_absent_interpretation_hint_is_none() {
+    let shacl_json = r#"{
+        "target_class": "ns://Plain",
+        "properties": [
+            { "path": "ns://name", "name": "name", "datatype": "xsd://string" }
+        ]
+    }"#;
+    let shape = round_trip("Plain", shacl_json);
+    assert!(
+        shape.interpretation_hint.is_none(),
+        "no class hint declared → ModelShape.interpretation_hint must be None",
+    );
+    let name = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "name")
+        .expect("name property");
+    assert!(
+        name.interpretation_hint.is_none(),
+        "no property hint declared → ShapeProperty.interpretation_hint must be None",
+    );
+}
+
+/// A custom (non-"literal") resolveLanguage round-trips and is never treated
+/// as deterministic-literal storage.
+#[test]
+fn round_trip_preserves_custom_resolve_language() {
+    let shacl_json = r#"{
+        "target_class": "ns://ImagePost",
+        "properties": [
+            {
+                "path": "image://data",
+                "name": "image",
+                "resolve_language": "lang://custom"
+            }
+        ]
+    }"#;
+    let shape = round_trip("ImagePost", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "image")
+        .expect("image property");
+    assert_eq!(prop.resolve_language.as_deref(), Some("lang://custom"));
+    assert!(
+        !prop.is_deterministic_literal(),
+        "custom resolveLanguage produces signed envelopes, never deterministic literals",
+    );
+}
+
+/// An explicit `resolveLanguage: "literal"` selects the signed-envelope path
+/// (NOT deterministic) — the Flux message body case. Storage mode is now
+/// derived entirely from `resolveLanguage`.
+#[test]
+fn round_trip_explicit_literal_is_envelope() {
+    let shacl_json = r#"{
+        "target_class": "ns://Message",
+        "properties": [
+            { "path": "flux://body", "name": "body", "resolve_language": "literal" }
+        ]
+    }"#;
+    let shape = round_trip("Message", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "body")
+        .expect("body property");
+    assert_eq!(prop.resolve_language.as_deref(), Some("literal"));
+    assert!(
+        !prop.is_deterministic_literal(),
+        "explicit resolveLanguage:\"literal\" means the signed-envelope path",
+    );
+}
+
+/// A property with no `resolveLanguage` defaults to deterministic typed-literal
+/// storage (the perf default — what a plain `@Property()` gets).
+#[test]
+fn round_trip_no_resolve_language_is_deterministic() {
+    let shacl_json = r#"{
+        "target_class": "ns://Channel",
+        "properties": [
+            { "path": "flux://channel_name", "name": "name", "datatype": "xsd://string" }
+        ]
+    }"#;
+    let shape = round_trip("Channel", shacl_json);
+    let prop = shape
+        .properties
+        .iter()
+        .find(|p| p.name == "name")
+        .expect("name property");
+    assert_eq!(prop.resolve_language, None);
+    assert!(
+        prop.is_deterministic_literal(),
+        "no resolveLanguage → deterministic literal storage (perf default)",
+    );
+}
+
+/// End-to-end test mimicking the JS integration test pipeline:
+/// SHACL shape → store → load shape → add data → model query with operators.
+#[tokio::test]
+async fn e2e_shacl_shape_with_where_ops() {
+    use super::query::execute_model_query;
+    use super::test_helpers::StaticShapeResolver;
+    use super::types::{ModelQueryInput, WhereCondition, WhereOps};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    let store = SparqlStore::new(None).unwrap();
+
+    let shacl_json = r#"{
+        "target_class": "ns://TestPost",
+        "properties": [
+            {
+                "path": "test://post_type",
+                "name": "type",
+                "min_count": 1,
+                "max_count": 1,
+                "has_value": "test://post",
+                "resolve_language": null
+            },
+            {
+                "path": "test://title",
+                "name": "title",
+                "datatype": "xsd://string",
+                "resolve_language": "literal"
+            },
+            {
+                "path": "test://view_count",
+                "name": "viewCount",
+                "datatype": "xsd://integer",
+                "resolve_language": "literal"
+            }
+        ]
+    }"#;
+
+    let class_name = "TestPost";
+    let target_class_uri = "ns://TestPost";
+    let shape_uri = "ns://TestPostShape";
+
+    let shacl_links = parse_shacl_to_links(shacl_json, class_name).expect("parse SHACL");
+    let mut all_links = vec![
+        Link {
+            source: target_class_uri.to_string(),
+            predicate: Some("rdf://type".to_string()),
+            target: "ad4m://SubjectClass".to_string(),
+        },
+        Link {
+            source: target_class_uri.to_string(),
+            predicate: Some("ad4m://shape".to_string()),
+            target: shape_uri.to_string(),
+        },
+    ];
+    all_links.extend(shacl_links);
+    for link in all_links {
+        store.add_link(&make_link_for_round_trip(link)).unwrap();
+    }
+
+    let shape = load_shape(&store, class_name).expect("load shape");
+    eprintln!("[e2e] Loaded shape properties:");
+    for p in &shape.properties {
+        eprintln!(
+            "  {} predicate={} resolve_language={:?} is_flag={} is_required={} initial={:?}",
+            p.name, p.predicate, p.resolve_language, p.is_flag, p.is_required, p.initial_value
+        );
+    }
+
+    let _ts = "1700000000000";
+    let items = [
+        "test://post-1",
+        "test://post-2",
+        "test://post-3",
+        "test://post-4",
+        "test://post-5",
+    ];
+    let titles = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+    let counts: [f64; 5] = [10.0, 20.0, 30.0, 40.0, 50.0];
+
+    for (i, item) in items.iter().enumerate() {
+        store
+            .add_link(&make_link_for_round_trip(Link {
+                source: item.to_string(),
+                predicate: Some("test://post_type".to_string()),
+                target: "test://post".to_string(),
+            }))
+            .unwrap();
+        store
+            .add_link(&make_link_for_round_trip(Link {
+                source: item.to_string(),
+                predicate: Some("test://title".to_string()),
+                target: format!(
+                    "literal:string:{}",
+                    percent_encoding::utf8_percent_encode(
+                        titles[i],
+                        percent_encoding::NON_ALPHANUMERIC
+                    )
+                ),
+            }))
+            .unwrap();
+        let count_target = if counts[i].fract() == 0.0 {
+            format!("literal:number:{}", counts[i] as i64)
+        } else {
+            format!("literal:number:{}", counts[i])
+        };
+        store
+            .add_link(&make_link_for_round_trip(Link {
+                source: item.to_string(),
+                predicate: Some("test://view_count".to_string()),
+                target: count_target,
+            }))
+            .unwrap();
+    }
+
+    let shape_arc = Arc::new(shape);
+    let resolver = StaticShapeResolver::new();
+    resolver.register_arc(class_name, shape_arc.clone());
+
+    // Test: gt numeric
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "viewCount".to_string(),
+        WhereCondition::Ops(WhereOps {
+            gt: Some(30.0),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query(
+        &store,
+        shape_arc.as_ref(),
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "e2e: gt:30 should match 40 and 50, got {} instances: {:?}",
+        result.instances.len(),
+        result.instances
+    );
+
+    // Test: not string
+    let mut wc = BTreeMap::new();
+    wc.insert(
+        "title".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::Value::String("Alpha".to_string())),
+            ..Default::default()
+        }),
+    );
+    let result = execute_model_query(
+        &store,
+        shape_arc.as_ref(),
+        &ModelQueryInput {
+            where_clause: Some(wc),
+            ..Default::default()
+        },
+        &resolver,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        4,
+        "e2e: not:Alpha should match 4, got {} instances: {:?}",
+        result.instances.len(),
+        result.instances
+    );
+}

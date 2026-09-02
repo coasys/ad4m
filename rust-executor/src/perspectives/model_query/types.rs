@@ -40,6 +40,15 @@ pub struct WhereOps {
     pub gte: Option<f64>,
     #[serde(default)]
     pub contains: Option<Value>,
+    /// Relation quantifier: at least one linked target satisfies the nested
+    /// clause. `{ comments: { some: { author: "did:…" } } }`. An empty clause
+    /// means "has at least one".
+    #[serde(default)]
+    pub some: Option<BTreeMap<String, WhereCondition>>,
+    /// Relation quantifier: no linked target satisfies the nested clause.
+    /// `{ comments: { none: {} } }` is "has none at all".
+    #[serde(default)]
+    pub none: Option<BTreeMap<String, WhereCondition>>,
 }
 
 impl Default for WhereOps {
@@ -52,6 +61,8 @@ impl Default for WhereOps {
             gt: None,
             gte: None,
             contains: None,
+            some: None,
+            none: None,
         }
     }
 }
@@ -176,14 +187,17 @@ where
     }
 }
 
-/// Parent scope for scoped queries.
+/// A named subgraph scope: a parent node + linking predicate.
 ///
-/// When a query targets instances that are children of a specific parent
-/// (e.g. "all Messages belonging to Channel X"), the parent scope constrains
-/// the SPARQL query with an additional triple pattern.
-#[derive(Debug, Clone, Deserialize)]
+/// Reusable across contexts that need to identify "the subtree under node X
+/// linked via predicate P": query-time filtering (e.g. "all Messages belonging
+/// to Channel X" as a `parent` filter on `ModelQueryInput`) AND write-time
+/// scoping (e.g. AutoProcessor's `existing_scope` / `mint_scope` fields — the
+/// former constrains dedup lookups; the latter turns each new mint into a
+/// child link under the given node).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub enum ParentScope {
+pub enum Scope {
     Model {
         model: String,
         id: String,
@@ -245,7 +259,7 @@ pub struct ProjectionInput {
 #[serde(rename_all = "camelCase")]
 pub struct ModelQueryInput {
     #[serde(default)]
-    pub parent: Option<ParentScope>,
+    pub parent: Option<Scope>,
     #[serde(default)]
     pub properties: Option<Vec<String>>,
     #[serde(default)]
@@ -270,6 +284,39 @@ pub struct ModelQueryInput {
     /// batched VALUES queries (O(M) cost).  Set to false to skip them.
     #[serde(default, rename = "deepQuery")]
     pub deep_query: Option<bool>,
+    /// Hydrate this relation's targets as the class each one actually *is*,
+    /// rather than as the class the relation declares.
+    ///
+    /// Only meaningful on an `include` sub-query. A heterogeneous relation —
+    /// `CollectionBlock.children`, a reified edge's endpoints — either declares
+    /// a base class, in which case every subclass property is dropped on
+    /// hydration, or declares nothing, in which case the include cannot resolve
+    /// a shape at all.
+    #[serde(default)]
+    pub polymorphic: Option<bool>,
+    /// Classes the caller would rather have, most wanted first.
+    ///
+    /// Membership is not exclusive, so a target can satisfy several classes and
+    /// hydration has to read it through one of them. Without this the choice is
+    /// made by specificity — how many required triples each class matched — which
+    /// answers "which class demanded most of this node", a question nobody asked.
+    /// Naming classes here answers the one they did: read it as this, if it is
+    /// one.
+    ///
+    /// **Ranks, never excludes.** Classification is unaffected: a target is still
+    /// tested against every registered class, and this only reorders the ones it
+    /// matched. So a target conforming to nothing named here still arrives,
+    /// hydrated against whichever class it *does* match, chosen by specificity as
+    /// it would have been anyway. The relation is heterogeneous by definition and
+    /// a caller listing what it can use must not thereby narrow what the
+    /// collection contains.
+    ///
+    /// (A target matching no registered class at all is a different case, and is
+    /// skipped — there is no shape to read it through.)
+    ///
+    /// Only meaningful alongside `polymorphic`.
+    #[serde(default)]
+    pub prefer_classes: Option<Vec<String>>,
 }
 
 /// Result returned by the model query endpoint.
@@ -391,6 +438,16 @@ pub struct ShapeProperty {
     pub(crate) is_flag: bool,
     pub(crate) is_required: bool,
     pub(crate) initial_value: Option<String>,
+    /// Language address used to resolve property values, and the sole
+    /// selector of storage mode:
+    ///   - `None`              → deterministic typed literal (POS-index
+    ///                           fast path — the default for a plain
+    ///                           `@Property()`).
+    ///   - `Some("literal")`   → signed-envelope on the built-in literal
+    ///                           language (`expression_create` produces a
+    ///                           `{author, timestamp, data, proof}` URI).
+    ///   - `Some(<addr>)`      → `expression_create` on that custom
+    ///                           language.
     pub(crate) resolve_language: Option<String>,
     pub(crate) datatype: Option<String>,
     pub(crate) direction: Option<String>, // "forward" or "reverse" for relation properties
@@ -408,6 +465,34 @@ pub struct ShapeProperty {
     /// Transform expression (SHACL-AF Node Expression).
     /// Applied in hydration for resolveLanguage properties.
     pub(super) transform: Option<TransformExpression>,
+    /// Natural-language hint describing this property's meaning, read back from
+    /// the `ad4m://interpretation_hint` link on the property node.  Surfaced so the
+    /// generic LLM extractor (and MCP tool-schema generation) can inject it as
+    /// semantic guidance.  `None` when the SDNA declared no hint.
+    pub(crate) interpretation_hint: Option<String>,
+    /// CRDT ordering strategy for this collection, from `ad4m://ordering` on the
+    /// property shape. `None` leaves the relation an unordered set sorted by
+    /// link timestamp, which is what every existing relation is.
+    pub(crate) ordering: Option<String>,
+    /// Whether this property is the class's dedup identity (its title-like
+    /// interpretation key), read back from the `ad4m://identity` link on the
+    /// property node.  `false` when the SDNA declared no identity — a class
+    /// with no identity property is never deduplicated.
+    pub(crate) identity: bool,
+}
+
+impl ShapeProperty {
+    /// True when the property's values are stored as deterministic typed
+    /// literals (POS-index friendly) rather than signed expression
+    /// envelopes or custom-language expressions. Derived from
+    /// `resolve_language` alone:
+    ///   - `None`             → deterministic (default fast path)
+    ///   - `Some("literal")`  → envelope (per-value provenance)
+    ///   - `Some(<other>)`    → custom-language expression (never
+    ///                          deterministic)
+    pub(crate) fn is_deterministic_literal(&self) -> bool {
+        self.resolve_language.is_none()
+    }
 }
 
 /// Enriched relation metadata for include (eager-loading) resolution.
@@ -444,6 +529,11 @@ pub struct ModelShape {
     /// Enriched relation metadata for include resolution, populated
     /// directly from the perspective's SHACL triples.
     pub(crate) include_relations: Vec<ShapeRelation>,
+    /// Class-level natural-language hint, read back from the
+    /// `ad4m://interpretation_hint` link on the shape node.  Steers the generic
+    /// LLM extractor toward what instances of this class represent.  `None`
+    /// when the SDNA declared no class hint.
+    pub(crate) interpretation_hint: Option<String>,
 }
 
 impl ModelShape {

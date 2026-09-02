@@ -21,10 +21,14 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
+        ordering: None,
     }
 }
 
-/// Helper: build a ShapeProperty for a collection relation.
+/// Helper: build a ShapeProperty for a URI-valued collection relation
+/// (no `sh:datatype`, so targets pass through byte-for-byte on hydration).
 pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
     ShapeProperty {
         name: name.to_string(),
@@ -41,7 +45,31 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
+        ordering: None,
     }
+}
+
+/// Helper: build a ShapeProperty for a scalar (to-one) relation — the
+/// `@HasOne` / `@BelongsToOne` case. Still `is_collection` (all relations are,
+/// so the query pipeline treats them uniformly); `is_scalar_relation` is what
+/// collapses it to a single value on hydration.
+pub fn scalar_relation(name: &str, predicate: &str) -> ShapeProperty {
+    let mut p = relation(name, predicate);
+    p.is_scalar_relation = true;
+    p
+}
+
+/// Helper: build a ShapeProperty for a literal-valued collection relation
+/// (declares `sh:datatype`, so `literal:<type>:<value>` wire form is
+/// decoded on hydration — the `@HasMany({ datatype: "xsd:string" })`
+/// case in TypeScript). Use `xsd://string` for the common
+/// `HasMany<string>` scenario.
+pub fn relation_with_datatype(name: &str, predicate: &str, datatype: &str) -> ShapeProperty {
+    let mut p = relation(name, predicate);
+    p.datatype = Some(datatype.to_string());
+    p
 }
 
 /// Helper: build a ShapeProperty for a flag field.
@@ -61,6 +89,9 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         where_filter: None,
         where_predicates: None,
         transform: None,
+        interpretation_hint: None,
+        identity: false,
+        ordering: None,
     }
 }
 
@@ -71,6 +102,7 @@ pub fn shape(class: &str, properties: Vec<ShapeProperty>) -> ModelShape {
         shape_uri: format!("{class}Shape"),
         properties,
         include_relations: Vec::new(),
+        interpretation_hint: None,
     }
 }
 
@@ -151,6 +183,30 @@ pub fn evaluate_getters_batch_from_json(
 ) -> Result<serde_json::Value, Error> {
     let shape = parse_shape_from_json(shape_json, class_name)?;
     super::getters::evaluate_getters_batch(store, &shape, instance_ids, property_names)
+}
+
+/// Helper: build an InstanceLinks entry with explicit per-link timestamps.
+///
+/// `inst_links` derives an increasing timestamp from position, which is right
+/// for most tests but cannot express the two cases that matter for duplicate
+/// and last-write-wins handling: the same `(predicate, target)` appearing twice
+/// at *different* timestamps (two reifiers over one triple), and links arriving
+/// out of timestamp order. Each entry is `(predicate, target, timestamp)`.
+pub fn inst_links_at(source: &str, links: Vec<(&str, &str, &str)>) -> InstanceLinks {
+    InstanceLinks {
+        source: source.to_string(),
+        links: links
+            .into_iter()
+            .map(|(pred, tgt, ts)| {
+                (
+                    pred.to_string(),
+                    tgt.to_string(),
+                    "did:key:testauthor".to_string(),
+                    ts.to_string(),
+                )
+            })
+            .collect(),
+    }
 }
 
 /// Helper: build an InstanceLinks entry.

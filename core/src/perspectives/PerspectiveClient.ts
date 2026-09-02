@@ -10,6 +10,8 @@ import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
+import type { TranscriptTurn } from "../generated/api";
+import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -183,6 +185,12 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
+    async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
+        return await this.#apiClient.call<Record<string, string[]>>(
+            'perspective.subjectClassesOf', { uuid, uris }
+        )
+    }
+
     async evaluateGetters(
         uuid: string,
         className: string,
@@ -249,6 +257,193 @@ export class PerspectiveClient {
         )
     }
 
+    /**
+     * Run generic LLM interpretation over a transcript into this perspective's own
+     * SHACL subject classes. The target shapes are resolved server-side from the
+     * perspective's registered subject classes, so you pass only the transcript.
+     * Returns the freshly minted instances (their base URIs + the links written).
+     *
+     * The server-side call prompts an LLM (up to `INTERPRETATION_MAX_ATTEMPTS`
+     * retries on parse failure), so it can legitimately take minutes on slower
+     * or CPU-only models. We raise the default 30s RPC timeout here to 20 min
+     * (matches the CI `--timeout 1200000` for the interpretation tests).
+     *
+     * `existingScope` and `mintScope` match the AutoProcessor semantics:
+     * `existingScope` constrains the dedup lookup to instances under a
+     * subtree; `mintScope` links every FRESHLY-created base as a child of
+     * `mintScope.id` via its predicate (upserts of pre-existing instances
+     * are NOT re-parented — same rule as the watcher).
+     */
+    async runInterpretation(
+        uuid: string,
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        classes?: string[],
+        existingScope?: RawScope,
+        mintScope?: RawScope,
+        observe?: RunInterpretationObserveOptions,
+    ): Promise<string[]> {
+        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
+        return this.#apiClient.call<string[]>(
+            'perspective.runInterpretation',
+            {
+                uuid, transcript, basePrefix, classes, existingScope, mintScope,
+                // Spread rather than always-present, so a client talking to a pre-#903
+                // executor sends exactly the params it sent before. `serde` would ignore
+                // the extra keys anyway; keeping the wire identical means a bug report
+                // from an older node cannot be about these.
+                ...(observe ? {
+                    observationId: observe.observationId,
+                    emitDebugEvents: observe.emitDebugEvents ?? false,
+                } : {}),
+            },
+            RUN_INTERPRETATION_TIMEOUT_MS,
+        )
+    }
+
+    /**
+     * Tool-calling counterpart to {@link runInterpretation}. The LLM sees a
+     * live per-class tool surface (`{Class}_query`, `{Class}_propose_create`,
+     * `{Class}_propose_link_child`, …) and drives the extraction via tool
+     * calls; buffered proposals drain through the same overlay gate the
+     * single-shot path uses.
+     *
+     * `maxToolCalls` bounds the loop and MUST be > 0 — zero would collapse
+     * the harness to a no-op final-answer step; use {@link runInterpretation}
+     * for the classic single-shot path.
+     *
+     * Same 20-minute RPC timeout as the single-shot path — an LLM loop
+     * that calls several tools can legitimately take longer than one plain
+     * generation.
+     */
+    async runInterpretationWithHarness(
+        uuid: string,
+        transcript: TranscriptTurn[],
+        basePrefix: string,
+        maxToolCalls: number,
+        classes?: string[],
+        modelOverride?: string,
+        existingScope?: RawScope,
+        // Optional live-debug event surface — same shape/semantics as the
+        // single-shot `runInterpretation`. `observationId` names the
+        // `processor_id` + `batch_key` on emitted `ToolCall` / `ToolResult`
+        // events so a subscribed UI can correlate them to this pass.
+        // `emitDebugEvents` is a dead-letter without an observationId
+        // (nothing to key against); the server gates on both.
+        observationId?: string,
+        emitDebugEvents?: boolean,
+    ): Promise<string[]> {
+        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
+        return this.#apiClient.call<string[]>(
+            'perspective.runInterpretationWithHarness',
+            {
+                uuid,
+                transcript,
+                basePrefix,
+                maxToolCalls,
+                classes,
+                modelOverride,
+                existingScope,
+                observationId,
+                emitDebugEvents,
+            },
+            RUN_INTERPRETATION_TIMEOUT_MS,
+        )
+    }
+
+    /**
+     * Register a neighbourhood auto-processor on this perspective. The executor's
+     * watch loop then runs interpretation automatically over new source items
+     * (like Flux per channel), coordinating which peer processes each batch via
+     * the shared-graph ProcessingClaim, and emits step signals on the events
+     * WebSocket (subscribe via {@link addAutoProcessorEventListener}).
+     * Returns the processor id.
+     */
+    async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
+        return this.#apiClient.call<string>(
+            'perspective.addAutoProcessor', { uuid, ...config },
+        )
+    }
+
+    /** Delete an auto-processor's config. `false` when there was none to delete. */
+    async removeAutoProcessor(uuid: string, processorId: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.removeAutoProcessor', { uuid, processorId },
+        )
+    }
+
+    /** Pending interpretation overlays (LLM suggestions awaiting human accept/reject). */
+    async interpretationOverlays(uuid: string): Promise<InterpretationOverlayInfo[]> {
+        return this.#apiClient.call<InterpretationOverlayInfo[]>(
+            'perspective.interpretationOverlays', { uuid },
+        )
+    }
+
+    /** Accept an overlay's suggestion(s): the LLM value becomes the real value and
+     *  the overlay is deleted. Omit `property` to accept the whole base. */
+    async acceptInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.acceptInterpretation', { uuid, base, property },
+        )
+    }
+
+    /** Reject an overlay's suggestion(s). Omit `property` to reject the whole base
+     *  (a rejected `create` deletes the suggested instance). */
+    async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.rejectInterpretation', { uuid, base, property },
+        )
+    }
+
+    /**
+     * Subscribe to auto-processor step signals. `cb` fires for every
+     * `auto-processor-event` on `uuid` (BatchReady → Claimed/BackedOff/… →
+     * Processed), letting a UI show progress and await the next batch.
+     *
+     * Registered on the per-uuid `#linkUnsubscribers` map so
+     * `PerspectiveProxy.dispose()` → `removeAllListeners(uuid)` cleans the
+     * subscription up; using the global `#unsubscribers` array would leak
+     * callbacks across repeated view lifecycles (CodeRabbit #881 review).
+     */
+    async addAutoProcessorEventListener(uuid: String, cb: (event: AutoProcessorEvent) => void): Promise<void> {
+        const unsub = this.#apiClient.subscribe(
+            (data) => {
+                if (data.type === 'auto-processor-event' && data.perspectiveUuid === uuid) {
+                    cb(data as unknown as AutoProcessorEvent)
+                }
+            }
+        )
+        let existing = this.#linkUnsubscribers.get(uuid as string) || []
+        existing.push(unsub)
+        this.#linkUnsubscribers.set(uuid as string, existing)
+        await this.#apiClient.waitForSubscription()
+    }
+
+    /**
+     * Subscribe to neighbourhood-state events on a perspective. `cb` fires
+     * when THIS executor claims / finishes / abandons a batch for any
+     * processor on `uuid` — perspective-scoped observability so a UI can
+     * render "someone is auto-processing this" without receiving the batch
+     * payload or LLM I/O. Registered on the per-uuid `#linkUnsubscribers`
+     * map so `PerspectiveProxy.dispose()` sweeps it up.
+     */
+    async addAutoProcessorNeighbourhoodStateListener(
+        uuid: String,
+        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
+    ): Promise<void> {
+        const unsub = this.#apiClient.subscribe(
+            (data) => {
+                if (data.type === 'auto-processor-neighbourhood-state' && data.perspectiveUuid === uuid) {
+                    cb(data as unknown as AutoProcessorNeighbourhoodStateEvent)
+                }
+            }
+        )
+        let existing = this.#linkUnsubscribers.get(uuid as string) || []
+        existing.push(unsub)
+        this.#linkUnsubscribers.set(uuid as string, existing)
+        await this.#apiClient.waitForSubscription()
+    }
+
     async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
         return this.#apiClient.call<LinkExpression>(
             'perspective.addLinkExpression', { uuid, link, status, batchId }
@@ -300,6 +495,56 @@ export class PerspectiveClient {
             'perspective.getSubjectData', { uuid, subjectClass, expressionAddress }
         )
     }
+
+    // ── SHACL resolution (server-side) ─────────────────────────────────────────
+    // These methods delegate shape resolution to the executor, which reads links
+    // from its local store in-process.  Each call replaces the multi-round-trip
+    // `queryLinks` sequences the old PerspectiveProxy methods performed.
+
+    /** List the names of every SHACL shape stored in a perspective (one RPC call). */
+    async getShaclNames(uuid: string): Promise<string[]> {
+        return this.#apiClient.call<string[]>('perspective.getShaclNames', { uuid })
+    }
+
+    /**
+     * Resolve a shape's `sh:targetClass` by name (one RPC call).
+     *
+     * Returns `undefined` when the shape (or its `sh://targetClass` edge) is
+     * absent — unified with `PerspectiveProxy.getShaclTargetClass` so callers
+     * see a single "not found" representation across both layers. The
+     * executor wire format is still `null` (see `perspective.getShaclTargetClass`
+     * in `perspectives_ws.rs`); this method maps that at the boundary rather
+     * than pushing the null one layer further up. PR #935 review r3897752023.
+     */
+    async getShaclTargetClass(uuid: string, name: string): Promise<string | undefined> {
+        const result = await this.#apiClient.call<string | null>(
+            'perspective.getShaclTargetClass',
+            { uuid, name },
+        )
+        return result ?? undefined
+    }
+
+    /**
+     * Retrieve a single SHACL shape's link triples by name (one RPC call).
+     * Returns `{shapeUri, links}` for reconstruction via `SHACLShape.fromLinks()`,
+     * or `null` if no shape with that name exists.
+     */
+    async getShacl(uuid: string, name: string): Promise<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null> {
+        return this.#apiClient.call<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null>(
+            'perspective.getShacl', { uuid, name }
+        )
+    }
+
+    /**
+     * Retrieve all SHACL shapes in one call.  Returns an array of
+     * `{name, shapeUri, links}` — one entry per shape (one RPC call).
+     */
+    async getAllShacl(uuid: string): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
+        return this.#apiClient.call<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>>(
+            'perspective.getAllShacl', { uuid }
+        )
+    }
+
 
     // ExpressionClient functions, needed for Subjects:
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {

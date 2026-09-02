@@ -89,11 +89,13 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             ?getter ?hasValue ?className
             ?relationKind ?targetClassName
             ?whereFilter ?wherePredicates ?filterEnabled
-            ?transform
+            ?transform ?interpretationHint ?identity ?ordering
         WHERE {{
             <{shape_uri}> <sh://property> ?propUri .
             ?propUri <sh://path> ?path .
             ?propUri <rdf://type> ?propType .
+            OPTIONAL {{ ?propUri <ad4m://interpretation_hint> ?interpretationHint . }}
+            OPTIONAL {{ ?propUri <ad4m://identity> ?identity . }}
             OPTIONAL {{ ?propUri <sh://datatype> ?datatype . }}
             OPTIONAL {{ ?propUri <sh://minCount> ?minCount . }}
             OPTIONAL {{ ?propUri <sh://maxCount> ?maxCount . }}
@@ -101,6 +103,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             OPTIONAL {{ ?propUri <ad4m://writable> ?writable . }}
             OPTIONAL {{ ?propUri <ad4m://local> ?local . }}
             OPTIONAL {{ ?propUri <ad4m://getter> ?getter . }}
+            OPTIONAL {{ ?propUri <ad4m://ordering> ?ordering . }}
             OPTIONAL {{ ?propUri <sh://hasValue> ?hasValue . }}
             OPTIONAL {{ ?propUri <sh://class> ?className . }}
             OPTIONAL {{ ?propUri <ad4m://relationKind> ?relationKind . }}
@@ -143,12 +146,18 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 
         let path = first["path"].as_str().unwrap_or("").to_string();
         let datatype = first["datatype"].as_str().map(|s| s.to_string());
+        // Sole selector of storage mode. `None` → deterministic typed
+        // literal (fast POS-index path). `Some("literal")` → signed
+        // envelope on the built-in literal language. `Some(<addr>)` →
+        // custom-language expression. Preserved verbatim, including an
+        // explicit empty string.
         let resolve_language = first["resolveLanguage"]
             .as_str()
             .map(decode_literal_string_target);
         let writable = parse_bool_literal_target(first["writable"].as_str());
         let local = parse_bool_literal_target(first["local"].as_str());
         let getter = first["getter"].as_str().map(decode_literal_string_target);
+        let ordering = first["ordering"].as_str().map(decode_literal_string_target);
         let has_value = first["hasValue"].as_str().map(decode_literal_target_value);
         let target_class_uri = first["className"].as_str().map(|s| s.to_string());
         let relation_kind = first["relationKind"]
@@ -164,6 +173,16 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             let json_str = decode_literal_string_target(raw);
             serde_json::from_str::<super::types::TransformExpression>(&json_str).ok()
         });
+        let interpretation_hint = first["interpretationHint"]
+            .as_str()
+            .map(decode_literal_string_target);
+        // Identity marker: the `ad4m://identity` literal decodes to "true"
+        // only when the SDNA explicitly declared this property the dedup key.
+        let identity = first["identity"]
+            .as_str()
+            .map(decode_literal_string_target)
+            .map(|v| v == "true")
+            .unwrap_or(false);
 
         let min_count = parse_count_literal(first["minCount"].as_str());
         let max_count = parse_count_literal(first["maxCount"].as_str());
@@ -252,6 +271,9 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 where_filter: where_filter.clone(),
                 where_predicates: where_predicates.clone(),
                 transform: transform.clone(),
+                interpretation_hint: interpretation_hint.clone(),
+                identity,
+                ordering: ordering.clone(),
             });
 
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
@@ -291,15 +313,37 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 where_filter,
                 where_predicates,
                 transform,
+                interpretation_hint,
+                identity,
+                ordering: ordering.clone(),
             });
         }
     }
+
+    // Class-level interpretation hint lives on the shape node itself.
+    let class_hint_query = format!(
+        r#"
+        SELECT ?hint WHERE {{
+            <{shape_uri}> <ad4m://interpretation_hint> ?hint .
+        }}
+        LIMIT 1
+        "#
+    );
+    let class_hint = store
+        .query(&class_hint_query)
+        .ok()
+        .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
+        .and_then(|rows| {
+            rows.first()
+                .and_then(|r| r["hint"].as_str().map(decode_literal_string_target))
+        });
 
     Ok(ModelShape {
         target_class,
         shape_uri,
         properties,
         include_relations,
+        interpretation_hint: class_hint,
     })
 }
 
@@ -546,6 +590,9 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 where_filter: None,
                 where_predicates: None,
                 transform,
+                interpretation_hint: None,
+                identity: false,
+                ordering: None,
             });
         }
     }
@@ -554,6 +601,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         for (name, rel_meta) in rels {
             let predicate = rel_meta["predicate"].as_str().unwrap_or("").to_string();
             let getter = rel_meta["getter"].as_str().map(|s| s.to_string());
+            let ordering = rel_meta["ordering"].as_str().map(|s| s.to_string());
 
             if predicate.is_empty() && getter.is_none() {
                 continue;
@@ -593,6 +641,9 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 where_filter,
                 where_predicates,
                 transform: None,
+                interpretation_hint: None,
+                identity: false,
+                ordering: ordering.clone(),
             });
 
             if rel_meta.get("targetShape").is_some() || rel_meta.get("targetClassName").is_some() {
@@ -634,6 +685,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         shape_uri,
         properties,
         include_relations,
+        interpretation_hint: None,
     })
 }
 

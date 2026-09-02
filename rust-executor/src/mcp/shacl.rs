@@ -52,10 +52,19 @@ pub struct ShaclProperty {
     /// Target SHACL node shape URI (sh:class). When present, linked nodes
     /// must conform to this shape, enabling typed construction.
     pub class: Option<String>,
-    /// Language address for resolving property values (ad4m://resolveLanguage).
-    /// When set, values should be passed through `expression_create` on this language
-    /// instead of being encoded as raw `literal://string:` URIs.
+    /// Sole selector of storage mode (`ad4m://resolveLanguage`):
+    ///   - `None`             → deterministic typed literal (fast path).
+    ///   - `Some("literal")`  → signed envelope on the built-in literal
+    ///                          language.
+    ///   - `Some(<addr>)`     → expression on that custom language.
     pub resolve_language: Option<String>,
+    /// Natural-language hint describing this property (or relation's) meaning.
+    /// Read back from the `ad4m://interpretation_hint` link on the property
+    /// node. Steers the harness LLM's tool descriptions — for a relation, this
+    /// is what makes `basedOn` mean "which prior beliefs did this intention
+    /// derive from" instead of just "some link". `None` when the SDNA
+    /// declared no hint on this property.
+    pub interpretation_hint: Option<String>,
 }
 
 impl ShaclClass {
@@ -197,6 +206,7 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
                 getter: p.getter.clone(),
                 class: class_uri,
                 resolve_language: p.resolve_language.clone(),
+                interpretation_hint: p.interpretation_hint.clone(),
             }
         })
         .collect();
@@ -396,7 +406,7 @@ pub async fn load_class_properties_with_uri(
             _ => None,
         };
 
-        // Get resolve language (ad4m://resolveLanguage)
+        // Get resolveLanguage (ad4m://resolveLanguage) — the general language selector.
         let resolve_language = match perspective
             .get_links(&LinkQuery {
                 source: Some(prop_uri.clone()),
@@ -407,21 +417,34 @@ pub async fn load_class_properties_with_uri(
         {
             Ok(links) if !links.is_empty() => {
                 let target = &links[0].data.target;
-                let prefix_legacy = "literal://string:";
-                let prefix = "literal:string:";
-                if target.starts_with(prefix_legacy) {
-                    let encoded_value = &target[prefix_legacy.len()..];
-                    urlencoding::decode(encoded_value)
-                        .ok()
-                        .map(|v| v.to_string())
-                } else if target.starts_with(prefix) {
-                    let encoded_value = &target[prefix.len()..];
-                    urlencoding::decode(encoded_value)
-                        .ok()
-                        .map(|v| v.to_string())
-                } else {
-                    Some(target.clone())
-                }
+                let val = target
+                    .strip_prefix("literal://string:")
+                    .or_else(|| target.strip_prefix("literal:string:"))
+                    .unwrap_or(target);
+                let decoded = urlencoding::decode(val).unwrap_or_default();
+                Some(decoded.to_string())
+            }
+            _ => None,
+        };
+
+        // Interpretation hint (ad4m://interpretation_hint) — natural-language
+        // meaning for this property/relation, used by the harness's tool
+        // schema generation to explain what a predicate is for.
+        let interpretation_hint = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("ad4m://interpretation_hint".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => {
+                let target = &links[0].data.target;
+                let raw = target
+                    .strip_prefix("literal://string:")
+                    .or_else(|| target.strip_prefix("literal:string:"))
+                    .unwrap_or(target);
+                Some(urlencoding::decode(raw).unwrap_or_default().to_string())
             }
             _ => None,
         };
@@ -437,6 +460,7 @@ pub async fn load_class_properties_with_uri(
             getter,
             class: class_uri,
             resolve_language,
+            interpretation_hint,
         });
     }
 
@@ -519,10 +543,12 @@ pub async fn resolve_property_predicate(
     ))
 }
 
-/// Resolve a property's resolve_language for a given class.
-/// Returns `Ok(Some(language))` if the property has a resolve language,
-/// or `Err` if the class/property is not found.
-/// Matching is case-insensitive because dynamic tool names are lowercased.
+/// Resolve a property's resolve_language (the general expression-language
+/// selector) for a given class. Returns `Ok(Some(language))` if set, `Ok(None)`
+/// if the property exists but has no resolve language, or `Err` if the
+/// class/property is not found. Matching is case-insensitive because dynamic
+/// tool names are lowercased.
+#[allow(dead_code)]
 pub async fn resolve_property_resolve_language(
     perspective: &PerspectiveInstance,
     class_name: &str,

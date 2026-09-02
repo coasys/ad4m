@@ -12,13 +12,13 @@ import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSON
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
 
-import { buildSPARQLQuery } from "./query-sparql";
+import { buildSPARQLQuery, valueToLiteralIri, effectiveLiteralStorage } from "./query-sparql";
 import { ModelQueryBuilder } from "./ModelQueryBuilder";
 import {
   normalizeValue,
 } from "./hydration";
 import type {
-  ParentScope, IncludeMap, Query,
+  Scope, IncludeMap, Query,
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
@@ -36,6 +36,109 @@ import type {
  * Rust endpoint.  Recursively converts included relation values (which come
  * back as plain JSON objects) into proper model class instances.
  */
+/**
+ * Key under which the executor returns a polymorphically-hydrated instance's
+ * concrete class.
+ *
+ * Half of a wire contract: the writer is `SUBJECT_CLASS_KEY` in
+ * `rust-executor/src/perspectives/model_query/relations.rs`, and the two are
+ * separate literals in separate languages. Renaming one alone does not fail to
+ * compile — it degrades to every instance staying plain JSON, which looks
+ * identical to a relation that declared no classes to build.
+ * `tests/js/tests/model/model-polymorphic.test.ts` drives both ends against one
+ * executor, so the drift fails a test rather than a user's query.
+ *
+ * The executor also returns `__subjectClasses`, the whole set this one names the
+ * head of. Nothing here reads it — it rides onto the instance with every other
+ * JSON key, for a caller that wants to know a choice was made.
+ */
+const SUBJECT_CLASS_KEY = '__subjectClass';
+
+/**
+ * Turn on `polymorphic` for every relation that declares it, at every depth of
+ * an include map.
+ *
+ * A relation being heterogeneous is a fact about the data, not about one query,
+ * so the declaration lives on the model and the call site writes
+ * `include: { children: true }`. That has to hold just as much one level down:
+ * in `include: { posts: { include: { children: true } } }`, `children` is a
+ * relation on `Post`, so the walk carries the class it is reading against down
+ * with it. Without that, a nested include of an untyped polymorphic relation
+ * reaches the executor with no shape to resolve and fails the query outright.
+ *
+ * An explicit `polymorphic: false` at any level still wins — `undefined` is the
+ * only state the default fills in.
+ *
+ * The walk stops descending *through* a polymorphic relation, because there is
+ * nothing to descend into: its targets are of several classes by definition, so
+ * no single class's metadata could say what a deeper include means. The
+ * executor resolves those nested includes against each concrete class instead.
+ */
+function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): void {
+  const relMeta = getRelationsMetadata(ctor);
+  for (const [relName, val] of Object.entries(includes)) {
+    // `$`-prefixed keys are projections, not relations.
+    if (relName.startsWith('$')) continue;
+    const meta = relMeta[relName];
+    if (!meta) continue;
+
+    let subQuery = val as any;
+    if (meta.polymorphic) {
+      if (val === true) {
+        subQuery = { polymorphic: true };
+        includes[relName] = subQuery;
+      } else if (typeof val === 'object' && val !== null && subQuery.polymorphic === undefined) {
+        subQuery.polymorphic = true;
+      }
+      // The classes this call site can build are also the classes it wants its
+      // targets read as, so the declaration answers both questions and the call
+      // site repeats neither. Sent as part of the query rather than applied to
+      // the results: a preference in the request is reproducible by anyone who
+      // sends it, where one applied afterwards would make the same data read
+      // differently depending on which classes the caller happened to import.
+      //
+      // It ranks and does not narrow — a target matching none of them still
+      // arrives — so declaring what you can construct never costs you a member
+      // of a relation that is heterogeneous by definition.
+      if (
+        typeof subQuery === 'object' &&
+        subQuery !== null &&
+        subQuery.polymorphic &&
+        subQuery.preferClasses === undefined &&
+        meta.instantiateAs
+      ) {
+        const names = (meta.instantiateAs() ?? [])
+          .map((cls) => (cls as any)?.className)
+          .filter((name): name is string => typeof name === 'string');
+        if (names.length) subQuery.preferClasses = names;
+      }
+    }
+
+    if (typeof subQuery !== 'object' || subQuery === null) continue;
+    const nested = subQuery.include as IncludeMap | undefined;
+    if (!nested || subQuery.polymorphic) continue;
+
+    // The thunk is only evaluated here, at query time, so a self-referential or
+    // circularly-imported target that is not yet defined costs the nested
+    // default rather than the whole query.
+    let TargetClass: any;
+    try {
+      TargetClass = meta.target?.();
+    } catch (e) {
+      // A class not yet initialised throws `ReferenceError` from the temporal
+      // dead zone, which is the expected cost of an import cycle and not worth
+      // saying anything about. Anything else — a thunk closing over nothing,
+      // typically — is a broken declaration that would otherwise cost the nested
+      // default in silence, so it gets said out loud.
+      const circularImport = e instanceof ReferenceError;
+      const say = circularImport ? console.debug : console.warn;
+      say(`prepareModelQueryParams: target class unavailable for include '${relName}':`, e);
+      continue;
+    }
+    if (TargetClass) applyPolymorphicIncludeDefaults(nested, TargetClass);
+  }
+}
+
 function jsonToModelInstance<T extends Ad4mModel>(
   ModelClass: typeof Ad4mModel & (new (...args: any[]) => T),
   perspective: PerspectiveProxy,
@@ -88,8 +191,56 @@ function jsonToModelInstance<T extends Ad4mModel>(
     for (const [relName, includeVal] of Object.entries(include)) {
       if (!includeVal) continue;
       const meta = relMeta[relName];
-      if (!meta?.target) continue;
-      const TargetClass = meta.target() as any;
+      // A polymorphic relation may legitimately declare no target at all —
+      // that is the case it exists for — so it must not be gated on one.
+      if (!meta) continue;
+      if (!meta.target && !meta.polymorphic) continue;
+      const TargetClass = meta.target?.() as any;
+      // For a polymorphic relation the executor sends each child's concrete
+      // class back on the instance, because it had to know it in order to
+      // hydrate against the right shape at all. What it cannot send is the
+      // constructor, so `instantiateAs` names the classes this side can build
+      // and the name → class map is derived from them: `@Model` records each
+      // class's name on the class itself, so listing the classes and listing
+      // their names would be the same list written twice, free to disagree.
+      //
+      // Built on first use rather than at decoration time, because the thunk
+      // exists to be called late: a class defined further round a circular
+      // import graph is not there yet when the decorator runs.
+      let byClassName: Record<string, any> | undefined;
+      // May resolve to nothing: a polymorphic relation is allowed to declare no
+      // target at all, and the list may not name the class that arrived — it
+      // says what this call site can construct, not what the relation may hold.
+      // The item then stays plain JSON — correct data, carrying its class name
+      // for a caller that wants to dispatch on it — rather than being forced
+      // through a constructor that does not exist.
+      const resolveChildClass = (item: any): any => {
+        if (!meta.polymorphic) return TargetClass;
+        const concrete = item?.[SUBJECT_CLASS_KEY];
+        // No concrete class means this was not read polymorphically after all —
+        // an explicit `polymorphic: false` at the call site — so the relation's
+        // own declared target is the right shape.
+        if (typeof concrete !== 'string') return TargetClass;
+        if (meta.instantiateAs) {
+          if (!byClassName) {
+            byClassName = {};
+            for (const cls of meta.instantiateAs() ?? []) {
+              const name = (cls as any)?.className;
+              if (typeof name === 'string') byClassName[name] = cls;
+            }
+          }
+          if (byClassName[concrete]) return byClassName[concrete];
+        }
+        // The declared target is not a fallback, and having named no classes to
+        // build does not make it one. Where a relation both declares a target
+        // and reads polymorphically, a child of some third class was hydrated
+        // against *its own* shape, so constructing the declared class over that
+        // JSON produces an instance that answers `instanceof` for a class it is
+        // not, carrying fields that class never declared — the exact
+        // mislabelling polymorphic reads exist to prevent. It fits only when it
+        // is the class the executor named.
+        return (TargetClass as any)?.className === concrete ? TargetClass : undefined;
+      };
       const nestedInclude =
         typeof includeVal === 'object' && includeVal !== null
           ? (includeVal as any).include
@@ -102,15 +253,19 @@ function jsonToModelInstance<T extends Ad4mModel>(
       const raw = instance[relName];
       if (Array.isArray(raw)) {
         instance[relName] = raw.map((item: any) => {
-          if (typeof item === 'object' && item !== null && item.id) {
-            return jsonToModelInstance(TargetClass, perspective, item, nestedInclude, nestedProperties);
+          const ChildClass = resolveChildClass(item);
+          if (ChildClass && typeof item === 'object' && item !== null && item.id) {
+            return jsonToModelInstance(ChildClass, perspective, item, nestedInclude, nestedProperties);
           }
           return item;
         });
       } else if (typeof raw === 'object' && raw !== null && raw.id) {
-        instance[relName] = jsonToModelInstance(
-          TargetClass, perspective, raw, nestedInclude, nestedProperties,
-        );
+        const ChildClass = resolveChildClass(raw);
+        if (ChildClass) {
+          instance[relName] = jsonToModelInstance(
+            ChildClass, perspective, raw, nestedInclude, nestedProperties,
+          );
+        }
       }
     }
   }
@@ -139,13 +294,29 @@ function jsonToModelInstance<T extends Ad4mModel>(
  * // Define a recipe model
  * @Model({ name: "Recipe" })
  * class Recipe extends Ad4mModel {
- *   // Required property with literal value
+ *   // Plain property — no `resolveLanguage` → deterministic typed literal
+ *   // storage (fast POS-index path). This is the perf default.
+ *   @Property({ through: "recipe://name" })
+ *   name: string = "";
+ *
+ *   // Property that needs per-value provenance (e.g. a signed message body):
+ *   // `resolveLanguage: "literal"` routes values through expression_create on
+ *   // the built-in literal language, producing a signed envelope URI
+ *   // (author/timestamp/proof) instead of a bare typed literal.
  *   @Property({
- *     through: "recipe://name",
+ *     through: "recipe://signed_note",
  *     resolveLanguage: "literal"
  *   })
- *   name: string = "";
- * 
+ *   signedNote: string = "";
+ *
+ *   // Property resolved through a custom language: values are routed through
+ *   // expression_create on that language (signed expression URIs).
+ *   @Optional({
+ *     through: "recipe://photo",
+ *     resolveLanguage: "QmFileStorageLanguageAddress..."
+ *   })
+ *   photo: string = "";
+ *
  *   // Optional property with custom initial value
  *   @Optional({
  *     through: "recipe://status",
@@ -301,9 +472,9 @@ export class Ad4mModel {
    * ```typescript
    * @Model({ name: "Recipe" })
    * class Recipe extends Ad4mModel {
-   *   @Property({ through: "recipe://name", resolveLanguage: "literal" })
+   *   @Property({ through: "recipe://name" })
    *   name: string = "";
-   *   
+   *
    *   @HasMany({ through: "recipe://ingredient" })
    *   ingredients: string[] = [];
    * }
@@ -405,7 +576,7 @@ export class Ad4mModel {
               predicate: predicate,
               required: isRequired,
               readOnly: propertySchema["x-ad4m"]?.writable === false,
-              ...(propertySchema["x-ad4m"]?.resolveLanguage && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
+              ...(propertySchema["x-ad4m"]?.resolveLanguage !== undefined && { resolveLanguage: propertySchema["x-ad4m"].resolveLanguage }),
               ...(propertySchema["x-ad4m"]?.initial && { initial: propertySchema["x-ad4m"].initial }),
               ...(propertySchema["x-ad4m"]?.local !== undefined && { local: propertySchema["x-ad4m"].local })
             };
@@ -426,20 +597,31 @@ export class Ad4mModel {
    * 
    * @param perspective - The perspective where this model will be stored
    * @param baseExpression - Optional expression URI for this instance.
-   *             If omitted, a random Literal URL is generated.
+   *             If omitted, a random `ad4m://obj/<id>` IRI is generated,
+   *             independent of any property content — this is what keeps
+   *             two instances with identical property values distinct.
    * @param source - Optional source expression this instance is linked to
-   * 
+   *
    * @example
    * ```typescript
    * // Create a new recipe with auto-generated base expression
    * const recipe = new Recipe(perspective);
-   * 
+   *
    * // Create with specific base expression
-   * const recipe = new Recipe(perspective, "literal:...");
+   * const recipe = new Recipe(perspective, "ad4m://obj/existing-id");
    * ```
    */
   constructor(perspective: PerspectiveProxy, baseExpression?: string) {
-    this._baseExpression = baseExpression ? baseExpression : Literal.from(makeRandomId(24)).toUrl();
+    // Use a dedicated `ad4m://obj/<id>` scheme for auto-generated
+    // baseExpressions instead of `Literal.from(...).toUrl()`'s
+    // `literal:string:<id>`. After typed-literal storage lands, the storage
+    // layer translates any `literal:string:X` target into a typed
+    // `"X"^^xsd:string` literal — which is correct for property values but
+    // wrong for relation targets (which must remain NamedNode IRIs). Using
+    // a distinct scheme keeps auto-generated instance IDs unambiguously
+    // IRIs, so relation links like `<post> --has_comment--> <comment-id>`
+    // round-trip correctly through the SPARQL store.
+    this._baseExpression = baseExpression ? baseExpression : `ad4m://obj/${makeRandomId(24)}`;
     this._perspective = perspective;
   }
 
@@ -810,7 +992,17 @@ export class Ad4mModel {
           normalIncludes[key] = val;
         }
       }
-      if (Object.keys(normalIncludes).length > 0) queryInput.include = normalIncludes;
+      // A relation declared `polymorphic` reads that way by default, so the
+      // caller writes `include: { children: true }` and still gets each child
+      // hydrated as the class it actually is. Declaring it on the model rather
+      // than repeating it at every call site is the point — the relation being
+      // heterogeneous is a fact about the data, not about one query — but an
+      // explicit `polymorphic: false` at the call site still wins. Applied at
+      // every depth, since a nested include is a fact about the data too.
+      if (Object.keys(normalIncludes).length > 0) {
+        applyPolymorphicIncludeDefaults(normalIncludes, this as any);
+        queryInput.include = normalIncludes;
+      }
       if (Object.keys(projections).length > 0) {
         // Tag each projection with its target class name so the executor can
         // resolve the target shape through its in-memory cache when applying
@@ -1089,16 +1281,21 @@ export class Ad4mModel {
     // Generate actions from metadata (replaces Prolog query)
     const actions = this.generatePropertySetterAction(key, metadata);
 
-    // Get resolve language from metadata (replaces Prolog query)
-    let resolveLanguage = metadata.resolveLanguage;
-
     // Skip storing empty/null/undefined values to avoid invalid empty literals (e.g. literal:string:)
     if (value === undefined || value === null || value === "") {
       return;
     }
 
-    if (resolveLanguage) {
-      value = await this._perspective.createExpression(value, resolveLanguage);
+    const mode = effectiveLiteralStorage(metadata);
+    if (mode.kind === "custom") {
+      // Custom language: route through expression_create on that language.
+      value = await this._perspective.createExpression(value, mode.language);
+    } else if (mode.kind === "envelope") {
+      // Built-in literal language: signed-envelope expression (provenance).
+      value = await this._perspective.createExpression(value, "literal");
+    } else {
+      // Deterministic literal: IRI (POS-index friendly).
+      value = valueToLiteralIri(value);
     }
 
     await this._perspective.executeAction(actions, this._baseExpression, [{ name: "value", value }], batchId);
@@ -1242,34 +1439,37 @@ export class Ad4mModel {
       (p) => p.required || p.flag || p.initial !== undefined
     );
 
-    // Track properties that have resolveLanguage (non-literal) so they can be
-    // set via setProperty after createSubject (which doesn't resolve languages).
-    const deferredResolveLanguageProps: string[] = [];
+    // Track properties resolved through expression_create — a signed literal
+    // envelope or a custom (non-"literal") resolveLanguage. These may fail
+    // inside a batch context, so defer them to setProperty after createSubject.
+    const deferredExpressionProps: string[] = [];
 
     if (hasConstructor) {
-      // First filter out the properties that are not relations (arrays)
       const initialValues = {};
       for (const [key, value] of Object.entries(this)) {
         if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
-          // Check if this property requires language resolution (e.g. file storage).
-          // If so, resolve the expression *before* passing to createSubject so
-          // the constructor receives a valid URI instead of raw data.
           const propMeta = metadata.properties[key];
-          if (propMeta?.resolveLanguage && propMeta.resolveLanguage !== 'literal' && typeof value === 'object') {
-            // Defer these properties — they need createExpression which may
-            // fail inside a batch context on some languages.  We'll set them
-            // via setProperty after createSubject.
-            deferredResolveLanguageProps.push(key);
+          // Only offer keys with a declared, settable model property. This
+          // excludes ORM bookkeeping fields (_baseExpression, _perspective —
+          // enumerable instance fields, not model properties), HasMany
+          // relations (tracked in a separate registry, never in
+          // `metadata.properties`), and read-only properties/flags
+          // (readOnly: true). None of these have an `ad4m://setter` on the
+          // Rust side, which otherwise logs a "declares no setter" warning
+          // per key on every save().
+          if (!propMeta || propMeta.readOnly) {
+            continue;
+          }
+          if (effectiveLiteralStorage(propMeta).kind !== "deterministic") {
+            deferredExpressionProps.push(key);
             continue;
           }
           initialValues[key] = value;
         }
       }
 
-      // Get the class name instead of passing the instance to avoid Prolog query generation
       const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
 
-      // Create the subject with the initial values
       await this.perspective.createSubject(
         className,
         this._baseExpression,
@@ -1283,10 +1483,7 @@ export class Ad4mModel {
     // property writing so that scalar values are persisted as links.
     await this.innerUpdate(!hasConstructor, batchId)
 
-    // Now handle any deferred resolveLanguage properties that were excluded
-    // from initialValues.  setProperty will call createExpression to upload
-    // the data to the appropriate language and store the resulting URI.
-    for (const key of deferredResolveLanguageProps) {
+    for (const key of deferredExpressionProps) {
       const value = (this as any)[key];
       if (value !== undefined && value !== null) {
         await this.setProperty(key, value, batchId);
@@ -1387,14 +1584,37 @@ export class Ad4mModel {
           // Handle all arrays as relations, including empty ones (which clears the relation)
           await this.setRelationValues(key, value, batchId);
         } else if (value !== undefined && value !== null && value !== "") {
-          if (setProperties) {
-            // Check if this is a relation property (has relation metadata)
-            const relationMeta = this.getRelationOptions(key);
-            if (relationMeta) {
-              // Skip - it's a relation, not a regular property
-              continue;
-            }
+          // A scalar handed to a relation field is a single-member relation.
+          //
+          // This used to `continue` — "Skip, it's a relation, not a regular
+          // property" — so `Model.create(p, { source: 'uri://x' })` typechecked,
+          // ran, resolved, and wrote no link. The record was created with the
+          // relation empty and nothing anywhere said so, which surfaces later as
+          // a *reader* complaining about a malformed instance: a Relationship
+          // with no endpoints, a Placement pointing at nothing. Both look like
+          // rendering bugs from the outside, because the record exists and the
+          // thing that should reference it does not.
+          //
+          // The array form is the documented path and stays correct; the problem
+          // is that the scalar form is plausible, typechecks against a field
+          // declared `string`, and fails silently. Coercing matches what a caller
+          // reaching for it meant. A value `setRelationValues` cannot use now
+          // fails there, loudly, instead of vanishing here.
+          //
+          // Deliberately outside the `setProperties` gate, mirroring the array
+          // branch above. `create` passes `setProperties: false` when the class
+          // has a constructor, because `create_subject` writes the values map —
+          // but a relation carries `ad4m://adder`, not `ad4m://setter`, so
+          // `create_subject` drops it (see the warning added in 3ee2b5bc6).
+          // Relations have to be written here in both cases or they are lost by
+          // both paths at once.
+          const relationMeta = this.getRelationOptions(key);
+          if (relationMeta) {
+            await this.setRelationValues(key, [value], batchId);
+            continue;
+          }
 
+          if (setProperties) {
             // Skip flag properties — they are immutable after creation
             const propMeta = this.getPropertyMetadata(key);
             if (propMeta?.flag) {
@@ -1606,7 +1826,7 @@ export class Ad4mModel {
    * @param perspective - The perspective to create the instance in
    * @param data - Property values to assign before saving
    * @param options - Optional settings:
-   *   - `parent` — a `ParentScope` (model form or raw form) whose `id` will
+   *   - `parent` — a `Scope` (model form or raw form) whose `id` will
    *     be used to create an incoming link from the parent to the new instance.
    *   - `batchId` — an existing batch id; when provided the link write and
    *     `save()` are added to the batch instead of committed immediately.
@@ -1635,7 +1855,7 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     data: Record<string, any> = {},
-    options?: { parent?: ParentScope; batchId?: string },
+    options?: { parent?: Scope; batchId?: string },
   ): Promise<T> {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
@@ -1881,8 +2101,7 @@ export class Ad4mModel {
    * // With explicit configuration
    * const PersonClass = Ad4mModel.fromJSONSchema(schema, {
    *   name: "Person",
-   *   namespace: "person://",
-   *   resolveLanguage: "literal"
+   *   namespace: "person://"
    * });
    * 
    * // With property mapping

@@ -7,21 +7,47 @@
 
 use deno_core::anyhow::{anyhow, Error};
 #[cfg(test)]
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use percent_encoding::utf8_percent_encode;
 use serde_json::Value;
 
 // ---------------------------------------------------------------------------
 // SPARQL injection prevention helpers
 // ---------------------------------------------------------------------------
 
-/// Encode a string for use in a `literal:string:…` IRI.
-///
-/// Uses `NON_ALPHANUMERIC` percent-encoding, matching `literal_encode` in
-/// `languages/literal.rs`.  `urlencoding::encode` uses RFC 3986 unreserved
-/// chars (keeps `.-_~`), which diverges from the storage encoding.
+/// Percent-encoding set matching JS `encodeRFC3986URIComponent`.
+/// Leaves `A-Z a-z 0-9 - _ . ~` un-encoded — same characters the SDK
+/// preserves, so `literal:*:` URLs round-trip without re-encoding drift.
+#[cfg(test)]
+const RFC3986_COMPONENT_ENCODE: percent_encoding::AsciiSet = percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// Encode a string for use in a `literal:string:…` IRI, matching
+/// the JS SDK's `encodeRFC3986URIComponent` encoding. Test-only —
+/// production paths construct typed RDF literals instead of synthesising
+/// the URI form by hand.
 #[cfg(test)]
 pub(super) fn literal_percent_encode(s: &str) -> String {
-    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+    utf8_percent_encode(s, &RFC3986_COMPONENT_ENCODE).to_string()
+}
+
+/// Format a finite f64 for the `literal:number:` IRI tail, mirroring
+/// `literal_encode` in `languages/literal.rs`: integers render without a
+/// fractional part (e.g. `42`), floats use `{}` formatting (e.g. `3.14`).
+///
+/// Returns `None` if the value is non-finite (NaN or +/- infinity) — these
+/// are rejected so we never emit a malformed IRI into the SPARQL.
+pub(super) fn format_literal_number(n: f64) -> Option<String> {
+    if !n.is_finite() {
+        return None;
+    }
+    if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+        Some(format!("{}", n as i64))
+    } else {
+        Some(format!("{n}"))
+    }
 }
 
 /// Escape a string value for use inside a SPARQL string literal (double-quoted).
@@ -33,15 +59,51 @@ pub(super) fn escape_sparql_string(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
+/// Cheap heuristic for "this string is plausibly an absolute IRI" — passes
+/// `validate_iri`, has a `:`, and starts with an ASCII letter. Used to decide
+/// whether a where-value is safe to emit as a `<…>` IRIREF; rejects bare
+/// strings like `"active"` that would produce un-parseable SPARQL.
+pub(crate) fn looks_like_absolute_iri(s: &str) -> bool {
+    if validate_iri(s).is_err() {
+        return false;
+    }
+    let Some(colon_idx) = s.find(':') else {
+        return false;
+    };
+    if colon_idx == 0 {
+        return false;
+    }
+    let first = s.as_bytes()[0];
+    first.is_ascii_alphabetic()
+}
+
+/// Predicate used by write paths to decide whether a string can be stored as
+/// a raw `NamedNode` target instead of being wrapped in a `literal:*` URI.
+///
+/// Kept in sync with the query-side [`looks_like_absolute_iri`] so a value
+/// that would round-trip through a raw-IRI store is also matched by SPARQL
+/// `UNION` IRI probes.  If write and query disagree on what a "safe IRI" is,
+/// values like `"Note: buy milk"` slip through the write regex (matches the
+/// scheme shape) but fail the query-side [`validate_iri`] gate — the
+/// resulting `NamedNode` is invalid, the query only probes the
+/// `xsd:string` arm, and the write becomes a silent no-match.
+///
+/// Mirrors the TypeScript `looksLikeUri` in `core/src/model/query-sparql.ts`.
+pub fn is_safe_iri_target(s: &str) -> bool {
+    looks_like_absolute_iri(s)
+}
+
 /// Validate a value for use inside an IRI `<…>`.  Rejects characters that
-/// would break or inject into a SPARQL IRI token.
+/// would break or inject into a SPARQL IRI token, including all control and
+/// whitespace characters (e.g. `\n`, `\r`, `\t`, U+00A0) which `validate_iri`
+/// previously let through and which would emit malformed `<…>` IRIREFs.
 pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
-    if s.contains('>')
+    if s.chars().any(|c| c.is_control() || c.is_whitespace())
+        || s.contains('>')
         || s.contains('<')
         || s.contains('{')
         || s.contains('}')
         || s.contains('"')
-        || s.contains(' ')
     {
         return Err(anyhow!("Invalid IRI component: '{}'", s));
     }
@@ -55,13 +117,9 @@ pub(super) const MAX_INCLUDE_DEPTH: u8 = 8;
 // literal: URI parsing (typed)
 // ---------------------------------------------------------------------------
 
-/// Parse a `literal:` URI into a typed JSON value.
-/// Returns the raw string as Value::String if not a literal: URI.
-///
-/// Since the signed-envelope migration (v3), all literal values are stored
-/// as plain `literal:string:X`, `literal:number:X`, `literal:boolean:X`,
-/// or `literal:json:X` (for non-envelope JSON objects/arrays).
-pub(super) fn parse_literal_value(uri: &str) -> Value {
+/// Parse a `literal:` URI into a typed JSON value, or return the input as a
+/// string when it is not a literal URI.
+pub(crate) fn parse_literal_value(uri: &str) -> Value {
     let body = if let Some(rest) = uri.strip_prefix("literal:") {
         rest
     } else {
@@ -90,7 +148,10 @@ pub(super) fn parse_literal_value(uri: &str) -> Value {
     } else if let Some(rest) = body.strip_prefix("json:") {
         let decoded = urlencoding::decode(rest).unwrap_or_else(|_| rest.into());
         if let Ok(json_val) = serde_json::from_str::<Value>(&decoded) {
-            // For signed expression envelopes, extract .data
+            // Unwrap signed-expression envelopes (`{author, timestamp, data, proof}`)
+            // to the inner `.data` so consumers always see the underlying value
+            // rather than the wrapper, regardless of whether the target was
+            // written as a plain literal or as a signed expression.
             if let Some(data) = json_val.get("data") {
                 if json_val.get("author").is_some() && json_val.get("proof").is_some() {
                     return data.clone();
@@ -257,5 +318,50 @@ mod tests {
         assert!(validate_iri("has spaces").is_err());
         assert!(validate_iri("has\"quotes").is_err());
         assert!(validate_iri("has{braces}").is_err());
+    }
+
+    // ---------------------------------------------------------------------
+    // is_safe_iri_target — shared write-side predicate that MUST agree with
+    // the query-side `looks_like_absolute_iri` gate.  A value that returns
+    // true here is stored as a raw `NamedNode` on the write path and probed
+    // via the SPARQL `UNION` IRI arm on the query path; a value that returns
+    // false falls through to `Literal::from_string` and is stored as a
+    // `literal:string:*` typed literal.  Any drift between the two produces
+    // silent no-match reads (see issue reported on PR #874).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn is_safe_iri_target_accepts_well_formed_iris() {
+        assert!(is_safe_iri_target("did:key:z6Mk123"));
+        assert!(is_safe_iri_target("literal:string:hello"));
+        assert!(is_safe_iri_target("http://example.com/foo"));
+    }
+
+    #[test]
+    fn is_safe_iri_target_rejects_scheme_lookalike_prose() {
+        // These all match the scheme-shape regex the write path used to rely
+        // on (`^[a-zA-Z][a-zA-Z0-9+\-._]*:`) but contain characters that
+        // `validate_iri` — and therefore the query-side gate — rejects.
+        assert!(!is_safe_iri_target("Note: buy milk"));
+        assert!(!is_safe_iri_target("Re: standup"));
+        assert!(!is_safe_iri_target("TODO: fix this"));
+    }
+
+    #[test]
+    fn is_safe_iri_target_rejects_control_chars_and_whitespace() {
+        assert!(!is_safe_iri_target("tag:2025:new\nline"));
+        assert!(!is_safe_iri_target("tag:2025:tab\there"));
+        assert!(!is_safe_iri_target("http://example.com/foo bar"));
+    }
+
+    #[test]
+    fn is_safe_iri_target_rejects_non_iri_shapes() {
+        // No colon at all — fails the scheme check.
+        assert!(!is_safe_iri_target("just plain text"));
+        assert!(!is_safe_iri_target("42"));
+        // Leading colon — no scheme prefix.
+        assert!(!is_safe_iri_target(":no-scheme"));
+        // Starts with a digit — not a valid scheme first char.
+        assert!(!is_safe_iri_target("1abc:foo"));
     }
 }

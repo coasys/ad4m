@@ -53,6 +53,19 @@ pub fn language_worker_options() -> WorkerOptions {
                 Some(include_bytes!("../../CUSTOM_DENO_SNAPSHOT.bin"))
             }
         },
+        // deno 2.9: `lazy_loaded_esm` / `lazy_loaded_js` sources that were
+        // NOT consumed at snapshot build time (e.g. `node:buffer` and its
+        // deno_node polyfill graph) are NOT embedded in the V8 snapshot.
+        // At runtime, `add_residual_lazy_loaded_sources` populates the
+        // module map from these slices; if they're empty,
+        // `take_lazy_esm_source("node:buffer")` returns None and the
+        // fallback path hits our `StringModuleLoader`, which correctly
+        // returns NotFound (it doesn't own `node:*`). Regenerate via
+        // `cargo run --features generate_snapshot --bin generate_snapshot`.
+        #[cfg(not(feature = "generate_snapshot"))]
+        residual_lazy_esm_sources: super::residual_lazy::RESIDUAL_LAZY_ESM_SOURCES,
+        #[cfg(not(feature = "generate_snapshot"))]
+        residual_lazy_js_sources: super::residual_lazy::RESIDUAL_LAZY_JS_SOURCES,
         extensions: vec![
             wallet_service::init(),
             utils_service::init(),

@@ -70,8 +70,8 @@ pub(super) async fn execute_model_query_inner(
 
     // Fast path: COUNT-only
     let is_count_only = query_input.limit == Some(0);
-    if is_count_only && all_where_pushable(query_input, shape) {
-        if let Some(sparql) = build_count_sparql(shape, query_input) {
+    if is_count_only && all_where_pushable(query_input, shape, Some(resolver)) {
+        if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
@@ -101,7 +101,7 @@ pub(super) async fn execute_model_query_inner(
     //     property exists as a scalar on the target shape.
     // Anything else (or more than one key) falls back to the post-hydration
     // Rust sort.
-    let can_push_pagination = all_where_pushable(query_input, shape) && {
+    let can_push_pagination = all_where_pushable(query_input, shape, Some(resolver)) && {
         match &query_input.order {
             None => true,
             Some(order) => {
@@ -229,7 +229,12 @@ pub(super) async fn execute_model_query_inner(
             None
         };
 
-    let query_plan = build_instance_sparql(shape, query_input, sparql_pagination.as_ref());
+    let query_plan = build_instance_sparql(
+        shape,
+        query_input,
+        sparql_pagination.as_ref(),
+        Some(resolver),
+    );
 
     // Captures the source IRI order returned by the phase-1 pagination subquery
     // so we can restore it after hydration (which uses BTreeMap, alphabetical order).
@@ -324,14 +329,14 @@ pub(super) async fn execute_model_query_inner(
 
     // Apply post-hydration where-clause filters
     if let Some(ref where_clause) = query_input.where_clause {
-        if !all_where_pushable(query_input, shape) {
+        if !all_where_pushable(query_input, shape, Some(resolver)) {
             instances.retain(|inst| matches_where(inst, where_clause, shape));
         }
     }
 
     // Calculate total count
     let total_count = if sparql_pagination.is_some() {
-        if let Some(count_sparql) = build_count_sparql(shape, query_input) {
+        if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
@@ -434,20 +439,30 @@ pub(super) async fn execute_model_query_inner(
     })
 }
 
-/// Apply transform expressions to resolveLanguage properties.
+/// Apply transform expressions to expression-resolved properties.
 ///
-/// For properties marked with `resolve_language`, if the value is a non-literal
-/// expression URL (not starting with "literal:"), this function fetches the
-/// expression data from the language controller and applies the property's
-/// transform expression (or the default file decode).
+/// Properties whose values are stored as signed expression URIs (rather than
+/// deterministic `literal:` IRIs) need their expression data fetched from the
+/// language controller and the property's transform expression applied. Any
+/// property with a non-`None` `resolve_language` falls in this bucket:
+///   - `Some("literal")` → signed-envelope literal (per-value provenance).
+///   - `Some(<addr>)`    → expression on that custom language.
+/// Values stored as deterministic `literal:` IRIs (i.e. `resolve_language ==
+/// None`) are left untouched by the per-value check below.
 async fn resolve_language_transforms(
     shape: &ModelShape,
     instances: &mut [Value],
 ) -> Result<(), Error> {
+    // Two kinds of properties need post-hydration work here:
+    //   - expression-resolved properties (`resolve_language` set): fetch the
+    //     expression data, then transform.
+    //   - deterministic-literal properties that carry a transform: their value
+    //     is already decoded by hydration, but the transform still has to be
+    //     applied to it (e.g. concat a prefix onto the stored literal).
     let resolve_props: Vec<&super::types::ShapeProperty> = shape
         .properties
         .iter()
-        .filter(|p| p.resolve_language.is_some())
+        .filter(|p| !p.is_deterministic_literal() || p.transform.is_some())
         .collect();
 
     if resolve_props.is_empty() {
@@ -462,8 +477,13 @@ async fn resolve_language_transforms(
             //   - String that parses as a language expression URL → fetch via controller
             //   - Anything else (already-decoded literal string, object, etc.) → use as-is
             let current = instance[&prop.name].clone();
+            // Only expression-resolved properties fetch their data from the
+            // language controller. Deterministic-literal properties (with a
+            // transform) use their already-decoded value as the transform focus
+            // directly — never re-interpreted as an expression URL.
+            let is_expr = !prop.is_deterministic_literal();
             let resolved: Option<Value> = match &current {
-                Value::String(uri) if !uri.starts_with("literal:") => {
+                Value::String(uri) if is_expr && !uri.starts_with("literal:") => {
                     match crate::languages::LanguageController::parse_expr_url(uri) {
                         Ok((lang, expr_addr)) => {
                             // Ensure the language is loaded before attempting to fetch the

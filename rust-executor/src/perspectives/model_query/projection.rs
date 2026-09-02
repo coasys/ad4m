@@ -20,7 +20,26 @@ use std::collections::{BTreeMap, HashMap};
 use super::types::{
     ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, ShapeResolver, WhereCondition,
 };
-use super::utils::{escape_sparql_string, validate_iri};
+use super::utils::{
+    escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
+};
+
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
+const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
+
+/// Render a finite f64 as a typed-literal SPARQL term, mirroring the storage
+/// layer's `xsd:integer` / `xsd:decimal` split.
+fn typed_number_literal(n: f64) -> Option<String> {
+    let s = format_literal_number(n)?;
+    let dt = if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+        XSD_INTEGER
+    } else {
+        XSD_DECIMAL
+    };
+    Some(format!("\"{s}\"^^<{dt}>"))
+}
 use crate::perspectives::sparql_store::SparqlStore;
 
 /// Resolve all projections for a set of parent instances.
@@ -159,13 +178,38 @@ pub(super) async fn resolve_projections(
             let result_json = store.query(&sparql)?;
             let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
+            // Collapse duplicate targets per parent.
+            //
+            // Only reachable when the projection filters on `author` or
+            // `timestamp`: `build_projection_reifier_patterns` then joins the
+            // reifier, and a triple asserted twice by the same author carries two
+            // reifiers, so it matches twice. Without the filter the query selects
+            // the direct triple alone and RDF set semantics have already
+            // deduplicated it.
+            //
+            // The `count: true` branch above answers `COUNT(DISTINCT ?t)`, so
+            // without this a filtered projection's list disagreed with the count
+            // of the very same relation.
+            //
+            // Retaining the first sighting preserves `order_clause`'s ordering.
             let mut list_map: HashMap<String, Vec<Value>> = HashMap::new();
+            let mut seen_per_parent: HashMap<String, std::collections::HashSet<String>> =
+                HashMap::new();
             for row in &rows {
                 if let Some(parent) = row["parent"].as_str() {
                     let t = row["t"]
                         .as_str()
                         .map(|s| Value::String(s.to_string()))
                         .unwrap_or(Value::Null);
+                    if let Some(key) = t.as_str() {
+                        if !seen_per_parent
+                            .entry(parent.to_string())
+                            .or_default()
+                            .insert(key.to_string())
+                        {
+                            continue;
+                        }
+                    }
                     list_map.entry(parent.to_string()).or_default().push(t);
                 }
             }
@@ -286,19 +330,26 @@ pub(super) fn build_projection_where_patterns(
 
     // Resolve the target class's shape through the perspective cache so we
     // can translate property names in the projection's where-clause into the
-    // predicate IRIs they map to in the store.
+    // predicate IRIs they map to in the store. The second tuple element
+    // records whether each property carries `resolveLanguage: "literal"` —
+    // only that resolver stores deterministic `literal:*:` targets that we
+    // can probe directly. Other resolvers wrap values in author-signed
+    // expression IRIs, so we fall back to `fn/parse_literal` for those.
     let (pred_lookup, resolution_failed) = if let Some(ref target_name) = proj.target_class_name {
         match resolver.get_shape(target_name) {
             Ok(target_shape) => {
-                let mut map = HashMap::new();
+                let mut map: HashMap<String, (String, bool)> = HashMap::new();
                 for p in &target_shape.properties {
                     if !p.predicate.is_empty() {
-                        map.insert(p.name.clone(), p.predicate.clone());
+                        map.insert(
+                            p.name.clone(),
+                            (p.predicate.clone(), p.is_deterministic_literal()),
+                        );
                     }
                 }
                 for r in &target_shape.include_relations {
                     if !r.predicate.is_empty() {
-                        map.insert(r.name.clone(), r.predicate.clone());
+                        map.insert(r.name.clone(), (r.predicate.clone(), false));
                     }
                 }
                 (map, false)
@@ -307,11 +358,11 @@ pub(super) fn build_projection_where_patterns(
                 log::warn!(
                     "Projection where-clause resolution failed for target '{target_name}': {e}"
                 );
-                (HashMap::<String, String>::new(), true)
+                (HashMap::<String, (String, bool)>::new(), true)
             }
         }
     } else {
-        (HashMap::<String, String>::new(), false)
+        (HashMap::<String, (String, bool)>::new(), false)
     };
 
     // Fail closed when the projection has non-system property filters but
@@ -366,8 +417,8 @@ pub(super) fn build_projection_where_patterns(
             continue;
         }
 
-        let pred = match pred_lookup.get(prop_name) {
-            Some(p) => p.clone(),
+        let (pred, is_literal_prop) = match pred_lookup.get(prop_name) {
+            Some(v) => (v.0.clone(), v.1),
             None => continue,
         };
 
@@ -380,35 +431,94 @@ pub(super) fn build_projection_where_patterns(
 
         match condition {
             WhereCondition::String(val) => {
-                let escaped = escape_sparql_string(val);
-                patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                patterns.push(format!(
-                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) = \"{escaped}\")\n",
-                ));
+                if is_literal_prop {
+                    let escaped = escape_sparql_string(val);
+                    let mut items = vec![format!("\"{escaped}\"^^<{XSD_STRING}>")];
+                    if looks_like_absolute_iri(val) {
+                        items.push(format!("<{val}>"));
+                    }
+                    patterns.push(format!("    VALUES ?{var} {{ {} }}\n", items.join(" ")));
+                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                } else {
+                    let escaped = escape_sparql_string(val);
+                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(format!(
+                        "    FILTER(<ad4m://fn/parse_literal>(?{var}) = \"{escaped}\")\n",
+                    ));
+                }
             }
             WhereCondition::Bool(b) => {
-                let bval = if *b { "true" } else { "false" };
-                patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                patterns.push(format!(
-                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) = \"{bval}\")\n",
-                ));
+                if is_literal_prop {
+                    patterns.push(format!("    ?t <{pred}> \"{b}\"^^<{XSD_BOOLEAN}> .\n"));
+                } else {
+                    let bval = if *b { "true" } else { "false" };
+                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(format!(
+                        "    FILTER(<ad4m://fn/parse_literal>(?{var}) = \"{bval}\")\n",
+                    ));
+                }
             }
             WhereCondition::Number(n) => {
-                patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                patterns.push(format!(
-                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) = \"{n}\")\n",
-                ));
+                if is_literal_prop {
+                    if let Some(typed) = typed_number_literal(*n) {
+                        patterns.push(format!("    ?t <{pred}> {typed} .\n"));
+                    } else {
+                        patterns.push("    FILTER(false)\n".to_string());
+                    }
+                } else {
+                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(format!(
+                        "    FILTER(<ad4m://fn/parse_literal>(?{var}) = \"{n}\")\n",
+                    ));
+                }
             }
             WhereCondition::StringArray(vals) => {
-                let list = vals
-                    .iter()
-                    .map(|v| format!("\"{}\"", escape_sparql_string(v)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
-                patterns.push(format!(
-                    "    FILTER(STR(<ad4m://fn/parse_literal>(?{var})) IN ({list}))\n",
-                ));
+                if is_literal_prop {
+                    let mut items: Vec<String> = Vec::with_capacity(vals.len() * 2);
+                    for v in vals {
+                        let escaped = escape_sparql_string(v);
+                        items.push(format!("\"{escaped}\"^^<{XSD_STRING}>"));
+                        if looks_like_absolute_iri(v) {
+                            items.push(format!("<{v}>"));
+                        }
+                    }
+                    patterns.push(format!("    VALUES ?{var} {{ {} }}\n", items.join(" ")));
+                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                } else {
+                    let list = vals
+                        .iter()
+                        .map(|v| format!("\"{}\"", escape_sparql_string(v)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(format!(
+                        "    FILTER(<ad4m://fn/parse_literal>(?{var}) IN ({list}))\n",
+                    ));
+                }
+            }
+            WhereCondition::NumberArray(vals) => {
+                if is_literal_prop {
+                    let items: Vec<String> = vals
+                        .iter()
+                        .filter_map(|n| typed_number_literal(*n))
+                        .collect();
+                    if items.is_empty() {
+                        patterns.push("    FILTER(false)\n".to_string());
+                    } else {
+                        patterns.push(format!("    VALUES ?{var} {{ {} }}\n", items.join(" ")));
+                        patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    }
+                } else {
+                    let list = vals
+                        .iter()
+                        .map(|n| format!("\"{n}\""))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(format!(
+                        "    FILTER(<ad4m://fn/parse_literal>(?{var}) IN ({list}))\n",
+                    ));
+                }
             }
             _ => {}
         }

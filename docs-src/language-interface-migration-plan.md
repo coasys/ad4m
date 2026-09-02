@@ -15,7 +15,7 @@ migration per user direction (2026-04-10):
 
 - `Agent.directMessageLanguage` field **stays**.
 - Friends SQLite table and `addFriends`/`removeFriends`/`friends()`
-  GraphQL **stay**.
+  operations **stay** (now served via WS-RPC).
 - DM Language capability **stays** at the runtime level as a pragmatic
   divergence from the finalized spec. The spec (`ad4m-lang.wit`) no
   longer defines `direct-message`, but the runtime retains flat DM
@@ -305,9 +305,9 @@ In `rust-executor` (or wherever the JS bridge lives): every `emit*` import
 receives events from the Language. Route them to the existing subscriber
 infrastructure:
 
-- `emitPerspectiveDiff(diff)` → the perspective's GraphQL `perspectiveLinkAdded` /
-  `perspectiveLinkRemoved` subscription stream. Also updates the local
-  perspective graph (same effect as the old callback-based path).
+- `emitPerspectiveDiff(diff)` → the perspective's `perspectiveLinkAdded` /
+  `perspectiveLinkRemoved` subscription stream (delivered via WS-RPC). Also
+  updates the local perspective graph (same effect as the old callback-based path).
 - `emitSyncStateChange(state)` → the perspective's `syncStateChange` stream.
 - `emitTelepresenceSignal(payload, recipientDid?)` → the telepresence
   subscriber stream.
@@ -328,7 +328,7 @@ async-local-storage in JS) as described in spec §7:
   DID context.
 - `agentDid()` / `agentSign()` / `agentCreateSignedExpression()` imports
   read this context.
-- Set correctly for **every** call site: GraphQL resolvers (who's calling?),
+- Set correctly for **every** call site: WS-RPC handlers (who's calling?),
   internal polling (pick a primary local agent), event handlers (the agent
   whose cell the signal came from).
 

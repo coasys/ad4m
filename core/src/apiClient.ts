@@ -35,6 +35,13 @@ export interface CallOptions {
      * client are skipped.
      */
     signal?: AbortSignal
+
+    /**
+     * Per-call timeout override in ms. Defaults to [[DEFAULT_TIMEOUT_MS]].
+     * Use for long-running calls (LLM prompts, holochain ops) that
+     * legitimately exceed the default.
+     */
+    timeoutMs?: number
 }
 
 /** Default RPC call timeout in milliseconds (30 seconds). */
@@ -119,7 +126,20 @@ export class ApiClient {
         })
 
         const url = this._getWsUrl()
-        const WsImpl = this._webSocketImpl ?? WebSocket
+        // Fallback order: injected impl → globalThis.WebSocket (browsers, Node ≥ 22) → require('ws') (Node ≤ 20).
+        // globalThis lookup avoids a ReferenceError on Node 18 where `WebSocket` is not a global.
+        const globalWs = (globalThis as any).WebSocket as (new (url: string) => WebSocket) | undefined
+        let WsImpl: new (url: string) => WebSocket
+        if (this._webSocketImpl) {
+            WsImpl = this._webSocketImpl
+        } else if (globalWs) {
+            WsImpl = globalWs
+        } else {
+            // Lazy CommonJS require so bundlers targeting browsers don't try to bundle `ws`.
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const req = eval('require') as NodeRequire
+            WsImpl = req('ws') as new (url: string) => WebSocket
+        }
         const ws = new WsImpl(url)
         this._ws = ws
 
@@ -270,7 +290,10 @@ export class ApiClient {
      * Send an RPC call over the WebSocket connection.
      * @param type - The operation type (e.g. 'agent.get', 'perspective.all')
      * @param params - Optional parameters to include in the message
-     * @param options - Optional call options (e.g. AbortSignal for cancellation)
+     * @param options - Optional call options: `signal` (AbortSignal for
+     *   cancellation) and/or `timeoutMs` (per-call timeout override,
+     *   defaults to [[DEFAULT_TIMEOUT_MS]] — use for long-running calls
+     *   like LLM prompts or holochain ops that legitimately exceed it).
      * @returns Promise that resolves with the result from the server
      */
     async call<T>(type: string, params?: Record<string, unknown>, options?: CallOptions): Promise<T> {
@@ -288,6 +311,7 @@ export class ApiClient {
         // protocol fields "id" and "type" (e.g. params might contain
         // { id: modelId } or { type: "db" }).
         const message: Record<string, unknown> = { id, type, params: params || {} }
+        const effectiveTimeout = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
         return new Promise<T>((resolve, reject) => {
             let abortHandler: (() => void) | null = null
@@ -302,8 +326,8 @@ export class ApiClient {
             const timer = setTimeout(() => {
                 this._pendingCalls.delete(id)
                 cleanup()
-                reject(new RpcError(408, `RPC call '${type}' timed out after ${DEFAULT_TIMEOUT_MS}ms`))
-            }, DEFAULT_TIMEOUT_MS)
+                reject(new RpcError(408, `RPC call '${type}' timed out after ${effectiveTimeout}ms`))
+            }, effectiveTimeout)
 
             // Wrap resolve/reject so we always clean up the abort listener.
             this._pendingCalls.set(id, {

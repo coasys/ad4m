@@ -18,7 +18,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   it("should extract property metadata with all fields", () => {
     @Model({ name: "PropertyModel" })
     class PropertyModel extends Ad4mModel {
-      @Property({ through: "test://name", resolveLanguage: "literal" })
+      @Property({ through: "test://name" })
       name: string = "";
       
       @Optional({ through: "test://optional" })
@@ -40,7 +40,9 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.properties.name.predicate).toBe("test://name");
     expect(metadata.properties.name.required).toBe(false);
     expect(metadata.properties.name.readOnly).toBe(false);
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // A bare @Property has no resolveLanguage → deterministic typed literal
+    // storage (default fast path).
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     
     // Verify "optional" property
     expect(metadata.properties.optional.predicate).toBe("test://optional");
@@ -148,7 +150,7 @@ describe("Ad4mModel.getModelMetadata()", () => {
   it("should handle complex model with mixed property and relation types", () => {
     @Model({ name: "Recipe" })
     class Recipe extends Ad4mModel {
-      @Property({ through: "recipe://name", resolveLanguage: "literal" })
+      @Property({ through: "recipe://name" })
       name: string = "";
       
       @Optional({ through: "recipe://description" })
@@ -182,7 +184,8 @@ describe("Ad4mModel.getModelMetadata()", () => {
     
     // Verify all metadata fields are correctly extracted
     expect(metadata.properties.name.predicate).toBe("recipe://name");
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // Bare @Property → no resolveLanguage → deterministic typed literal.
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     expect(metadata.properties.description.predicate).toBe("recipe://description");
     expect(metadata.properties.rating.predicate).toBe("recipe://rating");
     expect(metadata.properties.rating.prologGetter).toBe("avg_rating(Base, Value)");
@@ -207,8 +210,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     const ProductClass = Ad4mModel.fromJSONSchema(schema, {
       name: "Product",
-      namespace: "product://",
-      resolveLanguage: "literal"
+      namespace: "product://"
     });
 
     const metadata = ProductClass.getModelMetadata();
@@ -222,12 +224,13 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.name.predicate).toBe("product://name");
     expect(metadata.properties.name.required).toBe(true);
     expect(metadata.properties.name.readOnly).toBe(false);
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // No resolveLanguage set → deterministic typed literal storage (default).
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.price).toBeDefined();
     expect(metadata.properties.price.predicate).toBe("product://price");
     expect(metadata.properties.price.required).toBe(true);
-    expect(metadata.properties.price.resolveLanguage).toBe("literal");
+    expect(metadata.properties.price.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.description).toBeDefined();
     expect(metadata.properties.description.predicate).toBe("product://description");
@@ -288,7 +291,6 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
           type: "string",
           "x-ad4m": {
             through: "foaf://name",
-            resolveLanguage: "literal",
             writable: true
           }
         },
@@ -311,7 +313,8 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     // Verify x-ad4m metadata is respected
     expect(metadata.properties.name.predicate).toBe("foaf://name");
-    expect(metadata.properties.name.resolveLanguage).toBe("literal");
+    // No resolveLanguage set → deterministic typed literal (default).
+    expect(metadata.properties.name.resolveLanguage).toBeUndefined();
     expect(metadata.properties.name.readOnly).toBe(false);
     expect(metadata.properties.name.required).toBe(true);
 
@@ -371,8 +374,7 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     const ArticleClass = Ad4mModel.fromJSONSchema(schema, {
       name: "Article",
-      namespace: "article://",
-      resolveLanguage: "literal"
+      namespace: "article://"
     });
 
     const metadata = ArticleClass.getModelMetadata();
@@ -384,11 +386,12 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.title).toBeDefined();
     expect(metadata.properties.title.predicate).toBe("article://title");
     expect(metadata.properties.title.required).toBe(true);
-    expect(metadata.properties.title.resolveLanguage).toBe("literal");
+    // No resolveLanguage set → deterministic typed literal (default).
+    expect(metadata.properties.title.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.views).toBeDefined();
     expect(metadata.properties.views.predicate).toBe("article://views");
-    expect(metadata.properties.views.resolveLanguage).toBe("literal");
+    expect(metadata.properties.views.resolveLanguage).toBeUndefined();
 
     expect(metadata.properties.published).toBeDefined();
     expect(metadata.properties.published.predicate).toBe("article://published");
@@ -522,13 +525,13 @@ describe("Ad4mModel.queryToSPARQL()", () => {
 
   @Model({ name: "Task" })
   class Task extends Ad4mModel {
-    @Property({ through: "task://title", resolveLanguage: "literal", required: true })
+    @Property({ through: "task://title", required: true })
     title: string = "";
 
-    @Property({ through: "task://priority", resolveLanguage: "literal" })
+    @Property({ through: "task://priority" })
     priority: number = 0;
 
-    @Property({ through: "task://done", resolveLanguage: "literal" })
+    @Property({ through: "task://done" })
     done: boolean = false;
 
     @Optional({ through: "task://description" })
@@ -951,7 +954,7 @@ describe("SPARQL direct triple pattern generation", () => {
     @Flag({ through: "flux://entry_type", value: "flux://channel" })
     type: string = "";
 
-    @Property({ through: "flux://name", resolveLanguage: "literal", required: true })
+    @Property({ through: "flux://name", required: true })
     name: string = "";
 
     @Optional({ through: "flux://description" })
@@ -1034,13 +1037,13 @@ describe("buildSPARQLQuery edge cases", () => {
     @Flag({ through: "flag://type", value: "flag://FlagModel" })
     type: string = "";
 
-    @Property({ through: "flag://name", resolveLanguage: "literal", required: true })
+    @Property({ through: "flag://name", required: true })
     name: string = "";
   }
 
   @Model({ name: "NoFlagModel" })
   class NoFlagModel extends Ad4mModel {
-    @Property({ through: "noflag://title", resolveLanguage: "literal" })
+    @Property({ through: "noflag://title" })
     title: string = "";
   }
 
@@ -1735,7 +1738,7 @@ describe("SHACL recursion — self-referential relations", () => {
   it("should generate SHACL for a directly self-referential model without overflowing the stack", () => {
     @Model({ name: "RecursiveChannel" })
     class RecursiveChannel extends Ad4mModel {
-      @Property({ through: "channel://name", resolveLanguage: "literal" })
+      @Property({ through: "channel://name" })
       name: string = "";
 
       @HasMany(() => RecursiveChannel, { through: "channel://child" })
@@ -1862,7 +1865,7 @@ describe("deepQuery — getter evaluation", () => {
     @Flag({ through: "flux://entry_type", value: "flux://message" })
     type: string = "";
 
-    @Property({ through: "flux://body", resolveLanguage: "literal" })
+    @Property({ through: "flux://body" })
     body: string = "";
 
     @Property({
@@ -2430,5 +2433,632 @@ describe("IncludeProjection type guard and key splitting", () => {
     // Only one modelQuery call — no follow-up findAll for count projections.
     expect(mockPerspective.modelQuery).toHaveBeenCalledTimes(1);
     expect((results[0] as any).$signalCount).toBe(5);
+  });
+});
+
+describe("Ad4mModel instance identity (uniqueness without envelopes)", () => {
+  // Without a signed envelope, the only thing that keeps two instances from
+  // collapsing onto the same node is their auto-generated base expression.
+  // These tests pin that guarantee down: identity must come from the
+  // instance's own IRI, never from (possibly duplicate) property content.
+  const mockPerspective = {} as any;
+
+  it("auto-generates a distinct id for every instance, even with identical property values", () => {
+    @Model({ name: "IdentityTestMessage" })
+    class IdentityTestMessage extends Ad4mModel {
+      @Property({ through: "identity://body", resolveLanguage: "literal" })
+      body: string = "";
+    }
+
+    const message1 = new IdentityTestMessage(mockPerspective);
+    const message2 = new IdentityTestMessage(mockPerspective);
+
+    message1.body = "hello";
+    message2.body = "hello";
+
+    expect(message1.body).toBe(message2.body);
+    expect(message1.id).not.toBe(message2.id);
+  });
+
+  it("uses the ad4m://obj/<random> scheme, not content-derived addressing", () => {
+    @Model({ name: "IdentityTestSchemeCheck" })
+    class IdentityTestSchemeCheck extends Ad4mModel {}
+
+    const instance = new IdentityTestSchemeCheck(mockPerspective);
+
+    // 24 lowercase a-z chars after the prefix (see makeRandomId in ./util.ts).
+    // Locks in the scheme so a regression toward hashing property content
+    // for the base expression — which would reintroduce the exact collision
+    // this scheme exists to prevent — fails this test.
+    expect(instance.id).toMatch(/^ad4m:\/\/obj\/[a-z]{24}$/);
+  });
+
+  it("never reuses an id across many instances", () => {
+    @Model({ name: "IdentityTestManyInstances" })
+    class IdentityTestManyInstances extends Ad4mModel {}
+
+    const ids = Array.from(
+      { length: 200 },
+      () => new IdentityTestManyInstances(mockPerspective).id
+    );
+
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("respects an explicitly-provided base expression instead of generating one", () => {
+    @Model({ name: "IdentityTestExplicitId" })
+    class IdentityTestExplicitId extends Ad4mModel {}
+
+    const instance = new IdentityTestExplicitId(mockPerspective, "flux://existing-instance");
+
+    expect(instance.id).toBe("flux://existing-instance");
+  });
+});
+
+describe("Relation writes: to-one batching and scalar coercion", () => {
+  // `Relationship` is the shape that made both of these visible: a record whose
+  // two to-one relations name the things it connects, so it is worthless until
+  // both endpoints are linked, and it is created and pointed in one gesture.
+  @Model({ name: "TestRelationship" })
+  class TestRelationship extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://relationship" })
+    flag: string = "";
+
+    @Property({ through: "we://title", required: true })
+    label: string = "";
+
+    @HasOne({ through: "we://relationship_source" })
+    source?: string;
+
+    @HasOne({ through: "we://relationship_target" })
+    target?: string;
+  }
+
+  // A coverage fixture for a branch that already exists in `save()`, not a
+  // modelling pattern being endorsed. No required property, no flag and no
+  // initial value means `buildSHACL` emits the node shape and its property
+  // shapes as normal but with an *empty* constructor-action list, which the
+  // Rust side rejects as "No SHACL constructor found" — so `save()` skips
+  // `createSubject` and calls `innerUpdate(true)` instead. The base expression
+  // exists either way: the `Ad4mModel` constructor mints one, and
+  // `createSubject` writes onto a base rather than creating it.
+  //
+  // Worth naming the real caveat, which is about conformance rather than
+  // writes: a class with no required property and no flag states no criteria,
+  // so nothing structurally distinguishes an instance of it from any other
+  // base expression. That makes it an overlay rather than a class, and it is a
+  // question about SDNA modelling generally rather than about this file.
+  @Model({ name: "TestNoConstructor" })
+  class TestNoConstructor extends Ad4mModel {
+    @HasOne({ through: "we://placed_node" })
+    node?: string;
+  }
+
+  const makePerspective = () =>
+    ({
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      createSubject: jest.fn().mockResolvedValue(undefined),
+      createBatch: jest.fn().mockResolvedValue("batch-generated"),
+      commitBatch: jest.fn().mockResolvedValue(undefined),
+      stringOrTemplateObjectToSubjectClassName: jest
+        .fn()
+        .mockResolvedValue("TestRelationship"),
+      uuid: "test-perspective-uuid",
+    }) as any;
+
+  /** Targets written by `executeAction`, across every call. */
+  const writtenTargets = (perspective: any): string[] =>
+    perspective.executeAction.mock.calls.flatMap((call: any[]) =>
+      (call[2] ?? []).map((param: any) => param.value)
+    );
+
+  /** The batchId argument of each `executeAction` call. */
+  const batchIds = (perspective: any): unknown[] =>
+    perspective.executeAction.mock.calls.map((call: any[]) => call[3]);
+
+  describe("a scalar handed to a relation field", () => {
+    it("writes a link instead of being silently dropped", async () => {
+      // The failure this closes: this call typechecked, ran, resolved, and
+      // wrote no link — leaving a relationship with no endpoints, which only
+      // surfaces later as a reader calling the record malformed.
+      const perspective = makePerspective();
+
+      await TestRelationship.create(
+        perspective,
+        { label: "contradicts", source: "we://block/a", target: "we://block/b" },
+        { batchId: "batch-1" }
+      );
+
+      expect(writtenTargets(perspective)).toEqual(
+        expect.arrayContaining(["we://block/a", "we://block/b"])
+      );
+    });
+
+    it("writes it even when a constructor consumed the properties", async () => {
+      // `create` passes `setProperties: false` when the class has a SHACL
+      // constructor, because `createSubject` writes the values map. A relation
+      // carries `ad4m://adder` rather than `ad4m://setter`, so `createSubject`
+      // drops it — meaning the relation write has to happen here regardless of
+      // that flag, or both paths discard it at once.
+      const perspective = makePerspective();
+
+      await TestRelationship.create(
+        perspective,
+        { label: "contradicts", source: "we://block/a" },
+        { batchId: "batch-1" }
+      );
+
+      expect(perspective.createSubject).toHaveBeenCalled();
+      expect(writtenTargets(perspective)).toContain("we://block/a");
+    });
+
+    it("agrees with the documented array form", async () => {
+      const scalar = makePerspective();
+      await TestRelationship.create(
+        scalar,
+        { label: "x", source: "we://block/a" },
+        { batchId: "b" }
+      );
+
+      const array = makePerspective();
+      await TestRelationship.create(
+        array,
+        { label: "x", source: ["we://block/a"] as any },
+        { batchId: "b" }
+      );
+
+      expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
+    });
+
+    it("still writes the relation when there is no SHACL constructor", async () => {
+      const perspective = makePerspective();
+
+      await TestNoConstructor.create(
+        perspective,
+        { node: "we://block/a" },
+        { batchId: "batch-1" }
+      );
+
+      expect(perspective.createSubject).not.toHaveBeenCalled();
+      expect(writtenTargets(perspective)).toContain("we://block/a");
+    });
+  });
+
+  // The failure this closes: every `save()` of a new instance logged one
+  // Rust-side "declares no setter" warning per ORM-internal field, per flag,
+  // and per empty HasMany relation — none of which are real model data, so
+  // none of them should ever have been offered to `createSubject` at all.
+  describe("initialValues sent to createSubject", () => {
+    @Model({ name: "TestNoisyPost" })
+    class TestNoisyPost extends Ad4mModel {
+      @Flag({ through: "test://post_type", value: "test://post" })
+      type: string = "test://post";
+
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+    }
+
+    it("excludes ORM bookkeeping fields, flags, and empty relations", async () => {
+      const perspective = makePerspective();
+
+      await TestNoisyPost.create(perspective, { title: "hello" }, { batchId: "batch-1" });
+
+      expect(perspective.createSubject).toHaveBeenCalled();
+      const initialValues = perspective.createSubject.mock.calls[0][2];
+      expect(initialValues).toEqual({ title: "hello" });
+      expect(initialValues).not.toHaveProperty("_baseExpression");
+      expect(initialValues).not.toHaveProperty("_perspective");
+      expect(initialValues).not.toHaveProperty("type");
+      expect(initialValues).not.toHaveProperty("tags");
+    });
+  });
+
+  describe("generated @HasOne accessors", () => {
+    it("forward batchId, so a to-one link can join a write group", async () => {
+      // Without this the link commits on its own, so every subscriber sees the
+      // record with its relation still empty — a card before its placement.
+      const perspective = makePerspective();
+      const rel = new TestRelationship(perspective, "we://rel/1") as any;
+
+      await rel.setSource("we://block/a", "batch-1");
+      await rel.addTarget("we://block/b", "batch-1");
+      await rel.removeTarget("we://block/b", "batch-1");
+
+      expect(batchIds(perspective)).toEqual(["batch-1", "batch-1", "batch-1"]);
+    });
+
+    it("still work without one", async () => {
+      const perspective = makePerspective();
+      const rel = new TestRelationship(perspective, "we://rel/1") as any;
+
+      await rel.setSource("we://block/a");
+
+      expect(batchIds(perspective)).toEqual([undefined]);
+    });
+  });
+});
+
+describe("Polymorphic relations", () => {
+  @Model({ name: "PolyTextBlock" })
+  class PolyTextBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://text_block" })
+    flag: string = "";
+    @Property({ through: "we://text" })
+    text: string = "";
+  }
+
+  @Model({ name: "PolyImageBlock" })
+  class PolyImageBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://image_block" })
+    flag: string = "";
+    @Property({ through: "we://src" })
+    src: string = "";
+  }
+
+  @Model({ name: "PolyCollection" })
+  class PolyCollection extends Ad4mModel {
+    // No target class — the members are of genuinely different types, which is
+    // the situation `polymorphic` exists for.
+    @HasMany({
+      through: "we://children",
+      polymorphic: true,
+      instantiateAs: () => [PolyTextBlock, PolyImageBlock],
+    })
+    children: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("constructs each child as the class the executor says it is", () => {
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://i/1", __subjectClass: "PolyImageBlock", src: "cat.png" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1]).toBeInstanceOf(PolyImageBlock);
+    // The property that only exists on the concrete class — what a base-class
+    // hydration would have dropped before the value ever reached here.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[1].src).toBe("cat.png");
+  });
+
+  it("maps a child to its class by the name the class itself declares", () => {
+    // The mapping is derived from `@Model({ name })`, not restated beside the
+    // class list — the two cannot drift apart because there is only one of them.
+    expect((PolyTextBlock as any).className).toBe("PolyTextBlock");
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+  });
+
+  it("carries the readings a child was chosen over onto the typed instance", () => {
+    // A base expression can conform to two unrelated classes at once, and the
+    // executor has to pick one to hydrate against. The set it picked from rides
+    // back with the child, so a caller can see there was a choice — and fetch
+    // the other reading by asking that class for this id.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            {
+              id: "we://b/1",
+              __subjectClass: "PolyTextBlock",
+              __subjectClasses: ["PolyTextBlock", "PolyBookmark"],
+              text: "hello",
+            },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const child = collection.children[0];
+    expect(child).toBeInstanceOf(PolyTextBlock);
+    expect(child.__subjectClasses).toEqual(["PolyTextBlock", "PolyBookmark"]);
+  });
+
+  it("leaves children as data when no instantiateAs is given", () => {
+    @Model({ name: "PolyCollectionNoClasses" })
+    class PolyCollectionNoClasses extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollectionNoClasses.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    // Still correct data, just untyped — the concrete class name is present for
+    // a caller that wants to do its own dispatch.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[0].__subjectClass).toBe("PolyTextBlock");
+  });
+
+  it("keeps a child whose class is not listed, rather than dropping it", () => {
+    // `instantiateAs` says what this call site can construct, not what the
+    // relation may contain. A heterogeneous relation is open by definition, so
+    // an unlisted class must arrive as data — narrowing a read to particular
+    // classes is a thing to ask for in the query, never a side effect of
+    // declaring which constructors happen to be in scope.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children).toHaveLength(2);
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1].done).toBe(true);
+    expect(collection.children[1].__subjectClass).toBe("PolyTaskBlock");
+  });
+
+  it("does not construct an unlisted child as the relation's declared target", () => {
+    // A relation may declare a target *and* read polymorphically — the target
+    // says what the members usually are, not what they must be. A child of some
+    // third class was hydrated against its own shape, so building the declared
+    // class over that JSON would answer `instanceof` for a class it is not,
+    // carrying fields that class never declares.
+    @Model({ name: "PolyBaseBlock" })
+    class PolyBaseBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedCollection" })
+    class PolyTypedCollection extends Ad4mModel {
+      @HasMany(() => PolyBaseBlock, {
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => [PolyTextBlock],
+      })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).toBeDefined();
+    expect(unlisted).not.toBeInstanceOf(PolyBaseBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    // The declared target is still right when it is the class the executor named.
+    expect(declared).toBeInstanceOf(PolyBaseBlock);
+    expect(declared.base).toBe("declared");
+  });
+
+  it("does not use the declared target for another class when no classes are named", () => {
+    // Naming no classes to build is not the same as authorising the declared
+    // target to stand in for all of them. Without `instantiateAs` there is
+    // simply nothing this side can construct for a class it was not told about.
+    @Model({ name: "PolyBaseOnlyBlock" })
+    class PolyBaseOnlyBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedNoClasses" })
+    class PolyTypedNoClasses extends Ad4mModel {
+      @HasMany(() => PolyBaseOnlyBlock, { through: "we://children", polymorphic: true })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseOnlyBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedNoClasses.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).not.toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(declared).toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(declared.base).toBe("declared");
+  });
+
+  it("calls instantiateAs late, so a circular import can still resolve", () => {
+    let defined = false;
+    @Model({ name: "PolyLateCollection" })
+    class PolyLateCollection extends Ad4mModel {
+      // Evaluated at decoration time this would throw, the way an array literal
+      // naming a class from further round an import cycle would.
+      @HasMany({
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => {
+          if (!defined) throw new ReferenceError("class not defined yet");
+          return [PolyTextBlock];
+        },
+      })
+      children: string[] = [];
+    }
+
+    defined = true;
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyLateCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+  });
+
+  it("asks the executor for polymorphic hydration without the caller repeating it", () => {
+    // The relation being heterogeneous is a fact about the data, so declaring it
+    // on the model should be enough — `include: { children: true }` must still
+    // arrive at the executor as a polymorphic read.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    expect(JSON.parse(queryJson).include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
+  });
+
+  it("sends the classes it can build as the classes it wants, in declaration order", () => {
+    // The two questions have one answer: what this call site can construct is
+    // what it wants its targets read as. Sent with the query rather than applied
+    // to the results, so the same request gives the same reading to anyone.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Declaration order is the preference order — a target conforming to two of
+    // them is read as whichever was named first.
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual([
+      "PolyTextBlock",
+      "PolyImageBlock",
+    ]);
+  });
+
+  it("lets an explicit preference at the call site win over the declaration", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { preferClasses: ["PolyBookmark"] } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["PolyBookmark"]);
+  });
+
+  it("sends no preference for a polymorphic relation that names no classes", () => {
+    @Model({ name: "PolyCollectionUndeclared" })
+    class PolyCollectionUndeclared extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const { queryJson } = (PolyCollectionUndeclared as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Nothing to prefer, so nothing is sent and the executor ranks by
+    // specificity exactly as it did before any of this existed.
+    expect(JSON.parse(queryJson).include.children).toEqual({ polymorphic: true });
+  });
+
+  it("lets an explicit false at the call site win", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { polymorphic: false } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.polymorphic).toBe(false);
+  });
+
+  it("applies the default at every depth of a nested include", () => {
+    // `sections` is a plain typed relation, so the nested `children` is read off
+    // PolyCollection rather than off the class being queried. Left to the top
+    // level, the default would never reach it and the include would arrive at
+    // the executor with no shape to resolve — the query fails outright.
+    @Model({ name: "PolyPage" })
+    class PolyPage extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPage as any).prepareModelQueryParams({
+      include: { sections: { include: { children: true } } },
+    });
+
+    const include = JSON.parse(queryJson).include;
+    expect(include.sections.include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
+  });
+
+  it("lets an explicit false win at depth too", () => {
+    @Model({ name: "PolyPageExplicit" })
+    class PolyPageExplicit extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPageExplicit as any).prepareModelQueryParams({
+      include: { sections: { include: { children: { polymorphic: false } } } },
+    });
+
+    expect(JSON.parse(queryJson).include.sections.include.children.polymorphic).toBe(false);
   });
 });

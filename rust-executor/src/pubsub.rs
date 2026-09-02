@@ -135,6 +135,17 @@ lazy_static::lazy_static! {
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
     pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
     pub static ref COMPUTE_LOG_UPDATED_TOPIC: String = "compute-log-updated-topic".to_owned();
+    pub static ref AUTO_PROCESSOR_EVENT_TOPIC: String = "auto-processor-event-topic".to_owned();
+    /// Neighbourhood observation of an auto-processor pass: fires when THIS
+    /// executor claims, finishes, or abandons a batch. Payload is a
+    /// perspective-scoped `AutoProcessorNeighbourhoodState` — no batch
+    /// payload, no LLM I/O — so anyone with perspective read access can see
+    /// "someone is auto-processing" without seeing WHAT they are processing.
+    /// Cross-executor sync (e.g. a peer's claim reaching us via Holochain)
+    /// is not covered here; consumers who need cross-peer visibility can
+    /// subscribe to `link-added` and filter for `has_claim`.
+    pub static ref AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC: String =
+        "auto-processor-neighbourhood-state-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

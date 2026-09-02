@@ -100,10 +100,15 @@ async fn handle_ws(
     // ── Event broadcast ─────────────────────────────────────────────────
     let token_for_events = token.clone();
     let user_email_for_events = ctx.user_email.clone();
+    let is_admin_for_events = ctx.is_admin_credential;
     let tx_events = tx.clone();
     tokio::spawn(async move {
-        let event_stream =
-            super::events_ws::build_event_stream(token_for_events, user_email_for_events).await;
+        let event_stream = super::events_ws::build_event_stream(
+            token_for_events,
+            user_email_for_events,
+            is_admin_for_events,
+        )
+        .await;
         tokio::pin!(event_stream);
         while let Some(msg) = event_stream.next().await {
             if tx_events.send(msg).is_err() {
