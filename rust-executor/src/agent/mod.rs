@@ -331,8 +331,7 @@ impl AgentService {
                     wallet_signing_key_name: None,
                     db_backend: None,
                     db_backend_url: None,
-                    perspective_store_backend: None,
-                    perspective_store_url: None,
+                    snapshot_interval_secs: None,
                     internal_api_token: None,
                 });
             }

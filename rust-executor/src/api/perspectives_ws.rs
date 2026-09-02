@@ -28,10 +28,10 @@ fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError>
         return Ok(p);
     }
 
-    // Shared-backend fallback: try to rehydrate perspective from D1
+    // Shared-backend fallback: try to rehydrate perspective from the platform DB
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
-        if let Ok(Some(perspective)) = rehydrate_perspective_from_d1(uuid) {
+        if let Ok(Some(perspective)) = rehydrate_perspective_from_backend(uuid) {
             return Ok(perspective);
         }
     }
@@ -42,14 +42,14 @@ fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError>
     )))
 }
 
-/// Fetch perspective metadata from D1, create it locally, and populate links.
-fn rehydrate_perspective_from_d1(uuid: &str) -> Result<Option<PerspectiveInstance>, String> {
+/// Fetch perspective metadata from the shared backend, create it locally, and populate links.
+fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveInstance>, String> {
     let backend = crate::db_backend::db_backend();
 
     // Fetch perspective metadata
     let meta = backend
         .get("shared:platform", "perspectives", uuid)
-        .map_err(|e| format!("D1 perspective lookup failed: {}", e))?;
+        .map_err(|e| format!("Shared-backend perspective lookup failed: {}", e))?;
 
     let meta = match meta {
         Some(m) => m,
@@ -85,67 +85,6 @@ fn rehydrate_perspective_from_d1(uuid: &str) -> Result<Option<PerspectiveInstanc
 
     // Create the PerspectiveInstance
     let p = PerspectiveInstance::new(handle.clone(), None);
-
-    // Fetch links from D1 and populate local OxiGraph.
-    // Links are stored under the creator's DID in D1. Use the creator_did from
-    // the perspective metadata to fetch from the correct path.
-    let ps_backend = crate::perspective_store_backend::perspective_store_backend();
-    let fetch_did = meta
-        .get("creator_did")
-        .and_then(|d| d.as_str())
-        .unwrap_or("")
-        .to_string();
-    let fetch_did_ref = if fetch_did.is_empty() {
-        crate::agent::did()
-    } else {
-        fetch_did
-    };
-    match ps_backend.fetch_links(&fetch_did_ref, uuid, None) {
-        Ok(links) if !links.is_empty() => {
-            log::info!(
-                "Rehydrated {} links for perspective {} from D1",
-                links.len(),
-                uuid
-            );
-            // Convert SyncLinks back to DecoratedLinkExpressions and add to OxiGraph
-            for link in &links {
-                let link_expr = crate::types::DecoratedLinkExpression {
-                    author: link.author.clone(),
-                    timestamp: link.timestamp.clone(),
-                    data: crate::types::Link {
-                        source: link.source.clone(),
-                        predicate: if link.predicate.is_empty() {
-                            None
-                        } else {
-                            Some(link.predicate.clone())
-                        },
-                        target: link.target.clone(),
-                    },
-                    proof: crate::types::DecoratedExpressionProof {
-                        key: String::new(),
-                        signature: link.proof.clone().unwrap_or_default(),
-                        valid: None,
-                        invalid: None,
-                    },
-                    status: link
-                        .status
-                        .as_ref()
-                        .and_then(|s| serde_json::from_str(s).ok()),
-                };
-                let _ = p.sparql_store.add_link(&link_expr);
-            }
-        }
-        Ok(_) => {
-            log::debug!("No links found in D1 for perspective {}", uuid);
-        }
-        Err(e) => {
-            log::warn!(
-                "Failed to fetch links from D1 for perspective {}: {}",
-                uuid,
-                e
-            );
-        }
-    }
 
     // Register in the global PERSPECTIVES map
     crate::perspectives::register_perspective(uuid.to_string(), p.clone());
@@ -269,16 +208,16 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    // In shared mode, rehydrate any D1 perspectives not yet loaded locally
+    // In shared mode, rehydrate any backend perspectives not yet loaded locally
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
         let backend = crate::db_backend::db_backend();
-        if let Ok(d1_perspectives) = backend.list("shared:platform", "perspectives") {
-            for meta in d1_perspectives {
+        if let Ok(remote_perspectives) = backend.list("shared:platform", "perspectives") {
+            for meta in remote_perspectives {
                 if let Some(uuid) = meta.get("uuid").and_then(|u| u.as_str()) {
                     // Only rehydrate if not already loaded
                     if crate::perspectives::get_perspective(uuid).is_none() {
-                        let _ = rehydrate_perspective_from_d1(uuid);
+                        let _ = rehydrate_perspective_from_backend(uuid);
                     }
                 }
             }

@@ -109,12 +109,9 @@ pub struct Ad4mConfig {
     /// Base URL for the shared DB service (required when db_backend = "shared").
     pub db_backend_url: Option<String>,
 
-    /// Perspective store backend type: "local" (default) or "shared".
-    /// "local" uses OxiGraph only (current behaviour).
-    /// "shared" dual-writes to OxiGraph + platform Worker D1.
-    pub perspective_store_backend: Option<String>,
-    /// Base URL for the shared perspective store (required when perspective_store_backend = "shared").
-    pub perspective_store_url: Option<String>,
+    /// Interval in seconds between perspective snapshots (default 300 = 5 min).
+    /// Set to 0 to disable periodic snapshots. Only applies in shared mode.
+    pub snapshot_interval_secs: Option<u64>,
 
     /// Bearer token for internal API authentication (outbound: executor → platform Worker).
     /// MUST differ from `admin_credential` (inbound: client → executor) to maintain
@@ -154,11 +151,10 @@ impl Ad4mConfig {
         if self.db_backend_url.is_none() {
             self.db_backend_url = std::env::var("DB_BACKEND_URL").ok();
         }
-        if self.perspective_store_backend.is_none() {
-            self.perspective_store_backend = std::env::var("PERSPECTIVE_STORE_BACKEND").ok();
-        }
-        if self.perspective_store_url.is_none() {
-            self.perspective_store_url = std::env::var("PERSPECTIVE_STORE_URL").ok();
+        if self.snapshot_interval_secs.is_none() {
+            self.snapshot_interval_secs = std::env::var("SNAPSHOT_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok());
         }
         if self.internal_api_token.is_none() {
             self.internal_api_token = std::env::var("INTERNAL_API_TOKEN").ok();
@@ -175,13 +171,6 @@ impl Ad4mConfig {
         if self.db_backend.as_deref() == Some("shared") {
             if let Some(ref url) = self.db_backend_url {
                 if let Err(msg) = validate_shared_backend_url(url, "DB_BACKEND_URL") {
-                    log::warn!("{}", msg);
-                }
-            }
-        }
-        if self.perspective_store_backend.as_deref() == Some("shared") {
-            if let Some(ref url) = self.perspective_store_url {
-                if let Err(msg) = validate_shared_backend_url(url, "PERSPECTIVE_STORE_URL") {
                     log::warn!("{}", msg);
                 }
             }
@@ -340,8 +329,7 @@ impl Default for Ad4mConfig {
             wallet_signing_key_name: None,
             db_backend: None,
             db_backend_url: None,
-            perspective_store_backend: None,
-            perspective_store_url: None,
+            snapshot_interval_secs: None,
             internal_api_token: None,
         };
         config.prepare();

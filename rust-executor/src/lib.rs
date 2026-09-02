@@ -10,7 +10,7 @@ pub mod helpers;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
-pub mod perspective_store_backend;
+pub mod perspective_snapshot;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
@@ -358,35 +358,15 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         crate::db_backend::init_db_backend(backend);
     }
 
-    // Initialise the perspective store backend.
-    // "shared" mode mirrors link mutations to the platform Worker for durability;
-    // "local" mode relies on OxiGraph's RocksDB persistence only.
-    {
-        use std::sync::Arc;
-        let backend: Arc<dyn crate::perspective_store_backend::PerspectiveStoreBackend> =
-            match config.perspective_store_backend.as_deref() {
-                Some("shared") => {
-                    let url = config.perspective_store_url.as_ref().expect(
-                        "PERSPECTIVE_STORE_URL required when perspective_store_backend = shared",
-                    );
-                    let token = config
-                        .internal_api_token
-                        .as_ref()
-                        .expect("INTERNAL_API_TOKEN required for shared backends");
-                    info!("Initialising shared perspective store at {}", url);
-                    Arc::new(
-                        crate::perspective_store_backend::SharedPerspectiveStore::new(
-                            url.clone(),
-                            token.clone(),
-                        ),
-                    )
-                }
-                _ => {
-                    info!("Initialising local perspective store backend");
-                    Arc::new(crate::perspective_store_backend::LocalPerspectiveStore::new())
-                }
-            };
-        crate::perspective_store_backend::init_perspective_store_backend(backend);
+    // Restore perspective data from the platform backend if running in shared mode.
+    // Downloads the tar.gz snapshot and extracts to the data directory
+    // before perspectives initialise (so OxiGraph opens with restored data).
+    if config.wallet_backend.as_deref() == Some("shared") {
+        match crate::perspective_snapshot::restore_perspectives(&config) {
+            Ok(true) => info!("Restored perspectives from remote snapshot"),
+            Ok(false) => info!("No remote snapshot found — starting with fresh perspectives"),
+            Err(e) => log::warn!("Perspective restore failed (continuing without): {}", e),
+        }
     }
 
     // ── Token separation assertion ──────────────────────────────────────
@@ -560,6 +540,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();
+
+    // Start periodic perspective snapshots in shared mode.
+    if config.wallet_backend.as_deref() == Some("shared") {
+        crate::perspective_snapshot::spawn_periodic_backup(config.clone());
+    }
 
     // Start periodic memory diagnostics (logs RSS, jemalloc stats,
     // per-perspective data structure sizes every 30s).

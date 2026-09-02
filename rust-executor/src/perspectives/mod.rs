@@ -226,7 +226,7 @@ pub async fn add_perspective(
 
     // Sync perspective metadata to shared DB for cross-executor rehydration.
     // Store the creating executor's DID so other executors can fetch links
-    // from the correct D1 path (links are keyed by DID + perspective UUID).
+    // from the correct path (links are keyed by DID + perspective UUID).
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
         let backend = crate::db_backend::db_backend();
@@ -299,7 +299,7 @@ pub fn all_perspectives() -> Vec<PerspectiveInstance> {
 }
 
 /// Register a fully-constructed PerspectiveInstance in the global map.
-/// Used by the rehydration path (D1 → local) to avoid exposing the PERSPECTIVES static.
+/// Used by the rehydration path (shared backend → local) to avoid exposing the PERSPECTIVES static.
 pub(crate) fn register_perspective(uuid: String, instance: PerspectiveInstance) {
     let mut perspectives = PERSPECTIVES.write().unwrap();
     perspectives.insert(uuid, RwLock::new(instance));
