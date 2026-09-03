@@ -10,6 +10,7 @@ use crate::types::{Agent, AgentStatus};
 use crate::types::{Expression, ExpressionProof};
 use crate::wallet::Wallet;
 
+pub mod assistant;
 pub mod capabilities;
 pub mod enrolment;
 pub mod kel;
