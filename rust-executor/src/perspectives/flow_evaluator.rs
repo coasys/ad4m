@@ -30,8 +30,7 @@
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::write_flow_transition_proposal;
 use crate::perspectives::flow_context::{
-    load_all_flow_instances, load_flow_instances, load_shacl_flows, reachable_next_states,
-    FlowInstanceRecord, FlowTokens,
+    load_flow_instances, load_shacl_flows, reachable_next_states, FlowInstanceRecord, FlowTokens,
 };
 use crate::perspectives::model_query::ModelQueryInput;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -379,21 +378,21 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 
 /// Load → evaluate → write, called by the extraction pass once its own
 /// writes are committed. `subjects` narrows the FlowInstance load to the
-/// given base URIs; an empty slice sweeps every live instance. Returns
-/// the URIs of the proposals minted. Never fails: loader errors yield an
-/// empty result and a failed write drops only that proposal.
+/// given base URIs; an empty slice returns immediately — the extraction
+/// pass wrote nothing, so there are no flow instances to re-evaluate.
+/// Returns the URIs of the proposals minted. Never fails: loader errors
+/// yield an empty result and a failed write drops only that proposal.
 pub async fn run_engine_proposal_pass(
     perspective: &mut PerspectiveInstance,
     subjects: &[String],
     context: &AgentContext,
 ) -> Vec<String> {
+    if subjects.is_empty() {
+        return Vec::new();
+    }
     let loaded = async {
         let flows_by_uri = load_shacl_flows(perspective).await?;
-        let records = if subjects.is_empty() {
-            load_all_flow_instances(perspective).await?
-        } else {
-            load_flow_instances(perspective, subjects).await?
-        };
+        let records = load_flow_instances(perspective, subjects).await?;
         let acting_did = crate::agent::did_for_context(context)?;
         anyhow::Ok((flows_by_uri, records, acting_did))
     }
@@ -434,8 +433,10 @@ pub async fn run_engine_proposal_pass(
 }
 
 /// Check whether a proposal with the same evidence hash already exists for the
-/// same flow instance. Uses link queries: finds proposals carrying the evidence
-/// hash, then confirms one links to the same flow instance.
+/// same flow instance AND the same target state. Uses link queries: finds
+/// proposals carrying the evidence hash, then confirms one links to the same
+/// flow instance with the same `to_state`. Without the `to_state` check, two
+/// distinct transitions sharing identical requires guards would collide.
 async fn proposal_already_exists(
     perspective: &PerspectiveInstance,
     transition: &SatisfiedTransition,
@@ -455,6 +456,10 @@ async fn proposal_already_exists(
         Ok(links) => links,
         Err(_) => return false,
     };
+    let to_state_literal = format!(
+        "literal:string:{}",
+        urlencoding::encode(&transition.to_state)
+    );
     for link in &hash_links {
         let proposal_uri = &link.data.source;
         let instance_links = match perspective
@@ -468,9 +473,26 @@ async fn proposal_already_exists(
             Ok(links) => links,
             Err(_) => continue,
         };
-        if instance_links
+        let matches_instance = instance_links
             .iter()
-            .any(|l| l.data.target == transition.instance_uri)
+            .any(|l| l.data.target == transition.instance_uri);
+        if !matches_instance {
+            continue;
+        }
+        let to_state_links = match perspective
+            .get_links(&LinkQuery {
+                source: Some(proposal_uri.clone()),
+                predicate: Some("ad4m://flow/to_state".into()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(_) => continue,
+        };
+        if to_state_links
+            .iter()
+            .any(|l| l.data.target == to_state_literal)
         {
             return true;
         }

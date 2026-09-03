@@ -271,10 +271,11 @@ async fn run_engine_proposal_pass_is_idempotent_e2e() {
     let mut f = seed_delivery_fixture().await;
     f.seed_task("ad4m://task/1", "Onboard Ana").await;
 
-    let first = run_engine_proposal_pass(&mut f.perspective, &[], &f.ctx).await;
+    let subjects = vec![BASE_URI.to_string()];
+    let first = run_engine_proposal_pass(&mut f.perspective, &subjects, &f.ctx).await;
     assert_eq!(first.len(), 1, "first pass must mint one proposal");
 
-    let second = run_engine_proposal_pass(&mut f.perspective, &[], &f.ctx).await;
+    let second = run_engine_proposal_pass(&mut f.perspective, &subjects, &f.ctx).await;
     assert!(
         second.is_empty(),
         "second pass must skip the duplicate, got {second:?}"
@@ -292,5 +293,19 @@ async fn run_engine_proposal_pass_is_idempotent_e2e() {
         all_proposals.len(),
         1,
         "only one proposal should exist on the graph"
+    );
+}
+
+/// Empty subjects → early return (no unbounded sweep). The extraction pass
+/// wrote nothing, so there is nothing to re-evaluate.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_engine_proposal_pass_empty_subjects_returns_empty() {
+    let mut f = seed_delivery_fixture().await;
+    f.seed_task("ad4m://task/1", "Onboard Ana").await;
+
+    let result = run_engine_proposal_pass(&mut f.perspective, &[], &f.ctx).await;
+    assert!(
+        result.is_empty(),
+        "empty subjects must return immediately, got {result:?}"
     );
 }
