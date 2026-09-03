@@ -99,9 +99,8 @@ pub(crate) fn flow_transition_proposal_uri(proposal_id: &str) -> String {
 ///
 /// `batch_id` groups this instance write with any consumer's follow-on writes
 /// (e.g. the auto-processor bundling instance mint + first proposal in one
-/// atomic commit). Pass `None` for standalone mints — the current shape has
-/// only scalar constructor properties, so a single `create_subject` writes the
-/// whole record; there is no update-loop for follow-on collection members.
+/// atomic commit). Pass `None` for standalone mints — a single
+/// `create_subject` writes the whole record.
 ///
 /// Returns the freshly-minted `FlowInstance` URI (`ad4m://flow/instance/{id}`).
 ///
@@ -154,8 +153,8 @@ pub(crate) async fn mint_flow_instance(
 /// [`mint_flow_instance`], so the caller controls id generation and atomic
 /// commit. Propose-time comes from `Ad4mModel`'s built-in `createdAt`.
 ///
-/// `evidence` is a collection: `create_subject` writes the first element and
-/// each further element goes through `update_subject` in the same batch.
+/// `evidence` is a collection: it is passed as a JSON array and
+/// `create_subject` expands it into one `addLink` per element.
 /// `rationale` is written only when `Some` and non-empty. `runUri` is not
 /// written; engine-emitted proposals do not track back to a run today.
 ///
@@ -193,10 +192,8 @@ pub(crate) async fn write_flow_transition_proposal(
         }
     }
 
-    let mut rest_evidence: Vec<String> = Vec::new();
-    if let Some((first, rest)) = evidence_ids.split_first() {
-        values["evidence"] = first.clone().into();
-        rest_evidence.extend(rest.iter().cloned());
+    if !evidence_ids.is_empty() {
+        values["evidence"] = serde_json::json!(evidence_ids);
     }
 
     perspective
@@ -207,33 +204,13 @@ pub(crate) async fn write_flow_transition_proposal(
             },
             uri.clone(),
             Some(values),
-            batch_id.clone(),
+            batch_id,
             context,
         )
         .await
         .map_err(|e| {
             anyhow::anyhow!("write_flow_transition_proposal: create_subject failed: {e:#}")
         })?;
-
-    for evid in rest_evidence {
-        perspective
-            .update_subject(
-                SubjectClassOption {
-                    class_name: Some(FLOW_TRANSITION_PROPOSAL_CLASS.to_string()),
-                    query: None,
-                },
-                uri.clone(),
-                serde_json::json!({ "evidence": evid }),
-                batch_id.clone(),
-                context,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "write_flow_transition_proposal: update_subject(evidence) failed: {e:#}"
-                )
-            })?;
-    }
 
     Ok(uri)
 }
@@ -365,9 +342,8 @@ mod tests {
     fn write_flow_transition_proposal_values_align_with_sdna_property_names() {
         // Same 2026-08-20-bug guard as `mint_flow_instance_values_align_with_sdna_property_names`
         // but for the writer's payload: every JSON key the writer sends
-        // to `create_subject` (or to the follow-on `update_subject` for
-        // the `evidence` collection) MUST be a declared SDNA property
-        // name. A silent mismatch would return Ok while never writing.
+        // to `create_subject` MUST be a declared SDNA property name.
+        // A silent mismatch would return Ok while never writing.
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
         let props: Vec<&str> = v["properties"]
             .as_array()
@@ -398,15 +374,14 @@ mod tests {
 
     #[test]
     fn evidence_property_is_a_collection_with_add_link_setter() {
-        // The writer sends the first `evidence` element through
-        // `create_subject`'s constructor path and each subsequent element
-        // through `update_subject`. That fan-out is only correct if the
-        // SDNA declares `evidence` as a `collection` with an `addLink`
-        // setter — otherwise a `setSingleTarget` setter would overwrite
-        // the same predicate N times, leaving only the last element.
-        // Locking the shape here so a well-meaning SDNA edit that
-        // switches to `setSingleTarget` (which would type-check) breaks
-        // this test instead of silently losing evidence at runtime.
+        // The writer passes `evidence` as a JSON array, and
+        // `create_subject` only expands an array into per-element
+        // `addLink`s when every setter action is `addLink` — on a
+        // `setSingleTarget` setter the array would be stored as one
+        // `literal:json:` blob instead. Locking the shape here so a
+        // well-meaning SDNA edit that switches to `setSingleTarget`
+        // (which would type-check) breaks this test instead of silently
+        // changing the on-graph representation of evidence at runtime.
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
         let evidence = v["properties"]
             .as_array()
