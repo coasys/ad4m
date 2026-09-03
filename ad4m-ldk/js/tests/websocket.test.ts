@@ -9,6 +9,7 @@ class MockWebSocket {
     closed = false;
     closeCode?: number;
     closeReason?: string;
+    readyState = 1; // OPEN
 
     constructor(url: string) {
         this.url = url;
@@ -110,12 +111,26 @@ describe("websocket: DenoWebSocketFactory", () => {
         assert.equal(lastMock?.closeReason, "done");
     });
 
-    it("close() swallows errors from already-closed sockets", () => {
+    it("close() is a no-op when the socket is already CLOSING or CLOSED", () => {
         const factory = new DenoWebSocketFactory();
         const conn = factory.connect("ws://localhost:3456/ws");
         const mock = lastMock!;
-        mock.close = () => { throw new Error("already closed"); };
+        mock.close = () => { throw new Error("should not be called"); };
+        mock.readyState = 3; // CLOSED
         assert.doesNotThrow(() => conn.close());
+        assert.equal(mock.closed, false);
+    });
+
+    it("close() forwards unexpected close errors to onError instead of dropping them", () => {
+        const factory = new DenoWebSocketFactory();
+        const conn = factory.connect("ws://localhost:3456/ws");
+        const mock = lastMock!;
+        const thrown = new Error("write after end");
+        mock.close = () => { throw thrown; };
+        let received: unknown = null;
+        conn.onError((err) => { received = err; });
+        assert.doesNotThrow(() => conn.close());
+        assert.equal(received, thrown);
     });
 
     it("onOpen fires when the WebSocket open event dispatches", () => {
@@ -136,13 +151,26 @@ describe("websocket: DenoWebSocketFactory", () => {
         assert.deepEqual(received, ["text payload"]);
     });
 
-    it("onMessage stringifies non-string data", () => {
+    it("onMessage stringifies non-string, non-binary data", () => {
         const factory = new DenoWebSocketFactory();
         const conn = factory.connect("ws://localhost:3456/ws");
         const received: string[] = [];
         conn.onMessage((data) => received.push(data));
         lastMock!.emit("message", { data: 42 });
         assert.deepEqual(received, ["42"]);
+    });
+
+    it("onMessage forwards binary frames to onError instead of mangling them", () => {
+        const factory = new DenoWebSocketFactory();
+        const conn = factory.connect("ws://localhost:3456/ws");
+        const received: string[] = [];
+        let error: unknown = null;
+        conn.onMessage((data) => received.push(data));
+        conn.onError((err) => { error = err; });
+        lastMock!.emit("message", { data: new ArrayBuffer(4) });
+        assert.deepEqual(received, []);
+        assert.ok(error instanceof Error);
+        assert.match((error as Error).message, /binary/i);
     });
 
     it("onClose passes code and reason", () => {

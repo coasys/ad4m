@@ -10,6 +10,8 @@
 
 declare class WebSocket {
     constructor(url: string | URL);
+    /** 0 = CONNECTING, 1 = OPEN, 2 = CLOSING, 3 = CLOSED. */
+    readonly readyState: number;
     send(data: string | ArrayBuffer | Blob | ArrayBufferView): void;
     close(code?: number, reason?: string): void;
     addEventListener(type: "open", listener: (event: Event) => void): void;
