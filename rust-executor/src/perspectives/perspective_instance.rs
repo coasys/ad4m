@@ -156,6 +156,8 @@ mod inbound_touches_shacl_tests {
                 signature: String::new(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: Some(LinkStatus::Shared),
         }
@@ -7072,6 +7074,8 @@ mod tests {
                     signature: "s".into(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             };
@@ -7171,6 +7175,8 @@ mod tests {
                     signature: "s".into(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             };

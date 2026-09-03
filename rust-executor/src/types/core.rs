@@ -50,6 +50,17 @@ pub struct DecoratedExpressionProof {
     pub signature: String,
     pub valid: Option<bool>,
     pub invalid: Option<bool>,
+    /// Verification-method id that produced `signature` (did:scid path).
+    /// Absent for legacy did:key proofs, which decode the key from the DID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "keyId")]
+    pub key_id: Option<String>,
+    /// Key-event-log sequence the signer anchored to (did:scid path). Absent
+    /// for legacy did:key proofs. Old rows read back as `None` and verify on
+    /// the key path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "kelSeq")]
+    pub kel_seq: Option<u64>,
 }
 
 impl<T: Serialize> From<Expression<T>> for VerifiedExpression<T> {
@@ -65,6 +76,8 @@ impl<T: Serialize> From<Expression<T>> for VerifiedExpression<T> {
                 signature: expr.proof.signature,
                 valid: Some(valid),
                 invalid: Some(invalid),
+                key_id: expr.proof.key_id,
+                kel_seq: expr.proof.kel_seq,
             },
         }
     }
@@ -245,7 +258,8 @@ impl DecoratedLinkExpression {
             proof: ExpressionProof {
                 key: self.proof.key.clone(),
                 signature: self.proof.signature.clone(),
-                ..Default::default()
+                key_id: self.proof.key_id.clone(),
+                kel_seq: self.proof.kel_seq,
             },
         };
         let valid = verify(&link_expr).unwrap_or(false);
@@ -278,7 +292,8 @@ impl From<DecoratedLinkExpression> for LinkExpression {
             proof: ExpressionProof {
                 key: decorated.proof.key,
                 signature: decorated.proof.signature,
-                ..Default::default()
+                key_id: decorated.proof.key_id,
+                kel_seq: decorated.proof.kel_seq,
             },
             status: decorated.status,
         }

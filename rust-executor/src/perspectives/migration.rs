@@ -143,6 +143,8 @@ pub fn migrate_links_from_rusqlite_to_sparql(
                 signature: link_expr.proof.signature.clone(),
                 valid: None,
                 invalid: None,
+
+                ..Default::default()
             },
             status: Some(status.clone()),
         };
@@ -314,6 +316,8 @@ mod tests {
                 signature: "sig".to_string(),
                 valid: None,
                 invalid: None,
+
+                ..Default::default()
             },
             status: None,
         };
@@ -340,6 +344,8 @@ mod tests {
                 signature: "s".to_string(),
                 valid: None,
                 invalid: None,
+
+                ..Default::default()
             },
             status: None,
         };
@@ -366,6 +372,8 @@ mod tests {
                 signature: "s".to_string(),
                 valid: None,
                 invalid: None,
+
+                ..Default::default()
             },
             status: None,
         };
@@ -392,6 +400,8 @@ mod tests {
                 signature: "s".to_string(),
                 valid: None,
                 invalid: None,
+
+                ..Default::default()
             },
             status: None,
         };

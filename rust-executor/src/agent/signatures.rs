@@ -45,9 +45,12 @@ pub struct VerificationMethod {
     pub key: String,
 }
 
-/// The set of keys authoritative for a DID at a point in its key-event log.
+/// The master an identifier maps to, plus the keys valid at the resolved point.
+/// Keys arrive already filtered, so the verifier performs no validity arithmetic.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyState {
+    /// The did:scid this identifier belongs to.
+    pub master: String,
     pub keys: Vec<VerificationMethod>,
 }
 
@@ -74,10 +77,10 @@ impl std::fmt::Display for ResolveError {
 /// agent-language-backed implementation via [`set_key_state_resolver`]; until
 /// then the holder stays empty and `did:scid` verification fails closed.
 pub trait KeyStateResolver: Send + Sync {
-    /// Key state authoritative at a specific key-event-log sequence.
-    fn key_state_at(&self, did: &str, kel_seq: u64) -> Result<KeyState, ResolveError>;
-    /// Current key state (head of the key-event log).
-    fn current_key_state(&self, did: &str) -> Result<KeyState, ResolveError>;
+    /// Resolve any identifier — a master did:scid or a key bound to one — to the
+    /// key state valid at `kel_seq` (the log position the proof names), or at the
+    /// head when the proof names none.
+    fn resolve(&self, identifier: &str, kel_seq: Option<u64>) -> Result<KeyState, ResolveError>;
 }
 
 static RESOLVER: RwLock<Option<Arc<dyn KeyStateResolver>>> = RwLock::new(None);
@@ -217,11 +220,7 @@ fn verify_scid_with(
             return false;
         }
     };
-    let key_state = match kel_seq {
-        Some(seq) => resolver.key_state_at(did, seq),
-        None => resolver.current_key_state(did),
-    };
-    let key_state = match key_state {
+    let key_state = match resolver.resolve(did, kel_seq) {
         Ok(ks) => ks,
         Err(e) => {
             error!("Failed to resolve key state for {}: {}", did, e);
@@ -233,7 +232,7 @@ fn verify_scid_with(
     key_state
         .keys
         .iter()
-        .filter(|vm| key_id.map_or(true, |kid| vm.id == kid))
+        .filter(|vm| key_id.is_none_or(|kid| vm.id == kid))
         .any(|vm| verify_key_method(&vm.key, message, signature))
 }
 
@@ -245,26 +244,48 @@ mod tests {
     use crate::types::core::{Expression, ExpressionProof};
     use did_key::{generate, DIDCore, Ed25519KeyPair};
 
-    /// A fixture resolver that answers for one SCID and errors for everything
-    /// else — enough to exercise the did:scid verification path in isolation.
+    /// A fixture resolver that answers for one SCID with per-key validity
+    /// ranges — enough to exercise the did:scid verification path in isolation.
+    ///
+    /// When `revoked_at` holds a value, any `kel_seq >= revoked_at` returns an
+    /// empty key set (simulating revocation). Queries at seq < revoked_at return
+    /// the full state (history holds).
     struct FixtureResolver {
         did: String,
         state: KeyState,
+        /// Sequence at which the key gets revoked. `None` means never revoked.
+        revoked_at: Option<u64>,
     }
-    impl KeyStateResolver for FixtureResolver {
-        fn key_state_at(&self, did: &str, _seq: u64) -> Result<KeyState, ResolveError> {
-            if did == self.did {
-                Ok(self.state.clone())
-            } else {
-                Err(ResolveError::NotFound)
+    impl FixtureResolver {
+        /// A resolver where the key stays valid forever.
+        fn new(did: String, state: KeyState) -> Self {
+            Self {
+                did,
+                state,
+                revoked_at: None,
             }
         }
-        fn current_key_state(&self, did: &str) -> Result<KeyState, ResolveError> {
-            if did == self.did {
-                Ok(self.state.clone())
-            } else {
-                Err(ResolveError::NotFound)
+    }
+    impl KeyStateResolver for FixtureResolver {
+        fn resolve(
+            &self,
+            identifier: &str,
+            kel_seq: Option<u64>,
+        ) -> Result<KeyState, ResolveError> {
+            if identifier != self.did {
+                return Err(ResolveError::NotFound);
             }
+            // Simulate revocation: requests at or after the revocation seq see
+            // an empty key set. Earlier requests see the full state.
+            if let (Some(rev), Some(seq)) = (self.revoked_at, kel_seq) {
+                if seq >= rev {
+                    return Ok(KeyState {
+                        master: self.state.master.clone(),
+                        keys: vec![],
+                    });
+                }
+            }
+            Ok(self.state.clone())
         }
     }
 
@@ -335,15 +356,16 @@ mod tests {
         let (kp, key_did) = keypair();
         let scid = "did:scid:ke:1:EAgent".to_string();
         let vm_id = format!("{}#key-0", scid);
-        let resolver = FixtureResolver {
-            did: scid.clone(),
-            state: KeyState {
+        let resolver = FixtureResolver::new(
+            scid.clone(),
+            KeyState {
+                master: scid.clone(),
                 keys: vec![VerificationMethod {
                     id: vm_id.clone(),
                     key: key_did,
                 }],
             },
-        };
+        );
         let msg = hash_message(&"scid-signed".to_string());
         let sig = kp.sign(&msg);
         assert!(verify_scid_with(
@@ -361,15 +383,16 @@ mod tests {
     fn scid_rejects_unknown_key_id() {
         let (kp, key_did) = keypair();
         let scid = "did:scid:ke:1:EAgent".to_string();
-        let resolver = FixtureResolver {
-            did: scid.clone(),
-            state: KeyState {
+        let resolver = FixtureResolver::new(
+            scid.clone(),
+            KeyState {
+                master: scid.clone(),
                 keys: vec![VerificationMethod {
                     id: format!("{}#key-0", scid),
                     key: key_did,
                 }],
             },
-        };
+        );
         let msg = hash_message(&"scid-signed".to_string());
         let sig = kp.sign(&msg);
         assert!(!verify_scid_with(
@@ -386,15 +409,17 @@ mod tests {
     #[test]
     fn scid_resolve_error_fails_closed() {
         let (kp, key_did) = keypair();
-        let resolver = FixtureResolver {
-            did: "did:scid:ke:1:EKnown".to_string(),
-            state: KeyState {
+        let known = "did:scid:ke:1:EKnown".to_string();
+        let resolver = FixtureResolver::new(
+            known.clone(),
+            KeyState {
+                master: known.clone(),
                 keys: vec![VerificationMethod {
                     id: "id".to_string(),
                     key: key_did,
                 }],
             },
-        };
+        );
         let msg = hash_message(&"x".to_string());
         let sig = kp.sign(&msg);
         assert!(!verify_scid_with(
@@ -413,15 +438,16 @@ mod tests {
         let (kp, key_did) = keypair();
         let scid = "did:scid:ke:1:EAgent".to_string();
         let vm_id = format!("{}#key-0", scid);
-        let resolver = FixtureResolver {
-            did: scid.clone(),
-            state: KeyState {
+        let resolver = FixtureResolver::new(
+            scid.clone(),
+            KeyState {
+                master: scid.clone(),
                 keys: vec![VerificationMethod {
                     id: vm_id.clone(),
                     key: key_did,
                 }],
             },
-        };
+        );
         let sig = kp.sign(&hash_message(&"original".to_string()));
         let tampered = hash_message(&"tampered".to_string());
         assert!(!verify_scid_with(
@@ -432,5 +458,227 @@ mod tests {
             Some(&vm_id),
             Some(0)
         ));
+    }
+
+    // A proof naming a key that got revoked BEFORE its kel_seq MUST fail.
+    #[test]
+    fn revoked_before_seq_fails() {
+        let (kp, key_did) = keypair();
+        let scid = "did:scid:ke:1:EAgent".to_string();
+        let vm_id = format!("{}#key-0", scid);
+        let mut resolver = FixtureResolver::new(
+            scid.clone(),
+            KeyState {
+                master: scid.clone(),
+                keys: vec![VerificationMethod {
+                    id: vm_id.clone(),
+                    key: key_did,
+                }],
+            },
+        );
+        resolver.revoked_at = Some(4);
+        let msg = hash_message(&"post-revocation".to_string());
+        let sig = kp.sign(&msg);
+        // Proof at seq 5 (after revocation at 4) → must fail.
+        assert!(!verify_scid_with(
+            Some(&resolver),
+            &scid,
+            &msg,
+            &sig,
+            Some(&vm_id),
+            Some(5)
+        ));
+    }
+
+    // A proof made BEFORE a later revocation MUST still verify (history holds).
+    #[test]
+    fn pre_revocation_history_holds() {
+        let (kp, key_did) = keypair();
+        let scid = "did:scid:ke:1:EAgent".to_string();
+        let vm_id = format!("{}#key-0", scid);
+        let mut resolver = FixtureResolver::new(
+            scid.clone(),
+            KeyState {
+                master: scid.clone(),
+                keys: vec![VerificationMethod {
+                    id: vm_id.clone(),
+                    key: key_did,
+                }],
+            },
+        );
+        resolver.revoked_at = Some(4);
+        let msg = hash_message(&"pre-revocation".to_string());
+        let sig = kp.sign(&msg);
+        // Proof at seq 3 (before revocation at 4) → must pass.
+        assert!(verify_scid_with(
+            Some(&resolver),
+            &scid,
+            &msg,
+            &sig,
+            Some(&vm_id),
+            Some(3)
+        ));
+    }
+
+    // ── Two-master fixture ──────────────────────────────────────────────
+
+    /// A multi-identity resolver demonstrating the seam with two distinct masters.
+    struct MultiResolver {
+        identities: std::collections::HashMap<String, (KeyState, Option<u64>)>,
+    }
+    impl MultiResolver {
+        fn new() -> Self {
+            Self {
+                identities: std::collections::HashMap::new(),
+            }
+        }
+        fn add(&mut self, did: String, state: KeyState, revoked_at: Option<u64>) {
+            self.identities.insert(did, (state, revoked_at));
+        }
+    }
+    impl KeyStateResolver for MultiResolver {
+        fn resolve(
+            &self,
+            identifier: &str,
+            kel_seq: Option<u64>,
+        ) -> Result<KeyState, ResolveError> {
+            let (state, revoked_at) = self
+                .identities
+                .get(identifier)
+                .ok_or(ResolveError::NotFound)?;
+            if let (Some(rev), Some(seq)) = (revoked_at, kel_seq) {
+                if seq >= *rev {
+                    return Ok(KeyState {
+                        master: state.master.clone(),
+                        keys: vec![],
+                    });
+                }
+            }
+            Ok(state.clone())
+        }
+    }
+
+    // Two masters coexist in one resolver; each resolves to its own keys.
+    // Master A's key verifies A's signature; B's key verifies B's; cross-
+    // verification fails. Satisfies: "fixture resolver demonstrates the
+    // seam with at least two distinct masters."
+    #[test]
+    fn two_masters_resolve_independently() {
+        let (kp_a, key_a) = keypair();
+        let (kp_b, key_b) = keypair();
+        let scid_a = "did:scid:ke:1:EMasterA".to_string();
+        let scid_b = "did:scid:ke:1:EMasterB".to_string();
+        let vm_a = format!("{}#key-0", scid_a);
+        let vm_b = format!("{}#key-0", scid_b);
+
+        let mut resolver = MultiResolver::new();
+        resolver.add(
+            scid_a.clone(),
+            KeyState {
+                master: scid_a.clone(),
+                keys: vec![VerificationMethod {
+                    id: vm_a.clone(),
+                    key: key_a,
+                }],
+            },
+            None,
+        );
+        resolver.add(
+            scid_b.clone(),
+            KeyState {
+                master: scid_b.clone(),
+                keys: vec![VerificationMethod {
+                    id: vm_b.clone(),
+                    key: key_b,
+                }],
+            },
+            None,
+        );
+
+        let msg = hash_message(&"shared-message".to_string());
+        let sig_a = kp_a.sign(&msg);
+        let sig_b = kp_b.sign(&msg);
+
+        // Each master verifies its own signature.
+        assert!(verify_scid_with(
+            Some(&resolver),
+            &scid_a,
+            &msg,
+            &sig_a,
+            Some(&vm_a),
+            Some(0)
+        ));
+        assert!(verify_scid_with(
+            Some(&resolver),
+            &scid_b,
+            &msg,
+            &sig_b,
+            Some(&vm_b),
+            Some(0)
+        ));
+
+        // Cross-verification fails: A's sig with B's resolver → false.
+        assert!(!verify_scid_with(
+            Some(&resolver),
+            &scid_b,
+            &msg,
+            &sig_a,
+            Some(&vm_b),
+            Some(0)
+        ));
+    }
+
+    // ── Property-style tests ────────────────────────────────────────────
+
+    // inner_verify MUST never panic on arbitrary inputs — fuzz with edge cases.
+    #[test]
+    fn inner_verify_never_panics() {
+        let garbage_dids = [
+            "",
+            "not-a-did",
+            "did:",
+            "did:key:",
+            "did:scid:",
+            "did:scid:ke:1:",
+            "did:key:z6Mk\x00\x7f",
+            &"did:key:".repeat(200),
+        ];
+        let messages: &[&[u8]] = &[b"", b"\x00", b"hello", &[0xffu8; 256]];
+        let signatures: &[&[u8]] = &[b"", &[0u8; 64], &[0xffu8; 64], b"\x00\x01\x02"];
+
+        for did in &garbage_dids {
+            for msg in messages {
+                for sig in signatures {
+                    // Must not panic — result can only be true or false.
+                    let _ = inner_verify(did, msg, sig, None, None);
+                    let _ = inner_verify(did, msg, sig, Some("key-0"), Some(0));
+                    let _ = inner_verify(did, msg, sig, Some("key-0"), Some(u64::MAX));
+                }
+            }
+        }
+    }
+
+    // Without a resolver, every did:scid identifier returns false (fail closed).
+    #[test]
+    fn no_resolver_every_scid_fails() {
+        let scids = [
+            "did:scid:ke:1:EAbc123",
+            "did:scid:ke:1:EXyz789",
+            "did:scid:ke:1:E",
+            "did:scid:ke:2:ELongIdentifier0000000000000000000000",
+        ];
+        let msg = hash_message(&"irrelevant".to_string());
+        for scid in &scids {
+            assert!(
+                !verify_scid_with(None, scid, &msg, &[0u8; 64], None, None),
+                "expected false for {} with no resolver",
+                scid
+            );
+            assert!(
+                !verify_scid_with(None, scid, &msg, &[0u8; 64], Some("key-0"), Some(5)),
+                "expected false for {} with key_id+seq and no resolver",
+                scid
+            );
+        }
     }
 }

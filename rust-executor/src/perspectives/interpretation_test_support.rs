@@ -194,6 +194,8 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
                     signature: "s".into(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             })

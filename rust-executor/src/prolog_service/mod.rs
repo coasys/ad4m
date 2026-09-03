@@ -817,6 +817,8 @@ mod prolog_test {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -833,6 +835,8 @@ mod prolog_test {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },

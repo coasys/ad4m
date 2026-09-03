@@ -442,6 +442,8 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
                 signature: input.proof.signature.ok_or(anyhow!("Key is required"))?,
                 valid: input.proof.valid,
                 invalid: input.proof.invalid,
+
+                ..Default::default()
             },
             status: input.status,
         })
@@ -467,6 +469,8 @@ impl From<Expression<Perspective>> for PerspectiveExpression {
                 signature: expr.proof.signature,
                 valid: None,
                 invalid: None,
+                key_id: expr.proof.key_id,
+                kel_seq: expr.proof.kel_seq,
             },
             timestamp: expr.timestamp,
         }
@@ -483,7 +487,8 @@ impl PerspectiveExpression {
             proof: ExpressionProof {
                 key: self.proof.key.clone(),
                 signature: self.proof.signature.clone(),
-                ..Default::default()
+                key_id: self.proof.key_id.clone(),
+                kel_seq: self.proof.kel_seq,
             },
             timestamp: self.timestamp.clone(),
         };
