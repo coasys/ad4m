@@ -787,6 +787,22 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
         });
     }
 
+    // Sort states by `value`, matching TS `SHACLFlow.fromLinks`
+    // (`core/src/shacl/SHACLFlow.ts`) and for the same reason: link order is
+    // not preserved on the graph, so the only stable ordering is the declared
+    // `value`. The convention that rests on it — "the initial state is
+    // `states[0]`", which `FlowInstance.start` consumes on the TS side — would
+    // otherwise resolve differently in the two runtimes whenever
+    // link-discovery order differs from value order, and a Rust-side spawn
+    // would mint instances in the wrong starting state. Ties keep discovery
+    // order (`sort_by` is stable), which is as arbitrary as the declaration
+    // that produced them.
+    flow.states.sort_by(|a, b| {
+        a.value
+            .partial_cmp(&b.value)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     // Transitions — walk every `hasTransition` edge, resolve endpoints
     // via the state-name index.
     for transition_link in find_links(links, flow_uri, "ad4m://hasTransition") {
@@ -2083,5 +2099,39 @@ mod tests {
         let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
         assert!(flow.input_types.is_empty());
         assert!(flow.output_types.is_empty());
+    }
+
+    #[test]
+    fn parse_flow_from_links_sorts_states_by_value() {
+        // Link order on the graph is not preserved, so the reader must impose
+        // the same `value` ordering TS `SHACLFlow.fromLinks` does. The
+        // convention riding on it — "initial state = states[0]", which
+        // `FlowInstance.start` consumes — would otherwise resolve differently
+        // in the two runtimes, and a Rust-side spawn would mint instances in
+        // whichever state happened to be discovered first.
+        let flow_uri = "order://OrderFlow";
+        let mut links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Order")),
+            mk_link(flow_uri, "ad4m://namespace", &lit_str("order://")),
+        ];
+        // Declared deliberately out of order: last, first, middle.
+        for (name, value) in [("done", 1.0), ("identified", 0.0), ("scoped", 0.5)] {
+            let state_uri = format!("order://Order.{name}");
+            links.push(mk_link(flow_uri, "ad4m://hasState", &state_uri));
+            links.push(mk_link(&state_uri, "ad4m://stateName", &lit_str(name)));
+            links.push(mk_link(&state_uri, "ad4m://stateValue", &lit_num(value)));
+        }
+
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+
+        assert_eq!(
+            flow.states
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["identified", "scoped", "done"],
+            "states must come back ordered by declared value, not link order"
+        );
     }
 }
