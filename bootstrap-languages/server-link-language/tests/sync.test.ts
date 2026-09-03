@@ -12,7 +12,7 @@ import type { RoomConfig, StorageAdapter, Transport, TransportResponse } from ".
 import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
-import { encryptLinkForWire, generateRoomKey } from "../src/encryption.js";
+import { encryptLinkForWire, generateRoomKey, type KeyRing } from "../src/encryption.js";
 import type { LinkExpression, PerspectiveDiff } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
 
@@ -75,7 +75,7 @@ function makeLink(overrides?: Partial<LinkExpression["data"]>): LinkExpression {
 
 let emittedDiffs: PerspectiveDiff[];
 let syncStates: string[];
-let roomKey: Uint8Array | null;
+let keyRing: KeyRing | null;
 
 function setup(transport: MockTransport): void {
     resetAdapters();
@@ -87,14 +87,14 @@ function setup(transport: MockTransport): void {
 
     emittedDiffs = [];
     syncStates = [];
-    roomKey = null;
+    keyRing = null;
 
     syncModule.initSync({
         config,
         getToken: async () => "test-token",
         emitDiff: (diff) => emittedDiffs.push(diff),
         emitSyncState: (state) => syncStates.push(state),
-        getRoomKey: () => roomKey,
+        getKeyRing: () => keyRing,
     });
 }
 
@@ -131,12 +131,13 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.deepEqual(emittedDiffs[0].removals, [link]);
     });
 
-    it("decrypts wire links before applying/emitting when a room key is set", () => {
+    it("decrypts wire links before applying/emitting when a key ring is set", () => {
         const transport = new MockTransport();
         setup(transport);
-        roomKey = generateRoomKey();
+        const rk = generateRoomKey();
+        keyRing = new Map([[1, rk]]);
         const link = makeLink({ source: "secret-source" });
-        const wireLink = encryptLinkForWire(link, roomKey);
+        const wireLink = encryptLinkForWire(link, rk, 1);
 
         syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 1, "rev-1");
 
@@ -275,10 +276,10 @@ describe("sync: commit", () => {
         assert.ok(!isEncryptedLinkData(posted.additions[0].data));
     });
 
-    it("posts an encrypted wire diff when a room key is set", async () => {
+    it("posts an encrypted wire diff when a key ring is set", async () => {
         const transport = new MockTransport();
         setup(transport);
-        roomKey = generateRoomKey();
+        keyRing = new Map([[1, generateRoomKey()]]);
         const link = makeLink();
         let posted: any = null;
 
@@ -631,14 +632,14 @@ describe("sync: enqueueCommitBatched", () => {
         store.initStore(simpleHash);
         emittedDiffs = [];
         syncStates = [];
-        roomKey = null;
+        keyRing = null;
         // Throw from emitSyncState — simulates a torn-down runtime.
         syncModule.initSync({
             config,
             getToken: async () => "test-token",
             emitDiff: (diff) => emittedDiffs.push(diff),
             emitSyncState: () => { throw new Error("runtime torn down"); },
-            getRoomKey: () => roomKey,
+            getKeyRing: () => keyRing,
         });
 
         // First flush: hard-fails all retries → tries to emit → emitter throws.

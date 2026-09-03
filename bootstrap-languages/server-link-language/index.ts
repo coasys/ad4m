@@ -21,7 +21,7 @@ import * as auth from "./src/auth.js";
 import * as syncModule from "./src/sync.js";
 import * as telepresenceModule from "./src/telepresence.js";
 import { WsClient } from "./src/ws-client.js";
-import { deriveX25519KeyPair, openRoomKeyEnvelope } from "./src/encryption.js";
+import { buildKeyRing, deriveX25519KeyPair, type KeyRing } from "./src/encryption.js";
 
 import {
     initAdapters,
@@ -60,14 +60,14 @@ let configured = false;
 let localAgents: string[] = [];
 let wsClient: WsClient | null = null;
 
-/** The room's shared AES-256-GCM key, once fetched + decrypted. Null for a
- * plaintext room OR while E2E setup is still in flight. */
-let roomKey: Uint8Array | null = null;
-type RoomKeyStatus = "none" | "ready" | "error";
-/** "error" means an E2E key almost certainly exists but we couldn't get/open
- * it — commit() refuses to send plaintext in that state rather than risk a
- * confidentiality leak. See setupRoomKey(). */
-let roomKeyStatus: RoomKeyStatus = "none";
+/** The room's versioned key ring (version → decrypted AES-256-GCM key).
+ * Null for a plaintext room OR while E2E setup is still in flight. */
+let keyRing: KeyRing | null = null;
+type KeyRingStatus = "none" | "ready" | "error";
+/** "error" means E2E keys almost certainly exist but we could not get/open
+ * them — commit() refuses to send plaintext in that state rather than risk a
+ * confidentiality leak. See setupKeyRing(). */
+let keyRingStatus: KeyRingStatus = "none";
 
 function isPlaceholder(value: string): boolean {
     return !value || value === "<to-be-filled>";
@@ -77,25 +77,26 @@ function isPlaceholder(value: string): boolean {
 // Startup helpers
 // ---------------------------------------------------------------------------
 
-async function setupRoomKey(): Promise<void> {
+async function setupKeyRing(): Promise<void> {
     const config = getConfig();
     try {
         const token = await auth.getValidToken();
-        const keysRes = await api.fetchRoomKey(config, token);
+        const keysRes = await api.fetchRoomKeys(config, token);
         if (!keysRes) {
-            roomKeyStatus = "none";
-            roomKey = null;
+            keyRingStatus = "none";
+            keyRing = null;
             return;
         }
         const { privateKey } = deriveX25519KeyPair((payload) => getAgent().signStringHex(payload));
-        roomKey = openRoomKeyEnvelope(keysRes.encryptedKey, privateKey);
-        roomKeyStatus = "ready";
-        console.log(`[server-link-language] E2E room key acquired (version ${keysRes.version})`);
+        keyRing = buildKeyRing(keysRes.keys, privateKey);
+        keyRingStatus = "ready";
+        const versions = [...keyRing.keys()].sort((a, b) => a - b);
+        console.log(`[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`);
     } catch (err) {
-        roomKeyStatus = "error";
-        roomKey = null;
+        keyRingStatus = "error";
+        keyRing = null;
         console.error(
-            "[server-link-language] failed to acquire/decrypt the E2E room key — " +
+            "[server-link-language] failed to acquire/decrypt E2E key ring — " +
             "refusing to commit plaintext until this resolves:",
             err,
         );
@@ -141,7 +142,7 @@ const language = defineLanguage({
             getToken: () => auth.getValidToken(),
             emitDiff: (diff) => getRuntime().emitPerspectiveDiff(diff),
             emitSyncState: (state) => getRuntime().emitSyncStateChange(state),
-            getRoomKey: () => roomKey,
+            getKeyRing: () => keyRing,
         });
 
         wsClient = new WsClient({
@@ -203,7 +204,7 @@ const language = defineLanguage({
 
         try {
             await auth.authenticate();
-            await setupRoomKey();
+            await setupKeyRing();
             await syncModule.bootstrap();
         } catch (err) {
             console.error(
@@ -243,8 +244,8 @@ const language = defineLanguage({
         myDid = "";
         configured = false;
         localAgents = [];
-        roomKey = null;
-        roomKeyStatus = "none";
+        keyRing = null;
+        keyRingStatus = "none";
         auth.resetAuth();
         resetAdapters();
         console.log("[server-link-language] teardown");
@@ -264,15 +265,13 @@ const language = defineLanguage({
                     "server-link-language: not configured (SERVER_URL/ROOM_ID template variables unfilled)",
                 );
             }
-            if (roomKeyStatus === "error") {
-                // Retry once before refusing — the initial failure may have
-                // been a transient network/auth issue that has since resolved.
-                console.log("[server-link-language] retrying E2E room key acquisition before commit...");
-                await setupRoomKey();
+            if (keyRingStatus === "error") {
+                console.log("[server-link-language] retrying E2E key ring acquisition before commit...");
+                await setupKeyRing();
             }
-            if (roomKeyStatus === "error") {
+            if (keyRingStatus === "error") {
                 throw new Error(
-                    "server-link-language: refusing to commit — this room's E2E key could not be " +
+                    "server-link-language: refusing to commit — this room's E2E key ring could not be " +
                     "acquired/decrypted, and sending plaintext to a possibly-encrypted room would be unsafe. " +
                     "Retry once connectivity/auth recovers.",
                 );

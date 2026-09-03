@@ -24,7 +24,7 @@ import type {
     WirePerspectiveDiff,
 } from "./types.js";
 import { isEncryptedLinkData } from "./types.js";
-import { decryptLinkFromWire, encryptLinkForWire, statusField } from "./encryption.js";
+import { decryptLinkFromWire, encryptLinkForWire, latestKeyVersion, statusField, type KeyRing } from "./encryption.js";
 
 export interface SyncDeps {
     config: RoomConfig;
@@ -33,8 +33,8 @@ export interface SyncDeps {
     /** MUST be called for every inbound diff — see module doc above. */
     emitDiff: (diff: PerspectiveDiff) => void;
     emitSyncState?: (state: string) => void;
-    /** Returns the current room key, or null for a plaintext (non-E2E) room. */
-    getRoomKey: () => Uint8Array | null;
+    /** Returns the current key ring, or null for a plaintext (non-E2E) room. */
+    getKeyRing: () => KeyRing | null;
 }
 
 let _deps: SyncDeps | null = null;
@@ -55,8 +55,8 @@ function deps(): SyncDeps {
 // ---------------------------------------------------------------------------
 
 function toWireLink(link: LinkExpression): WireLinkExpression {
-    const roomKey = deps().getRoomKey();
-    if (!roomKey) {
+    const keyRing = deps().getKeyRing();
+    if (!keyRing) {
         return {
             author: link.author,
             timestamp: link.timestamp,
@@ -65,17 +65,22 @@ function toWireLink(link: LinkExpression): WireLinkExpression {
             data: link.data,
         };
     }
-    return encryptLinkForWire(link, roomKey);
+    const version = latestKeyVersion(keyRing);
+    const key = keyRing.get(version);
+    if (!key) {
+        throw new Error("toWireLink: key ring has no keys");
+    }
+    return encryptLinkForWire(link, key, version);
 }
 
 function fromWireLink(wireLink: WireLinkExpression): LinkExpression {
-    const roomKey = deps().getRoomKey();
-    if (isEncryptedLinkData(wireLink.data) && roomKey) {
-        return decryptLinkFromWire(wireLink, roomKey);
+    const keyRing = deps().getKeyRing();
+    if (isEncryptedLinkData(wireLink.data) && keyRing) {
+        return decryptLinkFromWire(wireLink, keyRing);
     }
-    if (isEncryptedLinkData(wireLink.data) && !roomKey) {
+    if (isEncryptedLinkData(wireLink.data) && !keyRing) {
         throw new Error(
-            "sync: received an encrypted link but no room key is available yet " +
+            "sync: received an encrypted link but no key ring available yet " +
             "(E2E key fetch may still be in flight, or this instance failed to decrypt it)",
         );
     }

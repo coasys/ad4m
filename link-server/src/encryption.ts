@@ -115,17 +115,19 @@ export interface RotateResult {
  * room E2E-enabled, and discards the plaintext key. This serves as both
  * "enable E2E" (first call) and "rotate" (subsequent calls).
  *
- * Members whose X25519 public key has not yet been registered (i.e. they
- * have not completed the DID auth challenge-response since E2E was set up)
- * are skipped — they receive their sealed copy on the next rotation after
- * they authenticate. The server does NOT fall back to deriving an X25519
- * key from the DID's Ed25519 key, because the client derives its X25519
- * keypair from a signing-capability seed (not Ed25519→X25519 conversion),
- * and using the wrong public key would produce an unopenable envelope.
+ * Key ring model: each rotation creates a new version. Members receive
+ * the new version sealed to their X25519 public key. Historical versions
+ * remain in `room_keys` — `GET /rooms/:roomId/keys` returns all versions
+ * a member has access to, so they can decrypt links encrypted under any
+ * past version they were present for.
  *
- * Members added to the ACL *after* a rotation cannot decrypt history until
- * the next rotation — the server does not retain plaintext keys to reseal
- * on demand, by design.
+ * Forward secrecy: a removed member keeps versions 1–N (already
+ * delivered) but never receives N+1. New members added after a rotation
+ * can only decrypt links from the version they first received onward.
+ *
+ * Members whose X25519 public key has not yet been registered are
+ * skipped — they receive their sealed copy on the next rotation after
+ * they authenticate.
  */
 export function rotateRoomKey(db: LinkServerDB, roomId: string): RotateResult {
   const aclRows = db.getAcl(roomId);
@@ -133,12 +135,7 @@ export function rotateRoomKey(db: LinkServerDB, roomId: string): RotateResult {
   const version = db.getLatestKeyVersion(roomId) + 1;
   const recipients: string[] = [];
   for (const row of aclRows) {
-    if (!row.x25519_public_key) {
-      // Skip — this member has not yet registered their X25519 key via
-      // the auth challenge-response. They will receive a sealed copy on
-      // the next rotation after they authenticate.
-      continue;
-    }
+    if (!row.x25519_public_key) continue;
     const recipientPub = hexToBytes(row.x25519_public_key);
     const encrypted = encryptRoomKeyForRecipient(roomKey, recipientPub);
     db.addRoomKey(roomId, row.did, version, JSON.stringify(encrypted));

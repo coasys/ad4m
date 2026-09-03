@@ -59,6 +59,7 @@ import { sha256 } from "@noble/hashes/sha2";
 import { hkdf } from "@noble/hashes/hkdf";
 
 import type {
+    KeysResponseEntry,
     Link,
     LinkExpression,
     SealedRoomKeyEnvelope,
@@ -214,6 +215,33 @@ export function openRoomKeyEnvelope(envelope: SealedRoomKeyEnvelope, recipientPr
 }
 
 // ---------------------------------------------------------------------------
+// Key ring
+// ---------------------------------------------------------------------------
+
+/** Ordered map of key version → decrypted room key. */
+export type KeyRing = Map<number, Uint8Array>;
+
+export function buildKeyRing(
+    entries: KeysResponseEntry[],
+    recipientPrivateKey: Uint8Array,
+): KeyRing {
+    const ring: KeyRing = new Map();
+    for (const entry of entries) {
+        const plainKey = openRoomKeyEnvelope(entry.encryptedKey, recipientPrivateKey);
+        ring.set(entry.version, plainKey);
+    }
+    return ring;
+}
+
+export function latestKeyVersion(ring: KeyRing): number {
+    let max = 0;
+    for (const v of ring.keys()) {
+        if (v > max) max = v;
+    }
+    return max;
+}
+
+// ---------------------------------------------------------------------------
 // Sealed envelope wire framing (base64 ↔ object)
 // ---------------------------------------------------------------------------
 
@@ -259,7 +287,7 @@ export function statusField(status: string | undefined): { status?: string } {
  * can still content-address links for OR-Set dedup/removal matching
  * without seeing the plaintext.
  */
-export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array): WireLinkExpression {
+export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array, keyVersion?: number): WireLinkExpression {
     const canonical = JSON.stringify({
         source: link.data.source,
         predicate: link.data.predicate ?? null,
@@ -283,6 +311,7 @@ export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array): W
     return {
         data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
         link_hash: linkHashHex,
+        ...(keyVersion !== undefined ? { key_version: keyVersion } : {}),
     };
 }
 
@@ -293,9 +322,23 @@ export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array): W
  * Throws if `roomKey` is wrong or the ciphertext was tampered with
  * (AES-GCM auth tag failure).
  */
-export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKey: Uint8Array): LinkExpression {
+export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKeyOrRing: Uint8Array | KeyRing): LinkExpression {
     if (!isEncryptedLinkData(wireLink.data)) {
         throw new Error("decryptLinkFromWire: wire link has no encrypted data (expected {ciphertext, nonce} in data)");
+    }
+    let roomKey: Uint8Array;
+    if (roomKeyOrRing instanceof Map) {
+        const version = wireLink.key_version ?? 1;
+        const key = roomKeyOrRing.get(version);
+        if (!key) {
+            throw new Error(
+                `decryptLinkFromWire: no key for version ${version} in ring ` +
+                `(have versions: ${[...roomKeyOrRing.keys()].join(", ")})`,
+            );
+        }
+        roomKey = key;
+    } else {
+        roomKey = roomKeyOrRing;
     }
     const nonce = hexToBytes(wireLink.data.nonce);
     const ciphertext = hexToBytes(wireLink.data.ciphertext);

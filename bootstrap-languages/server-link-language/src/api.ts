@@ -150,13 +150,13 @@ export async function fetchAcl(config: RoomConfig, token: string): Promise<AclRe
     return { admin: res.admin ?? "", members: res.members ?? [] };
 }
 
-/** Returns null when the room has no E2E key configured (server responds
- * 404/204, or omits/empties `encryptedKey`). */
-export async function fetchRoomKey(config: RoomConfig, token: string): Promise<KeysResponse | null> {
+/** Returns null when the room has no E2E keys configured (server responds
+ * 404/204, or returns an empty keys array). */
+export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse | null> {
     try {
         const res = await request<Partial<KeysResponse>>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
-        if (!res || !res.encryptedKey) return null;
-        return { encryptedKey: res.encryptedKey, version: res.version ?? 0 };
+        if (!res || !res.keys || res.keys.length === 0) return null;
+        return { keys: res.keys };
     } catch (err) {
         if (err instanceof ApiError && (err.status === 404 || err.status === 204)) {
             return null;

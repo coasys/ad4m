@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 
 import {
     AES_KEY_BYTES,
+    buildKeyRing,
     bytesToHex,
     decodeSealedEnvelope,
     decryptLinkFromWire,
@@ -20,6 +21,7 @@ import {
     encryptLinkForWire,
     generateRoomKey,
     hexToBytes,
+    latestKeyVersion,
     openRoomKeyEnvelope,
     randomBytes,
     sealRoomKeyForRecipient,
@@ -209,5 +211,79 @@ describe("encryption: encryptLinkForWire / decryptLinkFromWire", () => {
     it("throws when asked to decrypt a wire link with no encrypted data in data field", () => {
         const roomKey = generateRoomKey();
         assert.throws(() => decryptLinkFromWire({ author: "a", timestamp: "t", proof: { signature: "s", key: "k" } } as any, roomKey));
+    });
+
+    it("attaches key_version when provided", () => {
+        const roomKey = generateRoomKey();
+        const link = makeLink();
+        const wire = encryptLinkForWire(link, roomKey, 3);
+        assert.equal(wire.key_version, 3);
+    });
+
+    it("omits key_version when not provided", () => {
+        const roomKey = generateRoomKey();
+        const link = makeLink();
+        const wire = encryptLinkForWire(link, roomKey);
+        assert.equal("key_version" in wire, false);
+    });
+
+    it("decrypts with a KeyRing, selecting key by version", () => {
+        const key1 = generateRoomKey();
+        const key2 = generateRoomKey();
+        const ring = new Map([[1, key1], [2, key2]]);
+        const link = makeLink();
+
+        const wire1 = encryptLinkForWire(link, key1, 1);
+        const wire2 = encryptLinkForWire(link, key2, 2);
+
+        assert.deepEqual(decryptLinkFromWire(wire1, ring), link);
+        assert.deepEqual(decryptLinkFromWire(wire2, ring), link);
+    });
+
+    it("defaults to version 1 when wire link has no key_version", () => {
+        const key1 = generateRoomKey();
+        const ring = new Map([[1, key1]]);
+        const link = makeLink();
+        const wire = encryptLinkForWire(link, key1);
+        assert.deepEqual(decryptLinkFromWire(wire, ring), link);
+    });
+
+    it("throws when KeyRing lacks the required version", () => {
+        const key1 = generateRoomKey();
+        const key2 = generateRoomKey();
+        const ring = new Map([[1, key1]]);
+        const link = makeLink();
+        const wire = encryptLinkForWire(link, key2, 2);
+        assert.throws(() => decryptLinkFromWire(wire, ring), /no key for version 2/);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Key ring helpers
+// ---------------------------------------------------------------------------
+
+describe("encryption: buildKeyRing / latestKeyVersion", () => {
+    it("builds a KeyRing from sealed envelopes", () => {
+        const signer = mockSigner("ring-agent");
+        const { privateKey, publicKey } = deriveX25519KeyPair(signer);
+        const rk1 = generateRoomKey();
+        const rk2 = generateRoomKey();
+        const entries = [
+            { encryptedKey: sealRoomKeyForRecipient(rk1, publicKey), version: 1 },
+            { encryptedKey: sealRoomKeyForRecipient(rk2, publicKey), version: 2 },
+        ];
+        const ring = buildKeyRing(entries, privateKey);
+        assert.equal(ring.size, 2);
+        assert.deepEqual(ring.get(1), rk1);
+        assert.deepEqual(ring.get(2), rk2);
+    });
+
+    it("latestKeyVersion returns the highest version", () => {
+        const ring = new Map([[1, generateRoomKey()], [3, generateRoomKey()], [2, generateRoomKey()]]);
+        assert.equal(latestKeyVersion(ring), 3);
+    });
+
+    it("latestKeyVersion returns 0 for an empty ring", () => {
+        assert.equal(latestKeyVersion(new Map()), 0);
     });
 });

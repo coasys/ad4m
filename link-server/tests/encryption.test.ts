@@ -44,21 +44,23 @@ test("rotate generates a room key sealed to every current ACL member", async () 
     assert.equal(rotateRes.body.version, 1);
     assert.deepEqual(new Set(rotateRes.body.recipients), new Set([admin.did, member.did]));
 
-    const adminKey = await getJson<{ encryptedKey: EncryptedKeyPayload; version: number }>(
+    const adminKeys = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`,
       adminToken
     );
-    const memberKey = await getJson<{ encryptedKey: EncryptedKeyPayload; version: number }>(
+    const memberKeys = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`,
       memberToken
     );
-    assert.equal(adminKey.status, 200);
-    assert.equal(memberKey.status, 200);
-    assert.equal(adminKey.body.version, 1);
-    assert.equal(memberKey.body.version, 1);
+    assert.equal(adminKeys.status, 200);
+    assert.equal(memberKeys.status, 200);
+    assert.equal(adminKeys.body.keys.length, 1);
+    assert.equal(adminKeys.body.keys[0].version, 1);
+    assert.equal(memberKeys.body.keys.length, 1);
+    assert.equal(memberKeys.body.keys[0].version, 1);
 
-    const adminRoomKey = decryptRoomKeyWithX25519(adminKey.body.encryptedKey, testAgentX25519PrivateKey(admin));
-    const memberRoomKey = decryptRoomKeyWithX25519(memberKey.body.encryptedKey, testAgentX25519PrivateKey(member));
+    const adminRoomKey = decryptRoomKeyWithX25519(adminKeys.body.keys[0].encryptedKey, testAgentX25519PrivateKey(admin));
+    const memberRoomKey = decryptRoomKeyWithX25519(memberKeys.body.keys[0].encryptedKey, testAgentX25519PrivateKey(member));
     assert.deepEqual(adminRoomKey, memberRoomKey, "both members recover the same underlying room key");
   });
 });
@@ -108,12 +110,13 @@ test("member added after a rotation has no key until the next rotation", async (
     assert.equal(before.status, 404);
 
     await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
-    const after = await getJson<{ encryptedKey: EncryptedKeyPayload; version: number }>(
+    const after = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`,
       lateToken
     );
     assert.equal(after.status, 200);
-    assert.equal(after.body.version, 2);
+    assert.equal(after.body.keys.length, 1);
+    assert.equal(after.body.keys[0].version, 2);
   });
 });
 

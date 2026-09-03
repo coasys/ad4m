@@ -410,11 +410,13 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const row = ctx.db.getLatestRoomKey(claims.roomId, claims.did);
-      if (!row) {
+      const rows = ctx.db.getAllRoomKeys(claims.roomId, claims.did);
+      if (rows.length === 0) {
         return reply.code(404).send({ error: "no room key available for this agent yet" });
       }
-      return reply.send({ encryptedKey: JSON.parse(row.encrypted_key), version: row.version });
+      return reply.send({
+        keys: rows.map((r) => ({ encryptedKey: JSON.parse(r.encrypted_key), version: r.version })),
+      });
     }
   );
 

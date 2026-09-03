@@ -213,6 +213,9 @@ export class LinkServerDB {
       getLatestRoomKey: this.raw.prepare(
         `SELECT * FROM room_keys WHERE room_id = ? AND did = ? ORDER BY version DESC LIMIT 1`
       ),
+      getAllRoomKeys: this.raw.prepare(
+        `SELECT * FROM room_keys WHERE room_id = ? AND did = ? ORDER BY version ASC`
+      ),
       getLatestKeyVersion: this.raw.prepare(
         "SELECT COALESCE(MAX(version), 0) AS max FROM room_keys WHERE room_id = ?"
       ),
@@ -470,6 +473,10 @@ export class LinkServerDB {
 
   getLatestRoomKey(roomId: string, did: string): RoomKeyRow | undefined {
     return this.stmts.getLatestRoomKey.get(roomId, did) as RoomKeyRow | undefined;
+  }
+
+  getAllRoomKeys(roomId: string, did: string): RoomKeyRow[] {
+    return this.stmts.getAllRoomKeys.all(roomId, did) as RoomKeyRow[];
   }
 
   getLatestKeyVersion(roomId: string): number {

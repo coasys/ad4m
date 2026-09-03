@@ -63,6 +63,8 @@ export interface LinkExpression {
   /** Client-computed SHA-256 of the canonical plaintext, for OR-Set
    * dedup/removal when author/timestamp are encrypted away. */
   link_hash?: string;
+  /** Key version used to encrypt this link (absent → version 1). */
+  key_version?: number;
 }
 
 export interface PerspectiveDiff {
