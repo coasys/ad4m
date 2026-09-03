@@ -34,6 +34,7 @@ use crate::perspectives::flow_context::{
     scope_subject, FlowInstanceRecord,
 };
 use crate::perspectives::model_query::types::Scope;
+use crate::perspectives::model_query::ModelQueryInput;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
@@ -142,7 +143,10 @@ fn requires_query_input(
     if let Some(linked) = &query.linked_to {
         out.insert("parent".into(), linked_to_parent(linked, record)?);
     }
-    Ok(Value::Object(out))
+    let out = Value::Object(out);
+    serde_json::from_value::<ModelQueryInput>(out.clone())
+        .map_err(|e| anyhow!("translated query is not a valid ModelQueryInput: {e}"))?;
+    Ok(out)
 }
 
 fn requires_where(
@@ -170,7 +174,16 @@ fn requires_where(
     if let Some(alts) = query.or.as_ref().filter(|a| !a.is_empty()) {
         let branches = alts
             .iter()
-            .map(|alt| requires_where(alt, record, acting_did, true).map(Value::Object))
+            .map(|alt| {
+                if alt.class_name != query.class_name {
+                    bail!("`or` branch class `{}` must match the outer class `{}`",
+                          alt.class_name, query.class_name);
+                }
+                if alt.count.is_some() {
+                    bail!("`count` on an `or` branch is not supported");
+                }
+                requires_where(alt, record, acting_did, true).map(Value::Object)
+            })
             .collect::<Result<Vec<_>>>()?;
         out.insert("OR".to_string(), Value::Array(branches));
     }
@@ -231,6 +244,9 @@ fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value
         }
         _ => bail!("`linkedTo` must be \"base\", \"flow\", or {{ via, to }}"),
     };
+    if id.is_empty() {
+        bail!("`linkedTo` anchor resolved to an empty string");
+    }
     Ok(json!({ "id": id, "predicate": predicate }))
 }
 
@@ -680,6 +696,37 @@ mod tests {
             branch
         }]);
         assert!(requires_query_input(&nested, &rec, "did:key:x").is_err());
+    }
+
+    #[test]
+    fn or_branch_with_different_class_is_rejected() {
+        let branch = mq("ns://Other");
+        let mut q = mq("ns://T");
+        q.or = Some(vec![branch]);
+        let err = requires_query_input(&q, &inst(), "did:key:x").unwrap_err();
+        assert!(err.to_string().contains("must match the outer class"), "got {err:#}");
+    }
+
+    #[test]
+    fn or_branch_with_own_count_is_rejected() {
+        let mut branch = mq("ns://T");
+        branch.count = count(Some(2), None);
+        let mut q = mq("ns://T");
+        q.or = Some(vec![branch]);
+        let err = requires_query_input(&q, &inst(), "did:key:x").unwrap_err();
+        assert!(err.to_string().contains("count"), "got {err:#}");
+    }
+
+    #[test]
+    fn linked_to_with_empty_subject_is_rejected() {
+        let rec = FlowInstanceRecord {
+            subject: "".into(),
+            ..inst()
+        };
+        let mut q = mq("ns://T");
+        q.linked_to = Some(json!("base"));
+        let err = requires_query_input(&q, &rec, "did:key:x").unwrap_err();
+        assert!(err.to_string().contains("empty"), "got {err:#}");
     }
 
     #[test]
