@@ -80,24 +80,44 @@ pub async fn load_flow_instances(
     if subjects.is_empty() {
         return Ok(vec![]);
     }
+    // `model_query` has no `in` operator, so only a single subject is
+    // pushed down; a batch loads everything and filters here.
     let query = if subjects.len() == 1 {
         serde_json::json!({ "where": { "subject": subjects[0].clone() } })
     } else {
         serde_json::json!({})
     };
+    let records = query_flow_instances(perspective, &query).await?;
+    Ok(records
+        .into_iter()
+        .filter(|r| subjects.contains(&r.subject))
+        .collect())
+}
+
+/// Load every live `FlowInstance` on the perspective, unfiltered. Used by
+/// the engine sweep (`run_engine_proposal_pass` without a scope), where
+/// the bound is the perspective's own flow count.
+pub async fn load_all_flow_instances(
+    perspective: &PerspectiveInstance,
+) -> anyhow::Result<Vec<FlowInstanceRecord>> {
+    query_flow_instances(perspective, &serde_json::json!({})).await
+}
+
+/// Returns `Ok(vec![])` when the `FlowInstance` class is not registered
+/// yet: a perspective on which no flow has ever been spawned has no live
+/// flows, and that must not fail the extraction pass.
+async fn query_flow_instances(
+    perspective: &PerspectiveInstance,
+    query: &serde_json::Value,
+) -> anyhow::Result<Vec<FlowInstanceRecord>> {
     let json = match perspective
         .model_query(FLOW_INSTANCE_CLASS, &query.to_string())
         .await
     {
         Ok(j) => j,
         Err(e) => {
-            // Absent-class case: no FlowInstances have ever been minted
-            // on this perspective, so the SHACL shape isn't registered
-            // yet. That's a valid steady state — return empty rather
-            // than propagating an error that would break Model C's
-            // extraction pass on every call.
             let msg = format!("{e:#}");
-            if msg.contains("Shape not found") || msg.contains("shape not found") {
+            if msg.to_lowercase().contains("shape not found") {
                 return Ok(vec![]);
             }
             return Err(anyhow::anyhow!(
@@ -107,55 +127,11 @@ pub async fn load_flow_instances(
     };
     let parsed: serde_json::Value = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("load_flow_instances: response not JSON: {e:#}"))?;
-    let instances = parsed
+    Ok(parsed
         .get("instances")
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let subject_set: HashSet<&str> = subjects.iter().map(String::as_str).collect();
-    Ok(instances
-        .iter()
-        .filter_map(parse_flow_instance_from_hydrated)
-        .filter(|r| subject_set.contains(r.subject.as_str()))
-        .collect())
-}
-
-/// Load every live `FlowInstance` on the perspective, unfiltered.
-///
-/// The engine-only sweep entry point (`run_engine_proposal_pass` with
-/// `scope: None`) needs to evaluate all active FlowInstances — J#1's
-/// bounded default on [`load_flow_instances`] is a safety rail for the
-/// extraction pass (where empty subjects means "no anchor, so no scope
-/// to reason about"), not for the sweep pass. The sweep's bound is the
-/// perspective's own flow count, which the auto-processor mints
-/// one-per-message.
-///
-/// Absent-class case (no `FlowInstance` shape registered yet on this
-/// perspective) → `Ok(vec![])`, same policy as [`load_flow_instances`].
-pub async fn load_all_flow_instances(
-    perspective: &PerspectiveInstance,
-) -> anyhow::Result<Vec<FlowInstanceRecord>> {
-    let json = match perspective.model_query(FLOW_INSTANCE_CLASS, "{}").await {
-        Ok(j) => j,
-        Err(e) => {
-            let msg = format!("{e:#}");
-            if msg.contains("Shape not found") || msg.contains("shape not found") {
-                return Ok(vec![]);
-            }
-            return Err(anyhow::anyhow!(
-                "load_all_flow_instances: model_query failed: {msg}"
-            ));
-        }
-    };
-    let parsed: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| anyhow::anyhow!("load_all_flow_instances: response not JSON: {e:#}"))?;
-    let instances = parsed
-        .get("instances")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    Ok(instances
-        .iter()
+        .into_iter()
+        .flatten()
         .filter_map(parse_flow_instance_from_hydrated)
         .collect())
 }
