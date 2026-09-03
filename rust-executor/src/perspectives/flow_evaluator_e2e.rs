@@ -193,8 +193,8 @@ async fn evaluate_flow_transitions_where_equals_e2e() {
 }
 
 /// Two Tasks so the `evidence` collection has more than one element: the
-/// writer seeds the first through `create_subject` and streams the rest
-/// through `update_subject`, and both must land.
+/// writer passes the whole collection as a JSON array and `create_subject`
+/// expands it into one `addLink` per element — both must land.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
     let mut f = seed_delivery_fixture().await;
