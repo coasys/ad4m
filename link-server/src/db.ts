@@ -210,9 +210,6 @@ export class LinkServerDB {
         `INSERT OR REPLACE INTO room_keys (room_id, did, encrypted_key, version)
          VALUES (?, ?, ?, ?)`
       ),
-      getLatestRoomKey: this.raw.prepare(
-        `SELECT * FROM room_keys WHERE room_id = ? AND did = ? ORDER BY version DESC LIMIT 1`
-      ),
       getAllRoomKeys: this.raw.prepare(
         `SELECT * FROM room_keys WHERE room_id = ? AND did = ? ORDER BY version ASC`
       ),
@@ -469,10 +466,6 @@ export class LinkServerDB {
     encryptedKey: string
   ): void {
     this.stmts.addRoomKey.run(roomId, did, encryptedKey, version);
-  }
-
-  getLatestRoomKey(roomId: string, did: string): RoomKeyRow | undefined {
-    return this.stmts.getLatestRoomKey.get(roomId, did) as RoomKeyRow | undefined;
   }
 
   getAllRoomKeys(roomId: string, did: string): RoomKeyRow[] {

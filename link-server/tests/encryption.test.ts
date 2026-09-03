@@ -126,11 +126,9 @@ test("server stores link data opaquely — encrypted-shaped data round-trips unc
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
-    // The server does not validate or transform the data field — it stores
-    // whatever shape the client sends. Verify that encrypted-shaped data
-    // round-trips through commit → render without alteration.
     const encryptedData: EncryptedLinkData = { ciphertext: "deadbeef", nonce: "cafebabe" };
     const link = await createSignedLink(agent, encryptedData);
+    (link as any).link_hash = "opaque-test-hash-1";
 
     const commitRes = await postJson<{ sequence: number; revision: string }>(
       `${server.url}/rooms/${roomId}/commit`,
@@ -156,6 +154,7 @@ test("removing an encrypted-shaped link works by resending the exact original Li
 
     const encryptedData: EncryptedLinkData = { ciphertext: "aabb", nonce: "ccdd" };
     const link = await createSignedLink(agent, encryptedData);
+    (link as any).link_hash = "opaque-test-hash-2";
     await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [link], removals: [] }, token);
 
     const removeRes = await postJson<{ sequence: number }>(
@@ -167,5 +166,53 @@ test("removing an encrypted-shaped link works by resending the exact original Li
 
     const renderRes = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, token);
     assert.equal(renderRes.body.links.length, 0);
+  });
+});
+
+test("commit accepts fully-encrypted links (no author/timestamp/proof, only data+link_hash)", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const wireLink = {
+      data: { ciphertext: "deadbeef1234", nonce: "cafebabe5678" },
+      link_hash: "abc123def456",
+    };
+
+    const commitRes = await postJson<{ sequence: number; revision: string }>(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [wireLink], removals: [] },
+      token
+    );
+    assert.equal(commitRes.status, 200);
+    assert.equal(commitRes.body.sequence, 1);
+
+    const renderRes = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, token);
+    assert.equal(renderRes.status, 200);
+    assert.equal(renderRes.body.links.length, 1);
+    const stored = renderRes.body.links[0].data as EncryptedLinkData;
+    assert.equal(stored.ciphertext, "deadbeef1234");
+    assert.equal(stored.nonce, "cafebabe5678");
+  });
+});
+
+test("commit rejects encrypted links that lack a link_hash", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const wireLink = {
+      data: { ciphertext: "deadbeef", nonce: "cafebabe" },
+    };
+
+    const res = await postJson<{ error: string }>(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [wireLink], removals: [] },
+      token
+    );
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /link_hash/);
   });
 });

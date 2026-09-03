@@ -14,10 +14,8 @@ import {
     AES_KEY_BYTES,
     buildKeyRing,
     bytesToHex,
-    decodeSealedEnvelope,
     decryptLinkFromWire,
     deriveX25519KeyPair,
-    encodeSealedEnvelope,
     encryptLinkForWire,
     generateRoomKey,
     hexToBytes,
@@ -127,24 +125,6 @@ describe("encryption: sealRoomKeyForRecipient / openRoomKeyEnvelope", () => {
         assert.notDeepEqual(key, generateRoomKey());
     });
 
-    it("round-trips through the encodeSealedEnvelope wire framing", () => {
-        const recipient = deriveX25519KeyPair(mockSigner("did:key:zRecipient"));
-        const roomKey = generateRoomKey();
-
-        const envelope = sealRoomKeyForRecipient(roomKey, recipient.publicKey);
-        const encoded = encodeSealedEnvelope(envelope);
-        assert.equal(typeof encoded, "string");
-
-        const decoded = decodeSealedEnvelope(encoded);
-        assert.deepEqual(decoded, envelope);
-
-        const opened = openRoomKeyEnvelope(decoded, recipient.privateKey);
-        assert.deepEqual(opened, roomKey);
-    });
-
-    it("decodeSealedEnvelope rejects malformed input", () => {
-        assert.throws(() => decodeSealedEnvelope(Buffer.from(JSON.stringify({ nonce: "ab" })).toString("base64")));
-    });
 });
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ import type { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import {
   type FederateRequestBody,
+  isEncryptedLinkData,
   type LinkExpression,
   type ReconcileRequestBody,
   type RoomParams,
@@ -205,16 +206,22 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         if (!link || typeof link !== "object") {
           return reply.code(400).send({ error: "each link must be an object" });
         }
-        if (link.author !== claims.did) {
-          return reply
-            .code(400)
-            .send({ error: "every link's author must match the authenticated DID" });
-        }
-        if (typeof link.timestamp !== "string") {
-          return reply.code(400).send({ error: "each link must have a string timestamp" });
-        }
         if (!link.data || typeof link.data !== "object") {
           return reply.code(400).send({ error: "each link must have a data object" });
+        }
+        if (isEncryptedLinkData(link.data)) {
+          if (!link.link_hash || typeof link.link_hash !== "string") {
+            return reply.code(400).send({ error: "encrypted links must include a link_hash" });
+          }
+        } else {
+          if (link.author !== claims.did) {
+            return reply
+              .code(400)
+              .send({ error: "every link's author must match the authenticated DID" });
+          }
+          if (typeof link.timestamp !== "string") {
+            return reply.code(400).send({ error: "each link must have a string timestamp" });
+          }
         }
       }
 
