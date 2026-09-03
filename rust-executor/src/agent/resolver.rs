@@ -264,6 +264,8 @@ mod tests {
         let body = KeyEventBody::Delegate {
             key: full_key(&key_id1, &did1),
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = crate::agent::kel::KeyEvent::new(1, Some(ev0.hash.clone()), body, &key_id0, &kp0);
 
@@ -296,6 +298,8 @@ mod tests {
         let body1 = KeyEventBody::Delegate {
             key: full_key(&key_id_k, &did_k),
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 =
             crate::agent::kel::KeyEvent::new(1, Some(ev0.hash.clone()), body1, &key_id0, &kp0);
