@@ -13,7 +13,6 @@ use deno_core::error::AnyError;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tar::{Archive, Builder};
 

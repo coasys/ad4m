@@ -23,7 +23,12 @@ use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 // ── Helpers ──
 
-fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
+/// Async wrapper: `rehydrate_perspective_from_backend` calls
+/// `DbBackend::get`, which is a blocking `reqwest::blocking` HTTP call on
+/// `SharedDb`. Running it directly on the async request thread stalls the
+/// tokio runtime for the whole RPC round-trip. Wrap it in
+/// `spawn_blocking` so only a blocking-pool worker waits on the network.
+async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
     if let Some(p) = get_perspective(uuid) {
         return Ok(p);
     }
@@ -31,7 +36,12 @@ fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError>
     // Shared-backend fallback: try to rehydrate perspective from the platform DB
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
-        if let Ok(Some(perspective)) = rehydrate_perspective_from_backend(uuid) {
+        let uuid_owned = uuid.to_string();
+        let rehydrated =
+            tokio::task::spawn_blocking(move || rehydrate_perspective_from_backend(&uuid_owned))
+                .await
+                .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
+        if let Ok(Some(perspective)) = rehydrated {
             return Ok(perspective);
         }
     }
@@ -99,7 +109,7 @@ async fn get_perspective_with_access(
     uuid: &str,
     ctx: &RequestContext,
 ) -> Result<PerspectiveInstance, WsRpcError> {
-    let perspective = get_perspective_or_404(uuid)?;
+    let perspective = get_perspective_or_404(uuid).await?;
 
     if !ctx.is_admin_credential {
         let handle = perspective.persisted.lock().await.clone();
@@ -208,20 +218,29 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    // In shared mode, rehydrate any backend perspectives not yet loaded locally
+    // In shared mode, rehydrate any backend perspectives not yet loaded
+    // locally. Both `DbBackend::list` (network) and
+    // `rehydrate_perspective_from_backend` (network + DB writes) are
+    // synchronous blocking calls; running them on the async request
+    // thread stalls the tokio runtime while a slow platform Worker
+    // responds. Wrap the whole scan in `spawn_blocking`.
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
-        let backend = crate::db_backend::db_backend();
-        if let Ok(remote_perspectives) = backend.list("shared:platform", "perspectives") {
-            for meta in remote_perspectives {
-                if let Some(uuid) = meta.get("uuid").and_then(|u| u.as_str()) {
-                    // Only rehydrate if not already loaded
-                    if crate::perspectives::get_perspective(uuid).is_none() {
-                        let _ = rehydrate_perspective_from_backend(uuid);
+        tokio::task::spawn_blocking(|| {
+            let backend = crate::db_backend::db_backend();
+            if let Ok(remote_perspectives) = backend.list("shared:platform", "perspectives") {
+                for meta in remote_perspectives {
+                    if let Some(uuid) = meta.get("uuid").and_then(|u| u.as_str()) {
+                        // Only rehydrate if not already loaded
+                        if crate::perspectives::get_perspective(uuid).is_none() {
+                            let _ = rehydrate_perspective_from_backend(uuid);
+                        }
                     }
                 }
             }
-        }
+        })
+        .await
+        .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
     }
 
     let all: Vec<PerspectiveInstance> = crate::perspectives::all_perspectives();
