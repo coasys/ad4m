@@ -215,6 +215,47 @@ pub(crate) async fn write_flow_transition_proposal(
     Ok(uri)
 }
 
+/// Advance a `FlowInstance` to `to_state` — the one mutation the consensus
+/// firing path (`flow_consensus::fire_flow_consensus`) performs. Ported from
+/// the `feature/flow-mutations` branch unchanged.
+///
+/// An empty `to_state` is rejected up front: it would violate the
+/// `currentState` `min_count=1` SHACL constraint on write.
+pub(crate) async fn advance_flow_instance_state(
+    perspective: &mut PerspectiveInstance,
+    flow_instance_uri: &str,
+    to_state: &str,
+    batch_id: Option<String>,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    if to_state.is_empty() {
+        return Err(anyhow::anyhow!(
+            "advance_flow_instance_state: to_state must not be empty (would violate FlowInstance.currentState min_count=1)"
+        ));
+    }
+    ensure_flow_model_classes(perspective, context).await?;
+
+    // Property key must exactly match the SDNA `name` field (`currentState`,
+    // not `current_state`).
+    let values = serde_json::json!({ "currentState": to_state });
+    perspective
+        .update_subject(
+            SubjectClassOption {
+                class_name: Some(FLOW_INSTANCE_CLASS.to_string()),
+                query: None,
+            },
+            flow_instance_uri.to_string(),
+            values,
+            batch_id,
+            context,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("advance_flow_instance_state: update_subject failed: {e:#}")
+        })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
