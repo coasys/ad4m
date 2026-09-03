@@ -12,7 +12,7 @@ use super::model_query::types::ModelShape;
 use super::perspective_instance::PerspectiveInstance;
 use super::shacl_parser::parse_flow_to_links;
 use crate::agent::AgentContext;
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::types::{LinkQuery, LinkStatus};
 use std::collections::HashMap;
 
 const FLOW_URI: &str = "delivery://DeliveryFlow";
@@ -31,9 +31,16 @@ fn literal(s: &str) -> String {
 
 /// Two-state Delivery flow (`identified → scoped`) whose `scoped` state
 /// requires at least one `ns://Task`, plus one FlowInstance sitting in
-/// `identified`. The `requires` link is added by hand because
-/// `parse_flow_to_links` does not emit it yet.
+/// `identified`. `requires` is declared on the flow JSON so
+/// `parse_flow_to_links` emits the production `ad4m://requires` link.
 async fn seed_delivery_fixture() -> Fixture {
+    seed_delivery_fixture_with_requires(serde_json::json!([
+        { "className": "ns://Task", "count": { "min": 1 } }
+    ]))
+    .await
+}
+
+async fn seed_delivery_fixture_with_requires(requires: serde_json::Value) -> Fixture {
     let (mut perspective, mut shapes, ctx) =
         setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
 
@@ -42,19 +49,14 @@ async fn seed_delivery_fixture() -> Fixture {
         "namespace": "delivery://",
         "states": [
             { "name": "identified", "value": 0.0 },
-            { "name": "scoped", "value": 0.5 }
+            { "name": "scoped", "value": 0.5, "requires": requires }
         ],
         "transitions": [
             { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
         ],
     })
     .to_string();
-    let mut links = parse_flow_to_links(&flow_json, "Delivery").expect("parse_flow_to_links");
-    links.push(Link {
-        source: "delivery://Delivery.scoped".to_string(),
-        predicate: Some("ad4m://requires".to_string()),
-        target: literal(r#"[{"className":"ns://Task","count":{"min":1}}]"#),
-    });
+    let links = parse_flow_to_links(&flow_json, "Delivery").expect("parse_flow_to_links");
     for link in links {
         perspective
             .add_link(link, LinkStatus::Local, None, &ctx)
@@ -146,7 +148,7 @@ async fn evaluate_flow_transitions_e2e() {
     assert_eq!(
         scoped.requires.as_ref().map(|r| r[0].class_name.as_str()),
         Some("ns://Task"),
-        "hand-seeded requires link must round-trip through the flow reader"
+        "requires declared on the flow JSON must round-trip through parse_flow_to_links"
     );
 
     assert!(f.satisfied().await.is_empty(), "no Task yet → guard unmet");
@@ -166,6 +168,28 @@ async fn evaluate_flow_transitions_e2e() {
         t.evidence_hash,
         evidence_hash(&["ns://Task".to_string()], &t.evidence_ids)
     );
+}
+
+/// A non-empty `where` must survive translation into a shape `model_query`
+/// actually deserialises — the original Matches/Exists bug was a unit test
+/// asserting emitted JSON, not that `ModelQueryInput` accepted it.
+#[tokio::test(flavor = "multi_thread")]
+async fn evaluate_flow_transitions_where_equals_e2e() {
+    let mut f = seed_delivery_fixture_with_requires(serde_json::json!([
+        { "className": "ns://Task", "where": { "title": "Onboard Ana" }, "count": { "min": 1 } }
+    ]))
+    .await;
+
+    f.seed_task("ad4m://task/2", "Onboard Bo").await;
+    assert!(
+        f.satisfied().await.is_empty(),
+        "wrong title must not satisfy the guard"
+    );
+
+    f.seed_task("ad4m://task/1", "Onboard Ana").await;
+    let after = f.satisfied().await;
+    assert_eq!(after.len(), 1, "got {after:?}");
+    assert_eq!(after[0].evidence_ids, vec!["ad4m://task/1".to_string()]);
 }
 
 /// Two Tasks so the `evidence` collection has more than one element: the
