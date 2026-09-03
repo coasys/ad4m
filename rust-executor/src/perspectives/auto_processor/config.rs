@@ -488,7 +488,7 @@ pub async fn load_processors(
     let query = serde_json::json!({
         "properties": [
             "processorId", "sourceScopeQuery", "basePrefix",
-            "interpretationClasses", "debounceMs", "batchMin", "batchMax",
+            "interpretationClasses", "flows", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
             "existingScope", "mintScope", "maxToolCalls", "emitDebugEvents",
         ]
