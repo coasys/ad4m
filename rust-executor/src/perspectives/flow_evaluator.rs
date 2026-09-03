@@ -17,13 +17,15 @@
 //!
 //! String values in `where` are substituted at evaluation time:
 //! `$flow.base` → the instance's subject, `$flow.uri` / `$flow.instance`
-//! → the instance URI, `$did` → the acting DID.
+//! → the instance URI, `$did` → the acting DID. `linkedTo` compiles to a
+//! `parent` scope; the `"base"`/`"flow"` shorthand uses
+//! `ad4m://has_child`, and `{ via, to }` names the predicate.
 //!
 //! Every failure here is a skip, never an error: a broken flow
 //! definition, an unregistered class or a transient query failure drops
 //! one transition and the extraction pass carries on. Untranslatable
-//! guards (`exists`/`matches`, a colliding `didProperty`) log at warn —
-//! they will never start working on retry.
+//! guards (`exists`/`matches`, a colliding `didProperty`, a malformed
+//! `linkedTo`) log at warn — they will never start working on retry.
 
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::write_flow_transition_proposal;
@@ -82,6 +84,11 @@ fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool
     }
 }
 
+/// Default collection predicate used when `linkedTo` is the `"base"` /
+/// `"flow"` shorthand. Authors who need a different edge write
+/// `{ via, to }` instead.
+const LINKED_TO_DEFAULT_PREDICATE: &str = "ad4m://has_child";
+
 /// Substitute `$flow.base`, `$flow.uri` / `$flow.instance`, and `$did`
 /// in a `where` string. Empty fields are left verbatim so a missing
 /// subject cannot collapse the token into `""`.
@@ -115,7 +122,8 @@ fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str)
 
 /// Translate a flow-side `ModelQuery` into the JSON input `model_query`
 /// accepts. `didProperty` becomes `where.<prop> = acting_did`; `or`
-/// alternatives become an `OR` list of sub-clauses.
+/// alternatives become an `OR` list of sub-clauses; `linkedTo` becomes
+/// a `parent` scope.
 ///
 /// Scalars, `equals` and `in` map directly onto `WhereCondition`.
 /// `exists` and `matches` have no `model_query` counterpart yet, so a
@@ -126,19 +134,26 @@ fn requires_query_input(
     record: &FlowInstanceRecord,
     acting_did: &str,
 ) -> Result<Value> {
-    let where_clause = requires_where(query, record, acting_did)?;
-    Ok(if where_clause.is_empty() {
-        json!({})
-    } else {
-        json!({ "where": where_clause })
-    })
+    let where_clause = requires_where(query, record, acting_did, false)?;
+    let mut out = Map::new();
+    if !where_clause.is_empty() {
+        out.insert("where".into(), Value::Object(where_clause));
+    }
+    if let Some(linked) = &query.linked_to {
+        out.insert("parent".into(), linked_to_parent(linked, record)?);
+    }
+    Ok(Value::Object(out))
 }
 
 fn requires_where(
     query: &ModelQuery,
     record: &FlowInstanceRecord,
     acting_did: &str,
+    nested: bool,
 ) -> Result<Map<String, Value>> {
+    if nested && query.linked_to.is_some() {
+        bail!("`linkedTo` on an `or` branch is not supported by model_query");
+    }
     let mut out = Map::new();
     for (field, cond) in query.r#where.iter().flatten() {
         out.insert(
@@ -155,7 +170,7 @@ fn requires_where(
     if let Some(alts) = query.or.as_ref().filter(|a| !a.is_empty()) {
         let branches = alts
             .iter()
-            .map(|alt| requires_where(alt, record, acting_did).map(Value::Object))
+            .map(|alt| requires_where(alt, record, acting_did, true).map(Value::Object))
             .collect::<Result<Vec<_>>>()?;
         out.insert("OR".to_string(), Value::Array(branches));
     }
@@ -186,6 +201,37 @@ fn where_condition(
             bail!("`{field}`: `matches` is not supported by model_query")
         }
     })
+}
+
+fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value> {
+    let (id, predicate) = match linked {
+        Value::String(s) => {
+            let id = match s.as_str() {
+                "base" => record.subject.as_str(),
+                "flow" => record.instance_uri.as_str(),
+                other => bail!("`linkedTo` `{other}` is not `base` or `flow`"),
+            };
+            (id, LINKED_TO_DEFAULT_PREDICATE)
+        }
+        Value::Object(obj) => {
+            let via = obj
+                .get("via")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("`linkedTo` object needs a string `via` predicate"))?;
+            let to = obj
+                .get("to")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("`linkedTo` object needs `to` of `base` or `flow`"))?;
+            let id = match to {
+                "base" => record.subject.as_str(),
+                "flow" => record.instance_uri.as_str(),
+                other => bail!("`linkedTo.to` `{other}` is not `base` or `flow`"),
+            };
+            (id, via)
+        }
+        _ => bail!("`linkedTo` must be \"base\", \"flow\", or {{ via, to }}"),
+    };
+    Ok(json!({ "id": id, "predicate": predicate }))
 }
 
 /// The one perspective call the evaluator needs, behind a trait so the
@@ -604,6 +650,39 @@ mod tests {
     }
 
     #[test]
+    fn query_input_compiles_linked_to_into_parent_scope() {
+        let rec = inst();
+        let mut base = mq("ns://T");
+        base.linked_to = Some(json!("base"));
+        assert_eq!(
+            requires_query_input(&base, &rec, "did:key:x").unwrap(),
+            json!({ "parent": {
+                "id": "ad4m://task/onboarding",
+                "predicate": "ad4m://has_child",
+            }})
+        );
+        let mut flow = mq("ns://T");
+        flow.linked_to = Some(json!({ "via": "ns://about", "to": "flow" }));
+        assert_eq!(
+            requires_query_input(&flow, &rec, "did:key:x").unwrap(),
+            json!({ "parent": {
+                "id": "ad4m://flow/instance/1",
+                "predicate": "ns://about",
+            }})
+        );
+        let mut bad = mq("ns://T");
+        bad.linked_to = Some(json!(42));
+        assert!(requires_query_input(&bad, &rec, "did:key:x").is_err());
+        let mut nested = mq("ns://T");
+        nested.or = Some(vec![{
+            let mut branch = mq("ns://T");
+            branch.linked_to = Some(json!("base"));
+            branch
+        }]);
+        assert!(requires_query_input(&nested, &rec, "did:key:x").is_err());
+    }
+
+    #[test]
     fn query_input_deserialises_as_model_query_input() {
         let mut q = with_where(
             mq("ns://T"),
@@ -624,10 +703,12 @@ mod tests {
             ],
         );
         q.did_property = Some("author".into());
+        q.linked_to = Some(json!({ "via": "ns://about", "to": "base" }));
         let value = qin(&q, "did:key:acting");
         let parsed: crate::perspectives::model_query::ModelQueryInput =
             serde_json::from_value(value).expect("translated JSON must be a ModelQueryInput");
         assert!(parsed.where_clause.is_some());
+        assert!(parsed.parent.is_some());
     }
 
     /// Canned `model_query` keyed by class name; records every call.
