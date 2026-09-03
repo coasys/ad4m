@@ -45,6 +45,12 @@ fn clean_llm_json(raw: &str) -> String {
     // Prefer a strict parse from the first `[` so prose after the JSON is
     // dropped; fall back to the greedy bracket span when the JSON is not
     // valid on its own (trailing commas are repaired below).
+    //
+    // Trying the array FIRST is what makes the greedy fallbacks safe: a
+    // bracket that only occurs in prose can no longer short-circuit the
+    // chain ahead of the real payload, because the real payload's `[` is
+    // always consulted before any `{`-span. See the
+    // `prose_braces_before_the_real_array_*` regression test.
     let extracted = extract_first_json_value(candidate, '[')
         .or_else(|| extract_bracketed(candidate, '[', ']'))
         .or_else(|| extract_bracketed(candidate, '{', '}'))
@@ -172,6 +178,19 @@ mod tests {
         let out = parse_interpretation_response(raw).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn prose_braces_before_the_real_array_dont_swallow_the_payload() {
+        // Brace-prose before the array: the array-first chain must not let the
+        // `{a couple of things}` span become the payload. Under an
+        // object-first ordering the greedy `{`-matcher would short-circuit
+        // here and the real payload would never be tried.
+        let raw = r#"OK, I'll extract {a couple of things}: [{"class":"Task","title":"A"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class, "Task");
+        assert_eq!(prop_values(&out, "title"), vec!["A"]);
     }
 
     #[test]
