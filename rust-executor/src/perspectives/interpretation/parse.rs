@@ -104,9 +104,23 @@ fn clean_llm_json(raw: &str) -> String {
             }
         }
     }
-    let extracted = top_level_starts
+    // Among the strict-parsing candidates, prefer the first that has the
+    // SHAPE of an interpretation payload (an array, or an object with an
+    // `instances` key): a model may emit an unrelated-but-valid JSON object
+    // in its prose before the real payload, and taking it just because it
+    // parses would fail the semantic parse (`missing field instances`) and
+    // burn a retry while the real payload sits ignored right behind it.
+    // When no candidate has the shape, keep the first valid one — the
+    // semantic parse then reports the mismatch exactly as before.
+    let strict_candidates: Vec<String> = top_level_starts
         .iter()
-        .find_map(|&i| extract_first_json_value(candidate, i))
+        .filter_map(|&i| extract_first_json_value(candidate, i))
+        .collect();
+    let extracted = strict_candidates
+        .iter()
+        .find(|c| looks_like_interpretation_payload(c))
+        .or_else(|| strict_candidates.first())
+        .cloned()
         .or_else(|| extract_bracketed(candidate, '[', ']'))
         .or_else(|| extract_bracketed(candidate, '{', '}'))
         .unwrap_or_else(|| candidate.to_string());
@@ -115,6 +129,17 @@ fn clean_llm_json(raw: &str) -> String {
     //    now scoped to the extracted JSON. Skips commas inside string literals
     //    so values like "a, }" survive.
     strip_trailing_commas(&extracted)
+}
+
+/// Structural (not semantic) payload check used to rank strict candidates:
+/// an array, or an object carrying an `instances` key. Cheap by design —
+/// full deserialization stays in `parse_interpretation_output`.
+fn looks_like_interpretation_payload(candidate: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(candidate) {
+        Ok(serde_json::Value::Array(_)) => true,
+        Ok(serde_json::Value::Object(map)) => map.contains_key("instances"),
+        _ => false,
+    }
 }
 
 /// Strictly parse one JSON value starting at `start` and return exactly its
@@ -246,6 +271,27 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].class, "Task");
         assert_eq!(prop_values(&out, "title"), vec!["A"]);
+    }
+
+    #[test]
+    fn unrelated_valid_json_before_the_real_payload_is_skipped() {
+        // A syntactically valid but unrelated object in the prose must not
+        // win just because it parses: the scan prefers the first candidate
+        // shaped like a payload (array, or object with `instances`).
+        let raw = r#"Config used: {"model": "gemma3", "temp": 0.2}. Result: {"instances":[{"class":"Task","title":"A"}],"flow_proposals":[]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+
+        // Same with a bare-array payload after an unrelated object.
+        let raw = r#"Notes: {"irrelevant": true} then [{"class":"Task","title":"B"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(prop_values(&out, "title"), vec!["B"]);
+
+        // No payload-shaped candidate at all: first valid value is still
+        // taken and the semantic parse reports the mismatch (old behaviour).
+        assert!(parse_interpretation_output(r#"Just: {"note": "hi"}"#).is_err());
     }
 
     #[test]
