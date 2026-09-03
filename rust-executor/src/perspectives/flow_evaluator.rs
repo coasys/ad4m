@@ -15,6 +15,10 @@
 //! order-independent SHA256 in [`evidence_hash`] so a later verification
 //! can detect evidence that no longer resolves.
 //!
+//! String values in `where` are substituted at evaluation time:
+//! `$flow.base` → the instance's subject, `$flow.uri` / `$flow.instance`
+//! → the instance URI, `$did` → the acting DID.
+//!
 //! Every failure here is a skip, never an error: a broken flow
 //! definition, an unregistered class or a transient query failure drops
 //! one transition and the extraction pass carries on. Untranslatable
@@ -78,6 +82,37 @@ fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool
     }
 }
 
+/// Substitute `$flow.base`, `$flow.uri` / `$flow.instance`, and `$did`
+/// in a `where` string. Empty fields are left verbatim so a missing
+/// subject cannot collapse the token into `""`.
+fn substitute_tokens(s: &str, record: &FlowInstanceRecord, acting_did: &str) -> String {
+    let mut out = s.to_string();
+    if !record.subject.is_empty() {
+        out = out.replace("$flow.base", &record.subject);
+    }
+    if !record.instance_uri.is_empty() {
+        out = out.replace("$flow.uri", &record.instance_uri);
+        out = out.replace("$flow.instance", &record.instance_uri);
+    }
+    if !acting_did.is_empty() {
+        out = out.replace("$did", acting_did);
+    }
+    out
+}
+
+fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str) -> Value {
+    match value {
+        Value::String(s) => Value::String(substitute_tokens(s, record, acting_did)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|v| substitute_json(v, record, acting_did))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Translate a flow-side `ModelQuery` into the JSON input `model_query`
 /// accepts. `didProperty` becomes `where.<prop> = acting_did`; `or`
 /// alternatives become an `OR` list of sub-clauses.
@@ -86,8 +121,12 @@ fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool
 /// `exists` and `matches` have no `model_query` counterpart yet, so a
 /// guard using them fails translation and is skipped instead of being
 /// evaluated against a wrong query.
-fn requires_query_input(query: &ModelQuery, acting_did: &str) -> Result<Value> {
-    let where_clause = requires_where(query, acting_did)?;
+fn requires_query_input(
+    query: &ModelQuery,
+    record: &FlowInstanceRecord,
+    acting_did: &str,
+) -> Result<Value> {
+    let where_clause = requires_where(query, record, acting_did)?;
     Ok(if where_clause.is_empty() {
         json!({})
     } else {
@@ -95,10 +134,17 @@ fn requires_query_input(query: &ModelQuery, acting_did: &str) -> Result<Value> {
     })
 }
 
-fn requires_where(query: &ModelQuery, acting_did: &str) -> Result<Map<String, Value>> {
+fn requires_where(
+    query: &ModelQuery,
+    record: &FlowInstanceRecord,
+    acting_did: &str,
+) -> Result<Map<String, Value>> {
     let mut out = Map::new();
     for (field, cond) in query.r#where.iter().flatten() {
-        out.insert(field.clone(), where_condition(field, cond)?);
+        out.insert(
+            field.clone(),
+            where_condition(field, cond, record, acting_did)?,
+        );
     }
     if let Some(prop) = &query.did_property {
         if out.contains_key(prop) {
@@ -109,20 +155,30 @@ fn requires_where(query: &ModelQuery, acting_did: &str) -> Result<Map<String, Va
     if let Some(alts) = query.or.as_ref().filter(|a| !a.is_empty()) {
         let branches = alts
             .iter()
-            .map(|alt| requires_where(alt, acting_did).map(Value::Object))
+            .map(|alt| requires_where(alt, record, acting_did).map(Value::Object))
             .collect::<Result<Vec<_>>>()?;
         out.insert("OR".to_string(), Value::Array(branches));
     }
     Ok(out)
 }
 
-fn where_condition(field: &str, cond: &PropertyCondition) -> Result<Value> {
+fn where_condition(
+    field: &str,
+    cond: &PropertyCondition,
+    record: &FlowInstanceRecord,
+    acting_did: &str,
+) -> Result<Value> {
     Ok(match cond {
-        PropertyCondition::Str(s) => json!(s),
+        PropertyCondition::Str(s) => json!(substitute_tokens(s, record, acting_did)),
         PropertyCondition::Num(n) => json!(n),
         PropertyCondition::Bool(b) => json!(b),
-        PropertyCondition::Equals { equals } => equals.clone(),
-        PropertyCondition::In { one_of } => Value::Array(one_of.clone()),
+        PropertyCondition::Equals { equals } => substitute_json(equals, record, acting_did),
+        PropertyCondition::In { one_of } => Value::Array(
+            one_of
+                .iter()
+                .map(|v| substitute_json(v, record, acting_did))
+                .collect(),
+        ),
         PropertyCondition::Exists { .. } => {
             bail!("`{field}`: `exists` is not supported by model_query")
         }
@@ -183,12 +239,13 @@ async fn run_query<Q: RequiresQueryable + ?Sized>(
 async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     requires: &[ModelQuery],
+    record: &FlowInstanceRecord,
     acting_did: &str,
 ) -> RequiresResult {
     let mut class_names: Vec<String> = Vec::new();
     let mut evidence_ids: Vec<String> = Vec::new();
     for query in requires {
-        let input = match requires_query_input(query, acting_did) {
+        let input = match requires_query_input(query, record, acting_did) {
             Ok(v) => v,
             Err(e) => return RequiresResult::Untranslatable(e),
         };
@@ -231,7 +288,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
             if requires.is_empty() {
                 continue;
             }
-            match evaluate_requires(perspective, requires, acting_did).await {
+            match evaluate_requires(perspective, requires, record, acting_did).await {
                 RequiresResult::Satisfied(class_names, evidence_ids) => {
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
@@ -372,6 +429,20 @@ mod tests {
         Some(ModelQueryCount { min, max })
     }
 
+    fn inst() -> FlowInstanceRecord {
+        FlowInstanceRecord {
+            flow_uri: "delivery://DeliveryFlow".into(),
+            instance_uri: "ad4m://flow/instance/1".into(),
+            subject: "ad4m://task/onboarding".into(),
+            current_state: "identified".into(),
+            created_at: None,
+        }
+    }
+
+    fn qin(q: &ModelQuery, did: &str) -> Value {
+        requires_query_input(q, &inst(), did).unwrap()
+    }
+
     #[test]
     fn evidence_hash_is_order_independent_and_content_sensitive() {
         let classes = vec!["ns://A".to_string()];
@@ -404,7 +475,7 @@ mod tests {
     #[test]
     fn query_input_translates_scalars_operators_and_did_property() {
         assert_eq!(
-            requires_query_input(&mq("ns://T"), "did:key:x").unwrap(),
+            qin(&mq("ns://T"), "did:key:x"),
             json!({}),
             "bare class → no filter"
         );
@@ -430,7 +501,7 @@ mod tests {
         );
         q.did_property = Some("author".into());
         assert_eq!(
-            requires_query_input(&q, "did:key:acting").unwrap(),
+            qin(&q, "did:key:acting"),
             json!({ "where": {
                 "state": "done",
                 "priority": 3.0,
@@ -458,7 +529,7 @@ mod tests {
         );
         outer.or = Some(vec![leaf("owner"), inner]);
         assert_eq!(
-            requires_query_input(&outer, "did:key:x").unwrap(),
+            qin(&outer, "did:key:x"),
             json!({ "where": {
                 "channel": "c",
                 "OR": [ { "role": "owner" }, { "OR": [ { "role": "admin" } ] } ],
@@ -466,10 +537,7 @@ mod tests {
         );
         let mut empty_or = mq("ns://M");
         empty_or.or = Some(vec![]);
-        assert_eq!(
-            requires_query_input(&empty_or, "did:key:x").unwrap(),
-            json!({})
-        );
+        assert_eq!(qin(&empty_or, "did:key:x"), json!({}));
     }
 
     #[test]
@@ -478,7 +546,7 @@ mod tests {
             mq("ns://T"),
             vec![("deletedAt", PropertyCondition::Exists { exists: false })],
         );
-        assert!(requires_query_input(&exists, "did:key:x").is_err());
+        assert!(requires_query_input(&exists, &inst(), "did:key:x").is_err());
         let matches = with_where(
             mq("ns://T"),
             vec![(
@@ -488,7 +556,40 @@ mod tests {
                 },
             )],
         );
-        assert!(requires_query_input(&matches, "did:key:x").is_err());
+        assert!(requires_query_input(&matches, &inst(), "did:key:x").is_err());
+    }
+
+    #[test]
+    fn query_input_substitutes_flow_and_did_tokens() {
+        let rec = inst();
+        let q = with_where(
+            mq("ns://T"),
+            vec![
+                ("about", PropertyCondition::Str("$flow.base".into())),
+                (
+                    "on",
+                    PropertyCondition::Equals {
+                        equals: json!("$flow.uri"),
+                    },
+                ),
+                (
+                    "alsoOn",
+                    PropertyCondition::In {
+                        one_of: vec![json!("$flow.instance"), json!("other")],
+                    },
+                ),
+                ("author", PropertyCondition::Str("$did".into())),
+            ],
+        );
+        assert_eq!(
+            requires_query_input(&q, &rec, "did:key:acting").unwrap(),
+            json!({ "where": {
+                "about": "ad4m://task/onboarding",
+                "on": "ad4m://flow/instance/1",
+                "alsoOn": ["ad4m://flow/instance/1", "other"],
+                "author": "did:key:acting",
+            }})
+        );
     }
 
     #[test]
@@ -498,8 +599,35 @@ mod tests {
             vec![("author", PropertyCondition::Str("alice".into()))],
         );
         q.did_property = Some("author".into());
-        let err = requires_query_input(&q, "did:key:x").unwrap_err();
+        let err = requires_query_input(&q, &inst(), "did:key:x").unwrap_err();
         assert!(err.to_string().contains("collides"), "got {err:#}");
+    }
+
+    #[test]
+    fn query_input_deserialises_as_model_query_input() {
+        let mut q = with_where(
+            mq("ns://T"),
+            vec![
+                ("title", PropertyCondition::Str("Onboard Ana".into())),
+                (
+                    "owner",
+                    PropertyCondition::Equals {
+                        equals: json!("alice"),
+                    },
+                ),
+                (
+                    "tag",
+                    PropertyCondition::In {
+                        one_of: vec![json!("a"), json!("b")],
+                    },
+                ),
+            ],
+        );
+        q.did_property = Some("author".into());
+        let value = qin(&q, "did:key:acting");
+        let parsed: crate::perspectives::model_query::ModelQueryInput =
+            serde_json::from_value(value).expect("translated JSON must be a ModelQueryInput");
+        assert!(parsed.where_clause.is_some());
     }
 
     /// Canned `model_query` keyed by class name; records every call.
