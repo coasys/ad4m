@@ -423,6 +423,8 @@ impl Ad4mMcpHandler {
         perspective_id: &str,
         required_capability: &crate::agent::capabilities::Capability,
     ) -> Result<(PerspectiveInstance, AgentContext), String> {
+        // Lazy loading: ensure the perspective store has been hydrated.
+        crate::perspectives::ensure_hydrated(perspective_id).await;
         let perspective = get_perspective(perspective_id).ok_or_else(|| {
             json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
         })?;
@@ -466,6 +468,8 @@ impl Ad4mMcpHandler {
                 .map_err(|e| json!({"error": e}).to_string())?;
         }
 
+        // Lazy loading: ensure the perspective store has been hydrated.
+        crate::perspectives::ensure_hydrated(perspective_id).await;
         let perspective = get_perspective(perspective_id).ok_or_else(|| {
             json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
         })?;

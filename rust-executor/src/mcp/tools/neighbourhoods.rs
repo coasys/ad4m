@@ -258,6 +258,8 @@ impl Ad4mMcpHandler {
             return format!("Capability error: {}", e);
         }
 
+        // Lazy loading: ensure the perspective store has been hydrated.
+        crate::perspectives::ensure_hydrated(&p.perspective_uuid).await;
         // Check perspective access
         let perspective = match crate::perspectives::get_perspective(&p.perspective_uuid) {
             Some(p) => p,

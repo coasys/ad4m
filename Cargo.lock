@@ -61,6 +61,7 @@ version = "0.13.0-test-interpretation-2"
 dependencies = [
  "ad4m-client",
  "anyhow",
+ "arc-swap",
  "argon2 0.5.3",
  "async-trait",
  "aws-lc-sys 0.35.0",
@@ -87,6 +88,7 @@ dependencies = [
  "dirs 5.0.1",
  "env_logger 0.10.2",
  "fake",
+ "flate2",
  "fs_extra",
  "futures",
  "futures-channel",
@@ -142,6 +144,7 @@ dependencies = [
  "signal-hook",
  "sodoken",
  "sys_traits",
+ "tar",
  "tempfile",
  "thiserror 2.0.20",
  "tikv-jemalloc-ctl",

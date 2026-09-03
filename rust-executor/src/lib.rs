@@ -333,7 +333,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     }
 
     // Initialise the database backend.
-    // "shared" mode delegates to the platform Worker's internal DB API;
+    // Multi-tenant mode delegates to the remote DB API;
     // everything else uses the in-process Ad4mDb (LocalDb).
     {
         use std::sync::Arc;
@@ -358,21 +358,26 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         crate::db_backend::init_db_backend(backend);
     }
 
-    // Restore perspective data from the platform backend if running in shared mode.
-    // Downloads the tar.gz snapshot and extracts to the data directory
-    // before perspectives initialise (so OxiGraph opens with restored data).
+    // Restore perspective data from the remote snapshot backend in multi-tenant mode.
+    //
+    // Lazy mode: download the manifest only. Individual archives get fetched
+    // on demand when each perspective hydrates (first user access). This lets
+    // the executor report /health ready before downloading large stores.
     if config.wallet_backend.as_deref() == Some("shared") {
-        match crate::perspective_snapshot::restore_perspectives(&config) {
-            Ok(true) => info!("Restored perspectives from remote snapshot"),
-            Ok(false) => info!("No remote snapshot found — starting with fresh perspectives"),
-            Err(e) => log::warn!("Perspective restore failed (continuing without): {}", e),
+        match crate::perspective_snapshot::restore_perspectives_lazy(&config) {
+            Ok(true) => info!("Loaded snapshot manifest (lazy — archives download on demand)"),
+            Ok(false) => info!("No remote snapshot manifest — starting with fresh perspectives"),
+            Err(e) => log::warn!(
+                "Perspective manifest load failed (continuing without): {}",
+                e
+            ),
         }
     }
 
     // ── Token separation assertion ──────────────────────────────────────
     // internal_api_token (executor → Worker) must differ from admin_credential
     // (client → executor) to maintain trust boundary separation. Same value
-    // means compromise of any admin-capable client leaks platform-internal auth.
+    // means compromise of any admin-capable client leaks backend-internal auth.
     if config.wallet_backend.as_deref() == Some("shared") {
         if let (Some(internal), Some(admin)) =
             (&config.internal_api_token, &config.admin_credential)

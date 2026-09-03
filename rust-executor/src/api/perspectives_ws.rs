@@ -28,7 +28,7 @@ fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError>
         return Ok(p);
     }
 
-    // Shared-backend fallback: try to rehydrate perspective from the platform DB
+    // Multi-tenant fallback: try to rehydrate perspective from the remote DB backend
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
         if let Ok(Some(perspective)) = rehydrate_perspective_from_backend(uuid) {
@@ -108,6 +108,13 @@ async fn get_perspective_with_access(
                 "Access denied: You don't have permission to access this perspective",
             ));
         }
+    }
+
+    // Lazy loading: hydrate deferred perspectives on first access.
+    // Downloads the archive from the remote snapshot backend, opens the persistent
+    // SPARQL store, runs migrations, and starts background tasks.
+    if !perspective.is_hydrated() {
+        perspective.hydrate().await;
     }
 
     Ok(perspective)
