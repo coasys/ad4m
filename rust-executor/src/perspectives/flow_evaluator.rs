@@ -31,7 +31,7 @@ use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::write_flow_transition_proposal;
 use crate::perspectives::flow_context::{
     load_all_flow_instances, load_flow_instances, load_shacl_flows, reachable_next_states,
-    scope_subject, FlowInstanceRecord,
+    scope_subject, FlowInstanceRecord, FlowTokens,
 };
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::model_query::ModelQueryInput;
@@ -91,21 +91,15 @@ fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool
 const LINKED_TO_DEFAULT_PREDICATE: &str = "ad4m://has_child";
 
 /// Substitute `$flow.base`, `$flow.uri` / `$flow.instance`, and `$did`
-/// in a `where` string. Empty fields are left verbatim so a missing
-/// subject cannot collapse the token into `""`.
+/// in a `where` string. Delegates to [`FlowTokens::substitute`] — the
+/// single definition of the token set.
 fn substitute_tokens(s: &str, record: &FlowInstanceRecord, acting_did: &str) -> String {
-    let mut out = s.to_string();
-    if !record.subject.is_empty() {
-        out = out.replace("$flow.base", &record.subject);
-    }
-    if !record.instance_uri.is_empty() {
-        out = out.replace("$flow.uri", &record.instance_uri);
-        out = out.replace("$flow.instance", &record.instance_uri);
-    }
-    if !acting_did.is_empty() {
-        out = out.replace("$did", acting_did);
-    }
-    out
+    let tokens = FlowTokens {
+        subject: &record.subject,
+        instance_uri: &record.instance_uri,
+        did: acting_did,
+    };
+    tokens.substitute(s)
 }
 
 fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str) -> Value {

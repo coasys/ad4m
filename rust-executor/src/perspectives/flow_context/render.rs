@@ -17,76 +17,86 @@ use crate::perspectives::shacl_parser::{
 
 /// Substitution context for flow tokens in `ModelQuery` values. Flow
 /// definitions embed [`FLOW_BASE_TOKEN`] (the item the flow is anchored
-/// to) and [`FLOW_INSTANCE_TOKEN`] (the specific `FlowInstance` URI) in
+/// to), [`FLOW_INSTANCE_TOKEN`] / [`FLOW_URI_TOKEN`] (the specific
+/// `FlowInstance` URI), and [`DID_TOKEN`] (the acting agent's DID) in
 /// `where` clauses. Without substitution the LLM sees them verbatim,
 /// e.g. `where forTask = "$flow.base"` — no signal to the extractor.
 ///
 /// `subject` and `instance_uri` are typically taken from the enclosing
-/// [`FlowContext`]. `FlowTokens::none()` skips both substitutions;
-/// callers that render outside a flow instance context (unit tests,
-/// generic prompt scaffolding) use it to keep behaviour byte-identical
-/// to pre-substitution renderings.
-// Forward-staging for the post-LLM substitution engine (slice 10.6+):
-// the prompt path today preserves `$flow.base`/`$flow.instance` verbatim
-// so the LLM sees the tokens (per the J#4 revert to the legend
-// approach); this substitution helper is where the engine will resolve
-// them post-parse. Kept behind `#[allow(dead_code)]` so it's visible in
-// the public API for tests and so `flow_arc slice 10.6c` doesn't have
-// to reintroduce it — but doesn't add a warning today.
-#[allow(dead_code)]
+/// [`FlowContext`]; `did` is known only at evaluation time (the
+/// post-processing engine in `flow_evaluator`). `FlowTokens::none()`
+/// skips all substitutions; callers that render outside a flow instance
+/// context (unit tests, generic prompt scaffolding) use it to keep
+/// behaviour byte-identical to pre-substitution renderings.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FlowTokens<'a> {
     /// Base subject URI the flow instance is anchored to. `$flow.base`
     /// substitutes to this.
     pub subject: &'a str,
     /// URI of the `FlowInstanceRecord` node on the graph. `$flow.instance`
-    /// substitutes to this.
+    /// and `$flow.uri` both substitute to this.
     pub instance_uri: &'a str,
+    /// The acting agent's DID. `$did` substitutes to this. Empty in the
+    /// prompt path (the LLM sees the token); set at evaluation time.
+    pub did: &'a str,
 }
 
 /// The `$flow.base` prompt token — resolves to the flow instance's
 /// `subject` (the item the flow is anchored to, e.g. a Task URI).
-#[allow(dead_code)]
 pub const FLOW_BASE_TOKEN: &str = "$flow.base";
 
 /// The `$flow.instance` prompt token — resolves to the flow instance's
 /// on-graph URI.
-#[allow(dead_code)]
 pub const FLOW_INSTANCE_TOKEN: &str = "$flow.instance";
 
-#[allow(dead_code)]
+/// Alias for [`FLOW_INSTANCE_TOKEN`] — `$flow.uri` resolves to the same
+/// instance URI. Both forms are accepted for author convenience.
+pub const FLOW_URI_TOKEN: &str = "$flow.uri";
+
+/// The `$did` prompt token — resolves to the acting agent's DID at
+/// evaluation time.
+pub const DID_TOKEN: &str = "$did";
+
 impl<'a> FlowTokens<'a> {
     /// No-op token context — every substitution passes strings through
     /// unchanged. Use in unit tests and any render path that isn't
     /// scoped to a live flow instance.
+    #[allow(dead_code)]
     pub const fn none() -> FlowTokens<'static> {
         FlowTokens {
             subject: "",
             instance_uri: "",
+            did: "",
         }
     }
 
-    /// Substitute every occurrence of the two supported tokens in `s`.
+    /// Substitute every occurrence of the supported tokens in `s`.
     /// An empty field is treated as "not set" and its token is left in
     /// place — makes [`Self::none`] a true no-op even when one of the
-    /// two fields is meaningful.
+    /// fields is meaningful.
     pub fn substitute(&self, s: &str) -> String {
         let mut out = s.to_string();
         if !self.subject.is_empty() {
             out = out.replace(FLOW_BASE_TOKEN, self.subject);
         }
         if !self.instance_uri.is_empty() {
+            out = out.replace(FLOW_URI_TOKEN, self.instance_uri);
             out = out.replace(FLOW_INSTANCE_TOKEN, self.instance_uri);
+        }
+        if !self.did.is_empty() {
+            out = out.replace(DID_TOKEN, self.did);
         }
         out
     }
 
-    /// Build tokens from a [`FlowContext`]. Convenience for the prompt
-    /// assembler in `interpretation::prompt`.
+    /// Build tokens from a [`FlowContext`]. `did` is left empty — the
+    /// prompt path preserves `$did` verbatim; the evaluator fills it in.
+    #[allow(dead_code)]
     pub fn from_context(fc: &'a FlowContext) -> FlowTokens<'a> {
         FlowTokens {
             subject: &fc.subject,
             instance_uri: &fc.instance_uri,
+            did: "",
         }
     }
 }
@@ -681,37 +691,54 @@ mod tests {
         let none = FlowTokens::none();
         assert_eq!(none.substitute("$flow.base"), "$flow.base");
         assert_eq!(none.substitute("$flow.instance"), "$flow.instance");
+        assert_eq!(none.substitute("$flow.uri"), "$flow.uri");
+        assert_eq!(none.substitute("$did"), "$did");
         assert_eq!(none.substitute("plain"), "plain");
     }
 
     #[test]
-    fn flow_tokens_substitute_replaces_both_tokens() {
+    fn flow_tokens_substitute_replaces_all_tokens() {
         let tokens = FlowTokens {
             subject: "ad4m://task/foo",
             instance_uri: "ad4m://flow/inst-42",
+            did: "did:key:acting",
         };
         assert_eq!(tokens.substitute("$flow.base"), "ad4m://task/foo");
         assert_eq!(tokens.substitute("$flow.instance"), "ad4m://flow/inst-42");
+        assert_eq!(tokens.substitute("$flow.uri"), "ad4m://flow/inst-42");
+        assert_eq!(tokens.substitute("$did"), "did:key:acting");
         assert_eq!(
-            tokens.substitute("under $flow.base scoped to $flow.instance"),
-            "under ad4m://task/foo scoped to ad4m://flow/inst-42"
+            tokens.substitute("under $flow.base scoped to $flow.instance by $did"),
+            "under ad4m://task/foo scoped to ad4m://flow/inst-42 by did:key:acting"
+        );
+        assert_eq!(
+            tokens.substitute("$flow.uri is alias for $flow.instance"),
+            "ad4m://flow/inst-42 is alias for ad4m://flow/inst-42"
         );
     }
 
     #[test]
     fn flow_tokens_empty_field_leaves_own_token_intact() {
-        // Regression: substituting an unset field with "" would collapse
-        // the token into nothing and mask the fact that it was never
-        // wired up. Instead, an empty field is treated as "not set".
         let subject_only = FlowTokens {
             subject: "ad4m://task/foo",
             instance_uri: "",
+            did: "",
         };
         assert_eq!(subject_only.substitute("$flow.base"), "ad4m://task/foo");
         assert_eq!(
             subject_only.substitute("$flow.instance"),
             "$flow.instance",
             "instance_uri unset must leave the token verbatim, not empty-substitute"
+        );
+        assert_eq!(
+            subject_only.substitute("$flow.uri"),
+            "$flow.uri",
+            "$flow.uri alias must also stay when instance_uri unset"
+        );
+        assert_eq!(
+            subject_only.substitute("$did"),
+            "$did",
+            "did unset must leave the token verbatim"
         );
     }
 
