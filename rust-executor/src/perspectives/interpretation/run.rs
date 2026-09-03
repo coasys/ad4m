@@ -807,21 +807,8 @@ pub async fn run_interpretation_with_strategy_and_model(
 
         // The affected instance base URIs (created, updated, or given new
         // relations). Links are owned by `create_subject` / `update_subject`.
-        // The LLM's writes are on the graph now, so re-evaluate every active
-        // flow's `requires` guards against the fresh evidence. The LLM's own
-        // proposals only contribute a rationale; the semantic check reuses
-        // the extraction task so both share one worker and billing scope.
-        let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
-            task_id: task.task_id.clone(),
-        };
-        let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
-            perspective,
-            scope,
-            context,
-            &llm_proposals,
-            Some(&semantic_check),
-        )
-        .await;
+        let flow_proposals =
+            run_flow_post_pass(perspective, scope, context, &llm_proposals, &task.task_id).await;
 
         Ok(InterpretationOutcome {
             bases,
@@ -851,6 +838,32 @@ pub async fn run_interpretation_with_strategy_and_model(
             Err(e)
         }
     }
+}
+
+/// Shared flow post-processing for both interpretation paths (single-shot
+/// strategy and harness): the LLM's writes are on the graph now, so
+/// re-evaluate every active flow's `requires` guards against the fresh
+/// evidence. The LLM's own proposals only contribute a rationale; the
+/// semantic check reuses the extraction task so both share one worker and
+/// billing scope.
+async fn run_flow_post_pass(
+    perspective: &mut PerspectiveInstance,
+    scope: Option<&Scope>,
+    context: &AgentContext,
+    llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
+    task_id: &str,
+) -> Vec<String> {
+    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
+        task_id: task_id.to_string(),
+    };
+    crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+        perspective,
+        scope,
+        context,
+        llm_proposals,
+        Some(&semantic_check),
+    )
+    .await
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
@@ -1097,15 +1110,12 @@ pub async fn run_interpretation_with_harness_and_model(
 
     // Same flow post-processing as the single-shot path. The harness
     // returns bases only, so the minted proposals are just logged here.
-    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
-        task_id: task.task_id.clone(),
-    };
-    let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+    let flow_proposals = run_flow_post_pass(
         perspective,
         scope,
         context,
         &flow_buffer.drain(),
-        Some(&semantic_check),
+        &task.task_id,
     )
     .await;
     if !flow_proposals.is_empty() {

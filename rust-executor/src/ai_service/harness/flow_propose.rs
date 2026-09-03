@@ -25,62 +25,19 @@
 //! `mcp/tools/dynamic.rs` would leak it onto the external MCP transport
 //! where it'd have no buffer to write to and no engine draining it.
 
-use super::provider::ToolSchema;
+use super::provider::{HintBuffer, ToolSchema};
 use crate::perspectives::flow_context::FlowContext;
 use crate::perspectives::interpretation::LlmFlowProposal;
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // ── buffer ────────────────────────────────────────────────────────────────
 
 /// Per-pass accumulator for [`LlmFlowProposal`]s emitted by
-/// `_propose_transition` tool calls. Cloneable `Arc` so the ToolProvider
-/// decorator (which the harness owns for the duration of the loop) and the
-/// engine (which drains at pass end and threads the hints into
-/// [`crate::perspectives::flow_evaluator::run_engine_proposal_pass`]) hold
-/// independent references.
-///
-/// The mutex is only held during a single push/drain — tool calls are
-/// serialised through the harness loop anyway, so contention is nil.
-#[derive(Debug, Clone, Default)]
-pub struct FlowProposalBuffer {
-    inner: Arc<Mutex<Vec<LlmFlowProposal>>>,
-}
-
-impl FlowProposalBuffer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Recover-on-poison lock: if the mutex was poisoned by an earlier
-    /// panic during dispatch, take the guard anyway. `Vec<LlmFlowProposal>`
-    /// is plain data — a panic mid-`push` can't have left it in a torn
-    /// state, only in whatever state it was in when the panic fired.
-    /// Same policy as [`super::propose::ProposalBuffer`] (Lal's PR #911
-    /// review notes).
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<LlmFlowProposal>> {
-        self.inner.lock().unwrap_or_else(|poisoned| {
-            log::warn!(
-                "harness: FlowProposalBuffer mutex was poisoned by an earlier panic; \
-                 continuing with the recovered inner data ({} hint(s) so far)",
-                poisoned.get_ref().len()
-            );
-            poisoned.into_inner()
-        })
-    }
-
-    pub fn push(&self, hint: LlmFlowProposal) {
-        self.lock().push(hint);
-    }
-
-    pub fn drain(&self) -> Vec<LlmFlowProposal> {
-        std::mem::take(&mut *self.lock())
-    }
-
-    pub fn len(&self) -> usize {
-        self.lock().len()
-    }
-}
+/// `_propose_transition` tool calls. The engine drains it at pass end and
+/// threads the hints into
+/// [`crate::perspectives::flow_evaluator::run_engine_proposal_pass`].
+pub type FlowProposalBuffer = HintBuffer<LlmFlowProposal>;
 
 // ── tool naming ───────────────────────────────────────────────────────────
 
@@ -187,91 +144,6 @@ pub fn propose_transition_tool_schema(context: &FlowContext) -> ToolSchema {
     }
 }
 
-/// Build one [`ToolSchema`] per active [`FlowContext`]. Order preserved.
-///
-/// The decorator (slice 10.7b) hands this straight through to the inner
-/// [`super::provider::ToolProvider::tools`] output. Duplicate flow-name
-/// FlowContexts (multiple live instances of the same flow) each get their
-/// own tool — the tool name would collide, so the caller is expected to
-/// de-duplicate upstream. We do not filter here so the layering stays
-/// pure.
-pub fn propose_transition_tool_schemas(contexts: &[FlowContext]) -> Vec<ToolSchema> {
-    contexts
-        .iter()
-        .map(propose_transition_tool_schema)
-        .collect()
-}
-
-// ── args parsing ──────────────────────────────────────────────────────────
-
-/// Errors [`parse_propose_transition_args`] surfaces to the harness. The
-/// decorator (slice 10.7b) turns these into `Err(anyhow!(...))` payloads
-/// the harness slots into the `role: "tool"` response so the LLM can
-/// recover.
-#[derive(Debug, PartialEq)]
-pub enum ArgError {
-    NotAnObject,
-    MissingInstance,
-    InstanceNotString,
-    MissingToState,
-    ToStateNotString,
-    ReasonNotString,
-}
-
-impl std::fmt::Display for ArgError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotAnObject => f.write_str("arguments must be a JSON object"),
-            Self::MissingInstance => f.write_str("missing required `instance` field"),
-            Self::InstanceNotString => f.write_str("`instance` must be a string"),
-            Self::MissingToState => f.write_str("missing required `toState` field"),
-            Self::ToStateNotString => f.write_str("`toState` must be a string"),
-            Self::ReasonNotString => f.write_str("`reason` must be a string when present"),
-        }
-    }
-}
-
-impl std::error::Error for ArgError {}
-
-/// Parse the JSON args the LLM sent for a `_propose_transition` call into
-/// an [`LlmFlowProposal`]. Pure — the decorator (slice 10.7b) is
-/// responsible for pushing the result into a [`FlowProposalBuffer`].
-///
-/// `instance` and `toState` are required strings; `reason` is optional
-/// and, when present, must be a string. `additionalProperties: false` on
-/// the schema means an obedient LLM won't send extras, but we don't
-/// reject them here — the JSON-Schema enforcement is a hint to the LLM,
-/// not a validation gate. Grammar-decoding models honour the schema
-/// exactly, chat models may add noise; either way, we take what we can
-/// use.
-pub fn parse_propose_transition_args(args: &Value) -> Result<LlmFlowProposal, ArgError> {
-    let obj = args.as_object().ok_or(ArgError::NotAnObject)?;
-
-    let instance_val = obj.get("instance").ok_or(ArgError::MissingInstance)?;
-    let instance = instance_val
-        .as_str()
-        .ok_or(ArgError::InstanceNotString)?
-        .to_string();
-
-    let to_state_val = obj.get("toState").ok_or(ArgError::MissingToState)?;
-    let to_state = to_state_val
-        .as_str()
-        .ok_or(ArgError::ToStateNotString)?
-        .to_string();
-
-    let reason = match obj.get("reason") {
-        None => None,
-        Some(Value::Null) => None,
-        Some(v) => Some(v.as_str().ok_or(ArgError::ReasonNotString)?.to_string()),
-    };
-
-    Ok(LlmFlowProposal {
-        instance,
-        to_state,
-        reason,
-    })
-}
-
 // ── decorator ─────────────────────────────────────────────────────────────
 
 use super::provider::ToolProvider;
@@ -281,7 +153,8 @@ use async_trait::async_trait;
 /// [`ToolProvider`] decorator that adds one `{FlowName}_propose_transition`
 /// tool per active [`FlowContext`] on top of an inner (read-tool / SHACL
 /// propose-write) provider. Symmetric to [`super::propose::ProposeWritesProvider`]:
-///  * `tools()` = inner.tools() + [`propose_transition_tool_schemas`]
+///  * `tools()` = inner.tools() + one de-duplicated `_propose_transition`
+///    schema per distinct flow name (first FlowContext wins)
 ///  * `call()` intercepts the `_propose_transition` suffix, validates the
 ///    args against the pass's active FlowContexts, and pushes an
 ///    [`LlmFlowProposal`] into the shared [`FlowProposalBuffer`]
@@ -368,8 +241,16 @@ impl<P: ToolProvider + ?Sized> FlowTransitionProposeProvider<P> {
             ));
         }
 
-        let hint = parse_propose_transition_args(&args)
-            .map_err(|e| anyhow!("{flow_name}_propose_transition: {e}"))?;
+        // One parser per wire shape: `LlmFlowProposal`'s serde derive is the
+        // same parser the strategy path uses for `flow_proposals` entries.
+        // Unknown extra fields are ignored — the schema's
+        // `additionalProperties: false` is a hint to the LLM, not a gate.
+        let hint: LlmFlowProposal = serde_json::from_value(args).map_err(|e| {
+            anyhow!(
+                "{flow_name}_propose_transition: invalid arguments ({e}). Required: \
+                 `instance` (string), `toState` (string); optional: `reason` (string)."
+            )
+        })?;
 
         // Defence-in-depth: `instance` matches one of the active FlowContexts.
         // Schema `const` enforced this on obedient LLMs; chat models that
@@ -395,18 +276,8 @@ impl<P: ToolProvider + ?Sized> FlowTransitionProposeProvider<P> {
             })?;
 
         // Defence-in-depth: `toState` is one of the reachable next states.
-        // Empty `reachable_next_states` means the instance is in a terminal
-        // state; the tool schema advertised an empty enum, but chat models
-        // may call it anyway.
-        if ctx.reachable_next_states.is_empty() {
-            return Err(anyhow!(
-                "{flow_name}_propose_transition: flow instance `{}` is in terminal state \
-                 `{}`; no transitions are reachable. Do not propose transitions for this \
-                 instance in this pass.",
-                ctx.instance_uri,
-                ctx.current_state
-            ));
-        }
+        // The schema's enum advertised the same set (empty for a terminal
+        // state), but chat models may ignore JSON Schema constraints.
         let valid_targets: Vec<&str> = ctx
             .reachable_next_states
             .iter()
@@ -418,7 +289,13 @@ impl<P: ToolProvider + ?Sized> FlowTransitionProposeProvider<P> {
                  state from `{}`. Valid targets: {}.",
                 hint.to_state,
                 ctx.current_state,
-                valid_targets.join(", ")
+                if valid_targets.is_empty() {
+                    "none — the instance is in a terminal state; do not propose \
+                     transitions for it in this pass"
+                        .to_string()
+                } else {
+                    valid_targets.join(", ")
+                }
             ));
         }
 
@@ -590,143 +467,6 @@ mod tests {
         ctx.flow_interpretation_hint = None;
         let schema = propose_transition_tool_schema(&ctx);
         assert!(!schema.description.contains("Flow-level frame:"));
-    }
-
-    #[test]
-    fn schemas_preserve_context_order() {
-        let a = ctx_delivery_scoped();
-        let mut b = ctx_delivery_scoped();
-        b.flow_name = "Deliberation".to_string();
-        let schemas = propose_transition_tool_schemas(&[a.clone(), b.clone()]);
-        assert_eq!(schemas.len(), 2);
-        assert_eq!(schemas[0].name, "Delivery_propose_transition");
-        assert_eq!(schemas[1].name, "Deliberation_propose_transition");
-    }
-
-    // ── args parsing ─────────────────────────────────────────────────────
-
-    #[test]
-    fn parse_args_accepts_minimal_valid_object() {
-        let args = json!({
-            "instance": "ad4m://flow/instance/abc",
-            "toState": "Scoped"
-        });
-        let hint = parse_propose_transition_args(&args).expect("valid args should parse");
-        assert_eq!(
-            hint,
-            LlmFlowProposal {
-                instance: "ad4m://flow/instance/abc".to_string(),
-                to_state: "Scoped".to_string(),
-                reason: None,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_args_accepts_reason_when_present() {
-        let args = json!({
-            "instance": "ad4m://flow/instance/abc",
-            "toState": "Scoped",
-            "reason": "Owner named in message 3; acceptance criteria in message 5."
-        });
-        let hint = parse_propose_transition_args(&args).expect("valid args should parse");
-        assert_eq!(
-            hint.reason.as_deref(),
-            Some("Owner named in message 3; acceptance criteria in message 5.")
-        );
-    }
-
-    #[test]
-    fn parse_args_treats_null_reason_as_absent() {
-        let args = json!({
-            "instance": "ad4m://flow/instance/abc",
-            "toState": "Scoped",
-            "reason": null
-        });
-        let hint = parse_propose_transition_args(&args).expect("null reason should parse as None");
-        assert_eq!(hint.reason, None);
-    }
-
-    #[test]
-    fn parse_args_rejects_non_object() {
-        assert_eq!(
-            parse_propose_transition_args(&json!("nope")).unwrap_err(),
-            ArgError::NotAnObject
-        );
-    }
-
-    #[test]
-    fn parse_args_rejects_missing_required_fields() {
-        assert_eq!(
-            parse_propose_transition_args(&json!({"toState": "Scoped"})).unwrap_err(),
-            ArgError::MissingInstance
-        );
-        assert_eq!(
-            parse_propose_transition_args(&json!({"instance": "u"})).unwrap_err(),
-            ArgError::MissingToState
-        );
-    }
-
-    #[test]
-    fn parse_args_rejects_wrong_types() {
-        assert_eq!(
-            parse_propose_transition_args(&json!({"instance": 42, "toState": "S"})).unwrap_err(),
-            ArgError::InstanceNotString
-        );
-        assert_eq!(
-            parse_propose_transition_args(&json!({"instance": "u", "toState": 42})).unwrap_err(),
-            ArgError::ToStateNotString
-        );
-        assert_eq!(
-            parse_propose_transition_args(&json!({"instance": "u", "toState": "S", "reason": 42}))
-                .unwrap_err(),
-            ArgError::ReasonNotString
-        );
-    }
-
-    // ── buffer ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn buffer_new_is_empty() {
-        let buf = FlowProposalBuffer::new();
-        assert_eq!(buf.len(), 0);
-    }
-
-    #[test]
-    fn buffer_push_then_drain_returns_hints_in_order_and_clears() {
-        let buf = FlowProposalBuffer::new();
-        buf.push(LlmFlowProposal {
-            instance: "a".into(),
-            to_state: "S".into(),
-            reason: None,
-        });
-        buf.push(LlmFlowProposal {
-            instance: "b".into(),
-            to_state: "T".into(),
-            reason: Some("r".into()),
-        });
-        assert_eq!(buf.len(), 2);
-
-        let drained = buf.drain();
-        assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].instance, "a");
-        assert_eq!(drained[1].instance, "b");
-        assert_eq!(drained[1].reason.as_deref(), Some("r"));
-        assert_eq!(buf.len(), 0, "drain should empty the buffer");
-    }
-
-    #[test]
-    fn buffer_arc_clones_share_state() {
-        let buf = FlowProposalBuffer::new();
-        let buf2 = buf.clone();
-        buf.push(LlmFlowProposal {
-            instance: "x".into(),
-            to_state: "Y".into(),
-            reason: None,
-        });
-        assert_eq!(buf2.len(), 1, "cloned handle should observe the push");
-        buf2.drain();
-        assert_eq!(buf.len(), 0, "cloned drain should clear the original");
     }
 
     // ── decorator tests (slice 10.7b) ─────────────────────────────────
@@ -925,7 +665,7 @@ mod tests {
             )
             .await
             .expect_err("missing toState rejects");
-        assert!(err.to_string().contains("missing required `toState`"));
+        assert!(err.to_string().contains("missing field `toState`"));
         assert_eq!(buf.len(), 0);
     }
 
@@ -936,7 +676,7 @@ mod tests {
             .call("Delivery_propose_transition", json!("nope"))
             .await
             .expect_err("scalar args reject");
-        assert!(err.to_string().contains("must be a JSON object"));
+        assert!(err.to_string().contains("invalid arguments"));
         assert_eq!(buf.len(), 0);
     }
 
