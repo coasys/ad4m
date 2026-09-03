@@ -4715,32 +4715,53 @@ impl PerspectiveInstance {
                     if let Some(setter_commands) =
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
-                        let target_value = self
-                            .resolve_property_value(&class_name, prop, value, context)
-                            .await?;
+                        // An array value on a property whose setter actions are all
+                        // `addLink` is a collection write: one setter execution per
+                        // element, accumulating N links. Everywhere else an array
+                        // stays a single `literal:json:` value (a scalar property may
+                        // legitimately hold a JSON blob), because expanding over a
+                        // `setSingleTarget` setter would run last-element-wins and
+                        // silently drop the rest.
+                        let expand_collection = matches!(value, serde_json::Value::Array(_))
+                            && setter_commands.iter().all(|c| c.action == Action::AddLink);
+                        let elements: Vec<serde_json::Value> = match (expand_collection, value) {
+                            (true, serde_json::Value::Array(items)) => items.clone(),
+                            _ => vec![value.clone()],
+                        };
 
-                        //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
-                        //    prop, prop_start.elapsed());
+                        for (idx, element) in elements.iter().enumerate() {
+                            let target_value = self
+                                .resolve_property_value(&class_name, prop, element, context)
+                                .await?;
 
-                        // Compare predicates between setter and constructor commands
-                        for setter_cmd in setter_commands.iter() {
-                            let mut overwritten = false;
-                            if let Some(setter_pred) = &setter_cmd.predicate {
-                                for cmd in commands.iter_mut() {
-                                    if let Some(pred) = &cmd.predicate {
-                                        if pred == setter_pred {
-                                            cmd.target = Some(target_value.clone());
-                                            overwritten = true;
-                                            break;
+                            //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
+                            //    prop, prop_start.elapsed());
+
+                            // Compare predicates between setter and constructor commands.
+                            // Only the first element may overwrite a constructor
+                            // placeholder; every further collection element must append,
+                            // or they would all collapse onto the same command.
+                            for setter_cmd in setter_commands.iter() {
+                                let mut overwritten = false;
+                                if idx == 0 {
+                                    if let Some(setter_pred) = &setter_cmd.predicate {
+                                        for cmd in commands.iter_mut() {
+                                            if let Some(pred) = &cmd.predicate {
+                                                if pred == setter_pred {
+                                                    cmd.target = Some(target_value.clone());
+                                                    overwritten = true;
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            if !overwritten {
-                                commands.push(Command {
-                                    target: Some(target_value.clone()),
-                                    ..setter_cmd.clone()
-                                });
+                                if !overwritten {
+                                    commands.push(Command {
+                                        target: Some(target_value.clone()),
+                                        ..setter_cmd.clone()
+                                    });
+                                }
                             }
                         }
                     } else {
@@ -4820,9 +4841,8 @@ impl PerspectiveInstance {
                     self.get_property_setter_actions(&class_name, prop).await?
                 else {
                     // Same silent drop as `create_subject`, same reason for saying so out loud —
-                    // see the comment there. `update_subject` is the path a collection's second and
-                    // subsequent members go through, so a class whose collection has no setter
-                    // loses every one of them here without a word.
+                    // see the comment there. A class whose collection has no setter loses every
+                    // supplied member here without a word.
                     log::warn!(
                         "update_subject: class `{}` declares no setter for property `{}` — \
                          the supplied value was NOT written",
@@ -4831,14 +4851,25 @@ impl PerspectiveInstance {
                     );
                     continue;
                 };
-                let target_value = self
-                    .resolve_property_value(&class_name, prop, value, context)
-                    .await?;
-                for setter_cmd in setter_commands.iter() {
-                    commands.push(Command {
-                        target: Some(target_value.clone()),
-                        ..setter_cmd.clone()
-                    });
+                // Same collection expansion as `create_subject`: an array on an
+                // all-`addLink` setter appends one link per element; any other
+                // array stays a single `literal:json:` value.
+                let expand_collection = matches!(value, serde_json::Value::Array(_))
+                    && setter_commands.iter().all(|c| c.action == Action::AddLink);
+                let elements: Vec<serde_json::Value> = match (expand_collection, value) {
+                    (true, serde_json::Value::Array(items)) => items.clone(),
+                    _ => vec![value.clone()],
+                };
+                for element in &elements {
+                    let target_value = self
+                        .resolve_property_value(&class_name, prop, element, context)
+                        .await?;
+                    for setter_cmd in setter_commands.iter() {
+                        commands.push(Command {
+                            target: Some(target_value.clone()),
+                            ..setter_cmd.clone()
+                        });
+                    }
                 }
             }
         }
