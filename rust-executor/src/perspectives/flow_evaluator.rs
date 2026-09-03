@@ -327,6 +327,11 @@ pub async fn run_engine_proposal_pass(
             }
         }
 
+        if proposal_already_exists(perspective, transition).await {
+            log::debug!("run_engine_proposal_pass: {label} already proposed; skipping");
+            continue;
+        }
+
         let rationale = llm_proposals
             .iter()
             .find(|p| p.instance == transition.instance_uri && p.to_state == transition.to_state)
@@ -340,6 +345,53 @@ pub async fn run_engine_proposal_pass(
         }
     }
     minted
+}
+
+/// Check whether a proposal with the same evidence hash already exists for
+/// the same flow instance AND target state. Keeps the pass idempotent:
+/// minting does not advance `currentState`, so without this check every
+/// later pass re-proposes each satisfied-unconsumed transition — and a
+/// consensus rule counting proposals rather than distinct DIDs could then
+/// be gamed by one agent re-running its own pass. The `to_state` check
+/// matters because two distinct transitions can share identical `requires`
+/// guards and therefore identical evidence hashes.
+async fn proposal_already_exists(
+    perspective: &PerspectiveInstance,
+    transition: &SatisfiedTransition,
+) -> bool {
+    use crate::types::LinkQuery;
+    let literal = |s: &str| format!("literal:string:{}", urlencoding::encode(s));
+    let hash_links = match perspective
+        .get_links(&LinkQuery {
+            predicate: Some("ad4m://flow/evidence_hashes".into()),
+            target: Some(literal(&transition.evidence_hash)),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(links) => links,
+        Err(_) => return false,
+    };
+    for link in &hash_links {
+        let proposal_uri = &link.data.source;
+        let links_to = |predicate: &'static str, want: String| async move {
+            perspective
+                .get_links(&LinkQuery {
+                    source: Some(proposal_uri.clone()),
+                    predicate: Some(predicate.into()),
+                    ..Default::default()
+                })
+                .await
+                .map(|links| links.iter().any(|l| l.data.target == want))
+                .unwrap_or(false)
+        };
+        if links_to("ad4m://flow/instance", transition.instance_uri.clone()).await
+            && links_to("ad4m://flow/to_state", literal(&transition.to_state)).await
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Write one proposal inside its own batch, so readers never see a

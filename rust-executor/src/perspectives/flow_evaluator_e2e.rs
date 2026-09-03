@@ -316,6 +316,14 @@ async fn run_engine_proposal_pass_e2e() {
     assert_has_target(&by_pred, "ad4m://flow/instance", &f.instance_uri);
     assert_has_target(&by_pred, "ad4m://flow/from_state", &literal("identified"));
     assert_has_target(&by_pred, "ad4m://flow/to_state", &literal("scoped"));
+
+    // Idempotency: minting does not advance currentState, so a re-run sees
+    // the same satisfied transition — it must skip, not mint a duplicate.
+    let rerun = f.run_pass(&[], None).await;
+    assert!(
+        rerun.is_empty(),
+        "unchanged evidence re-proposed: {rerun:?}"
+    );
 }
 
 /// With a `semanticCheck` hint on the target state the gate consults the
