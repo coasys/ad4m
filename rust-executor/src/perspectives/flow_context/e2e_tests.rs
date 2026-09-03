@@ -1,4 +1,4 @@
-//! End-to-end integration test — the onion-shell test cut. Unit tests
+//! End-to-end integration test — the onion-shell test cut. The unit tests
 //! in `render.rs` cover the pure halves of the module against hand-built
 //! inputs; this file covers the composition against a real
 //! [`PerspectiveInstance`].
@@ -28,7 +28,7 @@
 //! `PerspectiveInstance`. The only piece that would need Ollama is the
 //! AIService, which none of the code paths under test touch.
 
-use super::loader::gather_active_flow_contexts;
+use super::loader::{gather_active_flow_contexts, load_all_flow_instances, load_flow_instances};
 use crate::perspectives::flow_classes::mint_flow_instance;
 use crate::perspectives::interpretation::{
     build_interpretation_input, ExistingInstances, TranscriptTurn,
@@ -114,9 +114,13 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    9 — it also idempotently registers the FlowInstance model
     //    class, which is the class `load_flow_instances` queries.
     let base_uri = "ad4m://task/onboarding";
+    // Pass the flow's canonical URI (`${namespace}${name}Flow`), not the
+    // bare name — `mint_flow_instance` writes into the record's
+    // `flowUri` property, which `build_flow_contexts` joins on
+    // (James PR #929 R5).
     let inst_uri = mint_flow_instance(
         &mut perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         base_uri,
         "identified",
         "e2e-inst-1",
@@ -196,7 +200,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
 
     // 7) The real payoff: feed the gathered context into the
     //    interpretation prompt builder — the same call `run.rs`
-    //    makes after slice 10.3c substituted this vector for `&[]`.
+    //    makes now that this vector replaces the earlier `&[]`.
     //    The prompt must carry an `active_flows` array whose only
     //    element identifies our Delivery instance by name.
     let existing = ExistingInstances::new();
@@ -219,4 +223,22 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
             .expect("active_flows[0].flow is a string"),
         "Delivery"
     );
+}
+
+/// On a perspective where `FlowInstance` has never been registered,
+/// `load_flow_instances` and `load_all_flow_instances` must return
+/// `Ok(vec![])` — not propagate the "No SHACL shape stored" error.
+#[tokio::test(flavor = "multi_thread")]
+async fn load_flow_instances_absent_class_returns_empty() {
+    let (perspective, _, _) = setup_perspective_no_llm(&[]).await;
+
+    let scoped = load_flow_instances(&perspective, &["ad4m://task/x".to_string()])
+        .await
+        .expect("absent class must not error");
+    assert!(scoped.is_empty());
+
+    let all = load_all_flow_instances(&perspective)
+        .await
+        .expect("absent class must not error");
+    assert!(all.is_empty());
 }

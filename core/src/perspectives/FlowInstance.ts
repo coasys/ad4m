@@ -41,6 +41,28 @@ import { Ad4mModel } from "../model/Ad4mModel";
 import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
 
+/**
+ * Extract the flow's human-readable name from its canonical URI.
+ *
+ * `SHACLFlow.flowUri` is `${namespace}${name}Flow` (e.g.
+ * `coasys://DeliveryFlow`). This function strips the `Flow` suffix and
+ * everything before the last URI-segment separator (`/` or `#`), leaving
+ * the bare name. Returns `undefined` for URIs that don't match the
+ * `…{name}Flow` shape — a stale FlowInstanceRecord whose flow URI came
+ * from an older writer, for instance.
+ */
+function flowNameFromUri(flowUri: string): string | undefined {
+  if (!flowUri.endsWith("Flow")) return undefined;
+  const withoutSuffix = flowUri.slice(0, -"Flow".length);
+  const sepIdx = Math.max(
+    withoutSuffix.lastIndexOf("/"),
+    withoutSuffix.lastIndexOf("#"),
+  );
+  if (sepIdx < 0) return withoutSuffix || undefined;
+  const name = withoutSuffix.slice(sepIdx + 1);
+  return name || undefined;
+}
+
 export class FlowInstance {
   /**
    * Private constructor — construct via {@link FlowInstance.start} or
@@ -115,8 +137,15 @@ export class FlowInstance {
     // synthetic hydration field and would be silently shadowed on read).
     // No explicit start-time field: Ad4mModel synthesises `createdAt` on
     // hydration from the earliest link timestamp on the instance's URI.
+    // Convention: `SHACLFlow.states` is stored sorted ascending by `value`
+    // (enforced by `fromLinks`), so `states[0]` is the initial state. A
+    // flow author who wants a specific state as the entry point must give
+    // it the lowest `value` in the set.
+    //
+    // Store the flow's URI, not the bare name — see FlowInstanceRecord's
+    // docstring for the collision-across-modules argument (James PR #929 R5).
     const record = await FlowInstanceRecord.create(perspective, {
-      flow: flowName,
+      flowUri: flow.flowUri,
       subject: baseExpression,
       currentState: flow.states[0].name,
     });
@@ -126,10 +155,13 @@ export class FlowInstance {
   /**
    * Return every live `FlowInstance` on the perspective (design doc §4.3).
    *
-   * Idempotently registers the hardwired `FlowInstanceRecord` +
-   * `FlowTransitionProposal` @Model classes on first call — so callers can
-   * ask for instances before any {@link FlowInstance.start} has ever
-   * run without hitting a "class not registered" hydration error.
+   * Read-only path: never registers classes. On a perspective that has
+   * never minted a flow instance, the `FlowInstanceRecord` SHACL shape
+   * isn't installed yet — this returns `[]` in that case rather than
+   * mutating the perspective. Registration is the responsibility of
+   * {@link FlowInstance.start}, which is the write path. (Registering on
+   * a read would sync a write to every peer in the neighbourhood —
+   * exactly what a query must not do — James PR #929 R7.)
    *
    * Filter surface (all optional, all combinable):
    * - **`flowName`** — narrows by flow-name discriminator (e.g. "Delivery")
@@ -164,39 +196,77 @@ export class FlowInstance {
     perspective: PerspectiveProxy,
     filter?: string | { flowName?: string; subject?: string },
   ): Promise<FlowInstance[]> {
-    await Ad4mModel.registerAll(perspective, [FlowInstanceRecord, FlowTransitionProposal]);
-
     const { flowName, subject } =
       typeof filter === "string"
         ? { flowName: filter, subject: undefined }
         : { flowName: filter?.flowName, subject: filter?.subject };
 
+    // Filter surface accepts a flow *name* for ergonomics — resolve it to
+    // the canonical URI before the SHACL query, since the record stores
+    // the URI (James PR #929 R5). Unknown name → no matches (short-circuit
+    // with an empty result rather than issuing a bare-name query that
+    // would silently return nothing anyway).
     const where: Record<string, string> = {};
-    if (flowName !== undefined) where.flow = flowName;
+    if (flowName !== undefined) {
+      const flow = await perspective.getFlow(flowName);
+      if (!flow) return [];
+      where.flowUri = flow.flowUri;
+    }
     if (subject !== undefined) where.subject = subject;
 
-    const records: FlowInstanceRecord[] =
-      Object.keys(where).length > 0
-        ? await FlowInstanceRecord.findAll(perspective, { where })
-        : await FlowInstanceRecord.findAll(perspective);
+    // "Shape not found" on a perspective that has never minted a flow
+    // instance is a no-op read, not an error — the executor throws for a
+    // missing SHACL shape and there is no side-effect-free way to ask
+    // "does this class exist". Return `[]` on that specific case; rethrow
+    // anything else so real infra failures don't get swallowed.
+    //
+    // Regex covers every message the executor + client stack raises for
+    // an unregistered class:
+    //   "No SHACL shape stored for class 'FlowInstance'." (executor RPC)
+    //   "Shape not found" (older Rust path)
+    //   "class not registered" / "not registered" (TS Ad4mModel guard)
+    let records: FlowInstanceRecord[];
+    try {
+      records =
+        Object.keys(where).length > 0
+          ? await FlowInstanceRecord.findAll(perspective, { where })
+          : await FlowInstanceRecord.findAll(perspective);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (
+        /no shacl shape stored|shape not found|class not registered|not registered/i.test(
+          msg,
+        )
+      ) {
+        return [];
+      }
+      throw e;
+    }
 
     // Pair each record with its parsed SHACLFlow. Cache lookups by
-    // flow-name so `getFlow` fires at most once per distinct flow —
+    // flow-URI so `getFlow` fires at most once per distinct flow —
     // matters when a perspective has hundreds of instances against
     // one shape.
-    const shapesByName = new Map<string, SHACLFlow>();
+    //
+    // The URI stored on the record is `${namespace}${name}Flow`
+    // (see SHACLFlow.flowUri) — recovering the name for `getFlow`
+    // means stripping the namespace + the `Flow` suffix. Records that
+    // don't parse this way are treated as stale and skipped.
+    const shapesByUri = new Map<string, SHACLFlow>();
     const wrappers: FlowInstance[] = [];
     for (const record of records) {
-      let shape = shapesByName.get(record.flow);
+      let shape = shapesByUri.get(record.flowUri);
       if (!shape) {
-        const loaded = await perspective.getFlow(record.flow);
-        if (!loaded) {
-          // Stale record — the flow it references was unregistered.
-          // Skip rather than return a half-wrapper.
+        const name = flowNameFromUri(record.flowUri);
+        if (!name) continue;
+        const loaded = await perspective.getFlow(name);
+        if (!loaded || loaded.flowUri !== record.flowUri) {
+          // Stale record — the flow it references was unregistered,
+          // or a different flow now owns that name.
           continue;
         }
         shape = loaded;
-        shapesByName.set(record.flow, shape);
+        shapesByUri.set(record.flowUri, shape);
       }
       wrappers.push(FlowInstance.wrap(perspective, shape, record));
     }
@@ -225,9 +295,18 @@ export class FlowInstance {
     return this.record.subject;
   }
 
-  /** Flow name — matches `shape.name` and the on-graph discriminator. */
+  /**
+   * Human-readable flow name — the display label. Sourced from the paired
+   * `SHACLFlow.name`, not from the record (which stores the URI as its
+   * canonical identity — see FlowInstanceRecord's docstring for why).
+   */
   get flowName(): string {
-    return this.record.flow;
+    return this.shape.name;
+  }
+
+  /** Flow URI — the on-graph discriminator, collision-free across modules. */
+  get flowUri(): string {
+    return this.record.flowUri;
   }
 
   /** Name of the state this instance is currently in. */

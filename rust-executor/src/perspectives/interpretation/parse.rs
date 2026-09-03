@@ -1,17 +1,10 @@
-use super::{InterpretationOutput, ProposedInstance};
+use super::ProposedInstance;
 
 /// Parse a raw LLM response into proposed instances.
 ///
 /// Local models wrap JSON in reasoning/markdown noise, so we first strip the
 /// common wrappers (mirrors Flux `LLMutils.ts`): `<think>…</think>` blocks,
 /// ```-fences, and trailing commas. Then parse as a JSON array.
-///
-/// This is the pre-slice-10.6 legacy contract: the LLM must return a JSON
-/// array of instances, and anything else (including a bare object) is a
-/// parse error so the retry loop can re-prompt. Post-slice-10.6 callers
-/// that also want LLM-emitted flow proposals should use
-/// [`parse_interpretation_output`], which additionally accepts the wrapping
-/// object shape.
 pub fn parse_interpretation_response(raw: &str) -> anyhow::Result<Vec<ProposedInstance>> {
     let cleaned = clean_llm_json(raw);
     let instances: Vec<ProposedInstance> = serde_json::from_str(&cleaned).map_err(|e| {
@@ -21,72 +14,6 @@ pub fn parse_interpretation_response(raw: &str) -> anyhow::Result<Vec<ProposedIn
         )
     })?;
     Ok(instances)
-}
-
-/// Parse a raw LLM response into the full [`InterpretationOutput`] payload —
-/// both extracted instances and any LLM-emitted flow proposals.
-///
-/// Accepts two shapes so a model trained on the legacy prompt still works
-/// while slice 10.6b rolls out the wrapping-object teach:
-///
-///   1. **Wrapping object** (post-slice-10.6): `{"instances": [...], "flow_proposals": [...]}`
-///      — either key may be omitted; missing keys default to empty vectors
-///      (see [`InterpretationOutput`]). Requires at least one of the two
-///      keys to be present so a bare `{class, title}` object (a misplaced
-///      instance) is still rejected as it was under the legacy contract.
-///   2. **Bare array** (legacy): `[{class, ...}, ...]` — the whole array is
-///      treated as `instances`, `flow_proposals` defaults to empty.
-pub fn parse_interpretation_output(raw: &str) -> anyhow::Result<InterpretationOutput> {
-    let cleaned = clean_llm_json(raw);
-    let value: serde_json::Value = serde_json::from_str(&cleaned).map_err(|e| {
-        anyhow::anyhow!(
-            "interpretation JSON parse failed: {e}; cleaned payload length: {} bytes",
-            cleaned.len()
-        )
-    })?;
-    match value {
-        serde_json::Value::Object(map) => {
-            // Reject shapes that look like a lone misplaced instance
-            // (`{class, ...}` without any wrapper keys) so a confused-LLM
-            // response still errors out and the retry loop re-prompts —
-            // matching the legacy [`parse_interpretation_response`] contract.
-            if !map.contains_key("instances") && !map.contains_key("flow_proposals") {
-                return Err(anyhow::anyhow!(
-                    "interpretation JSON parse failed: object has neither `instances` nor `flow_proposals` key; cleaned payload length: {} bytes",
-                    cleaned.len()
-                ));
-            }
-            serde_json::from_value(serde_json::Value::Object(map)).map_err(|e| {
-                anyhow::anyhow!(
-                    "interpretation object parse failed: {e}; cleaned payload length: {} bytes",
-                    cleaned.len()
-                )
-            })
-        }
-        serde_json::Value::Array(items) => {
-            let instances: Vec<ProposedInstance> =
-                serde_json::from_value(serde_json::Value::Array(items)).map_err(|e| {
-                    anyhow::anyhow!(
-                        "interpretation array parse failed: {e}; cleaned payload length: {} bytes",
-                        cleaned.len()
-                    )
-                })?;
-            Ok(InterpretationOutput {
-                instances,
-                flow_proposals: Vec::new(),
-            })
-        }
-        other => Err(anyhow::anyhow!(
-            "interpretation JSON parse failed: expected object or array at top level, got {}",
-            match other {
-                serde_json::Value::Null => "null",
-                serde_json::Value::Bool(_) => "bool",
-                serde_json::Value::Number(_) => "number",
-                serde_json::Value::String(_) => "string",
-                _ => unreachable!(),
-            }
-        )),
-    }
 }
 
 /// Strip the reasoning/markdown noise local models add around JSON.
@@ -114,28 +41,35 @@ fn clean_llm_json(raw: &str) -> String {
     //    surrounding prose would invert it before the real JSON begins, so a
     //    comma inside a genuine string value could be dropped. Extracting the
     //    bracketed block first confines the string-scanner to actual JSON.
-    //
-    //    Prefer whichever outer bracket appears FIRST in the trimmed input.
-    //    Pre-slice-10.6 the contract was array-only, so a naive `[` first
-    //    fallback-`{` was safe; post-10.6 the contract also accepts
-    //    `{"instances":[…],"flow_proposals":[…]}`, and the naive `[`-first
-    //    would misidentify the inner `instances` array as the payload and
-    //    swallow the outer object's tail.
     let candidate = s.trim();
-    let first_obj = candidate.find('{');
-    let first_arr = candidate.find('[');
-    let extracted = match (first_obj, first_arr) {
-        (Some(o), Some(a)) if o < a => extract_bracketed(candidate, '{', '}'),
-        (Some(_), None) => extract_bracketed(candidate, '{', '}'),
-        _ => extract_bracketed(candidate, '[', ']')
-            .or_else(|| extract_bracketed(candidate, '{', '}')),
-    }
-    .unwrap_or_else(|| candidate.to_string());
+    // Prefer a strict parse from the first `[` so prose after the JSON is
+    // dropped; fall back to the greedy bracket span when the JSON is not
+    // valid on its own (trailing commas are repaired below).
+    //
+    // Trying the array FIRST is what makes the greedy fallbacks safe: a
+    // bracket that only occurs in prose can no longer short-circuit the
+    // chain ahead of the real payload, because the real payload's `[` is
+    // always consulted before any `{`-span. See the
+    // `prose_braces_before_the_real_array_*` regression test.
+    let extracted = extract_first_json_value(candidate, '[')
+        .or_else(|| extract_bracketed(candidate, '[', ']'))
+        .or_else(|| extract_bracketed(candidate, '{', '}'))
+        .unwrap_or_else(|| candidate.to_string());
 
     // 4. Remove trailing commas before a closing } or ] (invalid JSON, common),
     //    now scoped to the extracted JSON. Skips commas inside string literals
     //    so values like "a, }" survive.
     strip_trailing_commas(&extracted)
+}
+
+/// Strictly parse one JSON value starting at the first `open` and return
+/// exactly its span, so trailing prose is not swallowed into the payload.
+fn extract_first_json_value(s: &str, open: char) -> Option<String> {
+    let start = s.find(open)?;
+    let mut stream =
+        serde_json::Deserializer::from_str(&s[start..]).into_iter::<serde_json::Value>();
+    stream.next()?.ok()?;
+    Some(s[start..start + stream.byte_offset()].to_string())
 }
 
 /// Return the substring from the first `open` to the matching last `close`,
@@ -244,6 +178,19 @@ mod tests {
         let out = parse_interpretation_response(raw).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn prose_braces_before_the_real_array_dont_swallow_the_payload() {
+        // Brace-prose before the array: the array-first chain must not let the
+        // `{a couple of things}` span become the payload. Under an
+        // object-first ordering the greedy `{`-matcher would short-circuit
+        // here and the real payload would never be tried.
+        let raw = r#"OK, I'll extract {a couple of things}: [{"class":"Task","title":"A"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class, "Task");
+        assert_eq!(prop_values(&out, "title"), vec!["A"]);
     }
 
     #[test]
@@ -407,128 +354,5 @@ mod tests {
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             INTERPRETATION_MAX_ATTEMPTS
         );
-    }
-
-    // --- slice 10.6a: parse_interpretation_output covers both shapes ---
-
-    #[test]
-    fn parse_output_legacy_bare_array_yields_instances_only() {
-        // Legacy shape must still parse — a pre-slice-10.6 model gets its
-        // instances into the new wrapper, flow_proposals stays empty. This
-        // is the fallback that keeps the parser back-compat during the
-        // slice 10.6b prompt migration.
-        let raw = r#"[{"class":"Intention","title":"Do X"}]"#;
-        let out = parse_interpretation_output(raw).unwrap();
-        assert_eq!(out.instances.len(), 1);
-        assert_eq!(out.instances[0].class, "Intention");
-        assert!(out.flow_proposals.is_empty());
-    }
-
-    #[test]
-    fn parse_output_wrapping_object_with_both_keys() {
-        // The full slice-10.6 shape: both instances and flow_proposals
-        // populated. `toState` on the wire → `to_state` in Rust (serde
-        // rename), `reason` optional.
-        let raw = r#"{
-          "instances": [
-            {"class":"Task","title":"Ship the PR","owner":"Nico"}
-          ],
-          "flow_proposals": [
-            {
-              "instance":"ad4m://flow/instance/delivery-42",
-              "toState":"review",
-              "reason":"PR is up, please review"
-            }
-          ]
-        }"#;
-        let out = parse_interpretation_output(raw).unwrap();
-        assert_eq!(out.instances.len(), 1);
-        assert_eq!(out.instances[0].class, "Task");
-        assert_eq!(out.flow_proposals.len(), 1);
-        let p = &out.flow_proposals[0];
-        assert_eq!(p.instance, "ad4m://flow/instance/delivery-42");
-        assert_eq!(p.to_state, "review");
-        assert_eq!(p.reason.as_deref(), Some("PR is up, please review"));
-    }
-
-    #[test]
-    fn parse_output_wrapping_object_omitting_flow_proposals_defaults_empty() {
-        // A model that emits only the wrapping shape but no flow proposals
-        // (transcript unrelated to any active flow) is valid — the field
-        // just defaults to empty.
-        let raw = r#"{"instances":[{"class":"Belief","title":"X"}]}"#;
-        let out = parse_interpretation_output(raw).unwrap();
-        assert_eq!(out.instances.len(), 1);
-        assert!(out.flow_proposals.is_empty());
-    }
-
-    #[test]
-    fn parse_output_wrapping_object_omitting_instances_defaults_empty() {
-        // Symmetric: a response that only proposes flow transitions and
-        // extracts no new instances is valid.
-        let raw = r#"{
-          "flow_proposals": [
-            {"instance":"ad4m://flow/instance/x","toState":"done"}
-          ]
-        }"#;
-        let out = parse_interpretation_output(raw).unwrap();
-        assert!(out.instances.is_empty());
-        assert_eq!(out.flow_proposals.len(), 1);
-        assert!(out.flow_proposals[0].reason.is_none());
-    }
-
-    #[test]
-    fn parse_output_rejects_lone_misplaced_instance_object() {
-        // `{class,title}` at the top level is a confused-LLM response — not
-        // a valid wrapping object, not a valid legacy array. Must error so
-        // the retry loop re-prompts, matching the pre-slice-10.6 contract.
-        let raw = r#"{"class":"Belief","title":"X"}"#;
-        let err = parse_interpretation_output(raw).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("neither `instances` nor `flow_proposals`"),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
-    fn parse_output_wrapping_object_tolerates_extra_top_level_keys() {
-        // Small models sometimes tack on `<metadata>` fields; the wrapper
-        // must ignore anything it doesn't recognise so a stray key doesn't
-        // torpedo an otherwise-valid response.
-        let raw = r#"{
-          "instances":[{"class":"Task","title":"A"}],
-          "flow_proposals":[],
-          "notes":"the model added this on its own"
-        }"#;
-        let out = parse_interpretation_output(raw).unwrap();
-        assert_eq!(out.instances.len(), 1);
-    }
-
-    #[test]
-    fn parse_output_wrapping_object_rejects_malformed_flow_proposal() {
-        // A flow_proposals entry that omits the required `instance` field
-        // must error — the engine cannot look up a FlowInstance without it.
-        let raw = r#"{
-          "instances":[],
-          "flow_proposals":[{"toState":"review"}]
-        }"#;
-        let err = parse_interpretation_output(raw).unwrap_err();
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("interpretation object parse failed"),
-            "got: {msg}"
-        );
-    }
-
-    #[test]
-    fn parse_output_strips_reasoning_wrappers_around_object() {
-        // The wrapping-object path must run through the same clean_llm_json
-        // pipeline as the legacy array path — code fences, <think> blocks,
-        // and trailing commas all still apply.
-        let raw = "```json\n<think>let me think...</think>\n{\"instances\":[{\"class\":\"Task\",\"title\":\"A\",}],\"flow_proposals\":[]}\n```";
-        let out = parse_interpretation_output(raw).unwrap();
-        assert_eq!(out.instances.len(), 1);
-        assert_eq!(out.instances[0].class, "Task");
     }
 }

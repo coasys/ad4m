@@ -1,4 +1,4 @@
-import { ApiClient, RpcError } from "../apiClient";
+import { ApiClient, CallOptions, RpcError } from "../apiClient";
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { Link, LinkExpressionInput, LinkExpression, LinkMutations, LinkExpressionMutations } from "../links/Links";
@@ -102,7 +102,7 @@ export class PerspectiveClient {
         return this.#apiClient.call<string|null>('perspective.publishSnapshot', { uuid })
     }
 
-    async queryLinks(uuid: string, query: LinkQuery): Promise<LinkExpression[]> {
+    async queryLinks(uuid: string, query: LinkQuery, options?: CallOptions): Promise<LinkExpression[]> {
         const params: Record<string, unknown> = { uuid }
         if (query.source) params.source = query.source
         if (query.predicate) params.predicate = query.predicate
@@ -110,16 +110,16 @@ export class PerspectiveClient {
         if (query.fromDate) params.fromDate = query.fromDate instanceof Date ? query.fromDate.toISOString() : String(query.fromDate)
         if (query.untilDate) params.untilDate = query.untilDate instanceof Date ? query.untilDate.toISOString() : String(query.untilDate)
         if (query.limit !== undefined) params.limit = query.limit
-        return this.#apiClient.call<LinkExpression[]>('perspective.queryLinks', params)
+        return this.#apiClient.call<LinkExpression[]>('perspective.queryLinks', params, options)
     }
 
-    async queryProlog(uuid: string, query: string): Promise<unknown> {
-        const result = await this.#apiClient.call<string>('perspective.queryProlog', { uuid, query })
+    async queryProlog(uuid: string, query: string, options?: CallOptions): Promise<unknown> {
+        const result = await this.#apiClient.call<string>('perspective.queryProlog', { uuid, query }, options)
         return JSON.parse(result)
     }
 
-    async querySparql<T = any>(uuid: string, query: string): Promise<T> {
-        const result = await this.#apiClient.call<string>('perspective.querySparql', { uuid, engine: 'sparql', query })
+    async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
+        const result = await this.#apiClient.call<string>('perspective.querySparql', { uuid, engine: 'sparql', query }, options)
         return JSON.parse(result) as T
     }
 
@@ -178,9 +178,9 @@ export class PerspectiveClient {
         )
     }
 
-    async modelQuery(uuid: string, className: string, queryJson: string): Promise<any> {
+    async modelQuery(uuid: string, className: string, queryJson: string, options?: CallOptions): Promise<any> {
         const resultJson = await this.#apiClient.call<string>(
-            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }
+            'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }, options
         )
         return JSON.parse(resultJson)
     }
@@ -297,7 +297,7 @@ export class PerspectiveClient {
                     emitDebugEvents: observe.emitDebugEvents ?? false,
                 } : {}),
             },
-            RUN_INTERPRETATION_TIMEOUT_MS,
+            { timeoutMs: RUN_INTERPRETATION_TIMEOUT_MS },
         )
     }
 
@@ -347,7 +347,7 @@ export class PerspectiveClient {
                 observationId,
                 emitDebugEvents,
             },
-            RUN_INTERPRETATION_TIMEOUT_MS,
+            { timeoutMs: RUN_INTERPRETATION_TIMEOUT_MS },
         )
     }
 
@@ -495,6 +495,56 @@ export class PerspectiveClient {
             'perspective.getSubjectData', { uuid, subjectClass, expressionAddress }
         )
     }
+
+    // ── SHACL resolution (server-side) ─────────────────────────────────────────
+    // These methods delegate shape resolution to the executor, which reads links
+    // from its local store in-process.  Each call replaces the multi-round-trip
+    // `queryLinks` sequences the old PerspectiveProxy methods performed.
+
+    /** List the names of every SHACL shape stored in a perspective (one RPC call). */
+    async getShaclNames(uuid: string): Promise<string[]> {
+        return this.#apiClient.call<string[]>('perspective.getShaclNames', { uuid })
+    }
+
+    /**
+     * Resolve a shape's `sh:targetClass` by name (one RPC call).
+     *
+     * Returns `undefined` when the shape (or its `sh://targetClass` edge) is
+     * absent — unified with `PerspectiveProxy.getShaclTargetClass` so callers
+     * see a single "not found" representation across both layers. The
+     * executor wire format is still `null` (see `perspective.getShaclTargetClass`
+     * in `perspectives_ws.rs`); this method maps that at the boundary rather
+     * than pushing the null one layer further up. PR #935 review r3897752023.
+     */
+    async getShaclTargetClass(uuid: string, name: string): Promise<string | undefined> {
+        const result = await this.#apiClient.call<string | null>(
+            'perspective.getShaclTargetClass',
+            { uuid, name },
+        )
+        return result ?? undefined
+    }
+
+    /**
+     * Retrieve a single SHACL shape's link triples by name (one RPC call).
+     * Returns `{shapeUri, links}` for reconstruction via `SHACLShape.fromLinks()`,
+     * or `null` if no shape with that name exists.
+     */
+    async getShacl(uuid: string, name: string): Promise<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null> {
+        return this.#apiClient.call<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null>(
+            'perspective.getShacl', { uuid, name }
+        )
+    }
+
+    /**
+     * Retrieve all SHACL shapes in one call.  Returns an array of
+     * `{name, shapeUri, links}` — one entry per shape (one RPC call).
+     */
+    async getAllShacl(uuid: string): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
+        return this.#apiClient.call<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>>(
+            'perspective.getAllShacl', { uuid }
+        )
+    }
+
 
     // ExpressionClient functions, needed for Subjects:
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {

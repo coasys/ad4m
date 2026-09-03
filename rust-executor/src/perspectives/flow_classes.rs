@@ -8,14 +8,16 @@
 //! `flow-transition-proposal.test.ts`) lock their shape to the SDNA JSON
 //! blobs loaded here so drift becomes unmergeable.
 //!
-//! Registration (`ensure_flow_model_classes`) is exposed for the engine
-//! (`mint_flow_instance` / future consensus firing). The auto-processor
-//! call-site — where an LLM-detected flow-start mints a `FlowInstance` on
-//! behalf of the extraction DID — lands with the slice-10 Model-C wiring;
-//! until then, callers are the unit tests here and the WS-RPC exposure of
-//! `startFlowInstance` (client mirror).
-
-#![allow(dead_code)]
+//! Forward-staging for the engine — no live WS-RPC path calls into this
+//! module today. The live flow-instance mint path is TS
+//! `FlowInstanceRecord.create` in `core/src/perspectives/FlowInstance.ts`
+//! (`FlowInstance.start` on the wrapper). When the consensus engine
+//! (slice 10.6+) fires transitions server-side, [`mint_flow_instance`]
+//! becomes the live path; keep the two representations in sync until
+//! then. James PR #929 R6 asked for this header to stop overclaiming
+//! today's state, and for the module-level `#![allow(dead_code)]` to be
+//! swapped for function-level attributes so drift on individual items
+//! surfaces at build time.
 
 use crate::agent::AgentContext;
 use crate::perspectives::hardwired_class::ensure_subject_class;
@@ -34,6 +36,7 @@ pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
 /// perspective. Mirrors [`super::interpretation::overlay::classes::ensure_interpretation_overlay_classes`].
 /// No `required_path` guard yet — the shapes are stable at this point; add one
 /// when a future property forces a re-register.
+///
 pub(crate) async fn ensure_flow_model_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -64,6 +67,7 @@ pub(crate) async fn ensure_flow_model_classes(
 /// Mirrors [`super::interpretation::overlay::classes::mint_interpretation_run`]'s
 /// `ad4m://interp/run/{id}` layout — the two are the mirror runtime records the
 /// engine writes on behalf of an extracting DID.
+#[allow(dead_code)]
 pub(crate) fn flow_instance_uri(instance_id: &str) -> String {
     format!("ad4m://flow/instance/{instance_id}")
 }
@@ -100,9 +104,14 @@ pub(crate) fn flow_transition_proposal_uri(proposal_id: &str) -> String {
 /// whole record; there is no update-loop for follow-on collection members.
 ///
 /// Returns the freshly-minted `FlowInstance` URI (`ad4m://flow/instance/{id}`).
+///
+/// Only test-called today; the live mint path is TS `FlowInstanceRecord.create`.
+/// Comes alive as the write path when the consensus engine (slice 10.6+) fires
+/// transitions server-side.
+#[allow(dead_code)]
 pub(crate) async fn mint_flow_instance(
     perspective: &mut PerspectiveInstance,
-    flow_name: &str,
+    flow_uri: &str,
     base_expression: &str,
     initial_state: &str,
     instance_id: &str,
@@ -115,9 +124,11 @@ pub(crate) async fn mint_flow_instance(
     // Property names must match the SDNA `name` fields exactly, not the
     // wire predicate paths. `subject` is used (not `baseExpression`) —
     // the latter collides with `Ad4mModel`'s synthetic hydration field
-    // on the TS reader side.
+    // on the TS reader side. The `flowUri` value is the flow's canonical
+    // URI (e.g. `coasys://DeliveryFlow`), not the bare name — see
+    // James PR #929 R5.
     let values = serde_json::json!({
-        "flow": flow_name,
+        "flowUri": flow_uri,
         "subject": base_expression,
         "currentState": initial_state,
     });
@@ -137,35 +148,20 @@ pub(crate) async fn mint_flow_instance(
     Ok(uri)
 }
 
-/// Mint one `FlowTransitionProposal` on-graph as the write-side counterpart
-/// to a [`super::flow_evaluator::SatisfiedTransition`]. Takes primitive
-/// fields — no dependency on `flow_evaluator` — so the module stays a
-/// leaf in the flow-runtime layering (evaluator can depend on classes,
-/// not the other way around).
+/// Mint one `FlowTransitionProposal` at `ad4m://flow/proposal/{proposal_id}`.
 ///
-/// **Pure w.r.t. side-effects the caller controls** — `proposal_id` +
-/// `batch_id` are caller-supplied, mirroring
-/// [`mint_flow_instance`] so the auto-processor / consensus loop can
-/// thread its own id-gen + atomic-commit batch. Propose-time is
-/// synthesised by `Ad4mModel`'s built-in `createdAt` (earliest link
-/// timestamp on the proposal URI) — no `proposedAt` scalar is written.
+/// `proposal_id` and `batch_id` are caller-supplied, as in
+/// [`mint_flow_instance`], so the caller controls id generation and atomic
+/// commit. Propose-time comes from `Ad4mModel`'s built-in `createdAt`.
 ///
-/// `evidence_ids` is written as a bag through the collection setter:
-/// `create_subject` seeds the first element via the constructor's own
-/// setter, then the remaining N-1 elements each go through
-/// `update_subject` with `{ "evidence": id }`. Every call shares
-/// `batch_id`, so the constructor + collection bumps commit atomically.
-/// Same shape [`super::interpretation::overlay::classes::mint_interpretation_run`]
-/// uses for its `sources` collection.
+/// `evidence` is a collection: `create_subject` writes the first element and
+/// each further element goes through `update_subject` in the same batch.
+/// `rationale` is written only when `Some` and non-empty. `runUri` is not
+/// written; engine-emitted proposals do not track back to a run today.
 ///
-/// `runUri` is still not written here — engine-emitted proposals don't
-/// track back to a specific InterpretationRun today. `rationale` IS
-/// carried when the caller passes `Some(text)` (slice 10.6c: LLM-proposed
-/// path). The SDNA declares both as `min_count: 0, max_count: 1`
-/// (optional scalar), so `Some(_)` writes and `None` omits.
-///
-/// Returns the freshly-minted proposal URI
-/// (`ad4m://flow/proposal/{proposal_id}`).
+/// Property names must match the SDNA `name` fields exactly. A mismatched
+/// key is silently dropped by `create_subject`; the alignment test below
+/// locks the mapping.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_flow_transition_proposal(
     perspective: &mut PerspectiveInstance,
@@ -184,10 +180,6 @@ pub(crate) async fn write_flow_transition_proposal(
 
     let uri = flow_transition_proposal_uri(proposal_id);
 
-    // Property names MUST match the SDNA `name` fields exactly — a
-    // mismatched key is silently dropped by `create_subject`
-    // (2026-08-20 bug). Locked by
-    // `write_flow_transition_proposal_values_align_with_sdna_property_names`.
     let mut values = serde_json::json!({
         "flowInstance": flow_instance_uri,
         "fromState": from_state,
@@ -195,19 +187,12 @@ pub(crate) async fn write_flow_transition_proposal(
         "proposer": proposer_did,
         "evidenceHashes": evidence_hash,
     });
-    // slice 10.6c: optional LLM-supplied attribution. Empty strings are
-    // treated as absent — the SDNA `min_count: 0` allows both, but writing
-    // an empty scalar bloats the graph with a link carrying no signal.
     if let Some(text) = rationale {
         if !text.is_empty() {
             values["rationale"] = text.to_string().into();
         }
     }
 
-    // `evidence` is a collection with an `addLink` setter. `create_subject`
-    // only writes ONE value per property, so seed with the first element
-    // and stream the rest through `update_subject` — same pattern as
-    // `mint_interpretation_run(...).sources`.
     let mut rest_evidence: Vec<String> = Vec::new();
     if let Some((first, rest)) = evidence_ids.split_first() {
         values["evidence"] = first.clone().into();
@@ -276,7 +261,7 @@ mod tests {
         let names: Vec<&str> = props.iter().filter_map(|p| p["name"].as_str()).collect();
         // No "startedAt" property — `Ad4mModel`'s built-in `createdAt`
         // (earliest link timestamp) carries flow-start time on hydration.
-        for expected in ["flow", "subject", "currentState"] {
+        for expected in ["flowUri", "subject", "currentState"] {
             assert!(
                 names.contains(&expected),
                 "FlowInstance SDNA missing '{expected}' property (found {names:?})",
@@ -346,7 +331,7 @@ mod tests {
             .iter()
             .filter_map(|p| p["name"].as_str())
             .collect();
-        for key in ["flow", "subject", "currentState"] {
+        for key in ["flowUri", "subject", "currentState"] {
             assert!(
                 props.contains(&key),
                 "mint_flow_instance writes `{key}` but SDNA does not declare it (found {props:?})",
@@ -397,10 +382,10 @@ mod tests {
             "proposer",
             "evidence",
             "evidenceHashes",
-            // slice 10.6c: optional LLM-attribution field. Same alignment
-            // guard as the required scalars — a rename in the SDNA that
-            // did not land here would silently drop the rationale from
-            // the on-graph proposal without erroring.
+            // Optional LLM-attribution field. Same alignment guard as
+            // the required scalars — a rename in the SDNA that did not
+            // land here would silently drop the rationale from the
+            // on-graph proposal without erroring.
             "rationale",
         ] {
             assert!(
@@ -459,8 +444,9 @@ mod tests {
             .collect();
         assert_eq!(
             identity_names,
-            vec!["flow"],
-            "FlowInstance identity must be `flow` — the base's per-flow-name discriminator",
+            vec!["flowUri"],
+            "FlowInstance identity must be `flowUri` — the flow's canonical URI, \
+             collision-free across social-DNA modules (James PR #929 R5)",
         );
 
         let ftp = parse(FLOW_TRANSITION_PROPOSAL_SDNA);

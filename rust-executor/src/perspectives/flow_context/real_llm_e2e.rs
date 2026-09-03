@@ -22,7 +22,7 @@
 //! # What it does *not* prove
 //!
 //! - The engine acts on the extracted instance (covered by the
-//!   `run_engine_proposal_pass` post-processing tests).
+//!   `run_engine_proposal_pass` e2e tests).
 //! - The LLM proposes a `FlowTransitionProposal` on its own (covered by
 //!   the `flow_proposals` output-field tests).
 //!
@@ -34,6 +34,15 @@
 //! `INTERPRETATION_E2E_MODEL` (default `gemma3:12b`). Retries the whole
 //! pass up to 3× to soak up single-sample LLM flake, matching the
 //! sibling generic-interpretation e2e tests.
+//!
+//! # CI gating (PR #943)
+//!
+//! Gated behind `#[ignore = "llm-e2e"]` — regular CI skips it; the nightly
+//! `llm-e2e` workflow on `dev` runs it against Marvin's local Ollama. Same
+//! discipline as `interpretation_e2e.rs` / `interpretation_harness_e2e.rs`.
+//! Run locally with `cargo test --release --lib
+//! perspectives::flow_context::real_llm_e2e -- --ignored --test-threads=1
+//! --nocapture`, or via the umbrella `scripts/run-llm-e2e.sh`.
 
 #![cfg(test)]
 
@@ -118,9 +127,11 @@ async fn seed_delivery_flow_and_instance(
             .expect("add_link(flow definition)");
     }
 
+    // Flow URI (`${namespace}${name}Flow`), not bare name — see James
+    // PR #929 R5.
     mint_flow_instance(
         perspective,
-        "Delivery",
+        "delivery://DeliveryFlow",
         base_uri,
         "identified",
         "e2e-real-llm-inst",
@@ -131,13 +142,14 @@ async fn seed_delivery_flow_and_instance(
     .expect("mint_flow_instance")
 }
 
-/// The onion-shell R5 test: real LLM + active-flow context in the prompt.
+/// Real LLM + active-flow context in the prompt — the onion-shell test
+/// above the pure composition proof in the sibling `e2e_tests` module.
 ///
-/// Verifies that when the extraction pass runs against a real model with the
-/// slice 10.3c wiring live, the added `active_flows` prompt block does not
-/// derail the LLM's ability to produce parseable output — the pass still
-/// lands at least one typed instance for a transcript unambiguously about
-/// scoping the referenced Task subject.
+/// Verifies that when the extraction pass runs against a real model
+/// with the flow-aware wiring live, the added `active_flows` prompt
+/// block does not derail the LLM's ability to produce parseable output
+/// — the pass still lands at least one typed instance for a transcript
+/// unambiguously about scoping the referenced Task subject.
 ///
 /// Retries up to 3× to soak single-sample flake from the small local model
 /// (`gemma3:12b` occasionally files a scope-discussion turn as a `belief` on
@@ -145,6 +157,7 @@ async fn seed_delivery_flow_and_instance(
 /// without hiding a real regression, since the last attempt's assertions
 /// still fire with full diagnostics).
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "llm-e2e"]
 async fn model_c_real_llm_extraction_with_active_flow_in_prompt() {
     let base_uri = "soa://ext/task/mvp";
     let mut last_counts: Option<std::collections::HashMap<String, usize>> = None;
@@ -155,8 +168,8 @@ async fn model_c_real_llm_extraction_with_active_flow_in_prompt() {
 
         let inst_uri = seed_delivery_flow_and_instance(&mut perspective, &ctx, base_uri).await;
 
-        // Sanity check the wiring — the gather half of slice 10.3c must see
-        // the just-minted instance, else the LLM can't possibly get flow
+        // Sanity check the wiring — the gather half must see the
+        // just-minted instance, else the LLM can't possibly get flow
         // context and this test is measuring nothing.
         let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()]).await;
         assert_eq!(

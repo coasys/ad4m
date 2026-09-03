@@ -2,7 +2,8 @@ pub mod auto_processor;
 pub(crate) mod flow_classes;
 pub(crate) mod flow_context;
 pub(crate) mod flow_evaluator;
-pub(crate) mod flow_semantic_check;
+#[cfg(test)]
+mod flow_evaluator_e2e;
 pub(crate) mod hardwired_class;
 pub mod interpretation;
 #[cfg(test)]
@@ -14,6 +15,7 @@ mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
+pub mod ordering;
 pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;

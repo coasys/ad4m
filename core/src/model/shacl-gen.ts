@@ -309,6 +309,12 @@ export function buildSHACL(
             relShape.filter = false;
         }
 
+        // Ordering is declared in the type system so the executor can act on it
+        // for every writer, not just this client.
+        if (relMeta.ordering) {
+            relShape.ordering = relMeta.ordering.strategy;
+        }
+
         // AD4M-specific metadata
         if (relMeta.local !== undefined) {
             relShape.local = relMeta.local;
