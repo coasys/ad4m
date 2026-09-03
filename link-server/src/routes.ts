@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { didToPublicKey, hashMessageForVerify, verifyHex, type AuthManager, type ChallengeStore } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
-import { rotateRoomKey } from "./encryption.js";
+import { rotateRoomKey, type EncryptedKeyPayload } from "./encryption.js";
 import type { FederateResult, FederationIdentity, FederationManager } from "./federation.js";
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
@@ -433,7 +433,66 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     async (request, reply) => {
       const claims = request.authClaims!;
       const result = rotateRoomKey(ctx.db, claims.roomId);
-      return reply.send({ version: result.version, recipients: result.recipients });
+      return reply.send({
+        version: result.version,
+        recipients: result.recipients,
+        membersNeedingHistoricalKeys: result.membersNeedingHistoricalKeys,
+      });
+    }
+  );
+
+  // ---- E2E key grant (admin re-seals historical versions for a member) ----
+
+  app.post(
+    "/rooms/:roomId/keys/grant",
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    async (request, reply) => {
+      const claims = request.authClaims!;
+      const body = request.body as {
+        targetDid?: string;
+        keys?: Array<{ version: number; encryptedKey: EncryptedKeyPayload }>;
+      } | null;
+
+      if (!body || typeof body.targetDid !== "string") {
+        return reply.code(400).send({ error: "targetDid is required" });
+      }
+      if (!Array.isArray(body.keys) || body.keys.length === 0) {
+        return reply.code(400).send({ error: "keys array is required and must not be empty" });
+      }
+
+      // Target must exist in the room ACL.
+      if (!ctx.db.isMember(claims.roomId, body.targetDid)) {
+        return reply.code(404).send({ error: "target DID is not a member of this room" });
+      }
+
+      // Validate each entry: version must be a positive integer, encryptedKey
+      // must have the expected shape. The server cannot verify the plaintext
+      // inside — the admin holds the trust anchor for the room.
+      const latestVersion = ctx.db.getLatestKeyVersion(claims.roomId);
+      const stored: number[] = [];
+      for (const entry of body.keys) {
+        if (typeof entry.version !== "number" || entry.version < 1 || entry.version > latestVersion) {
+          return reply.code(400).send({ error: `invalid version ${entry.version}; latest is ${latestVersion}` });
+        }
+        const ek = entry.encryptedKey;
+        if (
+          !ek ||
+          typeof ek.ephemeralPublicKey !== "string" ||
+          typeof ek.nonce !== "string" ||
+          typeof ek.ciphertext !== "string"
+        ) {
+          return reply.code(400).send({ error: `malformed encryptedKey for version ${entry.version}` });
+        }
+        const inserted = ctx.db.addRoomKeyIfMissing(
+          claims.roomId,
+          body.targetDid,
+          entry.version,
+          JSON.stringify(ek)
+        );
+        if (inserted) stored.push(entry.version);
+      }
+
+      return reply.send({ granted: stored });
     }
   );
 }

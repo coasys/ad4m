@@ -143,6 +143,12 @@ const language = defineLanguage({
             emitDiff: (diff) => getRuntime().emitPerspectiveDiff(diff),
             emitSyncState: (state) => getRuntime().emitSyncStateChange(state),
             getKeyRing: () => keyRing,
+            refreshKeyRing: async () => {
+                const prevSize = keyRing?.size ?? 0;
+                await setupKeyRing();
+                const newSize = keyRing?.size ?? 0;
+                return newSize > prevSize;
+            },
         });
 
         wsClient = new WsClient({
@@ -150,7 +156,22 @@ const language = defineLanguage({
             getToken: () => auth.getValidToken(),
             handlers: {
                 onDiff(msg) {
-                    syncModule.applyInboundWireDiff(msg.payload, msg.sequence, msg.revision);
+                    const result = syncModule.applyInboundWireDiff(msg.payload, msg.sequence, msg.revision);
+                    // If the live push contained links we couldn't decrypt,
+                    // kick off a background key ring refresh + re-bootstrap.
+                    if (result.missingVersions.size > 0) {
+                        void (async () => {
+                            try {
+                                const prevSize = keyRing?.size ?? 0;
+                                await setupKeyRing();
+                                if ((keyRing?.size ?? 0) > prevSize) {
+                                    await syncModule.bootstrap();
+                                }
+                            } catch (err) {
+                                console.error("[server-link-language] WS diff key ring refresh failed:", err);
+                            }
+                        })();
+                    }
                 },
                 onTelepresenceSignal(msg) {
                     // Directed at us specifically — this connection is

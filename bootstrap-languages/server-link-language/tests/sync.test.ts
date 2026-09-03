@@ -115,7 +115,8 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.equal(store.getRevision(), "rev-5");
         assert.equal(emittedDiffs.length, 1);
         assert.deepEqual(emittedDiffs[0], { additions: [link], removals: [] });
-        assert.deepEqual(result, { additions: [link], removals: [] });
+        assert.deepEqual(result.diff, { additions: [link], removals: [] });
+        assert.equal(result.missingVersions.size, 0);
     });
 
     it("applies removals and still emits", () => {
@@ -163,7 +164,7 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.equal(emittedDiffs.length, 0, "no diff emitted on failure");
     });
 
-    it("throws on encrypted diff with key ring missing the required version — no store mutation", () => {
+    it("skips encrypted diff with missing key version — applies rest, reports missing versions", () => {
         const transport = new MockTransport();
         setup(transport);
         const rk1 = generateRoomKey();
@@ -172,16 +173,15 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const link = makeLink({ source: "wrong-version" });
         const wireLink = encryptLinkForWire(link, rk2, 2); // encrypted with version 2, ring only has 1
 
-        assert.throws(
-            () => syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5"),
-            /no key for version 2/,
-        );
-        assert.equal(store.allLinks().links.length, 0, "store must remain empty — no partial application");
-        assert.equal(store.getSequence(), 0, "sequence must not advance on failure");
-        assert.equal(emittedDiffs.length, 0, "no diff emitted on failure");
+        const result = syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
+
+        assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
+        assert.equal(store.getSequence(), 5, "sequence must advance — cursor must not get stuck");
+        assert.equal(emittedDiffs.length, 1, "still emits (empty) diff");
+        assert.deepEqual(result.missingVersions, new Set([2]));
     });
 
-    it("rejects atomically — mixed plaintext + encrypted diff with missing key does not partially apply", () => {
+    it("applies plaintext links and skips undecryptable ones in a mixed batch", () => {
         const transport = new MockTransport();
         setup(transport);
         const rk = generateRoomKey();
@@ -189,13 +189,15 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         const plaintextLink = makeLink({ source: "visible" });
         const encryptedLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 2); // version 2, ring only has 1
 
-        assert.throws(
-            () => syncModule.applyInboundWireDiff(
-                { additions: [plaintextLink, encryptedLink], removals: [] }, 5, "rev-5",
-            ),
+        const result = syncModule.applyInboundWireDiff(
+            { additions: [plaintextLink, encryptedLink], removals: [] }, 5, "rev-5",
         );
-        assert.equal(store.allLinks().links.length, 0, "plaintext link must not be applied when batch fails");
-        assert.equal(emittedDiffs.length, 0, "no diff emitted on partial failure");
+
+        assert.equal(store.allLinks().links.length, 1, "plaintext link must be applied");
+        assert.deepEqual(store.allLinks().links[0].data.source, "visible");
+        assert.equal(emittedDiffs.length, 1, "diff emitted with the plaintext link");
+        assert.deepEqual(result.missingVersions, new Set([2]));
+        assert.equal(store.getSequence(), 5, "sequence advances past the batch");
     });
 
     it("encrypted removal across key versions removes the correct link", () => {

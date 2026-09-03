@@ -216,6 +216,16 @@ export class LinkServerDB {
       getLatestKeyVersion: this.raw.prepare(
         "SELECT COALESCE(MAX(version), 0) AS max FROM room_keys WHERE room_id = ?"
       ),
+      getMemberKeyVersions: this.raw.prepare(
+        "SELECT version FROM room_keys WHERE room_id = ? AND did = ? ORDER BY version ASC"
+      ),
+      getAllMemberKeyVersions: this.raw.prepare(
+        `SELECT did, version FROM room_keys WHERE room_id = ? ORDER BY did, version ASC`
+      ),
+      addRoomKeyIfMissing: this.raw.prepare(
+        `INSERT OR IGNORE INTO room_keys (room_id, did, encrypted_key, version)
+         VALUES (?, ?, ?, ?)`
+      ),
 
       addFederationPeer: this.raw.prepare(
         `INSERT INTO federation_peers (room_id, peer_url, added_at, peer_public_key)
@@ -475,6 +485,32 @@ export class LinkServerDB {
   getLatestKeyVersion(roomId: string): number {
     const row = this.stmts.getLatestKeyVersion.get(roomId) as { max: number };
     return row.max;
+  }
+
+  getMemberKeyVersions(roomId: string, did: string): number[] {
+    const rows = this.stmts.getMemberKeyVersions.all(roomId, did) as { version: number }[];
+    return rows.map((r) => r.version);
+  }
+
+  /** Returns a map of DID → version numbers for all members who have any keys in this room. */
+  getAllMemberKeyVersions(roomId: string): Map<string, number[]> {
+    const rows = this.stmts.getAllMemberKeyVersions.all(roomId) as { did: string; version: number }[];
+    const result = new Map<string, number[]>();
+    for (const row of rows) {
+      const versions = result.get(row.did);
+      if (versions) {
+        versions.push(row.version);
+      } else {
+        result.set(row.did, [row.version]);
+      }
+    }
+    return result;
+  }
+
+  /** INSERT OR IGNORE — stores a sealed key only if that (room, did, version) doesn't exist yet. */
+  addRoomKeyIfMissing(roomId: string, did: string, version: number, encryptedKey: string): boolean {
+    const info = this.stmts.addRoomKeyIfMissing.run(roomId, did, encryptedKey, version);
+    return info.changes > 0;
   }
 
   // ---- federation peers ----

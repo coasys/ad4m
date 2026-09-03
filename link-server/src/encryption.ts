@@ -104,9 +104,17 @@ export function decryptRoomKeyWithX25519(
 }
 
 
+export interface MemberKeyGap {
+  did: string;
+  missingVersions: number[];
+  x25519PublicKey: string;
+}
+
 export interface RotateResult {
   version: number;
   recipients: string[];
+  /** Members in the ACL who lack one or more historical key versions. */
+  membersNeedingHistoricalKeys: MemberKeyGap[];
 }
 
 /**
@@ -142,5 +150,25 @@ export function rotateRoomKey(db: LinkServerDB, roomId: string): RotateResult {
     recipients.push(row.did);
   }
   db.setE2eEnabled(roomId, true);
-  return { version, recipients };
+
+  // Detect members missing historical versions so the admin can grant them.
+  const membersNeedingHistoricalKeys: MemberKeyGap[] = [];
+  if (version > 1) {
+    const allVersions = db.getAllMemberKeyVersions(roomId);
+    const expectedVersions = Array.from({ length: version }, (_, i) => i + 1);
+    for (const row of aclRows) {
+      if (!row.x25519_public_key) continue;
+      const memberVersions = new Set(allVersions.get(row.did) ?? []);
+      const missing = expectedVersions.filter((v) => !memberVersions.has(v));
+      if (missing.length > 0) {
+        membersNeedingHistoricalKeys.push({
+          did: row.did,
+          missingVersions: missing,
+          x25519PublicKey: row.x25519_public_key,
+        });
+      }
+    }
+  }
+
+  return { version, recipients, membersNeedingHistoricalKeys };
 }

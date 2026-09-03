@@ -35,6 +35,9 @@ export interface SyncDeps {
     emitSyncState?: (state: string) => void;
     /** Returns the current key ring, or null for a plaintext (non-E2E) room. */
     getKeyRing: () => KeyRing | null;
+    /** Re-fetches the key ring from the server. Returns true if new versions
+     *  were obtained (callers should re-bootstrap to recover skipped links). */
+    refreshKeyRing?: () => Promise<boolean>;
 }
 
 let _deps: SyncDeps | null = null;
@@ -100,11 +103,63 @@ function toWireDiff(diff: PerspectiveDiff): WirePerspectiveDiff {
     };
 }
 
-function fromWireDiff(wire: WirePerspectiveDiff): PerspectiveDiff {
-    return {
-        additions: (wire.additions ?? []).map(fromWireLink),
-        removals: (wire.removals ?? []).map(fromWireLink),
-    };
+export interface FromWireDiffResult {
+    diff: PerspectiveDiff;
+    /** Key versions that appeared in the wire batch but could not be
+     *  decrypted because the key ring lacks them. Empty when everything
+     *  decrypted successfully (or the room uses plaintext). */
+    missingVersions: Set<number>;
+}
+
+/**
+ * Converts a wire diff to a local diff. When a link cannot be decrypted
+ * because the key ring lacks that version, the link gets **skipped** (not
+ * thrown) and its `key_version` is collected into `missingVersions`. This
+ * prevents a single undecryptable link from blocking the entire sync
+ * cursor.
+ *
+ * The "no key ring at all" case still throws — that represents a transient
+ * init-order problem (E2E keys not yet fetched), NOT a permanent gap.
+ */
+function fromWireDiff(wire: WirePerspectiveDiff): FromWireDiffResult {
+    const missingVersions = new Set<number>();
+    const additions: LinkExpression[] = [];
+    const removals: LinkExpression[] = [];
+
+    for (const wireLink of wire.additions ?? []) {
+        try {
+            additions.push(fromWireLink(wireLink));
+        } catch (err) {
+            if (isMissingVersionError(err)) {
+                missingVersions.add(extractMissingVersion(wireLink));
+            } else {
+                throw err; // "no key ring" or non-crypto errors propagate
+            }
+        }
+    }
+    for (const wireLink of wire.removals ?? []) {
+        try {
+            removals.push(fromWireLink(wireLink));
+        } catch (err) {
+            if (isMissingVersionError(err)) {
+                missingVersions.add(extractMissingVersion(wireLink));
+            } else {
+                throw err;
+            }
+        }
+    }
+
+    return { diff: { additions, removals }, missingVersions };
+}
+
+/** Matches the error shape thrown by decryptLinkFromWire when the key ring
+ *  has entries but lacks the specific version needed. */
+function isMissingVersionError(err: unknown): boolean {
+    return err instanceof Error && /no key for version \d+/.test(err.message);
+}
+
+function extractMissingVersion(wireLink: WireLinkExpression): number {
+    return wireLink.key_version ?? 1;
 }
 
 function normalizeSyncEntry(
@@ -127,13 +182,28 @@ function normalizeSyncEntry(
 // Inbound — the single choke point (see module doc)
 // ---------------------------------------------------------------------------
 
-export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): PerspectiveDiff {
-    const diff = fromWireDiff(wireDiff);
+export interface ApplyResult {
+    diff: PerspectiveDiff;
+    /** Key versions that could not be decrypted — if non-empty, some links
+     *  were skipped and a key ring refresh + re-bootstrap should follow. */
+    missingVersions: Set<number>;
+}
+
+export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): ApplyResult {
+    const { diff, missingVersions } = fromWireDiff(wireDiff);
+
+    if (missingVersions.size > 0) {
+        console.warn(
+            `[server-link-language] skipped ${missingVersions.size} undecryptable key version(s): ` +
+            `${[...missingVersions].join(", ")} — will request key grant`,
+        );
+    }
+
     store.applyDiff(diff);
     if (revision) store.setRevision(revision);
     if (Number.isFinite(sequence)) store.setSequence(sequence);
     deps().emitDiff(diff); // <-- CRITICAL. Do not remove. Do not bypass.
-    return diff;
+    return { diff, missingVersions };
 }
 
 // ---------------------------------------------------------------------------
@@ -466,14 +536,41 @@ export async function catchUp(): Promise<PerspectiveDiff> {
     const res = await api.fetchSync(config, token, since);
 
     let last: PerspectiveDiff = { additions: [], removals: [] };
+    const allMissingVersions = new Set<number>();
     for (const rawEntry of res.diffs) {
         const entry = normalizeSyncEntry(rawEntry, res.revision, res.sequence);
-        last = applyInboundWireDiff(entry.diff, entry.sequence, entry.revision);
+        const result = applyInboundWireDiff(entry.diff, entry.sequence, entry.revision);
+        last = result.diff;
+        for (const v of result.missingVersions) allMissingVersions.add(v);
     }
 
     if (res.diffs.length === 0 && res.revision) {
         store.setRevision(res.revision);
         store.setSequence(res.sequence);
+    }
+
+    // If any links were skipped due to missing key versions, attempt a key
+    // ring refresh. If the refresh yields new versions, re-bootstrap from
+    // the server's full active set to recover the skipped links.
+    if (allMissingVersions.size > 0 && _deps?.refreshKeyRing) {
+        console.log(
+            `[server-link-language] ${allMissingVersions.size} missing key version(s) ` +
+            `detected — refreshing key ring…`,
+        );
+        try {
+            const gotNew = await _deps.refreshKeyRing();
+            if (gotNew) {
+                console.log("[server-link-language] key ring refreshed with new versions — re-bootstrapping");
+                await bootstrap();
+            } else {
+                console.warn(
+                    "[server-link-language] key ring refresh returned no new versions — " +
+                    "admin has not yet granted historical keys",
+                );
+            }
+        } catch (err) {
+            console.error("[server-link-language] key ring refresh failed:", err);
+        }
     }
 
     emitSyncStateSafe("Synced");

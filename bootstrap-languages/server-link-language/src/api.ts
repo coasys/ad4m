@@ -166,6 +166,30 @@ export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// E2E key grant (admin re-seals historical versions for late members)
+// ---------------------------------------------------------------------------
+
+export interface GrantKeyEntry {
+    version: number;
+    encryptedKey: { ephemeralPublicKey: string; nonce: string; ciphertext: string };
+}
+
+export async function grantKeys(
+    config: RoomConfig,
+    token: string,
+    targetDid: string,
+    keys: GrantKeyEntry[],
+): Promise<number[]> {
+    const res = await request<{ granted: number[] }>(
+        roomUrl(config, "/keys/grant"),
+        "POST",
+        jsonHeaders(token),
+        JSON.stringify({ targetDid, keys }),
+    );
+    return res.granted ?? [];
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket URL
 // ---------------------------------------------------------------------------
 
