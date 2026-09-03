@@ -104,6 +104,8 @@ function emptyPerspectiveExpression(): Record<string, unknown> {
     };
 }
 
+// Return type mandated by @coasys/ad4m-ldk TelepresenceCapability — no
+// meaningful response data; the empty object satisfies the interface.
 export async function sendSignal(remoteAgentDid: DID, payload: unknown): Promise<object> {
     deps().send({ type: "telepresence-signal", toDid: remoteAgentDid, payload });
     return {};

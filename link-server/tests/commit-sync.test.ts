@@ -11,7 +11,18 @@ import {
   startTestServer,
   type TestServerHandle,
 } from "./helpers.js";
-import { computeRevision, type LinkExpression, type PerspectiveDiff } from "../src/types.js";
+import { EMPTY_REVISION, xorHex, type LinkExpression, type PerspectiveDiff } from "../src/types.js";
+
+/** Test helper: compute the XOR revision of a set of link hashes.
+ * The server maintains this incrementally — this standalone version
+ * exists only for assertions. */
+function computeRevision(linkHashes: string[]): string {
+  let rev = EMPTY_REVISION;
+  for (const hash of linkHashes) {
+    rev = xorHex(rev, hash);
+  }
+  return rev;
+}
 
 async function withServer(fn: (server: TestServerHandle) => Promise<void>): Promise<void> {
   const server = await startTestServer();

@@ -181,9 +181,7 @@ export class LinkServerDB {
          VALUES (?, ?, ?, ?)`
       ),
       removeLink: this.raw.prepare("DELETE FROM links WHERE room_id = ? AND link_hash = ?"),
-      hasLink: this.raw.prepare("SELECT 1 FROM links WHERE room_id = ? AND link_hash = ?"),
       getActiveLinkRows: this.raw.prepare("SELECT * FROM links WHERE room_id = ?"),
-      getActiveHashes: this.raw.prepare("SELECT link_hash FROM links WHERE room_id = ?"),
 
       getNextSequence: this.raw.prepare(
         "SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM diffs WHERE room_id = ?"
@@ -203,7 +201,6 @@ export class LinkServerDB {
         "INSERT OR REPLACE INTO sessions (token, room_id, did, expires_at) VALUES (?, ?, ?, ?)"
       ),
       getSession: this.raw.prepare("SELECT * FROM sessions WHERE token = ?"),
-      deleteSession: this.raw.prepare("DELETE FROM sessions WHERE token = ?"),
       deleteSessionsForDid: this.raw.prepare("DELETE FROM sessions WHERE room_id = ? AND did = ?"),
 
       addRoomKey: this.raw.prepare(
@@ -215,9 +212,6 @@ export class LinkServerDB {
       ),
       getLatestKeyVersion: this.raw.prepare(
         "SELECT COALESCE(MAX(version), 0) AS max FROM room_keys WHERE room_id = ?"
-      ),
-      getMemberKeyVersions: this.raw.prepare(
-        "SELECT version FROM room_keys WHERE room_id = ? AND did = ? ORDER BY version ASC"
       ),
       getAllMemberKeyVersions: this.raw.prepare(
         `SELECT did, version FROM room_keys WHERE room_id = ? ORDER BY did, version ASC`
@@ -349,10 +343,6 @@ export class LinkServerDB {
     return info.changes > 0;
   }
 
-  hasLink(roomId: string, linkHash: string): boolean {
-    return this.stmts.hasLink.get(roomId, linkHash) !== undefined;
-  }
-
   getActiveLinkRows(roomId: string): LinkRow[] {
     return this.stmts.getActiveLinkRows.all(roomId) as LinkRow[];
   }
@@ -361,11 +351,6 @@ export class LinkServerDB {
     return this.getActiveLinkRows(roomId).map(
       (row) => JSON.parse(row.link_data) as LinkExpression
     );
-  }
-
-  getActiveHashes(roomId: string): string[] {
-    const rows = this.stmts.getActiveHashes.all(roomId) as { link_hash: string }[];
-    return rows.map((r) => r.link_hash);
   }
 
   // ---- diffs (append-only log) ----
@@ -459,10 +444,6 @@ export class LinkServerDB {
     return this.stmts.getSession.get(token) as SessionRow | undefined;
   }
 
-  deleteSession(token: string): void {
-    this.stmts.deleteSession.run(token);
-  }
-
   deleteSessionsForDid(roomId: string, did: string): void {
     this.stmts.deleteSessionsForDid.run(roomId, did);
   }
@@ -485,11 +466,6 @@ export class LinkServerDB {
   getLatestKeyVersion(roomId: string): number {
     const row = this.stmts.getLatestKeyVersion.get(roomId) as { max: number };
     return row.max;
-  }
-
-  getMemberKeyVersions(roomId: string, did: string): number[] {
-    const rows = this.stmts.getMemberKeyVersions.all(roomId, did) as { version: number }[];
-    return rows.map((r) => r.version);
   }
 
   /** Returns a map of DID → version numbers for all members who have any keys in this room. */

@@ -167,11 +167,6 @@ export interface PeersResponse {
     peers: DID[];
 }
 
-export interface RevisionResponse {
-    revision: string;
-    sequence: number;
-}
-
 export interface AclResponse {
     admin: DID;
     members: DID[];

@@ -103,7 +103,7 @@ function toWireDiff(diff: PerspectiveDiff): WirePerspectiveDiff {
     };
 }
 
-export interface FromWireDiffResult {
+interface FromWireDiffResult {
     diff: PerspectiveDiff;
     /** Key versions that appeared in the wire batch but could not be
      *  decrypted because the key ring lacks them. Empty when everything

@@ -97,28 +97,19 @@ export type ClientWsMessage =
 
 /**
  * Canonical, order-stable JSON payload used for hashing a LinkExpression.
- * For plaintext links: {source,predicate,target,author,timestamp}.
- * For encrypted links with visible metadata: {ciphertext,nonce,author,timestamp}.
  * For fully-encrypted links (link_hash present): returns the client-supplied
  * hash directly — the server cannot compute the canonical form because all
  * fields are encrypted.
+ * For plaintext links: {source,predicate,target,author,timestamp}.
  */
 export function canonicalLinkPayload(link: LinkExpression): string {
   if (link.link_hash) {
     return link.link_hash;
   }
-  if (isEncryptedLinkData(link.data)) {
-    return JSON.stringify({
-      ciphertext: link.data.ciphertext,
-      nonce: link.data.nonce,
-      author: link.author ?? "",
-      timestamp: link.timestamp ?? "",
-    });
-  }
   return JSON.stringify({
-    source: link.data.source,
-    predicate: link.data.predicate ?? null,
-    target: link.data.target,
+    source: (link.data as LinkData).source,
+    predicate: (link.data as LinkData).predicate ?? null,
+    target: (link.data as LinkData).target,
     author: link.author ?? "",
     timestamp: link.timestamp ?? "",
   });
@@ -153,19 +144,6 @@ export function xorHex(a: string, b: string): string {
     result[i] = aBuf[i] ^ bBuf[i];
   }
   return result.toString("hex");
-}
-
-/**
- * Compute the XOR revision of a set of link hashes. Used by tests —
- * the server maintains the revision incrementally via xorHex() in
- * applyDiffAndAppend, never calling this at runtime.
- */
-export function computeRevision(linkHashes: string[]): string {
-  let rev = EMPTY_REVISION;
-  for (const hash of linkHashes) {
-    rev = xorHex(rev, hash);
-  }
-  return rev;
 }
 
 export interface RoomParams {
@@ -213,13 +191,10 @@ export interface ReconcileResponseBody {
 
 /**
  * Canonical payload signed by a server's identity key for federation calls.
- * Includes a timestamp (ISO-8601) for replay protection — receivers reject
- * payloads older than `FEDERATION_PAYLOAD_MAX_AGE_MS`.
- */
-/**
- * Canonical payload signed by a server's identity key for federation calls.
  * `body` is nested under its own key (not spread) so that body fields can
  * never shadow the positional `kind`/`roomId`/`timestamp` keys.
+ * Includes a timestamp (ISO-8601) for replay protection — receivers reject
+ * payloads older than `FEDERATION_PAYLOAD_MAX_AGE_MS`.
  */
 export function canonicalFederationPayload(
   kind: "federate" | "reconcile",

@@ -103,8 +103,6 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const { app } = await buildServer({
     dataDir: args.dataDir,
-    port: args.port,
-    host: args.host,
     selfUrl: args.selfUrl,
     autoAdmit: args.autoAdmit,
     logger: true,

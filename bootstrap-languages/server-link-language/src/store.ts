@@ -98,7 +98,7 @@ export function removeLink(link: LinkExpression): void {
     if (predicate) storage.delete(predIndexKey(predicate, h));
 }
 
-export function getLink(linkHash: string): LinkExpression | null {
+function getLink(linkHash: string): LinkExpression | null {
     const raw = getStorage().get(linkKey(linkHash));
     if (!raw) return null;
     return JSON.parse(raw) as LinkExpression;

@@ -103,6 +103,22 @@ async function setupKeyRing(): Promise<void> {
     }
 }
 
+/**
+ * Refresh the key ring from the server. If new versions appeared,
+ * re-bootstrap the full link set so previously-undecryptable links
+ * get picked up. Returns true when new key versions were obtained.
+ */
+async function refreshKeyRingIfNeeded(): Promise<boolean> {
+    const prevSize = keyRing?.size ?? 0;
+    await setupKeyRing();
+    const newSize = keyRing?.size ?? 0;
+    if (newSize > prevSize) {
+        await syncModule.bootstrap();
+        return true;
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Language definition
 // ---------------------------------------------------------------------------
@@ -146,8 +162,7 @@ const language = defineLanguage({
             refreshKeyRing: async () => {
                 const prevSize = keyRing?.size ?? 0;
                 await setupKeyRing();
-                const newSize = keyRing?.size ?? 0;
-                return newSize > prevSize;
+                return (keyRing?.size ?? 0) > prevSize;
             },
         });
 
@@ -160,17 +175,9 @@ const language = defineLanguage({
                     // If the live push contained links we couldn't decrypt,
                     // kick off a background key ring refresh + re-bootstrap.
                     if (result.missingVersions.size > 0) {
-                        void (async () => {
-                            try {
-                                const prevSize = keyRing?.size ?? 0;
-                                await setupKeyRing();
-                                if ((keyRing?.size ?? 0) > prevSize) {
-                                    await syncModule.bootstrap();
-                                }
-                            } catch (err) {
-                                console.error("[server-link-language] WS diff key ring refresh failed:", err);
-                            }
-                        })();
+                        void refreshKeyRingIfNeeded().catch((err) => {
+                            console.error("[server-link-language] WS diff key ring refresh failed:", err);
+                        });
                     }
                 },
                 onTelepresenceSignal(msg) {

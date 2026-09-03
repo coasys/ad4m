@@ -17,7 +17,7 @@ import type { LinkServerDB } from "./db.js";
 const ED25519_MULTICODEC_PREFIX = new Uint8Array([0xed, 0x01]);
 
 /** Strip an optional "#fragment" key-id suffix from a DID URL, e.g. "did:key:z6Mk...#primary". */
-export function didBase(did: string): string {
+function didBase(did: string): string {
   const hashIdx = did.indexOf("#");
   return hashIdx === -1 ? did : did.slice(0, hashIdx);
 }

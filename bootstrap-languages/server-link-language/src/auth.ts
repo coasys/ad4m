@@ -94,17 +94,6 @@ export function invalidateSession(): void {
     _session = null;
 }
 
-export function currentSession(): AuthSession | null {
-    return _session;
-}
-
-/** Returns this agent's derived X25519 public key (hex). Exposed so
- * index.ts / encryption bootstrapping can reuse the same derivation
- * without re-deriving. */
-export function getX25519PublicKeyHex(): string {
-    return myX25519PublicKeyHex();
-}
-
 export function resetAuth(): void {
     _session = null;
     _x25519PublicKeyHex = null;

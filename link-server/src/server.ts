@@ -12,8 +12,6 @@ import { WsManager, type WsManagerOptions } from "./ws.js";
 export interface ServerOptions {
   /** Directory the SQLite database lives in, or ":memory:" for an ephemeral in-memory DB (tests). */
   dataDir: string;
-  host?: string;
-  port?: number;
   /** How long issued JWTs (and their backing session rows) remain valid. Default 24h. */
   jwtExpirySeconds?: number;
   /** How often the federation reconciliation sweep runs. Default 60s. */

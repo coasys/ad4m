@@ -14,7 +14,6 @@ import type {
     KeysResponse,
     PeersResponse,
     RenderResponse,
-    RevisionResponse,
     SyncResponse,
     WirePerspectiveDiff,
 } from "./types.js";
@@ -138,11 +137,6 @@ export async function fetchRender(config: RoomConfig, token: string): Promise<Re
 export async function fetchPeers(config: RoomConfig, token: string): Promise<string[]> {
     const res = await request<Partial<PeersResponse>>(roomUrl(config, "/peers"), "GET", jsonHeaders(token));
     return res.peers ?? [];
-}
-
-export async function fetchRevision(config: RoomConfig, token: string): Promise<RevisionResponse> {
-    const res = await request<Partial<RevisionResponse>>(roomUrl(config, "/revision"), "GET", jsonHeaders(token));
-    return { revision: res.revision ?? "", sequence: typeof res.sequence === "number" ? res.sequence : 0 };
 }
 
 export async function fetchAcl(config: RoomConfig, token: string): Promise<AclResponse> {
