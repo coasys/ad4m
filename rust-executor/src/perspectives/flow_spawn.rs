@@ -18,8 +18,11 @@
 
 use std::collections::HashMap;
 
-use super::flow_context::FlowInstanceRecord;
+use super::flow_classes::mint_flow_instance;
+use super::flow_context::{load_flow_instances, load_shacl_flows, FlowInstanceRecord};
+use super::perspective_instance::PerspectiveInstance;
 use super::shacl_parser::SHACLFlow;
+use crate::agent::AgentContext;
 
 /// One flow that should be started on a given item.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,12 +53,18 @@ pub struct SpawnCandidate {
 /// the URI matches no registered class. An item of no known class spawns
 /// nothing, which is the same answer as an item whose classes no flow accepts.
 ///
-/// **A flow with empty `inputTypes` is never a deterministic spawn candidate.**
-/// `PerspectiveProxy.availableFlows` reads empty (or `"any"`) as "applies to
-/// everything", but that is a *menu* — a human picks from it. Auto-spawning on
-/// the same reading would mint an instance of such a flow on every item the
-/// extraction pass ever produces. Requiring an explicit class keeps the
-/// automatic path opt-in; a catch-all flow is still startable by hand.
+/// Matching is on class **names**, not target-class URIs, because that is what
+/// `subject_classes_of` yields and what TS `availableFlows` compares against
+/// (`exprClasses.some(cls => flow.inputTypes.includes(cls))`) — a flow declares
+/// `inputTypes: ["Task"]`. Comparing URIs here would make every typed flow
+/// silently unmatchable, the same failure J#3 fixed on the TS side.
+///
+/// **A catch-all flow is never a deterministic spawn candidate** — neither
+/// empty `inputTypes` nor the `"any"` wildcard. `availableFlows` reads both as
+/// "applies to everything", but that surface is a *menu* a human picks from.
+/// Auto-spawning on the same reading would mint an instance of such a flow on
+/// every item the extraction pass ever produces. Requiring an explicit class
+/// keeps the automatic path opt-in; a catch-all flow is still startable by hand.
 ///
 /// Output is sorted by `flow_uri`, since the catalogue is a `HashMap` and an
 /// unstable spawn order would make the resulting mints unreproducible.
@@ -73,6 +82,7 @@ pub fn spawn_candidates(
         .iter()
         .filter(|(_, flow)| {
             !flow.input_types.is_empty()
+                && !flow.input_types.iter().any(|t| t == "any")
                 && flow
                     .input_types
                     .iter()
@@ -102,6 +112,125 @@ pub fn spawn_candidates(
 /// `None` for a zero-state (atomic-action) flow.
 pub fn initial_state_of(flow: &SHACLFlow) -> Option<String> {
     flow.states.first().map(|s| s.name.clone())
+}
+
+/// One `FlowInstance` minted by [`run_flow_spawn_pass`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnOutcome {
+    pub flow_uri: String,
+    pub subject: String,
+    pub instance_uri: String,
+    pub initial_state: String,
+}
+
+/// Mint a `FlowInstance` for every flow that should start on each freshly
+/// created item — the write half of the spawn pass.
+///
+/// `created_bases` is deliberately the **created** items of an interpretation
+/// run, not every base it touched. `InterpretationOutcome.bases` also contains
+/// items that were merely updated or given a relation, and design §10 scopes v1
+/// spawn to "a new instance matching any `inputTypes` URI". Passing updated
+/// items too would start flows on pre-existing content the first time anything
+/// edits it, which is a different (and much louder) behaviour than the one
+/// specified.
+///
+/// **Soft-fail throughout**, matching `run_engine_proposal_pass` and
+/// `run_flow_consensus_pass`: a class lookup, catalogue read, or mint that fails
+/// is logged and skipped. Extraction has already committed its writes by the
+/// time this runs, so returning an error here would fail a run whose actual work
+/// succeeded.
+///
+/// **Zero-state flows are skipped.** They are candidates in the pure rule — the
+/// affordance is real — but an instance with no state has nothing to track, and
+/// design §8 makes their spawn row the *atomic-action* row: they are fired, not
+/// instantiated. Firing them is its own slice; minting a stateless instance now
+/// would leave rows no transition can ever advance.
+pub async fn run_flow_spawn_pass(
+    perspective: &mut PerspectiveInstance,
+    created_bases: &[String],
+    context: &AgentContext,
+) -> Vec<SpawnOutcome> {
+    if created_bases.is_empty() {
+        return Vec::new();
+    }
+
+    let flows = match load_shacl_flows(perspective).await {
+        Ok(flows) if !flows.is_empty() => flows,
+        Ok(_) => return Vec::new(),
+        Err(e) => {
+            log::warn!("run_flow_spawn_pass: load_shacl_flows failed, no flows spawned: {e:#}");
+            return Vec::new();
+        }
+    };
+
+    let classes_by_uri = match perspective.subject_classes_of(created_bases) {
+        Ok(map) => map,
+        Err(e) => {
+            log::warn!("run_flow_spawn_pass: subject_classes_of failed, no flows spawned: {e:#}");
+            return Vec::new();
+        }
+    };
+
+    let mut spawned = Vec::new();
+    for base in created_bases {
+        let Some(classes) = classes_by_uri.get(base) else {
+            // Absent means no *registered* class matched — see
+            // `subject_classes_of`. Nothing to match `inputTypes` against.
+            continue;
+        };
+
+        let live = match load_flow_instances(perspective, std::slice::from_ref(base)).await {
+            Ok(live) => live,
+            Err(e) => {
+                log::warn!(
+                    "run_flow_spawn_pass: load_flow_instances({base}) failed, skipping: {e:#}"
+                );
+                continue;
+            }
+        };
+
+        for candidate in spawn_candidates(&flows, &live, base, classes) {
+            let Some(initial_state) = candidate.initial_state.clone() else {
+                log::debug!(
+                    "run_flow_spawn_pass: {} is zero-state (atomic action) — not instantiating on {base}",
+                    candidate.flow_uri
+                );
+                continue;
+            };
+
+            let instance_id = uuid::Uuid::new_v4().to_string();
+            match mint_flow_instance(
+                perspective,
+                &candidate.flow_uri,
+                base,
+                &initial_state,
+                &instance_id,
+                None,
+                context,
+            )
+            .await
+            {
+                Ok(instance_uri) => {
+                    log::info!(
+                        "🌱 flow spawned: {} on {base} at state `{initial_state}` ({instance_uri})",
+                        candidate.flow_uri
+                    );
+                    spawned.push(SpawnOutcome {
+                        flow_uri: candidate.flow_uri,
+                        subject: base.clone(),
+                        instance_uri,
+                        initial_state,
+                    });
+                }
+                Err(e) => log::warn!(
+                    "run_flow_spawn_pass: mint_flow_instance({}, {base}) failed, skipping: {e:#}",
+                    candidate.flow_uri
+                ),
+            }
+        }
+    }
+
+    spawned
 }
 
 #[cfg(test)]
@@ -255,6 +384,27 @@ mod tests {
             spawn_candidates(&flows, &[], ITEM, &[TASK.to_string()]).is_empty(),
             "a catch-all flow must not auto-spawn"
         );
+
+        // The `"any"` wildcard is the other spelling of the same thing, and
+        // `availableFlows` treats them identically — so this must not depend on
+        // "any" merely failing to match a class name by accident.
+        let wildcard = catalogue(vec![(
+            "catchall://DeliveryFlow",
+            flow("catchall://", &["any"], &[("identified", 0.0)]),
+        )]);
+        assert!(
+            spawn_candidates(&wildcard, &[], ITEM, &[TASK.to_string()]).is_empty(),
+            "the `any` wildcard must not auto-spawn either"
+        );
+        // Even when the item genuinely is of a class the flow also lists.
+        let wildcard_plus = catalogue(vec![(
+            "catchall://DeliveryFlow",
+            flow("catchall://", &["any", TASK], &[("identified", 0.0)]),
+        )]);
+        assert!(
+            spawn_candidates(&wildcard_plus, &[], ITEM, &[TASK.to_string()]).is_empty(),
+            "a wildcard anywhere in inputTypes opts the flow out of auto-spawn"
+        );
     }
 
     #[test]
@@ -321,5 +471,201 @@ mod tests {
             .states
             .sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap());
         assert_eq!(initial_state_of(&sorted), Some("identified".to_string()));
+    }
+
+    // ---------------------------------------------------------------------
+    // Write half — against a real PerspectiveInstance, no LLM.
+    // ---------------------------------------------------------------------
+
+    /// Delivery flow accepting `Todo`, the class `setup_perspective_no_llm`
+    /// registers, so a created Todo is a genuine spawn target.
+    fn delivery_flow_json_for(input_type: &str) -> String {
+        serde_json::json!({
+            "name": "Delivery",
+            "namespace": "delivery://",
+            "start_action": [],
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                { "name": "scoped", "value": 0.5 },
+            ],
+            "transitions": [
+                {
+                    "action_name": "Scope",
+                    "from_state": "identified",
+                    "to_state": "scoped",
+                    "actions": []
+                }
+            ],
+            "inputTypes": [input_type],
+            "outputTypes": [],
+        })
+        .to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_pass_mints_an_instance_and_is_idempotent() {
+        use crate::perspectives::flow_context::load_flow_instances;
+        use crate::perspectives::interpretation_test_support::{
+            setup_perspective_no_llm, TASK_SDNA,
+        };
+        use crate::perspectives::shacl_parser::parse_flow_to_links;
+        use crate::types::LinkStatus;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+
+        // `inputTypes` holds class *names* — what `subject_classes_of` returns
+        // and what TS `availableFlows` compares against.
+        for link in parse_flow_to_links(&delivery_flow_json_for("Task"), "Delivery")
+            .expect("parse_flow_to_links")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition)");
+        }
+
+        // Create a Task the way the extraction pass does, so the spawn pass
+        // sees exactly what a real run hands it.
+        let base = "ad4m://task/onboarding".to_string();
+        perspective
+            .create_subject(
+                crate::perspectives::perspective_instance::SubjectClassOption {
+                    class_name: Some("Task".to_string()),
+                    query: None,
+                },
+                base.clone(),
+                Some(serde_json::json!({ "title": "write the spawn pass" })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject(Task)");
+
+        // Stage checks, so a failure names the broken link in the chain rather
+        // than just "nothing spawned".
+        let catalogue_on_graph = load_shacl_flows(&perspective)
+            .await
+            .expect("load_shacl_flows");
+        let on_graph = catalogue_on_graph
+            .get("delivery://DeliveryFlow")
+            .unwrap_or_else(|| {
+                panic!(
+                    "flow definition must be readable back, got {:?}",
+                    catalogue_on_graph.keys().collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            on_graph.input_types,
+            vec!["Task".to_string()],
+            "inputTypes must survive the write/read round-trip"
+        );
+        assert_eq!(
+            on_graph
+                .states
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["identified", "scoped"],
+            "states must round-trip in value order"
+        );
+        let classes = perspective
+            .subject_classes_of(&[base.clone()])
+            .expect("subject_classes_of");
+        assert_eq!(
+            classes.get(&base).map(|v| v.as_slice()),
+            Some(["Task".to_string()].as_slice()),
+            "the created item must classify as Task, got {classes:?}"
+        );
+
+        let live = load_flow_instances(&perspective, &[base.clone()]).await;
+        let candidates = spawn_candidates(
+            &catalogue_on_graph,
+            live.as_deref().unwrap_or(&[]),
+            &base,
+            classes.get(&base).expect("classified above"),
+        );
+        assert_eq!(
+            candidates.len(),
+            1,
+            "the pure rule must produce a candidate on these exact inputs; live={live:?}"
+        );
+
+        let spawned = run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx).await;
+
+        assert_eq!(
+            spawned.len(),
+            1,
+            "one matching flow ⇒ one mint, got {spawned:?}"
+        );
+        assert_eq!(spawned[0].flow_uri, "delivery://DeliveryFlow");
+        assert_eq!(spawned[0].subject, base);
+        assert_eq!(
+            spawned[0].initial_state, "identified",
+            "must start at the lowest-value state"
+        );
+
+        // It's on the graph, not just in the return value.
+        let live = load_flow_instances(&perspective, &[base.clone()])
+            .await
+            .expect("load_flow_instances");
+        assert_eq!(live.len(), 1, "the mint must be readable back");
+        assert_eq!(live[0].instance_uri, spawned[0].instance_uri);
+        assert_eq!(live[0].current_state, "identified");
+        assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
+
+        // Running again must not double-spawn — the live instance suppresses
+        // the candidate. This is what makes the pass safe to call on every
+        // interpretation run.
+        let again = run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx).await;
+        assert!(
+            again.is_empty(),
+            "second pass must mint nothing, got {again:?}"
+        );
+        assert_eq!(
+            load_flow_instances(&perspective, &[base])
+                .await
+                .expect("load_flow_instances")
+                .len(),
+            1,
+            "still exactly one instance on the graph"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_pass_mints_nothing_when_no_flow_accepts_the_class() {
+        use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+        use crate::perspectives::shacl_parser::parse_flow_to_links;
+        use crate::types::LinkStatus;
+
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        // Flow accepts a class nothing on this perspective is.
+        for link in parse_flow_to_links(&delivery_flow_json_for("SomethingElse"), "Delivery")
+            .expect("parse_flow_to_links")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition)");
+        }
+
+        let spawned =
+            run_flow_spawn_pass(&mut perspective, &["ad4m://task/unknown".to_string()], &ctx).await;
+
+        assert!(
+            spawned.is_empty(),
+            "an unregistered item must not spawn anything, got {spawned:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_pass_on_empty_input_is_a_no_op() {
+        use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        assert!(run_flow_spawn_pass(&mut perspective, &[], &ctx)
+            .await
+            .is_empty());
     }
 }

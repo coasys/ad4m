@@ -96,8 +96,20 @@ pub async fn load_flow_instances(
             // yet. That's a valid steady state — return empty rather
             // than propagating an error that would break Model C's
             // extraction pass on every call.
+            //
+            // The message this actually produces is
+            // `model_query/shape.rs`'s "No SHACL shape stored for class
+            // 'FlowInstance'…". The original guard matched only "Shape not
+            // found", a string nothing in the tree emits, so it never fired
+            // and every fresh perspective got an `Err` instead of the empty
+            // vec documented above — `gather_active_flow_contexts` then
+            // logged a warning on every call, and any caller treating the
+            // error as "skip" could never see the pre-mint state at all.
             let msg = format!("{e:#}");
-            if msg.contains("Shape not found") || msg.contains("shape not found") {
+            if msg.contains("No SHACL shape stored for class")
+                || msg.contains("Shape not found")
+                || msg.contains("shape not found")
+            {
                 return Ok(vec![]);
             }
             return Err(anyhow::anyhow!(
