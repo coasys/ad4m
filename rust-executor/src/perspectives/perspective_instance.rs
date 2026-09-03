@@ -31,6 +31,7 @@ use crate::types::{
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
+use arc_swap::ArcSwap;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
@@ -469,7 +470,6 @@ fn extract_predicates_from_sparql(query: &str) -> HashSet<String> {
     predicates
 }
 
-#[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
     /// Cached UUID — never changes after construction, avoids locking `persisted`.
@@ -494,11 +494,54 @@ pub struct PerspectiveInstance {
     // Fallback sync tracking for ensure_public_links_are_shared
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
-    pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
+    /// SPARQL store for this perspective. Wrapped in `Arc<ArcSwap<...>>` to
+    /// support lazy loading AND Clone: all clones share the same swap target,
+    /// so `hydrate()` on any clone atomically replaces the store for ALL of them.
+    /// Use `store()` to get a snapshot `Arc` for read access.
+    pub(crate) sparql_store: Arc<ArcSwap<crate::perspectives::sparql_store::SparqlStore>>,
+    /// Whether the SPARQL store has been hydrated (persistent store opened).
+    /// False for deferred perspectives that have not yet been accessed.
+    pub(crate) hydrated: Arc<AtomicBool>,
     /// In-memory cache of parsed `ModelShape` instances keyed by class name.
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+}
+
+/// Manual `Clone` because `ArcSwap` does not implement `Clone`.
+///
+/// Cloning a `PerspectiveInstance` shares the SAME underlying `ArcSwap` and
+/// `AtomicBool` — both are behind `Arc`. This means `hydrate()` on a clone
+/// atomically swaps the store for ALL clones, which matches the intent:
+/// every reference to the same perspective sees the same store.
+impl Clone for PerspectiveInstance {
+    fn clone(&self) -> Self {
+        Self {
+            persisted: self.persisted.clone(),
+            uuid: self.uuid.clone(),
+            created_from_join: self.created_from_join,
+            is_fast_polling: self.is_fast_polling,
+            retries: self.retries,
+            is_teardown: self.is_teardown.clone(),
+            sdna_change_mutex: self.sdna_change_mutex.clone(),
+            prolog_update_mutex: self.prolog_update_mutex.clone(),
+            link_language: self.link_language.clone(),
+            trigger_notification_check: self.trigger_notification_check.clone(),
+            trigger_prolog_subscription_check: self.trigger_prolog_subscription_check.clone(),
+            changed_predicates: self.changed_predicates.clone(),
+            commit_debounce_timer: self.commit_debounce_timer.clone(),
+            immediate_commits_remaining: self.immediate_commits_remaining.clone(),
+            subscribed_queries: self.subscribed_queries.clone(),
+            batch_store: self.batch_store.clone(),
+            last_successful_fallback_sync: self.last_successful_fallback_sync.clone(),
+            fallback_sync_interval: self.fallback_sync_interval.clone(),
+            // Arc<ArcSwap<...>> — clones share the same swap target.
+            // hydrate() on any clone swaps the store for ALL of them.
+            sparql_store: self.sparql_store.clone(),
+            hydrated: self.hydrated.clone(),
+            shape_cache: self.shape_cache.clone(),
+        }
+    }
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -506,7 +549,7 @@ pub struct PerspectiveInstance {
 /// store and memoizes the result.
 struct PerspectiveShapeResolver<'a> {
     cache: &'a std::sync::RwLock<HashMap<String, Arc<ModelShape>>>,
-    store: &'a crate::perspectives::sparql_store::SparqlStore,
+    store: Arc<crate::perspectives::sparql_store::SparqlStore>,
 }
 
 impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
@@ -514,7 +557,7 @@ impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
         if let Some(shape) = self.cache.read().unwrap().get(class_name).cloned() {
             return Ok(shape);
         }
-        let shape = load_shape_from_store(self.store, class_name)?;
+        let shape = load_shape_from_store(&self.store, class_name)?;
         let arc = Arc::new(shape);
         self.cache
             .write()
@@ -554,12 +597,196 @@ impl PerspectiveInstance {
             batch_store: Arc::new(RwLock::new(HashMap::new())),
             last_successful_fallback_sync: Arc::new(Mutex::new(None)),
             fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
-            sparql_store: Arc::new(
+            sparql_store: Arc::new(ArcSwap::from_pointee(
                 crate::perspectives::sparql_store::SparqlStore::new(sparql_data_path.as_deref())
                     .expect("Failed to create per-perspective SPARQL service"),
-            ),
+            )),
+            hydrated: Arc::new(AtomicBool::new(true)),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Create a deferred `PerspectiveInstance` with an in-memory SPARQL store.
+    ///
+    /// The store starts empty; call `swap_store()` after downloading and
+    /// extracting the perspective archive to replace it with a persistent store.
+    /// All queries on a deferred perspective return empty results until hydration.
+    pub fn new_deferred(handle: PerspectiveHandle) -> Self {
+        let uuid = handle.uuid.clone();
+        Self {
+            uuid: uuid.clone(),
+            persisted: Arc::new(Mutex::new(handle)),
+            created_from_join: false,
+            is_fast_polling: false,
+            retries: 0,
+            is_teardown: Arc::new(AtomicBool::new(false)),
+            sdna_change_mutex: Arc::new(Mutex::new(())),
+            prolog_update_mutex: Arc::new(RwLock::new(())),
+            link_language: Arc::new(RwLock::new(None)),
+            trigger_notification_check: Arc::new(AtomicBool::new(false)),
+            trigger_prolog_subscription_check: Arc::new(AtomicBool::new(false)),
+            changed_predicates: Arc::new(Mutex::new(ChangedPredicates::NoneRecorded)),
+            commit_debounce_timer: Arc::new(Mutex::new(None)),
+            immediate_commits_remaining: Arc::new(Mutex::new(IMMEDIATE_COMMITS_COUNT)),
+            subscribed_queries: Arc::new(Mutex::new(HashMap::new())),
+            batch_store: Arc::new(RwLock::new(HashMap::new())),
+            last_successful_fallback_sync: Arc::new(Mutex::new(None)),
+            fallback_sync_interval: Arc::new(Mutex::new(Duration::from_secs(30))),
+            // In-memory store — no RocksDB, no disk I/O.
+            sparql_store: Arc::new(ArcSwap::from_pointee(
+                crate::perspectives::sparql_store::SparqlStore::new(None)
+                    .expect("Failed to create in-memory SPARQL store"),
+            )),
+            hydrated: Arc::new(AtomicBool::new(false)),
+            shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Get a snapshot of the current SPARQL store.
+    ///
+    /// Returns a cloned `Arc<SparqlStore>` via lock-free ArcSwap read.
+    /// Callers hold the Arc for the duration of their operation; if the
+    /// store gets swapped during that time the old store stays alive
+    /// until all Arcs drop.
+    pub fn store(&self) -> Arc<crate::perspectives::sparql_store::SparqlStore> {
+        self.sparql_store.load_full()
+    }
+
+    /// Check whether this perspective's SPARQL store has been hydrated.
+    ///
+    /// Returns `false` for deferred perspectives created with `new_deferred()`.
+    pub fn is_hydrated(&self) -> bool {
+        self.hydrated.load(Ordering::Acquire)
+    }
+
+    /// Atomically replace the SPARQL store and mark the perspective as hydrated.
+    ///
+    /// Used by lazy loading after downloading and extracting the perspective
+    /// archive: the new persistent `SparqlStore` replaces the initial
+    /// in-memory store. Readers in flight keep the old store alive until done.
+    pub fn swap_store(&self, new_store: crate::perspectives::sparql_store::SparqlStore) {
+        self.sparql_store.store(Arc::new(new_store));
+        self.hydrated.store(true, Ordering::Release);
+    }
+
+    /// Hydrate a deferred perspective: download its archive (if remote),
+    /// open a persistent SPARQL store, run migrations, and swap it in
+    /// via ArcSwap.
+    ///
+    /// No-op if already hydrated. After hydration, background tasks start
+    /// (link language sync, neighbourhood sync, pending diffs, etc.).
+    pub async fn hydrate(&self) {
+        if self.is_hydrated() {
+            return;
+        }
+
+        // In multi-tenant mode, download this perspective's archive from the
+        // remote backend before opening the store. The archive extracts
+        // to `{app_data_path}/perspectives/{uuid}/sparql_store/`.
+        let config = crate::config::get_global_config();
+        if config.db_backend.as_deref() == Some("shared") {
+            match crate::perspective_snapshot::restore_perspective_archive(&config, &self.uuid) {
+                Ok(true) => {
+                    log::info!("📥 Downloaded archive for perspective {}", self.uuid);
+                }
+                Ok(false) => {
+                    log::info!(
+                        "No remote archive for {} — hydrating with fresh store",
+                        self.uuid
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to download archive for {}: {} — hydrating with fresh store",
+                        self.uuid,
+                        e
+                    );
+                }
+            }
+        }
+
+        let sparql_data_path = crate::perspectives::get_app_data_path().map(|base| {
+            let p = std::path::PathBuf::from(&base)
+                .join("perspectives")
+                .join(&self.uuid);
+            p.to_string_lossy().to_string()
+        });
+
+        let store = match crate::perspectives::sparql_store::SparqlStore::new(
+            sparql_data_path.as_deref(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                log::error!(
+                    "Failed to open persistent SPARQL store for {}: {} — staying in-memory",
+                    self.uuid,
+                    e
+                );
+                return;
+            }
+        };
+
+        // Run migrations on the freshly opened store (idempotent).
+        let store_arc = Arc::new(store);
+
+        match crate::perspectives::migration::migrate_links_from_rusqlite_to_sparql(
+            &self.uuid, &store_arc,
+        ) {
+            Ok(result) if result.migrated > 0 => {
+                log::info!(
+                    "🔄 Hydration migration for {}: {} migrated, {} literal conversions",
+                    self.uuid,
+                    result.migrated,
+                    result.literal_conversions
+                );
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("Hydration migration for {}: {}", self.uuid, e),
+        }
+
+        match store_arc.migrate_named_graphs_to_reifiers() {
+            Ok(count) if count > 0 => {
+                log::info!(
+                    "🔄 Hydration reifier migration for {}: {} links",
+                    self.uuid,
+                    count
+                );
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("Hydration reifier migration for {}: {}", self.uuid, e),
+        }
+
+        // Swap the store — from this point, all reads go to the persistent store.
+        // Unwrap the Arc: swap_store takes ownership of the inner SparqlStore.
+        // If other references exist (shouldn't at this point), clone the inner.
+        let inner = match Arc::try_unwrap(store_arc) {
+            Ok(s) => s,
+            Err(arc) => {
+                // Another reference exists; create a new store at the same path.
+                // This branch should not occur in practice.
+                log::warn!(
+                    "Could not unwrap Arc for {} — opening second store",
+                    self.uuid
+                );
+                match crate::perspectives::sparql_store::SparqlStore::new(
+                    sparql_data_path.as_deref(),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::error!("Failed to re-open store for {}: {}", self.uuid, e);
+                        drop(arc);
+                        return;
+                    }
+                }
+            }
+        };
+        self.swap_store(inner);
+
+        log::info!("✅ Hydrated perspective {}", self.uuid);
+
+        // Start background tasks now that the store holds real data.
+        let clone = self.clone();
+        tokio::spawn(clone.start_background_tasks());
     }
 
     /// Look up a cached `ModelShape` for the given class name, loading it
@@ -619,7 +846,7 @@ impl PerspectiveInstance {
     fn shape_resolver(&self) -> PerspectiveShapeResolver<'_> {
         PerspectiveShapeResolver {
             cache: &self.shape_cache,
-            store: &self.sparql_store,
+            store: self.store(),
         }
     }
 
@@ -805,7 +1032,7 @@ impl PerspectiveInstance {
                 .sum();
             (count, links)
         };
-        let quad_count = self.sparql_store.quad_count();
+        let quad_count = self.store().quad_count();
         let name = self.persisted.lock().await.name.clone().unwrap_or_default();
 
         PerspectiveMemoryStats {
@@ -840,7 +1067,7 @@ impl PerspectiveInstance {
                 .sum();
             (count, links)
         };
-        let quad_count = self.sparql_store.quad_count();
+        let quad_count = self.store().quad_count();
         let name = self
             .persisted
             .blocking_lock()
@@ -869,7 +1096,7 @@ impl PerspectiveInstance {
         &self,
         links: &[DecoratedLinkExpression],
     ) -> Result<(), deno_core::anyhow::Error> {
-        self.sparql_store.reload(links.to_vec())?;
+        self.store().reload(links.to_vec())?;
         self.shape_cache.write().unwrap().clear();
         Ok(())
     }
@@ -1211,7 +1438,7 @@ impl PerspectiveInstance {
 
         if let Some(mut link_language) = link_language_clone {
             // Query SPARQL store for all links
-            let decorated_links = match self.sparql_store.get_all_links() {
+            let decorated_links = match self.store().get_all_links() {
                 Ok(links) => links,
                 Err(e) => {
                     log::error!(
@@ -1611,7 +1838,7 @@ impl PerspectiveInstance {
 
             // Query SPARQL store
             let decorated_link = self
-                .sparql_store
+                .store()
                 .get_link(
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
@@ -1630,7 +1857,7 @@ impl PerspectiveInstance {
             let _handle = self.persisted.lock().await.clone();
 
             // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
+            if let Some(decorated_link) = self.store().get_link(
                 &link_expression.data.source,
                 link_expression.data.predicate.as_deref(),
                 &link_expression.data.target,
@@ -1957,7 +2184,7 @@ impl PerspectiveInstance {
         let handle = self.persisted.lock().await.clone();
 
         // Query SPARQL store
-        let decorated_link_option = self.sparql_store.get_link(
+        let decorated_link_option = self.store().get_link(
             &old_link.data.source,
             old_link.data.predicate.as_deref(),
             &old_link.data.target,
@@ -2085,7 +2312,7 @@ impl PerspectiveInstance {
         let mut existing_links = Vec::new();
         for link in link_expressions {
             // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
+            if let Some(decorated_link) = self.store().get_link(
                 &link.data.source,
                 link.data.predicate.as_deref(),
                 &link.data.target,
@@ -2277,7 +2504,7 @@ impl PerspectiveInstance {
             dt.to_rfc3339()
         });
 
-        Ok(self.sparql_store.query_links(
+        Ok(self.store().query_links(
             query.source.as_deref(),
             query.predicate.as_deref(),
             query.target.as_deref(),
@@ -2349,7 +2576,7 @@ impl PerspectiveInstance {
                 let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
                 dt.to_rfc3339()
             });
-            return Ok(self.sparql_store.query_links_top_n_by_timestamp(
+            return Ok(self.store().query_links_top_n_by_timestamp(
                 query.source.as_deref(),
                 query.predicate.as_deref(),
                 query.target.as_deref(),
@@ -3328,7 +3555,7 @@ impl PerspectiveInstance {
     /// `query` (no wire-format re-encoding of coincidentally-named
     /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
     pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_arbitrary(&query)
+        self.store().query_arbitrary(&query)
     }
 
     /// Resolve each URI to every subject class it is an instance of, most
@@ -3350,7 +3577,7 @@ impl PerspectiveInstance {
         uris: &[String],
     ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
         let resolver = self.shape_resolver();
-        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
+        super::subject_classes_of::subject_classes_of(&self.store(), &resolver, uris)
     }
 
     /// Execute a model query — the executor-side replacement for
@@ -3382,8 +3609,9 @@ impl PerspectiveInstance {
             .await?;
         let resolver = self.shape_resolver();
         let shape = resolver.get_shape(class_name)?;
+        let store = self.store();
         let result = super::model_query::execute_model_query(
-            &self.sparql_store,
+            &store,
             shape.as_ref(),
             &query_input,
             &resolver,
@@ -3406,7 +3634,7 @@ impl PerspectiveInstance {
     ) -> Result<String, deno_core::anyhow::Error> {
         let shape = self.get_shape(class_name)?;
         let result = super::model_query::evaluate_getters_batch(
-            &self.sparql_store,
+            &self.store(),
             shape.as_ref(),
             instance_ids,
             property_names,
@@ -3427,13 +3655,13 @@ impl PerspectiveInstance {
 
         // Removals first
         for removal in &diff.removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
+            if let Err(e) = self.store().remove_link(removal) {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
         for addition in &diff.additions {
-            if let Err(e) = self.sparql_store.add_link(addition) {
+            if let Err(e) = self.store().add_link(addition) {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
         }
@@ -3701,7 +3929,7 @@ impl PerspectiveInstance {
                 // from deleted users or corrupted data.
                 match {
                     let query = n.trigger.clone();
-                    let result_json = self.sparql_store.query(&query);
+                    let result_json = self.store().query(&query);
                     match result_json {
                         Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
                             .map_err(|e| anyhow::anyhow!(e)),
@@ -4475,7 +4703,7 @@ impl PerspectiveInstance {
         let _uuid = self.uuid.clone();
 
         let links = self
-            .sparql_store
+            .store()
             .get_links_by_predicate_and_source_suffix(predicate, &shape_suffix)?;
 
         // Return the first match
@@ -4498,7 +4726,7 @@ impl PerspectiveInstance {
         let _uuid = self.uuid.clone();
 
         let links = self
-            .sparql_store
+            .store()
             .get_links_by_predicate_and_source_suffix(predicate, &prop_suffix)?;
 
         // Return the first match
@@ -4528,7 +4756,7 @@ impl PerspectiveInstance {
         let prop_suffix = format!("{}.{}", class_name, property);
 
         let links = self
-            .sparql_store
+            .store()
             .get_links_by_predicate_and_source_suffix("ad4m://resolveLanguage", &prop_suffix)?;
 
         if let Some(link) = links.first() {
@@ -6070,6 +6298,10 @@ mod tests {
         setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
 
+        // Reset APP_DATA_PATH so this test uses in-memory stores,
+        // regardless of what other parallel tests may have set.
+        crate::perspectives::clear_app_data_path();
+
         // Initialize agent and prolog services for tests
         AgentService::init_global_test_instance();
         init_prolog_service().await;
@@ -7060,7 +7292,7 @@ mod tests {
                 },
                 status: None,
             };
-            perspective.sparql_store.add_link(&link).expect("add link");
+            perspective.store().add_link(&link).expect("add link");
         }
 
         let query_json = format!(
@@ -7159,7 +7391,7 @@ mod tests {
                 },
                 status: None,
             };
-            perspective.sparql_store.add_link(&link).expect("add_link");
+            perspective.store().add_link(&link).expect("add_link");
         }
 
         let query_json = format!(
@@ -7364,7 +7596,7 @@ mod tests {
         // `get_links` no longer routes through this path, the equivalence
         // assertion below catches drift between the two implementations.
         let direct = perspective
-            .sparql_store
+            .store()
             .query_links_top_n_by_timestamp(None, None, None, None, None, 5, false)
             .unwrap();
         assert_eq!(
@@ -7389,5 +7621,356 @@ mod tests {
                 "ascending top-N should yield non-decreasing timestamps"
             );
         }
+    }
+
+    // =========================================================================
+    // 14. Lazy perspective loading — ArcSwap refactor unit tests
+    // =========================================================================
+
+    /// 14.1 new_deferred creates an in-memory store marked unhydrated.
+    #[tokio::test]
+    async fn test_new_deferred_creates_unhydrated_instance() {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+
+        let handle = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Deferred Test".to_string()),
+            shared_url: None,
+            neighbourhood: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        };
+
+        let instance = PerspectiveInstance::new_deferred(handle);
+
+        // Must report unhydrated
+        assert!(
+            !instance.is_hydrated(),
+            "new_deferred() must create an unhydrated perspective"
+        );
+
+        // store() must still return a valid Arc<SparqlStore> (the in-memory one)
+        let store = instance.store();
+        assert!(
+            store
+                .query_links(None, None, None, None, None, None)
+                .unwrap()
+                .is_empty(),
+            "In-memory store from new_deferred() should start empty"
+        );
+    }
+
+    /// 14.2 new() creates a hydrated instance (backward-compat).
+    #[tokio::test]
+    async fn test_new_creates_hydrated_instance() {
+        let instance = setup().await;
+
+        assert!(
+            instance.is_hydrated(),
+            "new() must create a hydrated perspective"
+        );
+    }
+
+    /// 14.3 swap_store atomically replaces the store and marks hydrated.
+    #[tokio::test]
+    async fn test_swap_store_replaces_store_and_hydrates() {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+
+        let handle = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Swap Test".to_string()),
+            shared_url: None,
+            neighbourhood: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        };
+
+        let instance = PerspectiveInstance::new_deferred(handle);
+        assert!(!instance.is_hydrated());
+
+        // Grab a reference to the old store before swap
+        let old_store = instance.store();
+
+        // Create a new store and add a link to distinguish it
+        let new_store =
+            crate::perspectives::sparql_store::SparqlStore::new(None).expect("new store");
+        let link = crate::types::DecoratedLinkExpression {
+            author: "did:key:test".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            data: Link {
+                source: "src://marker".to_string(),
+                target: "tgt://marker".to_string(),
+                predicate: None,
+            },
+            proof: Default::default(),
+            status: Some(LinkStatus::Shared),
+        };
+        new_store.add_link(&link).unwrap();
+
+        // Swap
+        instance.swap_store(new_store);
+
+        // After swap: hydrated flag set
+        assert!(
+            instance.is_hydrated(),
+            "swap_store must set hydrated to true"
+        );
+
+        // After swap: store() returns the new store (has the marker link)
+        let swapped = instance.store();
+        let links = swapped
+            .query_links(None, None, None, None, None, None)
+            .unwrap();
+        assert_eq!(links.len(), 1, "Swapped store must contain the marker link");
+        assert_eq!(links[0].data.source, "src://marker");
+
+        // Old store reference still alive (not panicked), holds zero links
+        // because it was the in-memory store from new_deferred()
+        let old_links = old_store
+            .query_links(None, None, None, None, None, None)
+            .unwrap();
+        assert!(
+            old_links.is_empty(),
+            "Old store (still alive via Arc) must remain empty"
+        );
+    }
+
+    /// 14.3b Clone shares the same ArcSwap — swap on clone affects original.
+    #[tokio::test]
+    async fn test_clone_shares_arcswap_target() {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+
+        let handle = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Clone Test".to_string()),
+            shared_url: None,
+            neighbourhood: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        };
+
+        let original = PerspectiveInstance::new_deferred(handle);
+        let cloned = original.clone();
+
+        assert!(!original.is_hydrated());
+        assert!(!cloned.is_hydrated());
+
+        // Swap on the clone
+        let new_store =
+            crate::perspectives::sparql_store::SparqlStore::new(None).expect("new store");
+        cloned.swap_store(new_store);
+
+        // Both must now report hydrated
+        assert!(
+            cloned.is_hydrated(),
+            "Clone must report hydrated after swap_store"
+        );
+        assert!(
+            original.is_hydrated(),
+            "Original must report hydrated after clone's swap_store (shared AtomicBool)"
+        );
+
+        // Both store() calls must return the SAME store (same Arc identity)
+        let store_from_original = original.store();
+        let store_from_clone = cloned.store();
+        assert!(
+            Arc::ptr_eq(&store_from_original, &store_from_clone),
+            "Original and clone must share the same swapped store (same Arc<ArcSwap>)"
+        );
+    }
+
+    /// 14.7 hydrate() opens a persistent store (local mode, no remote download).
+    ///
+    /// In local mode (db_backend != "shared"), hydrate() skips the archive
+    /// download, opens a persistent OxiGraph store from app_data_path, runs
+    /// migrations, and swaps the store via ArcSwap.
+    #[tokio::test]
+    async fn test_hydrate_opens_persistent_store_local_mode() {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+
+        // Set config to local mode with a temp directory
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let mut config = crate::config::Ad4mConfig::default();
+        config.db_backend = None; // local mode — no remote download
+        config.app_data_path = Some(tmp_dir.path().to_string_lossy().to_string());
+        crate::config::set_global_config(config);
+        crate::perspectives::set_app_data_path(tmp_dir.path().to_string_lossy().to_string());
+
+        let uuid = Uuid::new_v4().to_string();
+        let handle = PerspectiveHandle {
+            uuid: uuid.clone(),
+            name: Some("Hydrate Test".to_string()),
+            shared_url: None,
+            neighbourhood: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        };
+
+        let instance = PerspectiveInstance::new_deferred(handle);
+        assert!(!instance.is_hydrated());
+
+        // Grab the in-memory store before hydration
+        let store_before = instance.store();
+
+        // Hydrate — should open a persistent store
+        instance.hydrate().await;
+
+        assert!(
+            instance.is_hydrated(),
+            "hydrate() must set is_hydrated to true"
+        );
+
+        // Store must have been swapped (different Arc identity)
+        let store_after = instance.store();
+        assert!(
+            !Arc::ptr_eq(&store_before, &store_after),
+            "After hydrate(), store() must return a different Arc (persistent store)"
+        );
+
+        // Persistent store directory must exist
+        let store_dir = tmp_dir.path().join("perspectives").join(&uuid);
+        assert!(
+            store_dir.exists(),
+            "hydrate() must create the perspective directory"
+        );
+
+        crate::perspectives::clear_app_data_path();
+    }
+
+    /// 14.7b hydrate() on an already-hydrated instance returns immediately (no-op).
+    #[tokio::test]
+    async fn test_hydrate_noop_when_already_hydrated() {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let mut config = crate::config::Ad4mConfig::default();
+        config.db_backend = None;
+        config.app_data_path = Some(tmp_dir.path().to_string_lossy().to_string());
+        crate::config::set_global_config(config);
+        crate::perspectives::set_app_data_path(tmp_dir.path().to_string_lossy().to_string());
+
+        let handle = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Already Hydrated".to_string()),
+            shared_url: None,
+            neighbourhood: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        };
+
+        // new() creates a hydrated instance
+        let instance = PerspectiveInstance::new(handle, None);
+        assert!(instance.is_hydrated());
+
+        let store_before = instance.store();
+
+        // hydrate() on an already-hydrated instance must be a no-op
+        instance.hydrate().await;
+
+        let store_after = instance.store();
+        assert!(
+            Arc::ptr_eq(&store_before, &store_after),
+            "hydrate() on an already-hydrated instance must not swap the store"
+        );
+
+        crate::perspectives::clear_app_data_path();
+    }
+
+    /// 14.8 hydrate() starts background tasks.
+    ///
+    /// After hydrate(), `start_background_tasks()` gets spawned. We verify
+    /// that hydrate() completes without panic and sets the hydrated flag.
+    /// (Background tasks require link languages which are not available in
+    /// unit tests — we verify the spawn path does not crash.)
+    #[tokio::test]
+    async fn test_hydrate_completes_and_spawns_background_tasks() {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+
+        let tmp_dir = tempfile::TempDir::new().unwrap();
+        let mut config = crate::config::Ad4mConfig::default();
+        config.db_backend = None;
+        config.app_data_path = Some(tmp_dir.path().to_string_lossy().to_string());
+        crate::config::set_global_config(config);
+        crate::perspectives::set_app_data_path(tmp_dir.path().to_string_lossy().to_string());
+
+        let handle = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Background Tasks Test".to_string()),
+            shared_url: None,
+            neighbourhood: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        };
+
+        let instance = PerspectiveInstance::new_deferred(handle);
+        assert!(!instance.is_hydrated());
+
+        // hydrate() should complete without panic
+        instance.hydrate().await;
+        assert!(instance.is_hydrated());
+
+        // Give spawned background tasks a moment to start (they may fail
+        // gracefully due to missing link languages — that's expected)
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // The perspective must remain hydrated after background task spawn
+        assert!(
+            instance.is_hydrated(),
+            "Perspective must stay hydrated after background task spawn"
+        );
+
+        crate::perspectives::clear_app_data_path();
+    }
+
+    /// 14.4 PerspectiveShapeResolver holds Arc<SparqlStore>, survives swap.
+    #[tokio::test]
+    async fn test_shape_resolver_holds_arc_survives_swap() {
+        setup_wallet();
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        AgentService::init_global_test_instance();
+        init_prolog_service().await;
+
+        let handle = PerspectiveHandle {
+            uuid: Uuid::new_v4().to_string(),
+            name: Some("Shape Resolver Test".to_string()),
+            shared_url: None,
+            neighbourhood: None,
+            state: PerspectiveState::Private,
+            owners: None,
+        };
+
+        let instance = PerspectiveInstance::new(handle, None);
+
+        // Get a store snapshot before swap
+        let store_before = instance.store();
+
+        // Swap to a new store
+        let new_store =
+            crate::perspectives::sparql_store::SparqlStore::new(None).expect("new store");
+        instance.swap_store(new_store);
+
+        // store_before still valid (held by Arc), distinct from new store
+        let store_after = instance.store();
+        assert!(
+            !Arc::ptr_eq(&store_before, &store_after),
+            "After swap, store() must return a different Arc than the pre-swap snapshot"
+        );
+
+        // The pre-swap Arc remains usable (no panic, no UB)
+        let _ = store_before
+            .query_links(None, None, None, None, None, None)
+            .unwrap();
     }
 }

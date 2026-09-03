@@ -37,6 +37,13 @@ impl Ad4mMcpHandler {
                 None => continue,
             };
 
+            // Skip unhydrated perspectives during tool discovery — they have
+            // no SHACL classes yet. Tools appear after the user opens the
+            // perspective (which triggers hydration).
+            if !perspective.is_hydrated() {
+                continue;
+            }
+
             let classes = shacl::load_classes(&perspective).await;
 
             for class in &classes {

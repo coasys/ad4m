@@ -95,6 +95,7 @@ async fn send_broadcast(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    crate::perspectives::ensure_hydrated(&uuid).await;
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -118,6 +119,7 @@ async fn send_signal(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    crate::perspectives::ensure_hydrated(&uuid).await;
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -141,6 +143,7 @@ async fn set_online_status(params: Value, ctx: Arc<RequestContext>) -> Result<Va
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    crate::perspectives::ensure_hydrated(&uuid).await;
     let perspective_instance = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -160,6 +163,7 @@ async fn has_telepresence(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
+    crate::perspectives::ensure_hydrated(&uuid).await;
     let perspective = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -171,6 +175,7 @@ async fn online_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let uuid = params.require_str("uuid")?;
+    crate::perspectives::ensure_hydrated(&uuid).await;
     let perspective = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 
@@ -191,6 +196,7 @@ async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let current_user_did = crate::agent::did_for_context(&agent_context)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
+    crate::perspectives::ensure_hydrated(&uuid).await;
     let perspective = get_perspective(&uuid)
         .ok_or_else(|| WsRpcError::not_found(format!("No perspective found with uuid {}", uuid)))?;
 

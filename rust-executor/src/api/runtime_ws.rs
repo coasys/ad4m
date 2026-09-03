@@ -130,6 +130,7 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
                 WsRpcError::bad_request("perspective_uuid required for perspective export")
             })?;
+            crate::perspectives::ensure_hydrated(uuid).await;
             let perspective = crate::perspectives::get_perspective(uuid)
                 .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))?;
             let links = perspective
