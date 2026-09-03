@@ -4612,36 +4612,62 @@ impl PerspectiveInstance {
                     let desired_set: std::collections::HashSet<&str> =
                         desired.iter().map(|s| s.as_str()).collect();
 
+                    // Reconcile with what this batch has already staged for the
+                    // relation, before staging anything more.
+                    //
+                    //   - an addition for a member now going away is dropped, so
+                    //     a save+update in one transaction cannot leave a
+                    //     duplicate behind;
+                    //   - a removal for a member that is wanted again is
+                    //     cancelled. `[A] → [B] → [A, B]` in one batch should
+                    //     leave A's original link alone, not remove it and
+                    //     re-add it under a fresh signature and timestamp —
+                    //     restamping is exactly what this diff exists to stop.
+                    //
+                    // `already_removed` is read after that cancellation so the
+                    // loop below does not stage a second removal for a member
+                    // this batch has already let go: the store still lists it
+                    // until commit.
+                    let mut already_removed: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    if let Some(ref bid) = batch_id {
+                        let mut batches = self.batch_store.write().await;
+                        if let Some(batch) = batches.get_mut(bid) {
+                            let mine = |l: &Link| l.source == source && l.predicate == predicate;
+                            batch.diff.additions.retain(|link_expr| {
+                                !(mine(&link_expr.data)
+                                    && !desired_set.contains(link_expr.data.target.as_str()))
+                            });
+                            batch.diff.removals.retain(|link_expr| {
+                                !(mine(&link_expr.data)
+                                    && desired_set.contains(link_expr.data.target.as_str()))
+                            });
+                            already_removed = batch
+                                .diff
+                                .removals
+                                .iter()
+                                .filter(|l| mine(&l.data))
+                                .map(|l| l.data.target.clone())
+                                .collect();
+                        }
+                    }
+
                     // Only a persisted link can be removed. A member that exists
-                    // solely as a pending addition leaves by being pruned from
-                    // the batch below, not by a removal of something the store
-                    // has never seen.
+                    // solely as a pending addition leaves by being pruned above,
+                    // not by a removal of something the store has never seen.
                     for link in &persisted {
-                        if !desired_set.contains(link.data.target.as_str()) {
+                        if !desired_set.contains(link.data.target.as_str())
+                            && !already_removed.contains(&link.data.target)
+                        {
                             self.remove_link(link.clone().into(), batch_id.clone())
                                 .await?;
                         }
                     }
 
-                    // Prune pending batch additions for targets that are going
-                    // away, so a save+update in one transaction cannot leave a
-                    // duplicate behind.
-                    if let Some(ref bid) = batch_id {
-                        let mut batches = self.batch_store.write().await;
-                        if let Some(batch) = batches.get_mut(bid) {
-                            batch.diff.additions.retain(|link_expr| {
-                                !(link_expr.data.source == source
-                                    && link_expr.data.predicate == predicate
-                                    && !desired_set.contains(link_expr.data.target.as_str()))
-                            });
-                        }
-                    }
-
-                    // Membership as this batch would leave it, read after the
-                    // prune so it reflects the removals just issued. A second
-                    // save on the same relation in one batch has to see the
-                    // first one's staged additions, or it re-adds every one of
-                    // them — the store will not show them until commit.
+                    // Membership as this batch would leave it. A second save on
+                    // the same relation in one batch has to see the first one's
+                    // staged additions, or it re-adds every one of them — the
+                    // store will not show them until commit.
                     let existing = self
                         .links_including_batch(
                             persisted,
@@ -6444,6 +6470,131 @@ mod tests {
             vec!["we://a", "we://b", "we://c"],
             "each member staged exactly once — before the batch-aware read the \
              second run re-added a and b, which the store could not yet see"
+        );
+    }
+
+    /// Drive `collectionSetter` once per desired set, all in one batch, and
+    /// report what the batch holds for `(source, predicate)` at the end.
+    ///
+    /// `persist` is seeded outside any batch, so the store really holds it.
+    async fn staged_after_batched_sets(
+        source: &str,
+        predicate: &str,
+        persist: &[&str],
+        sets: &[&[&str]],
+    ) -> (Vec<String>, Vec<String>) {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+
+        for target in persist {
+            perspective
+                .add_link(
+                    Link {
+                        source: source.to_string(),
+                        predicate: Some(predicate.to_string()),
+                        target: target.to_string(),
+                    },
+                    LinkStatus::Shared,
+                    None,
+                    &context,
+                )
+                .await
+                .unwrap();
+        }
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+
+        let batch_id = perspective.create_batch().await;
+        for targets in sets {
+            let params: Vec<Parameter> = serde_json::from_value(serde_json::json!(targets
+                .iter()
+                .map(|t| serde_json::json!({ "name": "value", "value": t }))
+                .collect::<Vec<_>>()))
+            .unwrap();
+            perspective
+                .execute_commands(
+                    commands.clone(),
+                    source.to_string(),
+                    params,
+                    Some(batch_id.clone()),
+                    &context,
+                )
+                .await
+                .unwrap();
+        }
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let mine = |l: &LinkExpression| {
+            l.data.source == source && l.data.predicate.as_deref() == Some(predicate)
+        };
+        let mut additions: Vec<String> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| mine(l))
+            .map(|l| l.data.target.clone())
+            .collect();
+        let mut removals: Vec<String> = batch
+            .diff
+            .removals
+            .iter()
+            .filter(|l| mine(l))
+            .map(|l| l.data.target.clone())
+            .collect();
+        additions.sort();
+        removals.sort();
+        (additions, removals)
+    }
+
+    /// `[A] → [B] → [B, C]` in one batch stages A's removal once, not twice.
+    ///
+    /// The store still lists A until the batch commits, so the second setter
+    /// sees it as present-and-unwanted and would stage the same removal again.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_stages_a_removal_once() {
+        let (additions, removals) = staged_after_batched_sets(
+            "we://col/3",
+            "we://children",
+            &["we://a"],
+            &[&["we://b"], &["we://b", "we://c"]],
+        )
+        .await;
+
+        assert_eq!(removals, vec!["we://a"], "A is staged for removal once");
+        assert_eq!(additions, vec!["we://b", "we://c"]);
+    }
+
+    /// `[A] → [B] → [A, B]` in one batch leaves A's original link alone.
+    ///
+    /// A is dropped and then wanted back before the batch commits. Cancelling
+    /// the staged removal keeps the link that is already there; without that it
+    /// is removed and re-added under a fresh signature and timestamp, which is
+    /// the restamping this diff exists to stop.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_cancels_a_reinstated_removal() {
+        let (additions, removals) = staged_after_batched_sets(
+            "we://col/4",
+            "we://children",
+            &["we://a"],
+            &[&["we://b"], &["we://a", "we://b"]],
+        )
+        .await;
+
+        assert!(
+            removals.is_empty(),
+            "A is wanted again, so its staged removal is cancelled: {removals:?}"
+        );
+        assert_eq!(
+            additions,
+            vec!["we://b"],
+            "only B is staged — A's existing link is untouched, not re-added"
         );
     }
 
