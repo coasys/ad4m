@@ -60,21 +60,56 @@ fn clean_llm_json(raw: &str) -> String {
     //    comma inside a genuine string value could be dropped. Extracting the
     //    bracketed block first confines the string-scanner to actual JSON.
     let candidate = s.trim();
-    // Prefer a strict parse from the first bracket so prose after the JSON
-    // is dropped; fall back to the greedy span of that bracket type when the
-    // JSON is not valid on its own (trailing commas are repaired below).
-    let extracted = match candidate.find(['[', '{']) {
-        Some(start) => {
-            let (open, close) = match &candidate[start..start + 1] {
-                "[" => ('[', ']'),
-                _ => ('{', '}'),
-            };
-            extract_first_json_value(candidate, start)
-                .or_else(|| extract_bracketed(candidate, open, close))
-                .unwrap_or_else(|| candidate.to_string())
+    // Strict-parse at each TOP-LEVEL bracket position in order, taking the
+    // first position where a complete JSON value parses; fall back to the
+    // greedy spans when none does (trailing commas are repaired below).
+    //
+    // Top-level-only strict attempts are what make this safe for every
+    // payload shape this branch accepts: a prose-only bracket (e.g.
+    // `I'll extract {a couple of things}: [...]`) fails its strict parse and
+    // the scan moves on to the real payload — see the
+    // `prose_braces_before_the_real_array_*` regression test — and a
+    // wrapper object `{ "instances": [...], "flow_proposals": [...] }` is
+    // taken whole rather than truncated to its inner instances array, which
+    // an array-first chain would silently do (dropping flow_proposals).
+    // Restricting to depth-0 positions keeps a repair-needing outer array
+    // (trailing commas) from being hijacked by a valid inner object: the
+    // inner positions are never strict-tried, so the outer falls through to
+    // the greedy span + comma repair. The depth scan is string-aware; prose
+    // with unbalanced quotes merely skews the scan towards the greedy
+    // fallbacks, which is the pre-existing behaviour for that case.
+    let mut top_level_starts = Vec::new();
+    {
+        let (mut depth, mut in_string, mut escaped) = (0i32, false, false);
+        for (i, c) in candidate.char_indices() {
+            if in_string {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '[' | '{' => {
+                    if depth == 0 {
+                        top_level_starts.push(i);
+                    }
+                    depth += 1;
+                }
+                ']' | '}' => depth = (depth - 1).max(0),
+                _ => {}
+            }
         }
-        None => candidate.to_string(),
-    };
+    }
+    let extracted = top_level_starts
+        .iter()
+        .find_map(|&i| extract_first_json_value(candidate, i))
+        .or_else(|| extract_bracketed(candidate, '[', ']'))
+        .or_else(|| extract_bracketed(candidate, '{', '}'))
+        .unwrap_or_else(|| candidate.to_string());
 
     // 4. Remove trailing commas before a closing } or ] (invalid JSON, common),
     //    now scoped to the extracted JSON. Skips commas inside string literals
@@ -198,6 +233,31 @@ mod tests {
         let out = parse_interpretation_response(raw).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn prose_braces_before_the_real_array_dont_swallow_the_payload() {
+        // Brace-prose before the array: the array-first chain must not let the
+        // `{a couple of things}` span become the payload. Under an
+        // object-first ordering the greedy `{`-matcher would short-circuit
+        // here and the real payload would never be tried.
+        let raw = r#"OK, I'll extract {a couple of things}: [{"class":"Task","title":"A"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class, "Task");
+        assert_eq!(prop_values(&out, "title"), vec!["A"]);
+    }
+
+    #[test]
+    fn wrapper_object_after_prose_keeps_flow_proposals() {
+        // A wrapper object must be taken whole: an array-first extraction
+        // chain would strict-parse the inner `instances` array and silently
+        // drop `flow_proposals`.
+        let raw = r#"Here {you go}: {"instances":[{"class":"Task","title":"A"}],"flow_proposals":[{"instance":"ad4m://flow/instance/1","toState":"scoped"}]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.flow_proposals.len(), 1);
+        assert_eq!(out.flow_proposals[0].to_state, "scoped");
     }
 
     #[test]

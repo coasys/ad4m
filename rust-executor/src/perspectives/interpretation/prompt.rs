@@ -234,6 +234,8 @@ fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
         serde_json::json!({
             "$flow.base": fc.subject,
             "$flow.instance": fc.instance_uri,
+            "$flow.uri": fc.instance_uri,
+            "$did": "(acting DID - substituted at evaluation time)",
         }),
     );
     if let Some(hint) = fc.flow_interpretation_hint.as_ref() {
@@ -1024,6 +1026,14 @@ mod tests {
         assert_eq!(
             fc["tokens"]["$flow.instance"], "ad4m://flow/instance/abc",
             "tokens legend must map $flow.instance to the instance's URI"
+        );
+        assert_eq!(
+            fc["tokens"]["$flow.uri"], "ad4m://flow/instance/abc",
+            "tokens legend must map $flow.uri to the same instance URI"
+        );
+        assert!(
+            fc["tokens"]["$did"].as_str().is_some(),
+            "tokens legend must include a $did entry"
         );
 
         let ns = fc["nextStates"]

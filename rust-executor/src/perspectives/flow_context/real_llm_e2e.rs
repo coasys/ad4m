@@ -21,9 +21,8 @@
 //!
 //! # What it does *not* prove
 //!
-//! - The engine acts on the extracted instance (that's the
-//!   `run_engine_proposal_pass` post-processing pass covered by its own
-//!   e2e tests).
+//! - The engine acts on the extracted instance (covered by the
+//!   `run_engine_proposal_pass` e2e tests).
 //! - The LLM proposes a `FlowTransitionProposal` on its own (covered by
 //!   the `flow_proposals` output-field tests).
 //!

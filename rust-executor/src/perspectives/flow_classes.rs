@@ -37,9 +37,6 @@ pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
 /// No `required_path` guard yet — the shapes are stable at this point; add one
 /// when a future property forces a re-register.
 ///
-/// Only called from [`mint_flow_instance`] today, which is itself only test-
-/// called; the annotation follows.
-#[allow(dead_code)]
 pub(crate) async fn ensure_flow_model_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
