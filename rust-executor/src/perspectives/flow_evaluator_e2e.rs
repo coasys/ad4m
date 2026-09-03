@@ -42,6 +42,14 @@ fn literal(s: &str) -> String {
 /// `requires` and `semanticCheck` links are added by hand because
 /// `parse_flow_to_links` does not emit them yet.
 async fn seed_fixture(semantic_check: Option<&str>) -> Fixture {
+    seed_fixture_with_requires(
+        r#"[{"className":"ns://Task","count":{"min":1}}]"#,
+        semantic_check,
+    )
+    .await
+}
+
+async fn seed_fixture_with_requires(requires_json: &str, semantic_check: Option<&str>) -> Fixture {
     let (mut perspective, mut shapes, ctx) =
         setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
 
@@ -62,7 +70,7 @@ async fn seed_fixture(semantic_check: Option<&str>) -> Fixture {
     links.push(Link {
         source: scoped.to_string(),
         predicate: Some("ad4m://requires".to_string()),
-        target: literal(r#"[{"className":"ns://Task","count":{"min":1}}]"#),
+        target: literal(requires_json),
     });
     if let Some(hint) = semantic_check {
         links.push(Link {
@@ -344,7 +352,43 @@ async fn semantic_check_gate_fires_only_on_yes_e2e() {
         assert_eq!(llm.calls(), 1, "answer {answer:?}: exactly one LLM call");
         let prompt = &llm.prompts.lock().unwrap()[0];
         assert!(prompt.contains(SCOPE_HINT) && prompt.contains("TO:   scoped"));
+        // The central claim of the gate: the LLM sees the evidence's
+        // CONTENT (the seeded Task's title, hydrated through the real
+        // model_query path), not just its URI — a hint like SCOPE_HINT is
+        // only decidable from property values.
+        assert!(
+            prompt.contains("Onboard Ana"),
+            "semantic-check prompt must carry hydrated evidence content:\n{prompt}"
+        );
+        assert!(prompt.contains("ad4m://task/1"));
     }
+}
+
+/// A `semanticCheck` whose transition carries no hydrated evidence (the
+/// guard here is a negative `max: 0` — satisfied by the ABSENCE of matches)
+/// discards fail-closed without consulting the LLM: there is no content a
+/// yes/no could rest on, so asking would be a rubber stamp.
+#[tokio::test(flavor = "multi_thread")]
+async fn semantic_check_without_evidence_discards_without_llm_call_e2e() {
+    // Negative guard, no tasks seeded: satisfied with ZERO evidence.
+    let mut f = seed_fixture_with_requires(
+        r#"[{"className":"ns://Task","count":{"max":0}}]"#,
+        Some(SCOPE_HINT),
+    )
+    .await;
+    // The guard itself is satisfied (sanity check for this test's premise)…
+    let satisfied = f.satisfied().await;
+    assert_eq!(satisfied.len(), 1, "negative guard should be satisfied");
+    assert!(satisfied[0].evidence.is_empty());
+    // …but the semantic check has nothing to evaluate, so the pass
+    // discards without asking the LLM.
+    let llm = CannedLlm::new(Ok("YES"));
+    let minted = f.run_pass(&[], Some(&llm)).await;
+    assert_eq!(llm.calls(), 0, "no evidence → no LLM call");
+    assert!(
+        minted.is_empty(),
+        "no evidence + semanticCheck must fail closed: {minted:?}"
+    );
 }
 
 /// No hint on the target state → the gate is enabled but never calls the
