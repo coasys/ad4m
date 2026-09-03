@@ -416,7 +416,7 @@ pub async fn evaluate_state_requires<Q: RequiresQueryable + ?Sized>(
 /// deterministic post-processing pass should never blow up because *one*
 /// flow definition or SDNA class went sideways:
 ///
-/// - Record whose `flow_name` is not in `flows_by_name` → skipped
+/// - Record whose `flow_uri` is not in `flows_by_uri` → skipped
 ///   (definition unpublished or hasn't synced yet).
 /// - State whose `requires` is `None` or empty → skipped (no
 ///   deterministic guard; slice 10.5's `semanticCheck` picks these up
@@ -430,12 +430,12 @@ pub async fn evaluate_state_requires<Q: RequiresQueryable + ?Sized>(
 pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     records: &[FlowInstanceRecord],
-    flows_by_name: &HashMap<String, SHACLFlow>,
+    flows_by_uri: &HashMap<String, SHACLFlow>,
     acting_did: &str,
 ) -> Vec<SatisfiedTransition> {
     let mut out = Vec::new();
     for record in records {
-        let Some(flow) = flows_by_name.get(&record.flow_name) else {
+        let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
             continue;
         };
         for state in reachable_next_states(flow, &record.current_state) {
@@ -454,7 +454,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         .clone()
                         .or_else(|| flow.consensus_rule.clone());
                     out.push(SatisfiedTransition {
-                        flow_name: record.flow_name.clone(),
+                        flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
                         subject: record.subject.clone(),
                         from_state: record.current_state.clone(),
@@ -468,7 +468,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                 Err(e) => {
                     log::debug!(
                         "flow evaluator: model_query failed for {}.{} on {}: {:#}",
-                        record.flow_name,
+                        record.flow_uri,
                         state.name,
                         record.instance_uri,
                         e
@@ -557,6 +557,69 @@ pub struct LlmProposalHint {
     pub reason: Option<String>,
 }
 
+async fn proposal_already_exists(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+    transition: &SatisfiedTransition,
+) -> bool {
+    let hash_literal = format!(
+        "literal:string:{}",
+        urlencoding::encode(&transition.evidence_hash)
+    );
+    let hash_links = match perspective
+        .get_links(&crate::types::LinkQuery {
+            predicate: Some("ad4m://flow/evidence_hashes".into()),
+            target: Some(hash_literal),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(links) => links,
+        Err(_) => return false,
+    };
+    let to_state_literal = format!(
+        "literal:string:{}",
+        urlencoding::encode(&transition.to_state)
+    );
+    for link in &hash_links {
+        let proposal_uri = &link.data.source;
+        let instance_links = match perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(proposal_uri.clone()),
+                predicate: Some("ad4m://flow/instance".into()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(_) => continue,
+        };
+        let matches_instance = instance_links
+            .iter()
+            .any(|l| l.data.target == transition.instance_uri);
+        if !matches_instance {
+            continue;
+        }
+        let to_state_links = match perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(proposal_uri.clone()),
+                predicate: Some("ad4m://flow/to_state".into()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(_) => continue,
+        };
+        if to_state_links
+            .iter()
+            .any(|l| l.data.target == to_state_literal)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 // ============================================================================
 // the auto-processor entry point
 // ============================================================================
@@ -618,7 +681,7 @@ pub async fn run_engine_proposal_pass(
     // Load the flow catalogue. Empty on I/O failure — same policy as
     // `gather_active_flow_contexts`. An empty perspective has zero flows,
     // and there's nothing to post-process.
-    let flows_by_name = match crate::perspectives::flow_context::load_shacl_flows(perspective).await
+    let flows_by_uri = match crate::perspectives::flow_context::load_shacl_flows(perspective).await
     {
         Ok(m) => m,
         Err(e) => {
@@ -626,7 +689,7 @@ pub async fn run_engine_proposal_pass(
             return Vec::new();
         }
     };
-    if flows_by_name.is_empty() {
+    if flows_by_uri.is_empty() {
         return Vec::new();
     }
 
@@ -668,7 +731,7 @@ pub async fn run_engine_proposal_pass(
     };
 
     let satisfied =
-        evaluate_flow_transitions(perspective, &records, &flows_by_name, &acting_did).await;
+        evaluate_flow_transitions(perspective, &records, &flows_by_uri, &acting_did).await;
     if satisfied.is_empty() {
         return Vec::new();
     }
@@ -684,7 +747,7 @@ pub async fn run_engine_proposal_pass(
         String,
         crate::perspectives::flow_context::FlowContext,
     > = if semantic_check.is_some() {
-        crate::perspectives::flow_context::build_flow_contexts(&records, &flows_by_name)
+        crate::perspectives::flow_context::build_flow_contexts(&records, &flows_by_uri)
             .into_iter()
             .map(|c| (c.instance_uri.clone(), c))
             .collect()
@@ -707,6 +770,15 @@ pub async fn run_engine_proposal_pass(
     // writer no longer takes a `proposed_at` param.
     let mut minted = Vec::with_capacity(satisfied.len());
     for transition in &satisfied {
+        if proposal_already_exists(perspective, transition).await {
+            log::debug!(
+                "run_engine_proposal_pass: {}.{}→{} already proposed, skipping",
+                transition.flow_name,
+                transition.from_state,
+                transition.to_state,
+            );
+            continue;
+        }
         // semantic-check gate. Runs BEFORE the write so a
         // rejected/uncertain transition never lands as a proposal. The gate
         // is skipped entirely when the caller passes `None` (back-compat
@@ -1486,9 +1558,9 @@ mod tests {
         state.requires = Some(requires);
     }
 
-    fn record(flow: &str, uri: &str, subject: &str, state: &str) -> FlowInstanceRecord {
+    fn record(flow_uri: &str, uri: &str, subject: &str, state: &str) -> FlowInstanceRecord {
         FlowInstanceRecord {
-            flow_name: flow.into(),
+            flow_uri: flow_uri.into(),
             instance_uri: uri.into(),
             subject: subject.into(),
             current_state: state.into(),
@@ -1501,9 +1573,9 @@ mod tests {
         let mut flow = simple_flow("Delivery", &[("identified", "scoped")]);
         let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
         set_requires(scoped, vec![mq("ns://Task")]);
-        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
         let recs = vec![record(
-            "Delivery",
+            "delivery://DeliveryFlow",
             "ad4m://flow/instance/1",
             "ad4m://task/1",
             "identified",
@@ -1525,9 +1597,9 @@ mod tests {
         let mut flow = simple_flow("Delivery", &[("identified", "scoped")]);
         let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
         set_requires(scoped, vec![mq("ns://Task")]);
-        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
         let recs = vec![record(
-            "Delivery",
+            "delivery://DeliveryFlow",
             "ad4m://flow/instance/1",
             "ad4m://task/1",
             "identified",
@@ -1542,9 +1614,9 @@ mod tests {
         // No `requires` = no deterministic guard; slice 10.5's semanticCheck
         // is a separate concern and doesn't fire here.
         let flow = simple_flow("Delivery", &[("identified", "scoped")]);
-        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
         let recs = vec![record(
-            "Delivery",
+            "delivery://DeliveryFlow",
             "ad4m://flow/instance/1",
             "ad4m://task/1",
             "identified",
@@ -1560,15 +1632,15 @@ mod tests {
     async fn flow_transitions_skips_records_with_unknown_flow_name() {
         // Definition unpublished or not yet synced — must not blow up.
         let flow = simple_flow("Delivery", &[("identified", "scoped")]);
-        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
         let recs = vec![
             record(
-                "Delivery",
+                "delivery://DeliveryFlow",
                 "ad4m://flow/instance/1",
                 "ad4m://task/1",
                 "identified",
             ),
-            record("Unknown", "ad4m://flow/instance/2", "ad4m://task/2", "some"),
+            record("unknown://UnknownFlow", "ad4m://flow/instance/2", "ad4m://task/2", "some"),
         ];
         let stub = StubPerspective::new();
         let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
@@ -1595,18 +1667,18 @@ mod tests {
             .unwrap();
         set_requires(tension, vec![mq("ns://Perspective")]);
         let flows = HashMap::from([
-            ("Delivery".into(), delivery),
-            ("Deliberation".into(), deliberation),
+            ("delivery://DeliveryFlow".into(), delivery),
+            ("deliberation://DeliberationFlow".into(), deliberation),
         ]);
         let recs = vec![
             record(
-                "Delivery",
+                "delivery://DeliveryFlow",
                 "ad4m://flow/instance/1",
                 "ad4m://task/1",
                 "identified",
             ),
             record(
-                "Deliberation",
+                "deliberation://DeliberationFlow",
                 "ad4m://flow/instance/2",
                 "ad4m://proposal/1",
                 "proposal",
@@ -1634,9 +1706,9 @@ mod tests {
             n: 3,
             from_role: None,
         });
-        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
         let recs = vec![record(
-            "Delivery",
+            "delivery://DeliveryFlow",
             "ad4m://flow/instance/1",
             "ad4m://task/1",
             "identified",
@@ -1656,9 +1728,9 @@ mod tests {
         });
         let scoped = flow.states.iter_mut().find(|s| s.name == "scoped").unwrap();
         set_requires(scoped, vec![mq("ns://Task")]);
-        let flows = HashMap::from([("Delivery".into(), flow)]);
+        let flows = HashMap::from([("delivery://DeliveryFlow".into(), flow)]);
         let recs = vec![record(
-            "Delivery",
+            "delivery://DeliveryFlow",
             "ad4m://flow/instance/1",
             "ad4m://task/1",
             "identified",
@@ -1791,7 +1863,7 @@ mod e2e_tests {
         let base_uri = "ad4m://task/onboarding";
         let inst_uri = mint_flow_instance(
             &mut perspective,
-            "Delivery",
+            "delivery://DeliveryFlow",
             base_uri,
             "identified",
             "e2e-inst-1",
@@ -1808,11 +1880,11 @@ mod e2e_tests {
             .await
             .expect("load_flow_instances");
         assert_eq!(records.len(), 1, "one active FlowInstance ⇒ one record");
-        let flows_by_name = load_shacl_flows(&perspective)
+        let flows_by_uri = load_shacl_flows(&perspective)
             .await
             .expect("load_shacl_flows");
         assert_eq!(
-            flows_by_name.len(),
+            flows_by_uri.len(),
             1,
             "one Delivery definition ⇒ one catalogue entry"
         );
@@ -1821,8 +1893,8 @@ mod e2e_tests {
         // the evaluator would see `None` and silent-skip regardless of
         // the graph state, which would make the negative path below a
         // false positive.
-        let scoped = flows_by_name
-            .get("Delivery")
+        let scoped = flows_by_uri
+            .get("delivery://DeliveryFlow")
             .expect("Delivery in catalogue")
             .states
             .iter()
@@ -1840,7 +1912,7 @@ mod e2e_tests {
         //    reached through the real SPARQL/SDNA stack, not just the
         //    stub.
         let before =
-            evaluate_flow_transitions(&perspective, &records, &flows_by_name, "did:key:acting")
+            evaluate_flow_transitions(&perspective, &records, &flows_by_uri, "did:key:acting")
                 .await;
         assert!(
             before.is_empty(),
@@ -1864,7 +1936,7 @@ mod e2e_tests {
         // 7) Positive pass: one FlowInstance × one reachable next-state
         //    × requires met ⇒ exactly one SatisfiedTransition.
         let after =
-            evaluate_flow_transitions(&perspective, &records, &flows_by_name, "did:key:acting")
+            evaluate_flow_transitions(&perspective, &records, &flows_by_uri, "did:key:acting")
                 .await;
         assert_eq!(
             after.len(),
@@ -1950,7 +2022,7 @@ mod e2e_tests {
         let base_uri = "ad4m://task/onboarding";
         let inst_uri = mint_flow_instance(
             &mut perspective,
-            "Delivery",
+            "delivery://DeliveryFlow",
             base_uri,
             "identified",
             "e2e-inst-writer",
@@ -1983,11 +2055,11 @@ mod e2e_tests {
         let records = load_flow_instances(&perspective, &[base_uri.to_string()])
             .await
             .expect("load_flow_instances");
-        let flows_by_name = load_shacl_flows(&perspective)
+        let flows_by_uri = load_shacl_flows(&perspective)
             .await
             .expect("load_shacl_flows");
         let satisfied =
-            evaluate_flow_transitions(&perspective, &records, &flows_by_name, "did:key:acting")
+            evaluate_flow_transitions(&perspective, &records, &flows_by_uri, "did:key:acting")
                 .await;
         assert_eq!(
             satisfied.len(),
@@ -2151,7 +2223,7 @@ mod e2e_tests {
         let base_uri = "ad4m://task/onboarding";
         let inst_uri = mint_flow_instance(
             &mut perspective,
-            "Delivery",
+            "delivery://DeliveryFlow",
             base_uri,
             "identified",
             "e2e-10.4c-inst",
@@ -2382,7 +2454,7 @@ mod e2e_tests {
         let base_uri = "ad4m://task/onboarding-10.5b";
         let inst_uri = mint_flow_instance(
             &mut perspective,
-            "Delivery",
+            "delivery://DeliveryFlow",
             base_uri,
             "identified",
             "e2e-10.5b-inst",
@@ -2536,7 +2608,7 @@ mod e2e_tests {
             .expect("add_link(scoped.requires)");
         let _ = mint_flow_instance(
             &mut perspective,
-            "Delivery",
+            "delivery://DeliveryFlow",
             "ad4m://task/no-hint",
             "identified",
             "e2e-10.5b-no-hint-inst",

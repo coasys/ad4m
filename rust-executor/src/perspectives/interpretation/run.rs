@@ -69,6 +69,40 @@ where
     }))
 }
 
+pub async fn retry_interpretation_output_parse<F, Fut>(
+    mut prompt_fn: F,
+) -> anyhow::Result<super::InterpretationOutput>
+where
+    F: FnMut(u8) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 1..=INTERPRETATION_MAX_ATTEMPTS {
+        let raw = match prompt_fn(attempt).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("interpretation: prompt attempt {attempt} failed: {e:#}");
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match super::parse_interpretation_output(&raw) {
+            Ok(output) => return Ok(output),
+            Err(e) => {
+                log::warn!(
+                    "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        anyhow::anyhow!(
+            "interpretation: failed after {INTERPRETATION_MAX_ATTEMPTS} attempts with no captured error"
+        )
+    }))
+}
+
 /// Drop [`InterpretationOp::Update`] ops whose new field values already match
 /// the perspective's current state (per-property value-set equality). Small LLMs
 /// occasionally re-emit an existing `existing` entry verbatim after being
@@ -687,7 +721,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         // `flow_proposals`) so the post-processing pass can honour LLM
         // attribution when a satisfied transition matches an LLM proposal.
         // Legacy bare-array LLM responses still parse (empty `flow_proposals`).
-        let InterpretationOutput {
+        let super::InterpretationOutput {
             instances,
             flow_proposals: llm_flow_proposals,
         } = retry_interpretation_output_parse(|_attempt| {

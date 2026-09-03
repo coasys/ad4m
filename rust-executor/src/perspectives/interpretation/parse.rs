@@ -1,4 +1,4 @@
-use super::ProposedInstance;
+use super::{InterpretationOutput, ProposedInstance};
 
 /// Parse a raw LLM response into proposed instances.
 ///
@@ -14,6 +14,55 @@ pub fn parse_interpretation_response(raw: &str) -> anyhow::Result<Vec<ProposedIn
         )
     })?;
     Ok(instances)
+}
+
+pub fn parse_interpretation_output(raw: &str) -> anyhow::Result<InterpretationOutput> {
+    let cleaned = clean_llm_json(raw);
+    let value: serde_json::Value = serde_json::from_str(&cleaned).map_err(|e| {
+        anyhow::anyhow!(
+            "interpretation JSON parse failed: {e}; cleaned payload length: {} bytes",
+            cleaned.len()
+        )
+    })?;
+    match value {
+        serde_json::Value::Object(map) => {
+            if !map.contains_key("instances") && !map.contains_key("flow_proposals") {
+                return Err(anyhow::anyhow!(
+                    "interpretation JSON parse failed: object has neither `instances` nor `flow_proposals` key; cleaned payload length: {} bytes",
+                    cleaned.len()
+                ));
+            }
+            serde_json::from_value(serde_json::Value::Object(map)).map_err(|e| {
+                anyhow::anyhow!(
+                    "interpretation object parse failed: {e}; cleaned payload length: {} bytes",
+                    cleaned.len()
+                )
+            })
+        }
+        serde_json::Value::Array(items) => {
+            let instances: Vec<ProposedInstance> =
+                serde_json::from_value(serde_json::Value::Array(items)).map_err(|e| {
+                    anyhow::anyhow!(
+                        "interpretation array parse failed: {e}; cleaned payload length: {} bytes",
+                        cleaned.len()
+                    )
+                })?;
+            Ok(InterpretationOutput {
+                instances,
+                flow_proposals: Vec::new(),
+            })
+        }
+        other => Err(anyhow::anyhow!(
+            "interpretation JSON parse failed: expected object or array at top level, got {}",
+            match other {
+                serde_json::Value::Null => "null",
+                serde_json::Value::Bool(_) => "bool",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::String(_) => "string",
+                _ => unreachable!(),
+            }
+        )),
+    }
 }
 
 /// Strip the reasoning/markdown noise local models add around JSON.
