@@ -116,6 +116,14 @@ pub struct AutoProcessorConfig {
     /// to materialize on each pass. Must contain at least one entry;
     /// [`load_processors`] skips otherwise.
     pub interpretation_classes: Vec<String>,
+    /// Canonical flow URIs (`SHACLFlow.flow_uri()`, `{namespace}{name}Flow`)
+    /// this processor is flow-aware of. Flow features — prompt rendering,
+    /// the proposal pass, and auto-spawn — run ONLY on selected flows
+    /// (Nico 2026-09-04: flows are targeted per processor, like the class
+    /// selection above). Empty = flow features off for this processor.
+    /// Absent on pre-flow configs, so hydration defaults to empty rather
+    /// than bailing.
+    pub flows: Vec<String>,
     /// After a new source item lands, wait this long with no further arrivals
     /// before running a pass (batches bursts of typing / imports).
     pub debounce_ms: i64,
@@ -194,7 +202,7 @@ pub fn processor_node(processor_id: &str) -> String {
 }
 
 /// Idempotently register the hard-wired [`AUTO_PROCESSOR_CLASS`] subject class.
-/// Refreshes the SHACL if an older registration predates `source_window_ms`.
+/// Refreshes the SHACL if an older registration predates the `flows` selection.
 pub async fn ensure_auto_processor_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -204,7 +212,7 @@ pub async fn ensure_auto_processor_class(
         AUTO_PROCESSOR_CLASS,
         AUTO_PROCESSOR_TARGET_CLASS,
         AUTO_PROCESSOR_SDNA,
-        Some("ad4m://source_window_ms"),
+        Some("ad4m://flow"),
         context,
     )
     .await
@@ -341,6 +349,24 @@ pub async fn write_processor(
                 .map_err(|e| {
                     anyhow::anyhow!("write_processor: add_link(interpretation_class) failed: {e:#}")
                 })?;
+        }
+        // Flow selection rides the same way as the class list: links in the
+        // same batch, `Shared` status — a peer whose processor view lacked
+        // the flow set would run flow-blind passes on the same batches.
+        for flow in cfg.flows.iter() {
+            perspective
+                .add_link(
+                    Link {
+                        source: node.clone(),
+                        predicate: Some("ad4m://flow".to_string()),
+                        target: format!("literal:string:{}", flow),
+                    },
+                    LinkStatus::Shared,
+                    Some(batch_id.clone()),
+                    context,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("write_processor: add_link(flow) failed: {e:#}"))?;
         }
         Ok(())
     }
@@ -539,6 +565,21 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         return None;
     }
 
+    // Flow selection: optional collection, same hydrated-array shape as
+    // `interpretationClasses`. Absent (pre-flow config) → empty = no flow
+    // features. Sorted + deduped for the same stable-iteration reason.
+    let mut flows: Vec<String> = instance
+        .get("flows")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    flows.sort();
+    flows.dedup();
+
     // Optional thresholds. Absent `batchMin` → 1 (original behaviour). An
     // absent `maxWaitMs` → `None` (wait indefinitely). A *present but
     // unparseable* value is a config error, so we bail (`None`) exactly like
@@ -623,6 +664,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         source_scope_query: scalar("sourceScopeQuery")?,
         base_prefix: scalar("basePrefix"),
         interpretation_classes,
+        flows,
         debounce_ms,
         batch_min,
         batch_max,
@@ -664,6 +706,7 @@ mod tests {
             // [`interpretation_classes_multiple_roundtrip_sorted`] below for
             // the "input order is arbitrary; output order is sorted" contract.
             interpretation_classes: vec!["ns://Question".into(), "ns://Task".into()],
+            flows: vec![],
             debounce_ms: 5_000,
             batch_min: 3,
             batch_max: 32,
@@ -999,6 +1042,47 @@ mod tests {
                 "ns://Task".to_string(),
             ],
             "loader must return interpretation_classes sorted alphabetically"
+        );
+    }
+
+    /// Flow selection rides the same write/load path as the class list —
+    /// sorted + deduped on load, and an absent selection (every pre-flow
+    /// config in the wild) loads as empty rather than failing.
+    #[tokio::test]
+    async fn flows_roundtrip_sorted_and_default_empty() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        // No flows set → loads as empty (backwards compatible).
+        let cfg = sample_config("flow-less");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].flows.is_empty(), "absent selection loads empty");
+
+        // Deliberately unsorted + duplicated selection round-trips clean.
+        let mut cfg = sample_config("flow-full");
+        cfg.flows = vec![
+            "delivery://DeliveryFlow".into(),
+            "coasys://DeliberationFlow".into(),
+            "delivery://DeliveryFlow".into(),
+        ];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        let full = loaded
+            .iter()
+            .find(|c| c.processor_id == "flow-full")
+            .expect("flow-full loads");
+        assert_eq!(
+            full.flows,
+            vec![
+                "coasys://DeliberationFlow".to_string(),
+                "delivery://DeliveryFlow".to_string(),
+            ],
+            "flows must load sorted and deduped"
         );
     }
 

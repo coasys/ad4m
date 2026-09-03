@@ -823,6 +823,10 @@ pub async fn run_one_pass(
                     // session to bill against) and each completion still
                     // fire-and-forgets bill_prompt_if_authed via AIService.
                     None,
+                    // Flow targeting (Nico 2026-09-04): flow features run
+                    // only on the flows this processor selected. An empty
+                    // selection = flow-blind pass.
+                    Some(&cfg.flows),
                 )
                 .await
             );
@@ -847,6 +851,8 @@ pub async fn run_one_pass(
                     Some(&cursor),
                     cfg.emit_debug_events,
                     emit_ctx.as_ref(),
+                    // Same flow targeting as the harness branch above.
+                    Some(&cfg.flows),
                 )
                 .await
             );
@@ -988,6 +994,7 @@ mod tests {
             ),
             base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
+            flows: vec![],
             debounce_ms,
             batch_min: 1,
             batch_max,

@@ -511,6 +511,7 @@ pub async fn run_interpretation_observed(
         None,
         false,
         emit_ctx,
+        None,
     )
     .await
     .map(|out| out.bases)
@@ -545,6 +546,7 @@ pub async fn run_interpretation_with_strategy(
         scope,
         None,
         false,
+        None,
         None,
     )
     .await
@@ -596,6 +598,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     cursor: Option<&InterpretationRunCursor>,
     emit_debug_events: bool,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
@@ -660,6 +663,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
             perspective,
             &flow_subjects,
+            flow_filter,
         )
         .await;
         let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
@@ -813,9 +817,13 @@ pub async fn run_interpretation_with_strategy_and_model(
         // class is in some flow's `inputTypes` gets its `FlowInstance` minted
         // now, so the flow's first-state `requires` are evaluated against this
         // run's own evidence in the same pass rather than the next one.
-        let spawned =
-            crate::perspectives::flow_spawn::run_flow_spawn_pass(perspective, &created, context)
-                .await;
+        let spawned = crate::perspectives::flow_spawn::run_flow_spawn_pass(
+            perspective,
+            &created,
+            context,
+            flow_filter,
+        )
+        .await;
         if !spawned.is_empty() {
             log::info!(
                 "🌱 interpretation: spawned {} flow instance(s) on new items",
@@ -825,8 +833,15 @@ pub async fn run_interpretation_with_strategy_and_model(
 
         // The affected instance base URIs (created, updated, or given new
         // relations). Links are owned by `create_subject` / `update_subject`.
-        let flow_proposals =
-            run_flow_post_pass(perspective, scope, context, &llm_proposals, &task.task_id).await;
+        let flow_proposals = run_flow_post_pass(
+            perspective,
+            scope,
+            context,
+            &llm_proposals,
+            &task.task_id,
+            flow_filter,
+        )
+        .await;
 
         Ok(InterpretationOutcome {
             bases,
@@ -870,6 +885,7 @@ async fn run_flow_post_pass(
     context: &AgentContext,
     llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
     task_id: &str,
+    flow_filter: Option<&[String]>,
 ) -> Vec<String> {
     let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
         task_id: task_id.to_string(),
@@ -880,6 +896,7 @@ async fn run_flow_post_pass(
         context,
         llm_proposals,
         Some(&semantic_check),
+        flow_filter,
     )
     .await
 }
@@ -928,6 +945,7 @@ pub async fn run_interpretation_with_harness_and_model(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     dedup_on_drain: bool,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
+    flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
@@ -955,9 +973,12 @@ pub async fn run_interpretation_with_harness_and_model(
     } else {
         Vec::new()
     };
-    let active_flows =
-        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, &flow_subjects)
-            .await;
+    let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
+        perspective,
+        &flow_subjects,
+        flow_filter,
+    )
+    .await;
     let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
 
     // Build per-class propose shapes from the perspective's SHACL classes,
@@ -1131,8 +1152,13 @@ pub async fn run_interpretation_with_harness_and_model(
 
     // Spawn pass before the proposal pass — same ordering rationale as the
     // single-shot path.
-    let spawned =
-        crate::perspectives::flow_spawn::run_flow_spawn_pass(perspective, &created, context).await;
+    let spawned = crate::perspectives::flow_spawn::run_flow_spawn_pass(
+        perspective,
+        &created,
+        context,
+        flow_filter,
+    )
+    .await;
     if !spawned.is_empty() {
         log::info!(
             "🌱 harness: spawned {} flow instance(s) on new items",
@@ -1148,6 +1174,7 @@ pub async fn run_interpretation_with_harness_and_model(
         context,
         &flow_buffer.drain(),
         &task.task_id,
+        flow_filter,
     )
     .await;
     if !flow_proposals.is_empty() {

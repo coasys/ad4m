@@ -435,9 +435,11 @@ pub async fn run_engine_proposal_pass(
     context: &AgentContext,
     llm_proposals: &[LlmFlowProposal],
     semantic_check: Option<&dyn SemanticCheckLlm>,
+    flow_filter: Option<&[String]>,
 ) -> Vec<String> {
     let loaded = async {
-        let flows_by_uri = load_shacl_flows(perspective).await?;
+        let mut flows_by_uri = load_shacl_flows(perspective).await?;
+        crate::perspectives::flow_context::retain_selected_flows(&mut flows_by_uri, flow_filter);
         let records = match scope {
             Some(s) => load_flow_instances(perspective, &[scope_subject(s).to_string()]).await?,
             None => load_all_flow_instances(perspective).await?,

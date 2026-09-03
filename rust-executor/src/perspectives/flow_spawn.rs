@@ -149,12 +149,13 @@ pub async fn run_flow_spawn_pass(
     perspective: &mut PerspectiveInstance,
     created_bases: &[String],
     context: &AgentContext,
+    flow_filter: Option<&[String]>,
 ) -> Vec<SpawnOutcome> {
     if created_bases.is_empty() {
         return Vec::new();
     }
 
-    let flows = match load_shacl_flows(perspective).await {
+    let mut flows = match load_shacl_flows(perspective).await {
         Ok(flows) if !flows.is_empty() => flows,
         Ok(_) => return Vec::new(),
         Err(e) => {
@@ -162,6 +163,10 @@ pub async fn run_flow_spawn_pass(
             return Vec::new();
         }
     };
+    super::flow_context::retain_selected_flows(&mut flows, flow_filter);
+    if flows.is_empty() {
+        return Vec::new();
+    }
 
     let classes_by_uri = match perspective.subject_classes_of(created_bases) {
         Ok(map) => map,
@@ -612,7 +617,7 @@ mod tests {
             "the pure rule must produce a candidate on these exact inputs; live={live:?}"
         );
 
-        let spawned = run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx).await;
+        let spawned = run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx, None).await;
 
         assert_eq!(
             spawned.len(),
@@ -638,7 +643,7 @@ mod tests {
         // Running again must not double-spawn — the live instance suppresses
         // the candidate. This is what makes the pass safe to call on every
         // interpretation run.
-        let again = run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx).await;
+        let again = run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx, None).await;
         assert!(
             again.is_empty(),
             "second pass must mint nothing, got {again:?}"
@@ -671,8 +676,13 @@ mod tests {
                 .expect("add_link(flow definition)");
         }
 
-        let spawned =
-            run_flow_spawn_pass(&mut perspective, &["ad4m://task/unknown".to_string()], &ctx).await;
+        let spawned = run_flow_spawn_pass(
+            &mut perspective,
+            &["ad4m://task/unknown".to_string()],
+            &ctx,
+            None,
+        )
+        .await;
 
         assert!(
             spawned.is_empty(),
@@ -685,9 +695,78 @@ mod tests {
         use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 
         let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
-        assert!(run_flow_spawn_pass(&mut perspective, &[], &ctx)
+        assert!(run_flow_spawn_pass(&mut perspective, &[], &ctx, None)
             .await
             .is_empty());
+    }
+
+    /// Flow targeting (Nico 2026-09-04): the pass mints only for flows the
+    /// caller selected. An empty selection is flow-blind; an unrelated
+    /// selection spawns nothing; naming the flow spawns it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spawn_pass_honours_flow_selection() {
+        use crate::perspectives::flow_context::load_flow_instances;
+        use crate::perspectives::interpretation_test_support::{
+            setup_perspective_no_llm, TASK_SDNA,
+        };
+        use crate::perspectives::shacl_parser::parse_flow_to_links;
+        use crate::types::LinkStatus;
+
+        let (mut perspective, _shapes, ctx) =
+            setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        for link in parse_flow_to_links(&delivery_flow_json_for("Task"), "Delivery")
+            .expect("parse_flow_to_links")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition)");
+        }
+        let base = "ad4m://task/selection".to_string();
+        perspective
+            .create_subject(
+                crate::perspectives::perspective_instance::SubjectClassOption {
+                    class_name: Some("Task".to_string()),
+                    query: None,
+                },
+                base.clone(),
+                Some(serde_json::json!({ "title": "target the flow" })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject(Task)");
+
+        // Empty selection = flow-blind pass.
+        let none_selected: Vec<String> = vec![];
+        let spawned = run_flow_spawn_pass(
+            &mut perspective,
+            &[base.clone()],
+            &ctx,
+            Some(&none_selected),
+        )
+        .await;
+        assert!(spawned.is_empty(), "empty selection must be flow-blind");
+
+        // A selection naming some other flow spawns nothing either.
+        let other = vec!["coasys://SomethingElseFlow".to_string()];
+        let spawned =
+            run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx, Some(&other)).await;
+        assert!(spawned.is_empty(), "unrelated selection must not spawn");
+        let live = load_flow_instances(&perspective, &[base.clone()])
+            .await
+            .expect("load_flow_instances");
+        assert!(
+            live.is_empty(),
+            "no instance minted under a non-matching selection"
+        );
+
+        // Naming the flow spawns it.
+        let selected = vec!["delivery://DeliveryFlow".to_string()];
+        let spawned =
+            run_flow_spawn_pass(&mut perspective, &[base.clone()], &ctx, Some(&selected)).await;
+        assert_eq!(spawned.len(), 1, "selected flow must spawn: {spawned:?}");
+        assert_eq!(spawned[0].flow_uri, "delivery://DeliveryFlow");
     }
 
     mod created_bases {

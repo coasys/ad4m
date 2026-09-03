@@ -163,6 +163,20 @@ pub fn build_flow_contexts(
         .collect()
 }
 
+/// Drop every flow not named by the selection. `None` = no filtering
+/// (direct interpretation runs default to all flows); `Some(uris)` keeps
+/// only the listed canonical flow URIs — the per-processor targeting Nico
+/// specified 2026-09-04: flow features run only on flows the operator
+/// selected, exactly like the interpretation-class selection.
+pub fn retain_selected_flows(
+    flows_by_uri: &mut HashMap<String, SHACLFlow>,
+    flow_filter: Option<&[String]>,
+) {
+    if let Some(selected) = flow_filter {
+        flows_by_uri.retain(|uri, _| selected.iter().any(|s| s == uri));
+    }
+}
+
 /// Compose the two loaders + [`build_flow_contexts`] into one call that
 /// the extraction pass (`run.rs`) can use directly.
 ///
@@ -188,14 +202,16 @@ pub fn build_flow_contexts(
 pub async fn gather_active_flow_contexts(
     perspective: &PerspectiveInstance,
     subjects: &[String],
+    flow_filter: Option<&[String]>,
 ) -> Vec<FlowContext> {
-    let flows_by_uri = match load_shacl_flows(perspective).await {
+    let mut flows_by_uri = match load_shacl_flows(perspective).await {
         Ok(m) => m,
         Err(e) => {
             log::warn!("gather_active_flow_contexts: load_shacl_flows failed, using empty: {e:#}");
             return Vec::new();
         }
     };
+    retain_selected_flows(&mut flows_by_uri, flow_filter);
     if flows_by_uri.is_empty() {
         return Vec::new();
     }
