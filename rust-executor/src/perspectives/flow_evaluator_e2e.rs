@@ -243,14 +243,15 @@ async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
 async fn run_engine_proposal_pass_e2e() {
     let mut f = seed_delivery_fixture().await;
 
-    let before = run_engine_proposal_pass(&mut f.perspective, None, &f.ctx).await;
+    let subjects = vec![BASE_URI.to_string()];
+    let before = run_engine_proposal_pass(&mut f.perspective, &subjects, &f.ctx).await;
     assert!(
         before.is_empty(),
         "guard unmet → no proposal, got {before:?}"
     );
 
     f.seed_task("ad4m://task/1", "Onboard Ana").await;
-    let minted = run_engine_proposal_pass(&mut f.perspective, None, &f.ctx).await;
+    let minted = run_engine_proposal_pass(&mut f.perspective, &subjects, &f.ctx).await;
     assert_eq!(minted.len(), 1, "got {minted:?}");
     assert!(minted[0].starts_with("ad4m://flow/proposal/"));
 

@@ -31,9 +31,8 @@ use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::write_flow_transition_proposal;
 use crate::perspectives::flow_context::{
     load_all_flow_instances, load_flow_instances, load_shacl_flows, reachable_next_states,
-    scope_subject, FlowInstanceRecord, FlowTokens,
+    FlowInstanceRecord, FlowTokens,
 };
-use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::model_query::ModelQueryInput;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
@@ -378,20 +377,21 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 }
 
 /// Load → evaluate → write, called by the extraction pass once its own
-/// writes are committed. `scope` narrows the FlowInstance load to the
-/// pass's anchor; `None` sweeps every live instance. Returns the URIs of
-/// the proposals minted. Never fails: loader errors yield an empty result
-/// and a failed write drops only that proposal.
+/// writes are committed. `subjects` narrows the FlowInstance load to the
+/// given base URIs; an empty slice sweeps every live instance. Returns
+/// the URIs of the proposals minted. Never fails: loader errors yield an
+/// empty result and a failed write drops only that proposal.
 pub async fn run_engine_proposal_pass(
     perspective: &mut PerspectiveInstance,
-    scope: Option<&Scope>,
+    subjects: &[String],
     context: &AgentContext,
 ) -> Vec<String> {
     let loaded = async {
         let flows_by_uri = load_shacl_flows(perspective).await?;
-        let records = match scope {
-            Some(s) => load_flow_instances(perspective, &[scope_subject(s).to_string()]).await?,
-            None => load_all_flow_instances(perspective).await?,
+        let records = if subjects.is_empty() {
+            load_all_flow_instances(perspective).await?
+        } else {
+            load_flow_instances(perspective, subjects).await?
         };
         let acting_did = crate::agent::did_for_context(context)?;
         anyhow::Ok((flows_by_uri, records, acting_did))

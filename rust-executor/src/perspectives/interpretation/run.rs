@@ -801,13 +801,10 @@ pub async fn run_interpretation_with_strategy_and_model(
         )
         .await?;
 
-        // The affected instance base URIs (created, updated, or given new
-        // relations). Links are owned by `create_subject` / `update_subject`.
-        // The LLM's writes are on the graph now, so re-evaluate every active
-        // flow's `requires` guards against the fresh evidence.
+        // Re-evaluate flow guards for the subjects the LLM just wrote.
         let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
             perspective,
-            scope,
+            &bases,
             context,
         )
         .await;
@@ -1079,7 +1076,7 @@ pub async fn run_interpretation_with_harness_and_model(
     // Same flow post-processing as the single-shot path. The harness
     // returns bases only, so the minted proposals are just logged here.
     let flow_proposals =
-        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, scope, context)
+        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, &bases, context)
             .await;
     if !flow_proposals.is_empty() {
         log::warn!(
