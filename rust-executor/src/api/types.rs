@@ -678,6 +678,11 @@ pub struct AddAutoProcessorRequest {
     pub base_prefix: Option<String>,
     /// Class URIs (SHACL `target_class`) to materialize each pass.
     pub interpretation_classes: Vec<String>,
+    /// Canonical flow URIs this processor is flow-aware of. Flow features
+    /// (flow-aware prompt, proposal pass, auto-spawn) run only on the flows
+    /// listed here. Omit or pass `[]` for no flow processing.
+    #[serde(default)]
+    pub flows: Vec<String>,
     /// Quiet-window (ms) after the last new item before a pass runs.
     pub debounce_ms: i64,
     /// Minimum items before a pass runs (Flux "wait for N inputs"). Default 1.
