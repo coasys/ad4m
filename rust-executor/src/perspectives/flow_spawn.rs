@@ -233,6 +233,27 @@ pub async fn run_flow_spawn_pass(
     spawned
 }
 
+/// The base URIs an interpretation pass is about to **create**, in op order,
+/// deduplicated.
+///
+/// This is the input contract of [`run_flow_spawn_pass`]: design §10 scopes v1
+/// spawn to *new* instances, so `Update` and `AddLinks` bases are excluded —
+/// see the doc comment on [`run_flow_spawn_pass`] for why passing updated
+/// items too would be a different behaviour. Computed from the planned ops
+/// rather than `apply_with_overlay`'s return value because the latter mixes
+/// created and updated bases indistinguishably.
+pub fn created_bases_of(ops: &[super::interpretation::InterpretationOp]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for op in ops {
+        if let super::interpretation::InterpretationOp::Create { base, .. } = op {
+            if !out.iter().any(|b| b == base) {
+                out.push(base.clone());
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +688,57 @@ mod tests {
         assert!(run_flow_spawn_pass(&mut perspective, &[], &ctx)
             .await
             .is_empty());
+    }
+
+    mod created_bases {
+        use crate::perspectives::flow_spawn::created_bases_of;
+        use crate::perspectives::interpretation::InterpretationOp;
+
+        fn create(base: &str) -> InterpretationOp {
+            InterpretationOp::Create {
+                base: base.to_string(),
+                class: "Task".to_string(),
+                values: serde_json::Map::new(),
+            }
+        }
+
+        fn update(base: &str) -> InterpretationOp {
+            InterpretationOp::Update {
+                base: base.to_string(),
+                class: "Task".to_string(),
+                values: serde_json::Map::new(),
+            }
+        }
+
+        #[test]
+        fn keeps_creates_only_in_op_order() {
+            let ops = vec![
+                update("ad4m://a"),
+                create("ad4m://b"),
+                InterpretationOp::AddLinks {
+                    source: "ad4m://c".to_string(),
+                    links: vec![],
+                },
+                create("ad4m://d"),
+            ];
+            assert_eq!(created_bases_of(&ops), vec!["ad4m://b", "ad4m://d"]);
+        }
+
+        #[test]
+        fn dedups_repeated_create_bases() {
+            let ops = vec![create("ad4m://a"), create("ad4m://b"), create("ad4m://a")];
+            assert_eq!(created_bases_of(&ops), vec!["ad4m://a", "ad4m://b"]);
+        }
+
+        #[test]
+        fn update_on_a_created_base_does_not_remove_it() {
+            let ops = vec![create("ad4m://a"), update("ad4m://a")];
+            assert_eq!(created_bases_of(&ops), vec!["ad4m://a"]);
+        }
+
+        #[test]
+        fn empty_ops_yield_no_bases() {
+            assert!(created_bases_of(&[]).is_empty());
+        }
     }
 }

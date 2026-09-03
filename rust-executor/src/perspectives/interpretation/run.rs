@@ -792,6 +792,10 @@ pub async fn run_interpretation_with_strategy_and_model(
         } else {
             None
         };
+        // Captured before `ops` moves into the apply: the spawn pass below is
+        // scoped to *created* instances (design §10 v1), and the returned
+        // `bases` mix created and updated indistinguishably.
+        let created = crate::perspectives::flow_spawn::created_bases_of(&ops);
         let bases = apply_with_overlay(
             perspective,
             shapes,
@@ -804,6 +808,20 @@ pub async fn run_interpretation_with_strategy_and_model(
             debug.as_ref(),
         )
         .await?;
+
+        // Spawn pass before the proposal pass: a freshly created item whose
+        // class is in some flow's `inputTypes` gets its `FlowInstance` minted
+        // now, so the flow's first-state `requires` are evaluated against this
+        // run's own evidence in the same pass rather than the next one.
+        let spawned =
+            crate::perspectives::flow_spawn::run_flow_spawn_pass(perspective, &created, context)
+                .await;
+        if !spawned.is_empty() {
+            log::info!(
+                "🌱 interpretation: spawned {} flow instance(s) on new items",
+                spawned.len()
+            );
+        }
 
         // The affected instance base URIs (created, updated, or given new
         // relations). Links are owned by `create_subject` / `update_subject`.
@@ -1093,6 +1111,9 @@ pub async fn run_interpretation_with_harness_and_model(
     // `InterpretationDebug` payload dev #903 wires into the classic path;
     // a follow-up commit on this branch can carry a per-round transcript
     // once the shape is agreed.
+    // Same capture-before-move as the single-shot path: the spawn pass is
+    // scoped to created instances only.
+    let created = crate::perspectives::flow_spawn::created_bases_of(&ops);
     let bases = apply_with_overlay(
         perspective,
         shapes,
@@ -1107,6 +1128,17 @@ pub async fn run_interpretation_with_harness_and_model(
     .await?;
 
     log::warn!("harness: apply_with_overlay produced {} bases", bases.len());
+
+    // Spawn pass before the proposal pass — same ordering rationale as the
+    // single-shot path.
+    let spawned =
+        crate::perspectives::flow_spawn::run_flow_spawn_pass(perspective, &created, context).await;
+    if !spawned.is_empty() {
+        log::info!(
+            "🌱 harness: spawned {} flow instance(s) on new items",
+            spawned.len()
+        );
+    }
 
     // Same flow post-processing as the single-shot path, returned the same
     // way: callers get the minted proposal URIs, not just a log line.
