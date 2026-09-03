@@ -151,6 +151,21 @@ pub struct SharedDb {
 
 const SHARED_DB_CACHE_TTL_SECS: u64 = 30;
 
+/// Cached single-row read from the platform DB.
+///
+/// **Deployment invariant (do not break silently):** this cache is
+/// executor-local, invalidated only by writes going through *this*
+/// executor's `upsert`/`delete`. Correctness therefore depends on one
+/// executor instance per user session — a second executor writing to the
+/// same row would not invalidate this executor's cache, and reads inside
+/// the 30 s TTL window would return the pre-write value.
+///
+/// If the deployment ever grows to multiple executors per user (read
+/// replicas, HA, load balancing), the cache invalidation strategy has to
+/// change — either shrink `SHARED_DB_CACHE_TTL_SECS` to zero (disable),
+/// or add a shared invalidation channel (Worker-side write notifications).
+/// Do not simply raise the TTL; stale-read bugs of the form "data doesn't
+/// update until the user reconnects" are the failure mode.
 struct CachedRow {
     data: Value,
     fetched_at: std::time::Instant,
@@ -233,6 +248,14 @@ impl DbBackend for SharedDb {
         /// Maximum rows to accept from a single list() call.
         /// Guards against unbounded memory growth if the Worker returns a
         /// very large table. Increase if a legitimate table exceeds this.
+        ///
+        /// **Silent truncation:** when the Worker returns more rows than
+        /// this, the excess is dropped and only a `log::warn!` records it.
+        /// The trait method returns a plain `Vec<Value>` with no
+        /// `truncated: bool` — callers that need to know whether the
+        /// result is complete cannot tell from the return value alone.
+        /// Grep the executor log for the warning below, or (better) get
+        /// the Worker to add cursor pagination so a full read is possible.
         const MAX_ROWS: usize = 10_000;
 
         let url = format!("{}/{}/{}", self.base_url, did, table);
@@ -253,13 +276,17 @@ impl DbBackend for SharedDb {
             .and_then(|r| r.as_array())
             .cloned()
             .unwrap_or_default();
+        let total = rows.len();
 
-        if rows.len() > MAX_ROWS {
+        if total > MAX_ROWS {
+            // Keep at warn: silent truncation of a user-scoped table read
+            // is the shape of bug that shows up months later as "my
+            // notification list is missing entries."
             log::warn!(
-                "SharedDb::list: table '{}/{}' returned {} rows, capping at {}",
+                "SharedDb::list: table '{}/{}' returned {} rows, truncating to {} (increase MAX_ROWS or add cursor pagination on the Worker)",
                 did,
                 table,
-                rows.len(),
+                total,
                 MAX_ROWS
             );
         }

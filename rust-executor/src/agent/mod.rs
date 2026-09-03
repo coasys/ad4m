@@ -640,6 +640,18 @@ impl AgentService {
         // In shared mode the JWT signing key name differs from "main"
         // (defaults to "platform"). Create it once if it does not exist yet,
         // so all executors sharing the wallet can sign tokens.
+        //
+        // Concurrency: `key_exists` + `generate_keypair` is a TOCTOU
+        // window — two executors starting at the same time both see the
+        // key missing and both call `generate_keypair`. This is safe
+        // *because the platform Worker's key-creation endpoint is
+        // idempotent*: it returns the existing key if the name is already
+        // taken, so racing calls converge on the same keypair rather than
+        // producing two competing signing identities. If the Worker's
+        // key-creation semantics ever change from idempotent-by-name to
+        // create-or-fail, this branch has to become a
+        // check-then-atomically-create RPC instead. See
+        // `SharedWallet::generate_keypair`.
         let signing_name = crate::config::get_global_config().signing_key_name();
         if signing_name != crate::wallet::KEY_NAME_MAIN && !backend.key_exists(&signing_name) {
             backend
@@ -673,6 +685,10 @@ impl AgentService {
 
             // Ensure the shared signing key exists (may have been created by
             // another executor; create only if missing).
+            //
+            // Same TOCTOU note as `create_new_keys` above: safe because the
+            // Worker's key-creation endpoint is idempotent by name and
+            // racing executors converge on the same key.
             let signing_name = crate::config::get_global_config().signing_key_name();
             if signing_name != crate::wallet::KEY_NAME_MAIN && !backend.key_exists(&signing_name) {
                 backend.generate_keypair(&signing_name).map_err(|e| {

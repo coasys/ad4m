@@ -37,11 +37,10 @@ async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpc
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
         let uuid_owned = uuid.to_string();
-        let rehydrated = tokio::task::spawn_blocking(move || {
-            rehydrate_perspective_from_backend(&uuid_owned)
-        })
-        .await
-        .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
+        let rehydrated =
+            tokio::task::spawn_blocking(move || rehydrate_perspective_from_backend(&uuid_owned))
+                .await
+                .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
         if let Ok(Some(perspective)) = rehydrated {
             return Ok(perspective);
         }
