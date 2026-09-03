@@ -17,7 +17,9 @@
 //!
 //! Every failure here is a skip, never an error: a broken flow
 //! definition, an unregistered class or a transient query failure drops
-//! one transition and the extraction pass carries on.
+//! one transition and the extraction pass carries on. Untranslatable
+//! guards (`exists`/`matches`) log at warn — they will never start
+//! working on retry.
 
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::write_flow_transition_proposal;
@@ -141,48 +143,58 @@ impl RequiresQueryable for PerspectiveInstance {
     }
 }
 
-/// Run one guard query. Returns whether its cardinality is satisfied and
-/// the IDs it matched.
-async fn evaluate_query<Q: RequiresQueryable + ?Sized>(
+/// Outcome of AND-ing a state's `requires`. Translation failures are
+/// split from query failures so the composer can `warn!` the former
+/// (persistent misconfig) and `debug!` the latter (transient).
+enum RequiresResult {
+    Satisfied(Vec<String>, Vec<String>),
+    Unmet,
+    Untranslatable(anyhow::Error),
+    QueryFailed(anyhow::Error),
+}
+
+/// Run one already-translated guard query. Returns the matched IDs.
+async fn run_query<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
-    query: &ModelQuery,
-    acting_did: &str,
-) -> Result<(bool, Vec<String>)> {
-    let input = requires_query_input(query, acting_did)?;
+    class_name: &str,
+    input: &Value,
+) -> Result<Vec<String>> {
     let raw = perspective
-        .model_query(&query.class_name, &input.to_string())
+        .model_query(class_name, &input.to_string())
         .await?;
     let result: Value = serde_json::from_str(&raw)?;
-    let ids: Vec<String> = result
+    let ids = result
         .get("instances")
         .and_then(Value::as_array)
-        .ok_or_else(|| {
-            anyhow!(
-                "model_query for `{}` returned no `instances` array",
-                query.class_name
-            )
-        })?
+        .ok_or_else(|| anyhow!("model_query for `{class_name}` returned no `instances` array"))?
         .iter()
         .filter_map(|inst| inst.get("id").and_then(Value::as_str))
         .map(str::to_string)
         .collect();
-    Ok((cardinality_satisfied(query.count.as_ref(), ids.len()), ids))
+    Ok(ids)
 }
 
-/// AND across a state's `requires`. `Ok(None)` as soon as one guard
-/// misses; `Ok(Some((class_names, evidence_ids)))`, both deduplicated in
-/// first-seen order, when every guard holds.
+/// AND across a state's `requires`. Unmet as soon as one guard misses;
+/// `Satisfied` (class names and evidence IDs, both deduplicated in
+/// first-seen order) when every guard holds.
 async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     requires: &[ModelQuery],
     acting_did: &str,
-) -> Result<Option<(Vec<String>, Vec<String>)>> {
+) -> RequiresResult {
     let mut class_names: Vec<String> = Vec::new();
     let mut evidence_ids: Vec<String> = Vec::new();
     for query in requires {
-        let (satisfied, ids) = evaluate_query(perspective, query, acting_did).await?;
-        if !satisfied {
-            return Ok(None);
+        let input = match requires_query_input(query, acting_did) {
+            Ok(v) => v,
+            Err(e) => return RequiresResult::Untranslatable(e),
+        };
+        let ids = match run_query(perspective, &query.class_name, &input).await {
+            Ok(ids) => ids,
+            Err(e) => return RequiresResult::QueryFailed(e),
+        };
+        if !cardinality_satisfied(query.count.as_ref(), ids.len()) {
+            return RequiresResult::Unmet;
         }
         if !class_names.contains(&query.class_name) {
             class_names.push(query.class_name.clone());
@@ -193,13 +205,13 @@ async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
             }
         }
     }
-    Ok(Some((class_names, evidence_ids)))
+    RequiresResult::Satisfied(class_names, evidence_ids)
 }
 
 /// Walk every record's reachable next-states and collect the ones whose
 /// `requires` guard holds. Records whose flow is unknown and states without
-/// a guard are skipped; a query error skips that one transition and is
-/// logged at debug level.
+/// a guard are skipped. A query error skips that one transition (`debug!`);
+/// an untranslatable guard is the same skip at `warn!`.
 pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     records: &[FlowInstanceRecord],
@@ -217,16 +229,24 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                 continue;
             }
             match evaluate_requires(perspective, requires, acting_did).await {
-                Ok(Some((class_names, evidence_ids))) => out.push(SatisfiedTransition {
-                    flow_name: flow.name.clone(),
-                    instance_uri: record.instance_uri.clone(),
-                    from_state: record.current_state.clone(),
-                    to_state: state.name.clone(),
-                    evidence_hash: evidence_hash(&class_names, &evidence_ids),
-                    evidence_ids,
-                }),
-                Ok(None) => {}
-                Err(e) => log::debug!(
+                RequiresResult::Satisfied(class_names, evidence_ids) => {
+                    out.push(SatisfiedTransition {
+                        flow_name: flow.name.clone(),
+                        instance_uri: record.instance_uri.clone(),
+                        from_state: record.current_state.clone(),
+                        to_state: state.name.clone(),
+                        evidence_hash: evidence_hash(&class_names, &evidence_ids),
+                        evidence_ids,
+                    })
+                }
+                RequiresResult::Unmet => {}
+                RequiresResult::Untranslatable(e) => log::warn!(
+                    "flow evaluator: untranslatable {}.{} on {}: {e:#}",
+                    flow.name,
+                    state.name,
+                    record.instance_uri
+                ),
+                RequiresResult::QueryFailed(e) => log::debug!(
                     "flow evaluator: skipping {}.{} on {}: {e:#}",
                     flow.name,
                     state.name,
