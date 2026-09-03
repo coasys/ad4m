@@ -1640,7 +1640,12 @@ mod tests {
                 "ad4m://task/1",
                 "identified",
             ),
-            record("unknown://UnknownFlow", "ad4m://flow/instance/2", "ad4m://task/2", "some"),
+            record(
+                "unknown://UnknownFlow",
+                "ad4m://flow/instance/2",
+                "ad4m://task/2",
+                "some",
+            ),
         ];
         let stub = StubPerspective::new();
         let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:acting").await;
