@@ -262,3 +262,35 @@ async fn run_engine_proposal_pass_e2e() {
     assert_has_target(&by_pred, "ad4m://flow/from_state", &literal("identified"));
     assert_has_target(&by_pred, "ad4m://flow/to_state", &literal("scoped"));
 }
+
+/// Running the proposal pass twice without changing the graph must not
+/// create a duplicate proposal — the second pass sees the first proposal's
+/// evidence hash and skips the write.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_engine_proposal_pass_is_idempotent_e2e() {
+    let mut f = seed_delivery_fixture().await;
+    f.seed_task("ad4m://task/1", "Onboard Ana").await;
+
+    let first = run_engine_proposal_pass(&mut f.perspective, &[], &f.ctx).await;
+    assert_eq!(first.len(), 1, "first pass must mint one proposal");
+
+    let second = run_engine_proposal_pass(&mut f.perspective, &[], &f.ctx).await;
+    assert!(
+        second.is_empty(),
+        "second pass must skip the duplicate, got {second:?}"
+    );
+
+    let all_proposals = f
+        .perspective
+        .get_links(&LinkQuery {
+            predicate: Some("ad4m://flow/evidence_hashes".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links");
+    assert_eq!(
+        all_proposals.len(),
+        1,
+        "only one proposal should exist on the graph"
+    );
+}

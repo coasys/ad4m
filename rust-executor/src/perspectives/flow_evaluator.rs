@@ -38,6 +38,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
+use crate::types::LinkQuery;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
@@ -410,6 +411,15 @@ pub async fn run_engine_proposal_pass(
 
     let mut minted = Vec::with_capacity(satisfied.len());
     for transition in &satisfied {
+        if proposal_already_exists(perspective, transition).await {
+            log::debug!(
+                "run_engine_proposal_pass: {}.{}→{} already proposed, skipping",
+                transition.flow_name,
+                transition.from_state,
+                transition.to_state
+            );
+            continue;
+        }
         match write_proposal(perspective, transition, &acting_did, context).await {
             Ok(uri) => minted.push(uri),
             Err(e) => log::debug!(
@@ -421,6 +431,51 @@ pub async fn run_engine_proposal_pass(
         }
     }
     minted
+}
+
+/// Check whether a proposal with the same evidence hash already exists for the
+/// same flow instance. Uses link queries: finds proposals carrying the evidence
+/// hash, then confirms one links to the same flow instance.
+async fn proposal_already_exists(
+    perspective: &PerspectiveInstance,
+    transition: &SatisfiedTransition,
+) -> bool {
+    let hash_literal = format!(
+        "literal:string:{}",
+        urlencoding::encode(&transition.evidence_hash)
+    );
+    let hash_links = match perspective
+        .get_links(&LinkQuery {
+            predicate: Some("ad4m://flow/evidence_hashes".into()),
+            target: Some(hash_literal),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(links) => links,
+        Err(_) => return false,
+    };
+    for link in &hash_links {
+        let proposal_uri = &link.data.source;
+        let instance_links = match perspective
+            .get_links(&LinkQuery {
+                source: Some(proposal_uri.clone()),
+                predicate: Some("ad4m://flow/instance".into()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(_) => continue,
+        };
+        if instance_links
+            .iter()
+            .any(|l| l.data.target == transition.instance_uri)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Write one proposal inside its own batch, so readers never see a
