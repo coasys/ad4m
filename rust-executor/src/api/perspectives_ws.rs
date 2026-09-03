@@ -226,7 +226,7 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     // responds. Wrap the whole scan in `spawn_blocking`.
     let config = crate::config::get_global_config();
     if config.db_backend.as_deref() == Some("shared") {
-        let _ = tokio::task::spawn_blocking(|| {
+        tokio::task::spawn_blocking(|| {
             let backend = crate::db_backend::db_backend();
             if let Ok(remote_perspectives) = backend.list("shared:platform", "perspectives") {
                 for meta in remote_perspectives {
@@ -239,7 +239,8 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
                 }
             }
         })
-        .await;
+        .await
+        .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
     }
 
     let all: Vec<PerspectiveInstance> = crate::perspectives::all_perspectives();
