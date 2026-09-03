@@ -67,67 +67,96 @@ pub fn strip_flow_suffix(tool_name: &str) -> Option<&str> {
 
 /// Build the `_propose_transition` [`ToolSchema`] for one active flow.
 ///
+/// `group` is every live [`FlowContext`] sharing one flow name (non-empty,
+/// as produced by `tools()`); one tool covers them all, so the tool name
+/// stays the clean `{FlowName}_propose_transition` the prompt documents.
+///
 /// The schema mirrors [`LlmFlowProposal`] shape:
-///  * `instance` (required, string) — must equal `context.instance_uri`.
-///    Locked in via the JSON Schema `const` keyword so the LLM can't
-///    address a different instance by mistake; the decorator (slice
-///    10.7b) also validates it as a defence-in-depth measure.
-///  * `toState` (required, string) — enumerated over
-///    `context.reachable_next_states` when non-empty. If the flow has
-///    zero reachable next states from the current state, the tool is
-///    STILL emitted (with an empty enum + a description telling the LLM
-///    to skip); this keeps the tool surface stable across passes so the
-///    prompt cache doesn't churn.
+///  * `instance` (required, string) — `enum` over EVERY live instance URI
+///    of this flow, so a schema-obedient model can attribute any of them
+///    (a `const` pinned to one instance would hide the rest from the tool
+///    surface). The decorator also validates it as defence-in-depth.
+///  * `toState` (required, string) — enumerated over the union of the
+///    group's `reachable_next_states` when non-empty. If no instance has a
+///    reachable next state, the tool is STILL emitted (no enum + a
+///    description telling the LLM to skip); this keeps the tool surface
+///    stable across passes so the prompt cache doesn't churn.
 ///  * `reason` (optional, string) — free text; lands as the on-graph
 ///    `rationale` field once the deterministic guard matches.
 ///
 /// The description prefixes the flow's `interpretationHint` (if any) so
 /// the LLM has the same guidance it would get from the `## Active flows`
 /// prompt block, without having to cross-reference.
-pub fn propose_transition_tool_schema(context: &FlowContext) -> ToolSchema {
-    let mut description = format!(
-        "Propose advancing flow '{flow}' (instance {inst}, currently in state '{state}') to a \
-         reachable next state. Only propose when the transcript provides evidence for the state's \
-         `requires` clause; the deterministic post-processor will discard hints that don't match a \
-         satisfied transition. Provide a short natural-language `reason` if useful — it lands as \
-         the proposal's on-graph rationale.",
-        flow = context.flow_name,
-        inst = context.instance_uri,
-        state = context.current_state,
+pub fn propose_transition_tool_schema(group: &[&FlowContext]) -> ToolSchema {
+    let first = group
+        .first()
+        .expect("propose_transition_tool_schema: empty group");
+    let mut description = if group.len() == 1 {
+        format!(
+            "Propose advancing flow '{flow}' (instance {inst}, currently in state '{state}') \
+             to a reachable next state.",
+            flow = first.flow_name,
+            inst = first.instance_uri,
+            state = first.current_state,
+        )
+    } else {
+        let listing = group
+            .iter()
+            .map(|c| format!("{} (currently '{}')", c.instance_uri, c.current_state))
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "Propose advancing flow '{flow}' to a reachable next state for one of its live \
+             instances: {listing}.",
+            flow = first.flow_name,
+        )
+    };
+    description.push_str(
+        " Only propose when the transcript provides evidence for the state's `requires` \
+         clause; the deterministic post-processor will discard hints that don't match a \
+         satisfied transition. Provide a short natural-language `reason` if useful — it lands \
+         as the proposal's on-graph rationale.",
     );
-    if let Some(hint) = context.flow_interpretation_hint.as_deref() {
+    if let Some(hint) = first.flow_interpretation_hint.as_deref() {
         if !hint.trim().is_empty() {
             description.push_str("\n\nFlow-level frame: ");
             description.push_str(hint.trim());
         }
     }
 
-    let next_state_names: Vec<String> = context
-        .reachable_next_states
-        .iter()
-        .map(|s| s.name.clone())
-        .collect();
+    let instance_uris: Vec<String> = group.iter().map(|c| c.instance_uri.clone()).collect();
+
+    // Union across the group, first-seen order.
+    let mut next_state_names: Vec<String> = Vec::new();
+    for ctx in group {
+        for s in &ctx.reachable_next_states {
+            if !next_state_names.contains(&s.name) {
+                next_state_names.push(s.name.clone());
+            }
+        }
+    }
 
     let mut to_state_schema = json!({
         "type": "string",
         "description":
-            "Name of the target state to propose. Must be one of the reachable next states."
+            "Name of the target state to propose. Must be one of the reachable next states of \
+             the addressed instance."
     });
     if !next_state_names.is_empty() {
         to_state_schema["enum"] = json!(next_state_names);
     }
 
     ToolSchema {
-        name: propose_transition_tool_name(&context.flow_name),
+        name: propose_transition_tool_name(&first.flow_name),
         description,
         parameters: json!({
             "type": "object",
             "properties": {
                 "instance": {
                     "type": "string",
-                    "const": context.instance_uri,
+                    "enum": instance_uris,
                     "description":
-                        "Instance URI this proposal is about. Must equal the URI shown in the \
+                        "Instance URI this proposal is about. Must equal a URI shown in the \
                          `## Active flows` prompt block."
                 },
                 "toState": to_state_schema,
@@ -154,8 +183,9 @@ use async_trait::async_trait;
 /// [`ToolProvider`] decorator that adds one `{FlowName}_propose_transition`
 /// tool per active [`FlowContext`] on top of an inner (read-tool / SHACL
 /// propose-write) provider. Symmetric to [`super::propose::ProposeWritesProvider`]:
-///  * `tools()` = inner.tools() + one de-duplicated `_propose_transition`
-///    schema per distinct flow name (first FlowContext wins)
+///  * `tools()` = inner.tools() + one `_propose_transition` schema per
+///    distinct flow name, whose `instance` enum names every live instance
+///    of that flow
 ///  * `call()` intercepts the `_propose_transition` suffix, validates the
 ///    args against the pass's active FlowContexts, and pushes an
 ///    [`LlmFlowProposal`] into the shared [`FlowProposalBuffer`]
@@ -192,26 +222,23 @@ where
 {
     async fn tools(&self) -> Vec<ToolSchema> {
         let mut out = self.inner.tools().await;
-        // De-duplicate schemas by tool name so multiple instances of the
-        // same flow don't produce colliding entries in the tools[] array
-        // (OpenAI + kalosm both reject duplicate function names). The
-        // FIRST occurrence wins; the JSON Schema `const` on its `instance`
-        // field pins one URI, and other instances of the same flow rely
-        // on the dispatcher accepting any of their URIs (see `call()`).
-        //
-        // For obedient models this means the "extra" instances are
-        // effectively hidden from the tool surface — they still get
-        // proposed for through the deterministic engine pass, just not
-        // via LLM attribution. Trade-off explicitly accepted rather than
-        // rewriting tool names to disambiguate (which would break the
-        // clean `{FlowName}_propose_transition` naming the prompt
-        // documents).
-        let mut seen = std::collections::HashSet::new();
+        // One tool per distinct flow name (OpenAI + kalosm both reject
+        // duplicate function names), covering EVERY live instance of that
+        // flow: the schema's `instance` enum lists all of them, so a
+        // schema-obedient model can attribute any instance, not just the
+        // first one seen. Groups preserve first-seen flow order.
+        let mut order: Vec<&str> = Vec::new();
+        let mut groups: std::collections::HashMap<&str, Vec<&FlowContext>> =
+            std::collections::HashMap::new();
         for ctx in &self.contexts {
-            let name = propose_transition_tool_name(&ctx.flow_name);
-            if seen.insert(name) {
-                out.push(propose_transition_tool_schema(ctx));
+            let entry = groups.entry(ctx.flow_name.as_str()).or_default();
+            if entry.is_empty() {
+                order.push(ctx.flow_name.as_str());
             }
+            entry.push(ctx);
+        }
+        for flow_name in order {
+            out.push(propose_transition_tool_schema(&groups[flow_name]));
         }
         out
     }
@@ -395,18 +422,39 @@ mod tests {
     // ── schema shape ─────────────────────────────────────────────────────
 
     #[test]
-    fn schema_carries_flow_name_and_instance_const() {
-        let schema = propose_transition_tool_schema(&ctx_delivery_scoped());
+    fn schema_carries_flow_name_and_instance_enum() {
+        let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
         assert_eq!(schema.name, "Delivery_propose_transition");
         assert_eq!(
-            schema.parameters["properties"]["instance"]["const"],
-            json!("ad4m://flow/instance/abc")
+            schema.parameters["properties"]["instance"]["enum"],
+            json!(["ad4m://flow/instance/abc"])
+        );
+    }
+
+    /// Two live instances of one flow share one tool whose `instance` enum
+    /// names BOTH — a schema-obedient model can attribute either (a `const`
+    /// pinned to the first would hide the second from the tool surface).
+    #[test]
+    fn schema_enumerates_every_live_instance_of_a_flow() {
+        let a = ctx_delivery_scoped();
+        let mut b = ctx_delivery_scoped();
+        b.instance_uri = "ad4m://flow/instance/def".into();
+        b.current_state = "Scoped".into();
+        let schema = propose_transition_tool_schema(&[&a, &b]);
+        assert_eq!(
+            schema.parameters["properties"]["instance"]["enum"],
+            json!(["ad4m://flow/instance/abc", "ad4m://flow/instance/def"])
+        );
+        assert!(
+            schema.description.contains("ad4m://flow/instance/def"),
+            "description must list every instance with its state: {}",
+            schema.description
         );
     }
 
     #[test]
     fn schema_to_state_enumerates_reachable_states() {
-        let schema = propose_transition_tool_schema(&ctx_delivery_scoped());
+        let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
         let enum_values = schema.parameters["properties"]["toState"]["enum"]
             .as_array()
             .expect("toState enum should be present when reachable states exist")
@@ -418,7 +466,7 @@ mod tests {
     fn schema_omits_enum_when_no_reachable_states() {
         // Terminal state (Done) has no outbound transitions — the tool
         // should still exist (surface stability) but not constrain toState.
-        let schema = propose_transition_tool_schema(&ctx_terminal_state());
+        let schema = propose_transition_tool_schema(&[&ctx_terminal_state()]);
         assert_eq!(schema.name, "Delivery_propose_transition");
         assert!(
             schema.parameters["properties"]["toState"]
@@ -430,7 +478,7 @@ mod tests {
 
     #[test]
     fn schema_required_lists_instance_and_to_state() {
-        let schema = propose_transition_tool_schema(&ctx_delivery_scoped());
+        let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
         let required = schema.parameters["required"]
             .as_array()
             .expect("required[] should be present")
@@ -440,7 +488,7 @@ mod tests {
 
     #[test]
     fn schema_forbids_additional_properties() {
-        let schema = propose_transition_tool_schema(&ctx_delivery_scoped());
+        let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
         assert_eq!(
             schema.parameters["additionalProperties"],
             json!(false),
@@ -450,7 +498,7 @@ mod tests {
 
     #[test]
     fn schema_description_includes_interpretation_hint_when_present() {
-        let schema = propose_transition_tool_schema(&ctx_delivery_scoped());
+        let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
         assert!(
             schema.description.contains("Team task board"),
             "expected flow interpretationHint to be inlined in description; got: {}",
@@ -462,11 +510,11 @@ mod tests {
     fn schema_description_omits_hint_section_when_hint_is_blank_or_absent() {
         let mut ctx = ctx_delivery_scoped();
         ctx.flow_interpretation_hint = Some("   ".to_string());
-        let schema = propose_transition_tool_schema(&ctx);
+        let schema = propose_transition_tool_schema(&[&ctx]);
         assert!(!schema.description.contains("Flow-level frame:"));
 
         ctx.flow_interpretation_hint = None;
-        let schema = propose_transition_tool_schema(&ctx);
+        let schema = propose_transition_tool_schema(&[&ctx]);
         assert!(!schema.description.contains("Flow-level frame:"));
     }
 
@@ -505,18 +553,24 @@ mod tests {
     #[tokio::test]
     async fn tools_include_inner_plus_one_per_flow_context() {
         let (p, _buf) = make_provider(vec![ctx_delivery_scoped(), ctx_terminal_state()]);
-        let names: Vec<String> = p.tools().await.into_iter().map(|t| t.name).collect();
-        assert!(names.contains(&"noop".to_string()), "inner tool preserved");
+        let tools = p.tools().await;
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"noop"), "inner tool preserved");
         // Both contexts share flow_name `Delivery`, so ONE tool entry
-        // survives de-dup (documented trade-off — the dispatcher still
-        // routes both instances).
+        // covers them — and its `instance` enum names BOTH instances, so
+        // neither is hidden from a schema-obedient model.
+        let delivery: Vec<&ToolSchema> = tools
+            .iter()
+            .filter(|t| t.name == "Delivery_propose_transition")
+            .collect();
         assert_eq!(
-            names
-                .iter()
-                .filter(|n| *n == "Delivery_propose_transition")
-                .count(),
+            delivery.len(),
             1,
             "duplicate flow-name contexts collapse to one tool entry"
+        );
+        assert_eq!(
+            delivery[0].parameters["properties"]["instance"]["enum"],
+            json!(["ad4m://flow/instance/abc", "ad4m://flow/instance/done"])
         );
     }
 

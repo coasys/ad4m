@@ -1576,7 +1576,9 @@ async fn run_interpretation_with_harness_handler(
     )
     .await
     {
-        Ok(Ok(bases)) => bases,
+        // Wire contract stays a bare array of base URIs; the outcome's
+        // flow-proposal URIs are not surfaced over WS-RPC yet.
+        Ok(Ok(outcome)) => outcome.bases,
         Ok(Err(e)) => return Err(WsRpcError::internal(e.to_string())),
         Err(_) => {
             log::warn!(

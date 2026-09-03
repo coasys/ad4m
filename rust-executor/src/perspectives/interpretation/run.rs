@@ -910,7 +910,7 @@ pub async fn run_interpretation_with_harness_and_model(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     dedup_on_drain: bool,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<InterpretationOutcome> {
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
     // configured — the harness pass is just a different loop, not a
@@ -1108,8 +1108,8 @@ pub async fn run_interpretation_with_harness_and_model(
 
     log::warn!("harness: apply_with_overlay produced {} bases", bases.len());
 
-    // Same flow post-processing as the single-shot path. The harness
-    // returns bases only, so the minted proposals are just logged here.
+    // Same flow post-processing as the single-shot path, returned the same
+    // way: callers get the minted proposal URIs, not just a log line.
     let flow_proposals = run_flow_post_pass(
         perspective,
         scope,
@@ -1119,13 +1119,19 @@ pub async fn run_interpretation_with_harness_and_model(
     )
     .await;
     if !flow_proposals.is_empty() {
-        log::warn!(
+        log::info!(
             "harness: flow pass minted {} proposal(s): {flow_proposals:?}",
             flow_proposals.len()
         );
     }
 
-    Ok(bases)
+    Ok(InterpretationOutcome {
+        bases,
+        // No single prompt/response to snapshot on the multi-turn harness
+        // loop; per-tool-call events carry the debug surface instead.
+        debug: None,
+        flow_proposals,
+    })
 }
 
 #[cfg(test)]
