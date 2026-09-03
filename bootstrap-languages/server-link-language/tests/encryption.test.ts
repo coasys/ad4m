@@ -267,3 +267,41 @@ describe("encryption: buildKeyRing / latestKeyVersion", () => {
         assert.equal(latestKeyVersion(new Map()), 0);
     });
 });
+
+// ---------------------------------------------------------------------------
+// Contract: link_hash consistency across key versions
+// ---------------------------------------------------------------------------
+
+describe("encryption: link_hash invariant", () => {
+    it("encryptLinkForWire produces identical link_hash regardless of key version", () => {
+        const key1 = generateRoomKey();
+        const key2 = generateRoomKey();
+        const link = makeLink();
+
+        const wire1 = encryptLinkForWire(link, key1, 1);
+        const wire2 = encryptLinkForWire(link, key2, 2);
+
+        assert.equal(wire1.link_hash, wire2.link_hash, "same plaintext must produce same link_hash across key versions");
+        assert.notEqual(
+            (wire1.data as any).ciphertext,
+            (wire2.data as any).ciphertext,
+            "ciphertext should differ (different keys + nonces)",
+        );
+    });
+
+    it("encrypted removal matches original addition by link_hash across key rotations", () => {
+        const key1 = generateRoomKey();
+        const key2 = generateRoomKey();
+        const ring = new Map([[1, key1], [2, key2]]);
+        const link = makeLink();
+
+        const wireAdd = encryptLinkForWire(link, key1, 1);
+        const wireRemove = encryptLinkForWire(link, key2, 2);
+
+        assert.equal(wireAdd.link_hash, wireRemove.link_hash, "removal link_hash must match addition link_hash");
+
+        const decryptedAdd = decryptLinkFromWire(wireAdd, ring);
+        const decryptedRemove = decryptLinkFromWire(wireRemove, ring);
+        assert.deepEqual(decryptedAdd, decryptedRemove, "both decrypt to the same plaintext link");
+    });
+});

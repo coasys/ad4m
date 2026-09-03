@@ -145,6 +145,139 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.deepEqual(emittedDiffs[0].additions[0], link);
         assert.deepEqual(store.allLinks().links[0], link);
     });
+
+    it("throws on encrypted diff without key ring — no store mutation", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        // keyRing stays null
+        const rk = generateRoomKey();
+        const link = makeLink({ source: "encrypted-no-ring" });
+        const wireLink = encryptLinkForWire(link, rk, 1);
+
+        assert.throws(
+            () => syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5"),
+            /no key ring available/,
+        );
+        assert.equal(store.allLinks().links.length, 0, "store must remain empty — no partial application");
+        assert.equal(store.getSequence(), 0, "sequence must not advance on failure");
+        assert.equal(emittedDiffs.length, 0, "no diff emitted on failure");
+    });
+
+    it("throws on encrypted diff with key ring missing the required version — no store mutation", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const rk1 = generateRoomKey();
+        const rk2 = generateRoomKey();
+        keyRing = new Map([[1, rk1]]);
+        const link = makeLink({ source: "wrong-version" });
+        const wireLink = encryptLinkForWire(link, rk2, 2); // encrypted with version 2, ring only has 1
+
+        assert.throws(
+            () => syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5"),
+            /no key for version 2/,
+        );
+        assert.equal(store.allLinks().links.length, 0, "store must remain empty — no partial application");
+        assert.equal(store.getSequence(), 0, "sequence must not advance on failure");
+        assert.equal(emittedDiffs.length, 0, "no diff emitted on failure");
+    });
+
+    it("rejects atomically — mixed plaintext + encrypted diff with missing key does not partially apply", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const rk = generateRoomKey();
+        keyRing = new Map([[1, rk]]);
+        const plaintextLink = makeLink({ source: "visible" });
+        const encryptedLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 2); // version 2, ring only has 1
+
+        assert.throws(
+            () => syncModule.applyInboundWireDiff(
+                { additions: [plaintextLink, encryptedLink], removals: [] }, 5, "rev-5",
+            ),
+        );
+        assert.equal(store.allLinks().links.length, 0, "plaintext link must not be applied when batch fails");
+        assert.equal(emittedDiffs.length, 0, "no diff emitted on partial failure");
+    });
+
+    it("encrypted removal across key versions removes the correct link", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const rk1 = generateRoomKey();
+        const rk2 = generateRoomKey();
+        keyRing = new Map([[1, rk1], [2, rk2]]);
+        const link = makeLink({ source: "will-be-removed" });
+
+        // Add with version 1
+        const wireAdd = encryptLinkForWire(link, rk1, 1);
+        syncModule.applyInboundWireDiff({ additions: [wireAdd], removals: [] }, 1, "rev-1");
+        assert.equal(store.allLinks().links.length, 1);
+
+        // Remove with version 2 (after key rotation)
+        const wireRemove = encryptLinkForWire(link, rk2, 2);
+        syncModule.applyInboundWireDiff({ additions: [], removals: [wireRemove] }, 2, "rev-2");
+        assert.equal(store.allLinks().links.length, 0, "removal must match by plaintext identity, not by key version");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// toWireLink / toWireDiff — outbound encryption contracts
+// ---------------------------------------------------------------------------
+
+describe("sync: toWireLink contracts", () => {
+    it("produces plaintext wire link when key ring is null", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        // keyRing stays null
+        let capturedBody = "";
+        transport.route(
+            (url, method) => method === "POST" && url.includes("/commit"),
+            (_url, _method, body) => {
+                capturedBody = body;
+                return { status: 200, headers: {}, body: JSON.stringify({ sequence: 1, revision: "rev-1" }) };
+            },
+        );
+
+        const link = makeLink();
+        await syncModule.commit({ additions: [link], removals: [] });
+        const sent = JSON.parse(capturedBody);
+        assert.equal(sent.additions[0].author, "did:key:zAuthor", "plaintext link must retain author");
+        assert.equal(sent.additions[0].data.source, "a", "plaintext link must retain data fields");
+        assert.equal(isEncryptedLinkData(sent.additions[0].data), false, "data must not be encrypted");
+    });
+
+    it("encrypts wire link when key ring has keys", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const rk = generateRoomKey();
+        keyRing = new Map([[1, rk]]);
+        let capturedBody = "";
+        transport.route(
+            (url, method) => method === "POST" && url.includes("/commit"),
+            (_url, _method, body) => {
+                capturedBody = body;
+                return { status: 200, headers: {}, body: JSON.stringify({ sequence: 1, revision: "rev-1" }) };
+            },
+        );
+
+        const link = makeLink();
+        await syncModule.commit({ additions: [link], removals: [] });
+        const sent = JSON.parse(capturedBody);
+        assert.ok(isEncryptedLinkData(sent.additions[0].data), "data must be encrypted");
+        assert.equal(sent.additions[0].author, undefined, "author must be absent on encrypted wire link");
+        assert.equal(sent.additions[0].key_version, 1, "key_version must be set");
+        assert.equal(typeof sent.additions[0].link_hash, "string", "link_hash must be present");
+    });
+
+    it("throws when key ring exists but has no keys (empty Map)", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        keyRing = new Map(); // non-null but empty
+
+        const link = makeLink();
+        await assert.rejects(
+            () => syncModule.commit({ additions: [link], removals: [] }),
+            /key ring has no keys/,
+        );
+    });
 });
 
 // ---------------------------------------------------------------------------

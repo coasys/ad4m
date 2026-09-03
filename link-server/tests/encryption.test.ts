@@ -216,3 +216,128 @@ test("commit rejects encrypted links that lack a link_hash", async () => {
     assert.match(res.body.error, /link_hash/);
   });
 });
+
+test("encrypted link removal by link_hash removes the correct link from the active set", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const hash = "e2e-removal-test-hash";
+    const wireAdd = {
+      data: { ciphertext: "aabbccdd", nonce: "11223344" },
+      link_hash: hash,
+    };
+
+    await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [wireAdd], removals: [] }, token);
+
+    const renderBefore = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, token);
+    assert.equal(renderBefore.body.links.length, 1);
+
+    // Removal uses a DIFFERENT ciphertext (re-encrypted after key rotation)
+    // but the SAME link_hash — the server must match by link_hash.
+    const wireRemove = {
+      data: { ciphertext: "eeff0011", nonce: "55667788" },
+      link_hash: hash,
+    };
+    const removeRes = await postJson<{ sequence: number }>(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [], removals: [wireRemove] },
+      token
+    );
+    assert.equal(removeRes.status, 200);
+
+    const renderAfter = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, token);
+    assert.equal(renderAfter.body.links.length, 0, "link must be removed by link_hash match");
+  });
+});
+
+test("any authenticated member can remove encrypted links (author check bypassed)", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const alice = await createTestAgent();
+    const bob = await createTestAgent();
+    const aliceToken = await authenticateAgent(server.url, roomId, alice);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: bob.did }, aliceToken);
+    const bobToken = await authenticateAgent(server.url, roomId, bob);
+
+    // Alice adds an encrypted link
+    const hash = "cross-member-removal-hash";
+    const wireAdd = {
+      data: { ciphertext: "alice-data", nonce: "alice-nonce" },
+      link_hash: hash,
+    };
+    await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [wireAdd], removals: [] }, aliceToken);
+
+    const renderBefore = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, bobToken);
+    assert.equal(renderBefore.body.links.length, 1);
+
+    // Bob removes it using the same link_hash — should succeed because
+    // encrypted links skip the author === claims.did check.
+    const wireRemove = {
+      data: { ciphertext: "bob-reencrypted", nonce: "bob-nonce" },
+      link_hash: hash,
+    };
+    const removeRes = await postJson<{ sequence: number }>(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [], removals: [wireRemove] },
+      bobToken
+    );
+    assert.equal(removeRes.status, 200);
+
+    const renderAfter = await getJson<{ links: LinkExpression[] }>(`${server.url}/rooms/${roomId}/render`, bobToken);
+    assert.equal(renderAfter.body.links.length, 0, "Bob must be able to remove Alice's encrypted link");
+  });
+});
+
+test("plaintext removal by non-author is rejected (contrast with encrypted mode)", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const alice = await createTestAgent();
+    const bob = await createTestAgent();
+    const aliceToken = await authenticateAgent(server.url, roomId, alice);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: bob.did }, aliceToken);
+    const bobToken = await authenticateAgent(server.url, roomId, bob);
+
+    // Alice adds a plaintext link
+    const link = await createSignedLink(alice, { source: "a", predicate: "p", target: "b" });
+    await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [link], removals: [] }, aliceToken);
+
+    // Bob tries to remove it — should fail because link.author is Alice's DID,
+    // not Bob's, and plaintext validation requires author === claims.did.
+    const removeRes = await postJson<{ error: string }>(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [], removals: [link] },
+      bobToken
+    );
+    assert.equal(removeRes.status, 400, "plaintext cross-member removal must be rejected");
+    assert.match(removeRes.body.error, /author/);
+  });
+});
+
+test("encrypted links with key_version round-trip through sync unchanged", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const wireLink = {
+      data: { ciphertext: "versioned-ct", nonce: "versioned-nonce" },
+      link_hash: "versioned-hash",
+      key_version: 3,
+    };
+
+    await postJson(`${server.url}/rooms/${roomId}/commit`, { additions: [wireLink], removals: [] }, token);
+
+    const syncRes = await getJson<{ diffs: Array<{ additions: LinkExpression[] }> }>(
+      `${server.url}/rooms/${roomId}/sync?since=0`,
+      token
+    );
+    assert.equal(syncRes.status, 200);
+    assert.equal(syncRes.body.diffs.length, 1);
+    const synced = syncRes.body.diffs[0].additions[0];
+    assert.equal((synced.data as EncryptedLinkData).ciphertext, "versioned-ct");
+    assert.equal(synced.key_version, 3, "key_version must survive the commit → sync round-trip");
+    assert.equal(synced.link_hash, "versioned-hash", "link_hash must survive the round-trip");
+  });
+});
