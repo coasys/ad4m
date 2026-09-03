@@ -176,8 +176,11 @@ fn requires_where(
             .iter()
             .map(|alt| {
                 if alt.class_name != query.class_name {
-                    bail!("`or` branch class `{}` must match the outer class `{}`",
-                          alt.class_name, query.class_name);
+                    bail!(
+                        "`or` branch class `{}` must match the outer class `{}`",
+                        alt.class_name,
+                        query.class_name
+                    );
                 }
                 if alt.count.is_some() {
                     bail!("`count` on an `or` branch is not supported");
@@ -704,7 +707,10 @@ mod tests {
         let mut q = mq("ns://T");
         q.or = Some(vec![branch]);
         let err = requires_query_input(&q, &inst(), "did:key:x").unwrap_err();
-        assert!(err.to_string().contains("must match the outer class"), "got {err:#}");
+        assert!(
+            err.to_string().contains("must match the outer class"),
+            "got {err:#}"
+        );
     }
 
     #[test]
