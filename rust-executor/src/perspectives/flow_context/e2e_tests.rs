@@ -28,7 +28,7 @@
 //! `PerspectiveInstance`. The only piece that would need Ollama is the
 //! AIService, which none of the code paths under test touch.
 
-use super::loader::gather_active_flow_contexts;
+use super::loader::{gather_active_flow_contexts, load_all_flow_instances, load_flow_instances};
 use crate::perspectives::flow_classes::mint_flow_instance;
 use crate::perspectives::interpretation::{
     build_interpretation_input, ExistingInstances, TranscriptTurn,
@@ -223,4 +223,22 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
             .expect("active_flows[0].flow is a string"),
         "Delivery"
     );
+}
+
+/// On a perspective where `FlowInstance` has never been registered,
+/// `load_flow_instances` and `load_all_flow_instances` must return
+/// `Ok(vec![])` — not propagate the "No SHACL shape stored" error.
+#[tokio::test(flavor = "multi_thread")]
+async fn load_flow_instances_absent_class_returns_empty() {
+    let (perspective, _, _) = setup_perspective_no_llm(&[]).await;
+
+    let scoped = load_flow_instances(&perspective, &["ad4m://task/x".to_string()])
+        .await
+        .expect("absent class must not error");
+    assert!(scoped.is_empty());
+
+    let all = load_all_flow_instances(&perspective)
+        .await
+        .expect("absent class must not error");
+    assert!(all.is_empty());
 }

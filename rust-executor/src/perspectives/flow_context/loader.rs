@@ -95,8 +95,8 @@ pub async fn load_flow_instances(
 }
 
 /// Load every live `FlowInstance` on the perspective, unfiltered. Used by
-/// the engine sweep (`run_engine_proposal_pass` without a scope), where
-/// the bound is the perspective's own flow count.
+/// component tests that need all instances without a subject filter.
+#[allow(dead_code)]
 pub async fn load_all_flow_instances(
     perspective: &PerspectiveInstance,
 ) -> anyhow::Result<Vec<FlowInstanceRecord>> {
@@ -117,7 +117,7 @@ async fn query_flow_instances(
         Ok(j) => j,
         Err(e) => {
             let msg = format!("{e:#}");
-            if msg.to_lowercase().contains("shape not found") {
+            if msg.to_lowercase().contains("no shacl shape stored") {
                 return Ok(vec![]);
             }
             return Err(anyhow::anyhow!(
