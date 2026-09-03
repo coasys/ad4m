@@ -4,7 +4,7 @@
 //! `<class>_propose_create` / `<class>_propose_link_child` tools that
 //! accumulate SHACL-instance writes, this module gives the LLM
 //! `<flow>_propose_transition` tools that accumulate
-//! [`crate::perspectives::flow_evaluator::LlmFlowProposal`]s.
+//! [`crate::perspectives::interpretation::LlmFlowProposal`]s.
 //!
 //! Symmetry with `propose`:
 //!  * per-flow surface (one tool per active [`FlowContext`]) instead of
@@ -13,8 +13,9 @@
 //!    harness loop terminates
 //!  * tool call is a proposal, not a write — the deterministic
 //!    [`crate::perspectives::flow_evaluator::run_engine_proposal_pass`] gate
-//!    still owns whether it lands (matched against a
-//!    [`crate::perspectives::flow_evaluator::SatisfiedTransition`] by
+//!    still owns whether it lands (the proposal's `(instance, to_state)`
+//!    is matched against a
+//!    [`crate::perspectives::flow_evaluator::SatisfiedTransition`]'s
 //!    `(instance_uri, to_state)`)
 //!
 //! ## Why decorator (10.7b), not new dynamic MCP tools
