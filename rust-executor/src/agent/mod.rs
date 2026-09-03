@@ -12,6 +12,7 @@ use crate::wallet::Wallet;
 
 pub mod capabilities;
 pub mod kel;
+pub mod resolver;
 pub mod signatures;
 
 /// Validate that a user email is safe to use as a filesystem path segment.
@@ -281,6 +282,27 @@ lazy_static! {
 
 impl AgentService {
     pub fn init_global_instance(app_path: String) {
+        // Install the identity resolver (KEL-backed did:scid verification).
+        let kel_db_path = format!("{}/ad4m/kel.db", app_path);
+        match kel::adapter::SqliteAdapter::open(&kel_db_path) {
+            Ok(adapter) => {
+                let resolver = resolver::AgentLanguageResolver::new(
+                    Arc::new(adapter),
+                    Arc::new(kel::adapter::MonotonicityCache::new()),
+                    Arc::new(resolver::ReverseIndex::new()),
+                );
+                signatures::set_key_state_resolver(Arc::new(resolver));
+                log::info!("Identity resolver installed (KEL at {})", kel_db_path);
+            }
+            Err(e) => {
+                log::error!(
+                    "Failed to open KEL database at {}: {} — did:scid verification disabled",
+                    kel_db_path,
+                    e
+                );
+            }
+        }
+
         let mut agent_instance = AGENT_SERVICE.lock().unwrap();
         *agent_instance = Some(AgentService::new(app_path));
     }

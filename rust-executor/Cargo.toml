@@ -36,6 +36,12 @@ generate_snapshot = []  # Feature flag for snapshot generation mode
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+# --- did:scid identity stack (agent-identity) ---
+bip39 = "2.1"      # BIP-39 mnemonic -> master seed
+hmac = "0.12"      # SLIP-0010 ed25519 HD derivation (HMAC-SHA512)
+zeroize = "1.8"    # scrub master-seed material
+serde_jcs = "0.2"  # RFC 8785 JCS canonical serialization for SAID hashing
+
 # coasys/deno v2.9.5-coasys-1 folds deno_core + rusty_v8 into the monorepo
 # (libs/core/, libs/deno_v8/). All deno-family crates now come from a single
 # coasys/deno tag. Underlying v8 pulled from coasys/rusty_v8 v150.4.0-coasys
@@ -182,10 +188,6 @@ reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 rusqlite = "0.40.0"
 fake = { version = "2.9.2", features = ["derive"] }
 sha2 = "0.10.8"
-bip39 = "2.1"          # BIP-39 mnemonic → master seed (recovery authority)
-hmac = "0.12"          # SLIP-0010 ed25519 HD derivation (HMAC-SHA512)
-zeroize = "1.8"        # scrub master-seed material on drop
-serde_jcs = "0.2"      # RFC 8785 JCS canonical serialization for SAID hashing
 regex = "1.5.4"
 json5 = "0.4"
 serde_yaml = "0.9"
