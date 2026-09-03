@@ -182,6 +182,10 @@ reqwest = { version = "0.11.20", features = ["json", "native-tls"] }
 rusqlite = "0.40.0"
 fake = { version = "2.9.2", features = ["derive"] }
 sha2 = "0.10.8"
+bip39 = "2.1"          # BIP-39 mnemonic → master seed (recovery authority)
+hmac = "0.12"          # SLIP-0010 ed25519 HD derivation (HMAC-SHA512)
+zeroize = "1.8"        # scrub master-seed material on drop
+serde_jcs = "0.2"      # RFC 8785 JCS canonical serialization for SAID hashing
 regex = "1.5.4"
 json5 = "0.4"
 serde_yaml = "0.9"
