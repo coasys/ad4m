@@ -18,6 +18,7 @@ pub mod agent_ws;
 pub mod ai_ws;
 pub mod expressions_ws;
 pub mod hosting_ws;
+pub mod identity_ws;
 pub mod languages_ws;
 pub mod neighbourhoods_ws;
 pub mod perspectives_ws;

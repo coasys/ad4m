@@ -287,17 +287,23 @@ lazy_static! {
 
 impl AgentService {
     pub fn init_global_instance(app_path: String) {
-        // Install the identity resolver (KEL-backed did:scid verification).
+        // Install the identity service (KEL-backed did:scid verification).
         let kel_db_path = format!("{}/ad4m/kel.db", app_path);
         match kel::adapter::SqliteAdapter::open(&kel_db_path) {
             Ok(adapter) => {
-                let resolver = resolver::AgentLanguageResolver::new(
-                    Arc::new(adapter),
-                    Arc::new(kel::adapter::MonotonicityCache::new()),
-                    Arc::new(resolver::ReverseIndex::new()),
-                );
-                signatures::set_key_state_resolver(Arc::new(resolver));
-                log::info!("Identity resolver installed (KEL at {})", kel_db_path);
+                let adapter = Arc::new(adapter);
+                resolver::IdentityService::install(adapter);
+                // Also install the verifier seam so `did:scid` links verify.
+                let _ = resolver::IdentityService::with(|svc| {
+                    signatures::set_key_state_resolver(Arc::new(
+                        resolver::AgentLanguageResolver::new(
+                            svc.adapter.clone(),
+                            Arc::new(kel::adapter::MonotonicityCache::new()),
+                            svc.reverse_index.clone(),
+                        ),
+                    ));
+                });
+                log::info!("Identity service installed (KEL at {})", kel_db_path);
             }
             Err(e) => {
                 log::error!(

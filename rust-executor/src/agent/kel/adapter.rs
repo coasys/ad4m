@@ -483,6 +483,8 @@ mod tests {
         let body = KeyEventBody::Delegate {
             key: full_key(&format!("{}#key-1", did1), &did1),
             from_seq: 5,
+            label: None,
+            lane: None,
         };
         let bad_ev = super::super::KeyEvent::new(5, Some("fake".to_string()), body, &key_id0, &kp0);
         let result = adapter.append(&scid, bad_ev);
