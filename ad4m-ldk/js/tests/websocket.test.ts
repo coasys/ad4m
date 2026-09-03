@@ -194,6 +194,27 @@ describe("websocket: DenoWebSocketFactory", () => {
         assert.equal(received, errEvent);
     });
 
+    it("onError notifies every registered callback, not just the last one", () => {
+        const factory = new DenoWebSocketFactory();
+        const conn = factory.connect("ws://localhost:3456/ws");
+        const mock = lastMock!;
+        const firstReceived: unknown[] = [];
+        const secondReceived: unknown[] = [];
+        conn.onError((err) => firstReceived.push(err));
+        conn.onError((err) => secondReceived.push(err));
+
+        const errEvent = { type: "error" };
+        mock.emit("error", errEvent);
+        assert.deepEqual(firstReceived, [errEvent]);
+        assert.deepEqual(secondReceived, [errEvent]);
+
+        const closeErr = new Error("boom");
+        mock.close = () => { throw closeErr; };
+        conn.close();
+        assert.deepEqual(firstReceived, [errEvent, closeErr]);
+        assert.deepEqual(secondReceived, [errEvent, closeErr]);
+    });
+
     it("implements WebSocketFactory interface", () => {
         const factory: WebSocketFactory = new DenoWebSocketFactory();
         assert.equal(typeof factory.connect, "function");

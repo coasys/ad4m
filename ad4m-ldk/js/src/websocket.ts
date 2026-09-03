@@ -41,10 +41,14 @@ function isBinaryPayload(data: unknown): boolean {
  */
 class DenoWSConnection implements WSConnection {
     private readonly ws: WebSocket;
-    private errorCallback?: (err: unknown) => void;
+    private readonly errorCallbacks: Array<(err: unknown) => void> = [];
 
     constructor(url: string) {
         this.ws = new WebSocket(url);
+    }
+
+    private emitError(err: unknown): void {
+        for (const cb of this.errorCallbacks) cb(err);
     }
 
     send(data: string): void {
@@ -59,7 +63,7 @@ class DenoWSConnection implements WSConnection {
             this.ws.close(code, reason);
         } catch (err) {
             // Forward unexpected close failures instead of dropping them silently.
-            this.errorCallback?.(err);
+            this.emitError(err);
         }
     }
 
@@ -77,7 +81,7 @@ class DenoWSConnection implements WSConnection {
             if (isBinaryPayload(data)) {
                 // No binary path in this interface (link languages are text/JSON only) —
                 // report it instead of silently mangling the payload via String(data).
-                this.errorCallback?.(new Error("DenoWebSocketFactory: received a binary WebSocket frame, which is not supported"));
+                this.emitError(new Error("DenoWebSocketFactory: received a binary WebSocket frame, which is not supported"));
                 return;
             }
             cb(String(data));
@@ -89,7 +93,7 @@ class DenoWSConnection implements WSConnection {
     }
 
     onError(cb: (err: unknown) => void): void {
-        this.errorCallback = cb;
+        this.errorCallbacks.push(cb);
         this.ws.addEventListener("error", (event: Event) => cb(event));
     }
 }
