@@ -3385,6 +3385,70 @@ impl PerspectiveInstance {
             .and_then(|p| p.ordering.clone())
     }
 
+    /// Fold a batch's own pending work into a set of persisted links.
+    ///
+    /// [`Self::get_links`] reads the store, while a batched [`Self::add_links`]
+    /// or [`Self::remove_link`] writes only into the batch — so inside an
+    /// uncommitted batch the store still shows a collection as it stood before
+    /// the batch began. Anything that *diffs* a collection has to see the
+    /// batch's staged work too, or a second `save()` on the same relation in the
+    /// same batch computes its delta against stale membership and re-stages what
+    /// the first one already added. The ORM supports exactly that sequence: it
+    /// re-snapshots after a batched save so later saves diff against it.
+    ///
+    /// Returns `persisted` untouched when there is no batch, which is every
+    /// caller outside a transaction.
+    async fn links_including_batch(
+        &self,
+        persisted: Vec<DecoratedLinkExpression>,
+        source: &str,
+        predicate: Option<&str>,
+        batch_id: Option<&str>,
+    ) -> Vec<DecoratedLinkExpression> {
+        let Some(bid) = batch_id else {
+            return persisted;
+        };
+        let batches = self.batch_store.read().await;
+        let Some(batch) = batches.get(bid) else {
+            return persisted;
+        };
+
+        let relevant = |l: &Link| {
+            l.source == source
+                && match predicate {
+                    Some(p) => l.predicate.as_deref() == Some(p),
+                    None => true,
+                }
+        };
+
+        // A target this batch has already removed is gone as far as the batch is
+        // concerned, even though the store still has it.
+        let removed: std::collections::HashSet<&str> = batch
+            .diff
+            .removals
+            .iter()
+            .filter(|e| relevant(&e.data))
+            .map(|e| e.data.target.as_str())
+            .collect();
+
+        let mut out: Vec<DecoratedLinkExpression> = persisted
+            .into_iter()
+            .filter(|l| !removed.contains(l.data.target.as_str()))
+            .collect();
+        let mut seen: std::collections::HashSet<String> =
+            out.iter().map(|l| l.data.target.clone()).collect();
+
+        for expr in batch.diff.additions.iter().filter(|e| relevant(&e.data)) {
+            if removed.contains(expr.data.target.as_str()) || !seen.insert(expr.data.target.clone())
+            {
+                continue;
+            }
+            let status = expr.status.clone().unwrap_or_default();
+            out.push(DecoratedLinkExpression::from((expr.clone(), status)));
+        }
+        out
+    }
+
     /// Write the ordering entries that turn the collection's current order into
     /// the desired one.
     ///
@@ -3414,7 +3478,7 @@ impl PerspectiveInstance {
             }
         };
 
-        let existing_order_links = self
+        let persisted_order_links = self
             .get_links(&LinkQuery {
                 source: Some(source.to_string()),
                 predicate: Some(
@@ -3426,6 +3490,17 @@ impl PerspectiveInstance {
                 limit: None,
             })
             .await?;
+        // Entries this batch has already staged count as prior ordering: without
+        // them a second save in the batch sees no entries at all and takes the
+        // `generate_full` branch, restating the whole chain.
+        let existing_order_links = self
+            .links_including_batch(
+                persisted_order_links,
+                source,
+                Some(crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE),
+                batch_id.as_deref(),
+            )
+            .await;
         let targets: Vec<String> = existing_order_links
             .iter()
             .map(|l| l.data.target.clone())
@@ -4519,7 +4594,7 @@ impl PerspectiveInstance {
                     // the diff and the ordering below have to arrive together or
                     // every existing ordered collection scrambles on its next
                     // save.
-                    let existing = self
+                    let persisted = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
                             predicate: predicate.clone(),
@@ -4537,19 +4612,11 @@ impl PerspectiveInstance {
                     let desired_set: std::collections::HashSet<&str> =
                         desired.iter().map(|s| s.as_str()).collect();
 
-                    // What the collection holds now, with each member's earliest
-                    // link timestamp — the ordering module's membership input.
-                    let mut current_members: Vec<(String, String)> = Vec::new();
-                    let mut existing_targets: std::collections::HashSet<String> =
-                        std::collections::HashSet::new();
-                    for link in &existing {
-                        if existing_targets.insert(link.data.target.clone()) {
-                            current_members
-                                .push((link.data.target.clone(), link.timestamp.clone()));
-                        }
-                    }
-
-                    for link in &existing {
+                    // Only a persisted link can be removed. A member that exists
+                    // solely as a pending addition leaves by being pruned from
+                    // the batch below, not by a removal of something the store
+                    // has never seen.
+                    for link in &persisted {
                         if !desired_set.contains(link.data.target.as_str()) {
                             self.remove_link(link.clone().into(), batch_id.clone())
                                 .await?;
@@ -4567,6 +4634,32 @@ impl PerspectiveInstance {
                                     && link_expr.data.predicate == predicate
                                     && !desired_set.contains(link_expr.data.target.as_str()))
                             });
+                        }
+                    }
+
+                    // Membership as this batch would leave it, read after the
+                    // prune so it reflects the removals just issued. A second
+                    // save on the same relation in one batch has to see the
+                    // first one's staged additions, or it re-adds every one of
+                    // them — the store will not show them until commit.
+                    let existing = self
+                        .links_including_batch(
+                            persisted,
+                            &source,
+                            predicate.as_deref(),
+                            batch_id.as_deref(),
+                        )
+                        .await;
+
+                    // What the collection holds now, with each member's earliest
+                    // link timestamp — the ordering module's membership input.
+                    let mut current_members: Vec<(String, String)> = Vec::new();
+                    let mut existing_targets: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for link in &existing {
+                        if existing_targets.insert(link.data.target.clone()) {
+                            current_members
+                                .push((link.data.target.clone(), link.timestamp.clone()));
                         }
                     }
 
@@ -6279,6 +6372,153 @@ mod tests {
             target: format!("https://{}.org", Faker.fake::<String>()),
             predicate: Some(format!("https://{}.net", Faker.fake::<String>())),
         }
+    }
+
+    /// Two `collectionSetter` runs in one uncommitted batch stage each member once.
+    ///
+    /// The store does not show a batch's own additions until it commits, so the
+    /// second run used to diff against pre-batch membership and re-stage
+    /// everything the first had already added. This is an ordinary sequence, not
+    /// an exotic one: the ORM re-snapshots after a batched save precisely so a
+    /// later save in the same batch diffs correctly.
+    #[tokio::test]
+    async fn test_collection_setter_twice_in_one_batch_stages_each_member_once() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/1";
+        let predicate = "we://children";
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+
+        let params = |targets: &[&str]| -> Vec<Parameter> {
+            serde_json::from_value(serde_json::json!(targets
+                .iter()
+                .map(|t| serde_json::json!({ "name": "value", "value": t }))
+                .collect::<Vec<_>>()))
+            .unwrap()
+        };
+
+        let batch_id = perspective.create_batch().await;
+
+        perspective
+            .execute_commands(
+                commands.clone(),
+                source.to_string(),
+                params(&["we://a", "we://b"]),
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        perspective
+            .execute_commands(
+                commands.clone(),
+                source.to_string(),
+                params(&["we://a", "we://b", "we://c"]),
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let mut staged: Vec<&str> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| l.data.source == source && l.data.predicate.as_deref() == Some(predicate))
+            .map(|l| l.data.target.as_str())
+            .collect();
+        staged.sort();
+
+        assert_eq!(
+            staged,
+            vec!["we://a", "we://b", "we://c"],
+            "each member staged exactly once — before the batch-aware read the \
+             second run re-added a and b, which the store could not yet see"
+        );
+    }
+
+    /// A member the batch has already removed is not reported as still present.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_drops_a_removed_member() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/2";
+        let predicate = "we://children";
+
+        // Persist a member outside any batch, so the store really holds it.
+        perspective
+            .add_link(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: "we://a".to_string(),
+                },
+                LinkStatus::Shared,
+                None,
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+
+        let batch_id = perspective.create_batch().await;
+
+        // Set the collection to just `b`: `a` is persisted and unwanted, so it
+        // is removed within the batch.
+        let params: Vec<Parameter> =
+            serde_json::from_value(serde_json::json!([{ "name": "value", "value": "we://b" }]))
+                .unwrap();
+        perspective
+            .execute_commands(
+                commands.clone(),
+                source.to_string(),
+                params,
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let removed: Vec<&str> = batch
+            .diff
+            .removals
+            .iter()
+            .filter(|l| l.data.source == source && l.data.predicate.as_deref() == Some(predicate))
+            .map(|l| l.data.target.as_str())
+            .collect();
+        assert_eq!(
+            removed,
+            vec!["we://a"],
+            "the persisted member is removed once"
+        );
+
+        let staged: Vec<&str> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| l.data.source == source && l.data.predicate.as_deref() == Some(predicate))
+            .map(|l| l.data.target.as_str())
+            .collect();
+        assert_eq!(staged, vec!["we://b"], "only the new member is staged");
     }
 
     #[tokio::test]
