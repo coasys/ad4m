@@ -34,13 +34,14 @@ use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::write_flow_transition_proposal;
 use crate::perspectives::flow_context::{
     load_all_flow_instances, load_flow_instances, load_shacl_flows, reachable_next_states,
-    scope_subject, FlowInstanceRecord,
+    scope_subject, FlowInstanceRecord, FlowTokens,
 };
 use crate::perspectives::flow_semantic_check::{
     build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
 };
 use crate::perspectives::interpretation::LlmFlowProposal;
 use crate::perspectives::model_query::types::Scope;
+use crate::perspectives::model_query::ModelQueryInput;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
@@ -113,48 +114,125 @@ fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool
     }
 }
 
+/// Default collection predicate used when `linkedTo` is the `"base"` /
+/// `"flow"` shorthand. Authors who need a different edge write
+/// `{ via, to }` instead.
+const LINKED_TO_DEFAULT_PREDICATE: &str = "ad4m://has_child";
+
+/// Substitute `$flow.base`, `$flow.uri` / `$flow.instance`, and `$did`
+/// in a `where` string. Delegates to [`FlowTokens::substitute`] — the
+/// single definition of the token set.
+fn substitute_tokens(s: &str, record: &FlowInstanceRecord, acting_did: &str) -> String {
+    let tokens = FlowTokens {
+        subject: &record.subject,
+        instance_uri: &record.instance_uri,
+        did: acting_did,
+    };
+    tokens.substitute(s)
+}
+
+fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str) -> Value {
+    match value {
+        Value::String(s) => Value::String(substitute_tokens(s, record, acting_did)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|v| substitute_json(v, record, acting_did))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 /// Translate a flow-side `ModelQuery` into the JSON input `model_query`
 /// accepts. `didProperty` becomes `where.<prop> = acting_did`; `or`
-/// alternatives become an `OR` list of sub-clauses.
+/// alternatives become an `OR` list of sub-clauses; `linkedTo` becomes
+/// a `parent` scope.
 ///
 /// Scalars, `equals` and `in` map directly onto `WhereCondition`.
 /// `exists` and `matches` have no `model_query` counterpart yet, so a
 /// guard using them fails translation and is skipped instead of being
 /// evaluated against a wrong query.
-fn requires_query_input(query: &ModelQuery, acting_did: &str) -> Result<Value> {
-    let where_clause = requires_where(query, acting_did)?;
-    Ok(if where_clause.is_empty() {
-        json!({})
-    } else {
-        json!({ "where": where_clause })
-    })
+fn requires_query_input(
+    query: &ModelQuery,
+    record: &FlowInstanceRecord,
+    acting_did: &str,
+) -> Result<Value> {
+    let where_clause = requires_where(query, record, acting_did, false)?;
+    let mut out = Map::new();
+    if !where_clause.is_empty() {
+        out.insert("where".into(), Value::Object(where_clause));
+    }
+    if let Some(linked) = &query.linked_to {
+        out.insert("parent".into(), linked_to_parent(linked, record)?);
+    }
+    let out = Value::Object(out);
+    serde_json::from_value::<ModelQueryInput>(out.clone())
+        .map_err(|e| anyhow!("translated query is not a valid ModelQueryInput: {e}"))?;
+    Ok(out)
 }
 
-fn requires_where(query: &ModelQuery, acting_did: &str) -> Result<Map<String, Value>> {
+fn requires_where(
+    query: &ModelQuery,
+    record: &FlowInstanceRecord,
+    acting_did: &str,
+    nested: bool,
+) -> Result<Map<String, Value>> {
+    if nested && query.linked_to.is_some() {
+        bail!("`linkedTo` on an `or` branch is not supported by model_query");
+    }
     let mut out = Map::new();
     for (field, cond) in query.r#where.iter().flatten() {
-        out.insert(field.clone(), where_condition(field, cond)?);
+        out.insert(
+            field.clone(),
+            where_condition(field, cond, record, acting_did)?,
+        );
     }
     if let Some(prop) = &query.did_property {
+        if out.contains_key(prop) {
+            bail!("`didProperty` `{prop}` collides with an existing `where` field");
+        }
         out.insert(prop.clone(), Value::String(acting_did.to_string()));
     }
     if let Some(alts) = query.or.as_ref().filter(|a| !a.is_empty()) {
         let branches = alts
             .iter()
-            .map(|alt| requires_where(alt, acting_did).map(Value::Object))
+            .map(|alt| {
+                if alt.class_name != query.class_name {
+                    bail!(
+                        "`or` branch class `{}` must match the outer class `{}`",
+                        alt.class_name,
+                        query.class_name
+                    );
+                }
+                if alt.count.is_some() {
+                    bail!("`count` on an `or` branch is not supported");
+                }
+                requires_where(alt, record, acting_did, true).map(Value::Object)
+            })
             .collect::<Result<Vec<_>>>()?;
         out.insert("OR".to_string(), Value::Array(branches));
     }
     Ok(out)
 }
 
-fn where_condition(field: &str, cond: &PropertyCondition) -> Result<Value> {
+fn where_condition(
+    field: &str,
+    cond: &PropertyCondition,
+    record: &FlowInstanceRecord,
+    acting_did: &str,
+) -> Result<Value> {
     Ok(match cond {
-        PropertyCondition::Str(s) => json!(s),
+        PropertyCondition::Str(s) => json!(substitute_tokens(s, record, acting_did)),
         PropertyCondition::Num(n) => json!(n),
         PropertyCondition::Bool(b) => json!(b),
-        PropertyCondition::Equals { equals } => equals.clone(),
-        PropertyCondition::In { one_of } => Value::Array(one_of.clone()),
+        PropertyCondition::Equals { equals } => substitute_json(equals, record, acting_did),
+        PropertyCondition::In { one_of } => Value::Array(
+            one_of
+                .iter()
+                .map(|v| substitute_json(v, record, acting_did))
+                .collect(),
+        ),
         PropertyCondition::Exists { .. } => {
             bail!("`{field}`: `exists` is not supported by model_query")
         }
@@ -162,6 +240,40 @@ fn where_condition(field: &str, cond: &PropertyCondition) -> Result<Value> {
             bail!("`{field}`: `matches` is not supported by model_query")
         }
     })
+}
+
+fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value> {
+    let (id, predicate) = match linked {
+        Value::String(s) => {
+            let id = match s.as_str() {
+                "base" => record.subject.as_str(),
+                "flow" => record.instance_uri.as_str(),
+                other => bail!("`linkedTo` `{other}` is not `base` or `flow`"),
+            };
+            (id, LINKED_TO_DEFAULT_PREDICATE)
+        }
+        Value::Object(obj) => {
+            let via = obj
+                .get("via")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("`linkedTo` object needs a string `via` predicate"))?;
+            let to = obj
+                .get("to")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("`linkedTo` object needs `to` of `base` or `flow`"))?;
+            let id = match to {
+                "base" => record.subject.as_str(),
+                "flow" => record.instance_uri.as_str(),
+                other => bail!("`linkedTo.to` `{other}` is not `base` or `flow`"),
+            };
+            (id, via)
+        }
+        _ => bail!("`linkedTo` must be \"base\", \"flow\", or {{ via, to }}"),
+    };
+    if id.is_empty() {
+        bail!("`linkedTo` anchor resolved to an empty string");
+    }
+    Ok(json!({ "id": id, "predicate": predicate }))
 }
 
 /// The one perspective call the evaluator needs, behind a trait so the
@@ -178,58 +290,67 @@ impl RequiresQueryable for PerspectiveInstance {
     }
 }
 
-/// Run one guard query. Returns whether its cardinality is satisfied and
-/// the matched instances, hydrated with the JSON `model_query` already
-/// returned for each (no second read).
-async fn evaluate_query<Q: RequiresQueryable + ?Sized>(
+/// Outcome of AND-ing a state's `requires`. Translation failures are
+/// split from query failures so the composer can `warn!` the former
+/// (persistent misconfig) and `debug!` the latter (transient).
+enum RequiresResult {
+    Satisfied(Vec<String>, Vec<EvidenceItem>),
+    Unmet,
+    Untranslatable(anyhow::Error),
+    QueryFailed(anyhow::Error),
+}
+
+/// Run one already-translated guard query. Returns the matched instances,
+/// hydrated with the JSON `model_query` already returned for each (no
+/// second read).
+async fn run_query<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
-    query: &ModelQuery,
-    acting_did: &str,
-) -> Result<(bool, Vec<EvidenceItem>)> {
-    let input = requires_query_input(query, acting_did)?;
+    class_name: &str,
+    input: &Value,
+) -> Result<Vec<EvidenceItem>> {
     let raw = perspective
-        .model_query(&query.class_name, &input.to_string())
+        .model_query(class_name, &input.to_string())
         .await?;
     let result: Value = serde_json::from_str(&raw)?;
-    let matched: Vec<EvidenceItem> = result
+    let matched = result
         .get("instances")
         .and_then(Value::as_array)
-        .ok_or_else(|| {
-            anyhow!(
-                "model_query for `{}` returned no `instances` array",
-                query.class_name
-            )
-        })?
+        .ok_or_else(|| anyhow!("model_query for `{class_name}` returned no `instances` array"))?
         .iter()
         .filter_map(|inst| {
             let id = inst.get("id").and_then(Value::as_str)?;
             Some(EvidenceItem {
                 id: id.to_string(),
-                class_name: query.class_name.clone(),
+                class_name: class_name.to_string(),
                 content: inst.to_string(),
             })
         })
         .collect();
-    Ok((
-        cardinality_satisfied(query.count.as_ref(), matched.len()),
-        matched,
-    ))
+    Ok(matched)
 }
 
-/// AND across a state's `requires`. `Ok(None)` as soon as one guard
-/// misses; `Ok(Some((class_names, evidence)))`, both deduplicated by
-/// first-seen order (evidence by instance ID), when every guard holds.
+/// AND across a state's `requires`. Unmet as soon as one guard misses;
+/// `Satisfied` (class names and hydrated evidence, both deduplicated in
+/// first-seen order, evidence by instance ID) when every guard holds.
 async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     requires: &[ModelQuery],
+    record: &FlowInstanceRecord,
     acting_did: &str,
-) -> Result<Option<(Vec<String>, Vec<EvidenceItem>)>> {
+) -> RequiresResult {
     let mut class_names: Vec<String> = Vec::new();
     let mut evidence: Vec<EvidenceItem> = Vec::new();
     for query in requires {
-        let (satisfied, matched) = evaluate_query(perspective, query, acting_did).await?;
-        if !satisfied {
-            return Ok(None);
+        let input = match requires_query_input(query, record, acting_did) {
+            Ok(v) => v,
+            Err(e) => return RequiresResult::Untranslatable(e),
+        };
+        let matched = match run_query(perspective, &query.class_name, &input).await {
+            Ok(items) => items,
+            Err(e) => return RequiresResult::QueryFailed(e),
+        };
+        if !cardinality_satisfied(query.count.as_ref(), matched.len()) {
+            return RequiresResult::Unmet;
         }
         if !class_names.contains(&query.class_name) {
             class_names.push(query.class_name.clone());
@@ -240,7 +361,7 @@ async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
             }
         }
     }
-    Ok(Some((class_names, evidence)))
+    RequiresResult::Satisfied(class_names, evidence)
 }
 
 /// Walk every record's reachable next-states and collect the ones whose
@@ -263,8 +384,8 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
             if requires.is_empty() {
                 continue;
             }
-            match evaluate_requires(perspective, requires, acting_did).await {
-                Ok(Some((class_names, evidence))) => {
+            match evaluate_requires(perspective, requires, record, acting_did).await {
+                RequiresResult::Satisfied(class_names, evidence) => {
                     let evidence_ids: Vec<String> = evidence.iter().map(|e| e.id.clone()).collect();
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
@@ -277,8 +398,14 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         semantic_check: state.semantic_check.clone(),
                     })
                 }
-                Ok(None) => {}
-                Err(e) => log::debug!(
+                RequiresResult::Unmet => {}
+                RequiresResult::Untranslatable(e) => log::warn!(
+                    "flow evaluator: untranslatable {}.{} on {}: {e:#}",
+                    flow.name,
+                    state.name,
+                    record.instance_uri
+                ),
+                RequiresResult::QueryFailed(e) => log::debug!(
                     "flow evaluator: skipping {}.{} on {}: {e:#}",
                     flow.name,
                     state.name,
@@ -337,6 +464,15 @@ pub async fn run_engine_proposal_pass(
             transition.flow_name, transition.from_state, transition.to_state
         );
 
+        // Idempotency BEFORE the semantic gate: minting doesn't advance
+        // `currentState`, so a satisfied-but-unconsumed transition reappears
+        // on every pass — checking duplicates first means it costs two link
+        // queries per pass instead of one LLM call per pass.
+        if proposal_already_exists(perspective, transition).await {
+            log::debug!("run_engine_proposal_pass: {label} already proposed; skipping");
+            continue;
+        }
+
         if let (Some(llm), Some(hint)) = (semantic_check, transition.semantic_check.as_deref()) {
             // No hydrated evidence means there is no content the LLM could
             // evaluate the hint against — asking would be a rubber stamp on
@@ -369,11 +505,6 @@ pub async fn run_engine_proposal_pass(
                     continue;
                 }
             }
-        }
-
-        if proposal_already_exists(perspective, transition).await {
-            log::debug!("run_engine_proposal_pass: {label} already proposed; skipping");
-            continue;
         }
 
         let rationale = llm_proposals
@@ -546,6 +677,20 @@ mod tests {
         q
     }
 
+    fn inst() -> FlowInstanceRecord {
+        FlowInstanceRecord {
+            flow_uri: "delivery://DeliveryFlow".into(),
+            instance_uri: "ad4m://flow/instance/1".into(),
+            subject: "ad4m://task/onboarding".into(),
+            current_state: "identified".into(),
+            created_at: None,
+        }
+    }
+
+    fn qin(q: &ModelQuery, did: &str) -> Value {
+        requires_query_input(q, &inst(), did).unwrap()
+    }
+
     fn count(min: Option<u32>, max: Option<u32>) -> Option<ModelQueryCount> {
         Some(ModelQueryCount { min, max })
     }
@@ -582,7 +727,7 @@ mod tests {
     #[test]
     fn query_input_translates_scalars_operators_and_did_property() {
         assert_eq!(
-            requires_query_input(&mq("ns://T"), "did:key:x").unwrap(),
+            qin(&mq("ns://T"), "did:key:x"),
             json!({}),
             "bare class → no filter"
         );
@@ -608,7 +753,7 @@ mod tests {
         );
         q.did_property = Some("author".into());
         assert_eq!(
-            requires_query_input(&q, "did:key:acting").unwrap(),
+            qin(&q, "did:key:acting"),
             json!({ "where": {
                 "state": "done",
                 "priority": 3.0,
@@ -636,7 +781,7 @@ mod tests {
         );
         outer.or = Some(vec![leaf("owner"), inner]);
         assert_eq!(
-            requires_query_input(&outer, "did:key:x").unwrap(),
+            qin(&outer, "did:key:x"),
             json!({ "where": {
                 "channel": "c",
                 "OR": [ { "role": "owner" }, { "OR": [ { "role": "admin" } ] } ],
@@ -644,10 +789,7 @@ mod tests {
         );
         let mut empty_or = mq("ns://M");
         empty_or.or = Some(vec![]);
-        assert_eq!(
-            requires_query_input(&empty_or, "did:key:x").unwrap(),
-            json!({})
-        );
+        assert_eq!(qin(&empty_or, "did:key:x"), json!({}));
     }
 
     #[test]
@@ -656,7 +798,7 @@ mod tests {
             mq("ns://T"),
             vec![("deletedAt", PropertyCondition::Exists { exists: false })],
         );
-        assert!(requires_query_input(&exists, "did:key:x").is_err());
+        assert!(requires_query_input(&exists, &inst(), "did:key:x").is_err());
         let matches = with_where(
             mq("ns://T"),
             vec![(
@@ -666,7 +808,147 @@ mod tests {
                 },
             )],
         );
-        assert!(requires_query_input(&matches, "did:key:x").is_err());
+        assert!(requires_query_input(&matches, &inst(), "did:key:x").is_err());
+    }
+
+    #[test]
+    fn query_input_substitutes_flow_and_did_tokens() {
+        let rec = inst();
+        let q = with_where(
+            mq("ns://T"),
+            vec![
+                ("about", PropertyCondition::Str("$flow.base".into())),
+                (
+                    "on",
+                    PropertyCondition::Equals {
+                        equals: json!("$flow.uri"),
+                    },
+                ),
+                (
+                    "alsoOn",
+                    PropertyCondition::In {
+                        one_of: vec![json!("$flow.instance"), json!("other")],
+                    },
+                ),
+                ("author", PropertyCondition::Str("$did".into())),
+            ],
+        );
+        assert_eq!(
+            requires_query_input(&q, &rec, "did:key:acting").unwrap(),
+            json!({ "where": {
+                "about": "ad4m://task/onboarding",
+                "on": "ad4m://flow/instance/1",
+                "alsoOn": ["ad4m://flow/instance/1", "other"],
+                "author": "did:key:acting",
+            }})
+        );
+    }
+
+    #[test]
+    fn query_input_compiles_linked_to_into_parent_scope() {
+        let rec = inst();
+        let mut base = mq("ns://T");
+        base.linked_to = Some(json!("base"));
+        assert_eq!(
+            requires_query_input(&base, &rec, "did:key:x").unwrap(),
+            json!({ "parent": {
+                "id": "ad4m://task/onboarding",
+                "predicate": "ad4m://has_child",
+            }})
+        );
+        let mut flow = mq("ns://T");
+        flow.linked_to = Some(json!({ "via": "ns://about", "to": "flow" }));
+        assert_eq!(
+            requires_query_input(&flow, &rec, "did:key:x").unwrap(),
+            json!({ "parent": {
+                "id": "ad4m://flow/instance/1",
+                "predicate": "ns://about",
+            }})
+        );
+        let mut bad = mq("ns://T");
+        bad.linked_to = Some(json!(42));
+        assert!(requires_query_input(&bad, &rec, "did:key:x").is_err());
+        let mut nested = mq("ns://T");
+        nested.or = Some(vec![{
+            let mut branch = mq("ns://T");
+            branch.linked_to = Some(json!("base"));
+            branch
+        }]);
+        assert!(requires_query_input(&nested, &rec, "did:key:x").is_err());
+    }
+
+    #[test]
+    fn query_input_deserialises_as_model_query_input() {
+        let mut q = with_where(
+            mq("ns://T"),
+            vec![
+                ("title", PropertyCondition::Str("Onboard Ana".into())),
+                (
+                    "owner",
+                    PropertyCondition::Equals {
+                        equals: json!("alice"),
+                    },
+                ),
+                (
+                    "tag",
+                    PropertyCondition::In {
+                        one_of: vec![json!("a"), json!("b")],
+                    },
+                ),
+            ],
+        );
+        q.did_property = Some("author".into());
+        q.linked_to = Some(json!({ "via": "ns://about", "to": "base" }));
+        let value = qin(&q, "did:key:acting");
+        let parsed: crate::perspectives::model_query::ModelQueryInput =
+            serde_json::from_value(value).expect("translated JSON must be a ModelQueryInput");
+        assert!(parsed.where_clause.is_some());
+        assert!(parsed.parent.is_some());
+    }
+
+    #[test]
+    fn query_input_bails_when_did_property_collides_with_where() {
+        let mut q = with_where(
+            mq("ns://T"),
+            vec![("author", PropertyCondition::Str("alice".into()))],
+        );
+        q.did_property = Some("author".into());
+        let err = requires_query_input(&q, &inst(), "did:key:x").unwrap_err();
+        assert!(err.to_string().contains("collides"), "got {err:#}");
+    }
+
+    #[test]
+    fn or_branch_with_different_class_is_rejected() {
+        let branch = mq("ns://Other");
+        let mut q = mq("ns://T");
+        q.or = Some(vec![branch]);
+        let err = requires_query_input(&q, &inst(), "did:key:x").unwrap_err();
+        assert!(
+            err.to_string().contains("must match the outer class"),
+            "got {err:#}"
+        );
+    }
+
+    #[test]
+    fn or_branch_with_own_count_is_rejected() {
+        let mut branch = mq("ns://T");
+        branch.count = count(Some(2), None);
+        let mut q = mq("ns://T");
+        q.or = Some(vec![branch]);
+        let err = requires_query_input(&q, &inst(), "did:key:x").unwrap_err();
+        assert!(err.to_string().contains("count"), "got {err:#}");
+    }
+
+    #[test]
+    fn linked_to_with_empty_subject_is_rejected() {
+        let rec = FlowInstanceRecord {
+            subject: "".into(),
+            ..inst()
+        };
+        let mut q = mq("ns://T");
+        q.linked_to = Some(json!("base"));
+        let err = requires_query_input(&q, &rec, "did:key:x").unwrap_err();
+        assert!(err.to_string().contains("empty"), "got {err:#}");
     }
 
     /// Canned `model_query` keyed by class name; records every call.
