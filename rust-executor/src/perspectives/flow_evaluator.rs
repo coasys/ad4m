@@ -18,8 +18,8 @@
 //! Every failure here is a skip, never an error: a broken flow
 //! definition, an unregistered class or a transient query failure drops
 //! one transition and the extraction pass carries on. Untranslatable
-//! guards (`exists`/`matches`) log at warn — they will never start
-//! working on retry.
+//! guards (`exists`/`matches`, a colliding `didProperty`) log at warn —
+//! they will never start working on retry.
 
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::write_flow_transition_proposal;
@@ -101,6 +101,9 @@ fn requires_where(query: &ModelQuery, acting_did: &str) -> Result<Map<String, Va
         out.insert(field.clone(), where_condition(field, cond)?);
     }
     if let Some(prop) = &query.did_property {
+        if out.contains_key(prop) {
+            bail!("`didProperty` `{prop}` collides with an existing `where` field");
+        }
         out.insert(prop.clone(), Value::String(acting_did.to_string()));
     }
     if let Some(alts) = query.or.as_ref().filter(|a| !a.is_empty()) {
@@ -486,6 +489,17 @@ mod tests {
             )],
         );
         assert!(requires_query_input(&matches, "did:key:x").is_err());
+    }
+
+    #[test]
+    fn query_input_bails_when_did_property_collides_with_where() {
+        let mut q = with_where(
+            mq("ns://T"),
+            vec![("author", PropertyCondition::Str("alice".into()))],
+        );
+        q.did_property = Some("author".into());
+        let err = requires_query_input(&q, "did:key:x").unwrap_err();
+        assert!(err.to_string().contains("collides"), "got {err:#}");
     }
 
     /// Canned `model_query` keyed by class name; records every call.
