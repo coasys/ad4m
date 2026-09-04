@@ -890,7 +890,7 @@ async fn run_flow_post_pass(
     let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
         task_id: task_id.to_string(),
     };
-    crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+    let minted = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
         perspective,
         scope,
         context,
@@ -898,7 +898,30 @@ async fn run_flow_post_pass(
         Some(&semantic_check),
         flow_filter,
     )
-    .await
+    .await;
+
+    // Consensus pass directly after minting (design §2): with the default
+    // `{ n: 1 }` rule a freshly satisfied transition fires in the same run;
+    // higher thresholds leave the proposal live for other agents' passes or
+    // an explicit accept. Same scope + flow filter as every other pass.
+    let fired = crate::perspectives::flow_consensus::run_flow_consensus_pass(
+        perspective,
+        scope,
+        context,
+        flow_filter,
+    )
+    .await;
+    for outcome in &fired {
+        log::info!(
+            "🔥 flow fired: {} {} → {} (by {:?})",
+            outcome.instance_uri,
+            outcome.from_state,
+            outcome.to_state,
+            outcome.fired_by_proposers
+        );
+    }
+
+    minted
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to

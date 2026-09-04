@@ -43,11 +43,14 @@
 //!   [`super::flow_evaluator::recompute_evidence_hash`]), per-target rule
 //!   resolution, role gates, firing, keep-and-mark.
 //! - [`delete_flow_proposal`] — hard delete, shared by auto-invalidation
-//!   and the upcoming reject API.
+//!   and [`reject_flow_proposal`].
+//! - [`accept_flow_proposal`] / [`reject_flow_proposal`] — the write API
+//!   (§4.3 / §7): accept adds an idempotent `acceptedBy` link and runs the
+//!   pass immediately; reject hard-deletes. Both refuse resolved proposals.
 //!
 //! # Non-goals here (later slices)
 //!
-//! - Accept/reject API + auto-processor wiring (consumes this module).
+//! - WS-RPC + MCP + TS surfaces over accept/reject.
 //! - `flow-state-changed` subscription topics (§7).
 //! - Weighted / delegation / time-decay consensus (v1.5+).
 
@@ -66,7 +69,7 @@ use crate::perspectives::flow_evaluator::{
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery, SHACLFlow};
-use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
+use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery, LinkStatus};
 use std::collections::{BTreeMap, HashSet};
 
 /// Predicate marking a proposal as consumed by a firing. Absence = live.
@@ -746,6 +749,93 @@ pub async fn run_flow_consensus_pass(
         }
     }
     outcomes
+}
+
+// ---------------------------------------------------------------------------
+// Accept / reject (design §7) — the Rust core the WS-RPC and MCP surfaces
+// will expose in the wire slice.
+// ---------------------------------------------------------------------------
+
+/// All source-links of a LIVE proposal. `Err` when the URI carries no links
+/// (nothing to accept/reject — a typo'd or already-deleted URI must not
+/// succeed silently) or when the proposal is already resolved: resolved
+/// proposals are the kept flow-atom record and are immutable to this API.
+async fn live_proposal_links(
+    perspective: &PerspectiveInstance,
+    proposal_uri: &str,
+) -> anyhow::Result<Vec<DecoratedLinkExpression>> {
+    let links = perspective
+        .get_links(&LinkQuery {
+            source: Some(proposal_uri.to_string()),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("proposal lookup on {proposal_uri} failed: {e:#}"))?;
+    if links.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no FlowTransitionProposal at {proposal_uri}"
+        ));
+    }
+    if let Some(resolution) = links
+        .iter()
+        .find(|l| l.data.predicate.as_deref() == Some(RESOLVED_AS_PREDICATE))
+    {
+        return Err(anyhow::anyhow!(
+            "proposal {proposal_uri} is already resolved ({}) — resolved proposals are the kept flow-atom record",
+            resolution.data.target
+        ));
+    }
+    Ok(links)
+}
+
+/// Accept a live proposal on behalf of the acting DID (spec §4.3): write an
+/// `acceptedBy` link — idempotent per DID, raw-DID target exactly as the
+/// loader reads acceptors — then run the consensus pass immediately, so a
+/// click resolves now rather than on the next transcript (design §7).
+///
+/// The immediate pass runs unscoped: accepts are rare, user-initiated
+/// events, and the pass is idempotent for every uninvolved instance it
+/// sweeps. Returns whatever fired (possibly nothing, e.g. n not yet met).
+pub async fn accept_flow_proposal(
+    perspective: &mut PerspectiveInstance,
+    proposal_uri: &str,
+    context: &AgentContext,
+) -> anyhow::Result<Vec<FireOutcome>> {
+    let links = live_proposal_links(perspective, proposal_uri).await?;
+    let did = crate::agent::did_for_context(context)
+        .map_err(|e| anyhow::anyhow!("accept_flow_proposal: no acting DID: {e:#}"))?;
+    let already = links.iter().any(|l| {
+        l.data.predicate.as_deref() == Some(ACCEPTED_BY_PREDICATE) && l.data.target == did
+    });
+    if already {
+        log::debug!("accept_flow_proposal: {proposal_uri} already accepted by {did}");
+    } else {
+        perspective
+            .add_link(
+                Link {
+                    source: proposal_uri.to_string(),
+                    predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+                    target: did.clone(),
+                },
+                LinkStatus::Shared,
+                None,
+                context,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
+    }
+    Ok(run_flow_consensus_pass(perspective, None, context, None).await)
+}
+
+/// Reject a live proposal: hard delete, per spec §4.2 — a rejected proposal
+/// is noise, not a Synergy atom. Erroring on missing/resolved URIs is the
+/// caller's signal that nothing was rejected.
+pub async fn reject_flow_proposal(
+    perspective: &mut PerspectiveInstance,
+    proposal_uri: &str,
+) -> anyhow::Result<()> {
+    live_proposal_links(perspective, proposal_uri).await?;
+    delete_flow_proposal(perspective, proposal_uri).await
 }
 
 // ---------------------------------------------------------------------------

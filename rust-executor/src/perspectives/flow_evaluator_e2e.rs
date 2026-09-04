@@ -720,3 +720,117 @@ async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
         .expect("load instances");
     assert_eq!(recs[0].current_state, "identified");
 }
+
+/// Accept API + a real `{ n: 2 }` per-state rule: one DID holds, a second
+/// DID's acceptance fires, and the immediate pass inside `accept` delivers
+/// the outcome without waiting for the next transcript.
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_api_n2_quorum_fires_e2e() {
+    use super::flow_consensus::{
+        accept_flow_proposal, run_flow_consensus_pass, ACCEPTED_BY_PREDICATE,
+    };
+
+    let mut f = seed_satisfied_fixture(None).await;
+    f.perspective
+        .add_link(
+            Link {
+                source: "delivery://Delivery.scoped".to_string(),
+                predicate: Some("ad4m://consensusRule".to_string()),
+                target: literal(r#"{"n":2}"#),
+            },
+            LinkStatus::Local,
+            None,
+            &f.ctx,
+        )
+        .await
+        .expect("add consensusRule link");
+
+    let minted = f.run_pass(&[], None).await;
+    assert_eq!(minted.len(), 1, "got {minted:?}");
+
+    // One distinct DID < n=2: nothing fires.
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    assert!(outcomes.is_empty(), "1 < n=2 must hold: {outcomes:?}");
+
+    // Self-accept (proposer's own DID) is idempotent across calls and adds
+    // no second distinct DID — still no fire.
+    let acting_did = crate::agent::did_for_context(&f.ctx).expect("did_for_context");
+    for _ in 0..2 {
+        let fired = accept_flow_proposal(&mut f.perspective, &minted[0], &f.ctx)
+            .await
+            .expect("self-accept");
+        assert!(
+            fired.is_empty(),
+            "self-accept must not reach n=2: {fired:?}"
+        );
+    }
+    let by_pred = f.links_by_predicate(&minted[0]).await;
+    assert_eq!(
+        by_pred.get(ACCEPTED_BY_PREDICATE).map(Vec::len),
+        Some(1),
+        "repeat accepts by one DID must write exactly one acceptedBy link"
+    );
+
+    // A second agent's acceptance arrives (as it would via sync): the next
+    // accept-triggered pass reaches quorum and fires.
+    f.perspective
+        .add_link(
+            Link {
+                source: minted[0].clone(),
+                predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+                target: "did:key:other-agent".to_string(),
+            },
+            LinkStatus::Shared,
+            None,
+            &f.ctx,
+        )
+        .await
+        .expect("second-agent acceptedBy link");
+    let fired = accept_flow_proposal(&mut f.perspective, &minted[0], &f.ctx)
+        .await
+        .expect("accept with quorum");
+    assert_eq!(fired.len(), 1, "n=2 met must fire: {fired:?}");
+    assert_eq!(fired[0].fired_by_proposers.len(), 2);
+    assert!(fired[0]
+        .fired_by_proposers
+        .contains(&"did:key:other-agent".to_string()));
+    assert!(fired[0].fired_by_proposers.contains(&acting_did));
+
+    // Resolved proposals are immutable to the API.
+    assert!(
+        accept_flow_proposal(&mut f.perspective, &minted[0], &f.ctx)
+            .await
+            .is_err(),
+        "accept on a fired proposal must error"
+    );
+}
+
+/// Reject hard-deletes a live proposal, errors on a second attempt (nothing
+/// left to reject), and never moves the instance.
+#[tokio::test(flavor = "multi_thread")]
+async fn reject_deletes_live_proposal_and_errors_on_missing_e2e() {
+    use super::flow_consensus::reject_flow_proposal;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let minted = f.run_pass(&[], None).await;
+    assert_eq!(minted.len(), 1, "got {minted:?}");
+
+    reject_flow_proposal(&mut f.perspective, &minted[0])
+        .await
+        .expect("reject");
+    assert!(
+        f.links_by_predicate(&minted[0]).await.is_empty(),
+        "rejected proposal must be hard-deleted"
+    );
+    assert!(
+        reject_flow_proposal(&mut f.perspective, &minted[0])
+            .await
+            .is_err(),
+        "rejecting a deleted proposal must error"
+    );
+
+    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
+        .await
+        .expect("load instances");
+    assert_eq!(recs[0].current_state, "identified");
+}
