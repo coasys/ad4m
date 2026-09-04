@@ -140,9 +140,19 @@ impl Fixture {
         llm_proposals: &[LlmFlowProposal],
         semantic_check: Option<&dyn SemanticCheckLlm>,
     ) -> Vec<String> {
+        self.run_pass_scoped(&[BASE_URI.to_string()], llm_proposals, semantic_check)
+            .await
+    }
+
+    async fn run_pass_scoped(
+        &mut self,
+        subjects: &[String],
+        llm_proposals: &[LlmFlowProposal],
+        semantic_check: Option<&dyn SemanticCheckLlm>,
+    ) -> Vec<String> {
         run_engine_proposal_pass(
             &mut self.perspective,
-            None,
+            subjects,
             &self.ctx,
             llm_proposals,
             semantic_check,
@@ -332,6 +342,37 @@ async fn run_engine_proposal_pass_e2e() {
     assert!(
         rerun.is_empty(),
         "unchanged evidence re-proposed: {rerun:?}"
+    );
+}
+
+/// The pass is bounded to the subjects it is handed (PR #940 review): a
+/// satisfied transition anchored on a base OUTSIDE the subject set must not
+/// mint — an empty set returns immediately (no whole-perspective sweep) and
+/// an unrelated subject set loads nothing. Only the pass that names the
+/// instance's base mints its proposal.
+#[tokio::test(flavor = "multi_thread")]
+async fn proposal_pass_is_bounded_to_subjects_e2e() {
+    let mut f = seed_satisfied_fixture(None).await;
+
+    let swept = f.run_pass_scoped(&[], &[], None).await;
+    assert!(
+        swept.is_empty(),
+        "empty subjects must early-return, not sweep the perspective: {swept:?}"
+    );
+
+    let unrelated = f
+        .run_pass_scoped(&["ad4m://task/unrelated".to_string()], &[], None)
+        .await;
+    assert!(
+        unrelated.is_empty(),
+        "subjects not anchoring the instance must not mint: {unrelated:?}"
+    );
+
+    let scoped = f.run_pass(&[], None).await;
+    assert_eq!(
+        scoped.len(),
+        1,
+        "the pass naming the instance's base must mint: {scoped:?}"
     );
 }
 

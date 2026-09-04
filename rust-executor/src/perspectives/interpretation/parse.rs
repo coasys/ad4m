@@ -104,21 +104,30 @@ fn clean_llm_json(raw: &str) -> String {
             }
         }
     }
-    // Among the strict-parsing candidates, prefer the first that has the
-    // SHAPE of an interpretation payload (an array, or an object with an
-    // `instances` key): a model may emit an unrelated-but-valid JSON object
-    // in its prose before the real payload, and taking it just because it
-    // parses would fail the semantic parse (`missing field instances`) and
-    // burn a retry while the real payload sits ignored right behind it.
-    // When no candidate has the shape, keep the first valid one — the
-    // semantic parse then reports the mismatch exactly as before.
+    // Among the strict-parsing candidates, prefer the first that actually
+    // DESERIALIZES as an interpretation payload: a model may emit an
+    // unrelated-but-valid JSON value in its prose before the real payload —
+    // an object (`{"model": "gemma3"}`) or, just as easily, a scalar array
+    // (`["Task"]`) — and taking it just because it parses would fail the
+    // semantic parse and burn a retry while the real payload sits ignored
+    // right behind it. When nothing fully deserializes, fall back to the
+    // first candidate merely SHAPED like a payload (array / object with an
+    // `instances` key), so a slightly-malformed real payload still wins
+    // over prose values and the semantic parse reports ITS mismatch rather
+    // than the prose value's. When even that misses, keep the first valid
+    // value — old behaviour.
     let strict_candidates: Vec<String> = top_level_starts
         .iter()
         .filter_map(|&i| extract_first_json_value(candidate, i))
         .collect();
     let extracted = strict_candidates
         .iter()
-        .find(|c| looks_like_interpretation_payload(c))
+        .find(|c| parses_as_interpretation_payload(c))
+        .or_else(|| {
+            strict_candidates
+                .iter()
+                .find(|c| looks_like_interpretation_payload(c))
+        })
         .or_else(|| strict_candidates.first())
         .cloned()
         .or_else(|| extract_bracketed(candidate, '[', ']'))
@@ -131,9 +140,28 @@ fn clean_llm_json(raw: &str) -> String {
     strip_trailing_commas(&extracted)
 }
 
-/// Structural (not semantic) payload check used to rank strict candidates:
-/// an array, or an object carrying an `instances` key. Cheap by design —
-/// full deserialization stays in `parse_interpretation_output`.
+/// Semantic payload check used as the first ranking tier for strict
+/// candidates: does this JSON actually deserialize into one of the two
+/// accepted payload shapes (bare instance array, or wrapper object)? An
+/// unrelated scalar array like `["Task"]` parses as JSON and passes the
+/// structural check below, but fails here — so the real payload behind it
+/// still wins.
+fn parses_as_interpretation_payload(candidate: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(candidate) {
+        Ok(v @ serde_json::Value::Array(_)) => {
+            serde_json::from_value::<Vec<ProposedInstance>>(v).is_ok()
+        }
+        Ok(v @ serde_json::Value::Object(_)) => {
+            serde_json::from_value::<InterpretationOutput>(v).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// Structural (not semantic) payload check — second ranking tier: an array,
+/// or an object carrying an `instances` key. Keeps a slightly-malformed real
+/// payload ranked above prose values so the semantic parse error points at
+/// the payload, not the prose.
 fn looks_like_interpretation_payload(candidate: &str) -> bool {
     match serde_json::from_str::<serde_json::Value>(candidate) {
         Ok(serde_json::Value::Array(_)) => true,
@@ -292,6 +320,22 @@ mod tests {
         // No payload-shaped candidate at all: first valid value is still
         // taken and the semantic parse reports the mismatch (old behaviour).
         assert!(parse_interpretation_output(r#"Just: {"note": "hi"}"#).is_err());
+    }
+
+    #[test]
+    fn unrelated_scalar_array_before_the_real_payload_is_skipped() {
+        // A scalar array is valid JSON and array-shaped, but does not
+        // deserialize as instances — it must not outrank the real payload.
+        let raw = r#"Classes seen: ["Task"]. Result: {"instances":[{"class":"Task","title":"A"}],"flow_proposals":[]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+
+        // Same with a bare-array payload after the unrelated scalar array.
+        let raw = r#"Classes seen: ["Task", "Belief"] then [{"class":"Task","title":"B"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(prop_values(&out, "title"), vec!["B"]);
     }
 
     #[test]
