@@ -861,6 +861,67 @@ async fn accept_api_n2_quorum_fires_e2e() {
     );
 }
 
+/// A forged `acceptedBy` naming the ACTING DID (delivered via sync with a
+/// foreign author) must not turn the victim's own accept into a no-op: the
+/// write-side idempotency check is authorship-bound like the loader, so the
+/// genuine self-authored vote still lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn forged_accept_naming_acting_did_does_not_suppress_own_vote_e2e() {
+    use super::flow_consensus::{accept_flow_proposal, ACCEPTED_BY_PREDICATE};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let minted = f.run_pass(&[], None).await;
+    assert_eq!(minted.len(), 1, "got {minted:?}");
+    let acting_did = crate::agent::did_for_context(&f.ctx).expect("did_for_context");
+
+    // The attack: a synced link naming US as acceptor but authored by the
+    // attacker — exactly as `diff_from_link_language` would deliver it. The
+    // loader drops it as a vote (author != target); the write path must not
+    // let it count as "already accepted".
+    f.perspective
+        .add_link_expression(
+            crate::types::LinkExpression {
+                author: "did:key:attacker".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                data: Link {
+                    source: minted[0].clone(),
+                    predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+                    target: acting_did.clone(),
+                },
+                proof: crate::types::ExpressionProof {
+                    key: "did:key:attacker#key".to_string(),
+                    signature: "test-signature".to_string(),
+                },
+                status: Some(LinkStatus::Shared),
+            },
+            LinkStatus::Shared,
+            None,
+        )
+        .await
+        .expect("forged acceptedBy naming the acting DID");
+
+    accept_flow_proposal(&mut f.perspective, &minted[0], &f.ctx)
+        .await
+        .expect("accept with forged self-targeted vote present");
+
+    let links = f
+        .perspective
+        .get_links(&LinkQuery {
+            source: Some(minted[0].clone()),
+            predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get acceptedBy links");
+    assert!(
+        links
+            .iter()
+            .any(|l| l.data.target == acting_did && l.author == acting_did),
+        "the victim's own accept must write a self-authored vote even when a \
+         forged link already names them: {links:?}"
+    );
+}
+
 /// Reject hard-deletes a live proposal, errors on a second attempt (nothing
 /// left to reject), and never moves the instance.
 #[tokio::test(flavor = "multi_thread")]

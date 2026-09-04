@@ -912,8 +912,13 @@ pub async fn accept_flow_proposal(
     let links = live_proposal_links(perspective, proposal_uri).await?;
     let did = crate::agent::did_for_context(context)
         .map_err(|e| anyhow::anyhow!("accept_flow_proposal: no acting DID: {e:#}"))?;
+    // Authorship-bound, mirroring the loader: a forged `acceptedBy` naming
+    // this DID (author != target) is dropped there as a vote, so it must not
+    // suppress the genuine self-authored vote here either.
     let already = links.iter().any(|l| {
-        l.data.predicate.as_deref() == Some(ACCEPTED_BY_PREDICATE) && l.data.target == did
+        l.data.predicate.as_deref() == Some(ACCEPTED_BY_PREDICATE)
+            && l.data.target == did
+            && l.author == did
     });
     if already {
         log::debug!("accept_flow_proposal: {proposal_uri} already accepted by {did}");

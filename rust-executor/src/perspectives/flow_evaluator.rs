@@ -1744,6 +1744,41 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn resolved_proposal_does_not_suppress_the_remint() {
+            // The cyclic-flow shape (review → changes_requested → review):
+            // the fired proposal is kept-and-marked with `resolved_as`, and
+            // its whole dedup key still matches the next cycle's transition.
+            // A resolved row is the flow-atom record, not a live proposal —
+            // it must not wedge the remint.
+            let mut store = full_candidate_store("did:key:me");
+            store.by_predicate.insert(
+                crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE.to_string(),
+                Some(vec![link(
+                    "proposal://1",
+                    crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE,
+                    "literal:string:fired",
+                )]),
+            );
+            assert!(
+                !proposal_already_exists(&store, &transition(), "did:key:me").await,
+                "a resolved proposal must not suppress the remint on a cyclic flow"
+            );
+        }
+
+        #[tokio::test]
+        async fn resolved_as_lookup_error_reports_already_proposed() {
+            let mut store = full_candidate_store("did:key:me");
+            store.by_predicate.insert(
+                crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE.to_string(),
+                None,
+            );
+            assert!(
+                proposal_already_exists(&store, &transition(), "did:key:me").await,
+                "a failed resolved_as lookup must fail closed like the other lookups"
+            );
+        }
+
+        #[tokio::test]
         async fn proposer_lookup_error_reports_already_proposed() {
             let mut store = full_candidate_store("did:key:me");
             store
