@@ -912,10 +912,10 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
 
     // The affected instance base URIs (created, updated, or given new
     // relations). Links are owned by `create_subject` / `update_subject`.
-    let pass_subjects = flow_pass_subjects(&bases, flow_subjects);
     let flow_proposals = run_flow_post_pass(
         perspective,
-        &pass_subjects,
+        &bases,
+        flow_subjects,
         context,
         llm_proposals,
         &task.task_id,
@@ -925,39 +925,36 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     Ok((bases, flow_proposals))
 }
 
+/// The subject set is bounded to: everything the pass wrote plus everything
+/// the LLM was shown flow context for, deduplicated. Never empty-by-accident
+/// on a pass that did work, never a sweep.
 async fn run_flow_post_pass(
     perspective: &mut PerspectiveInstance,
-    subjects: &[String],
+    bases: &[String],
+    flow_subjects: &[String],
     context: &AgentContext,
     llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
     task_id: &str,
     flow_filter: Option<&[String]>,
 ) -> Vec<String> {
-    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
-        task_id: task_id.to_string(),
-    };
-    crate::perspectives::flow_evaluator::run_engine_proposal_pass(
-        perspective,
-        subjects,
-        context,
-        llm_proposals,
-        Some(&semantic_check),
-        flow_filter,
-    )
-    .await
-}
-
-/// The subject set `run_flow_post_pass` is bounded to: everything the pass
-/// wrote plus everything the LLM was shown flow context for, deduplicated.
-/// Never empty-by-accident on a pass that did work, never a sweep.
-fn flow_pass_subjects(bases: &[String], flow_subjects: &[String]) -> Vec<String> {
     let mut subjects: Vec<String> = bases.to_vec();
     for s in flow_subjects {
         if !subjects.contains(s) {
             subjects.push(s.clone());
         }
     }
-    subjects
+    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
+        task_id: task_id.to_string(),
+    };
+    crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+        perspective,
+        &subjects,
+        context,
+        llm_proposals,
+        Some(&semantic_check),
+        flow_filter,
+    )
+    .await
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
