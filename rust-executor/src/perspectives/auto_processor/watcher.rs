@@ -790,18 +790,12 @@ pub async fn run_one_pass(
     // same overlay-writing gate (`apply_with_overlay`), so downstream
     // provenance + processed signalling is identical.
     //
-    // Debug carriage differs by path today:
-    // * classic → `InterpretationOutcome { bases, debug }` — `debug`
-    //   carries the raw prompt/response for persistence on the
-    //   InterpretationRun node.
-    // * harness → `Vec<String>` bases only. The harness path emits
-    //   per-tool-call events via its own logging surface (see harness/mod.rs
-    //   `harness: round=` prints); persisting the full transcript on
-    //   InterpretationRun is a follow-up (there's no single prompt/response
-    //   to snapshot — it's a multi-turn loop).
+    // Both paths return `InterpretationOutcome`; the harness one carries
+    // `debug: None` (multi-turn loop — no single prompt/response to
+    // snapshot; per-tool-call events cover it instead).
     let (bases, debug) = match cfg.max_tool_calls {
         Some(n) if n > 0 => {
-            let bases = abandon_on_err!(
+            let outcome = abandon_on_err!(
                 run_interpretation_with_harness_and_model(
                     perspective,
                     &shapes,
@@ -832,7 +826,7 @@ pub async fn run_one_pass(
                 )
                 .await
             );
-            (bases, None)
+            (outcome.bases, outcome.debug)
         }
         _ => {
             let outcome = abandon_on_err!(
