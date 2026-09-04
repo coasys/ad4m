@@ -490,7 +490,8 @@ pub(crate) async fn run_interpretation_harness_e2e(
         None,
     )
     .await
-    .expect("run_interpretation_with_harness against real LLM to succeed");
+    .expect("run_interpretation_with_harness against real LLM to succeed")
+    .bases;
     let placements = read_back_placements(perspective, &bases).await;
     print_placements(&placements);
     placements
