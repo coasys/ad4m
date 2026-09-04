@@ -794,18 +794,51 @@ async fn accept_api_n2_quorum_fires_e2e() {
         "repeat accepts by one DID must write exactly one acceptedBy link"
     );
 
-    // A second agent's acceptance arrives (as it would via sync): the next
-    // accept-triggered pass reaches quorum and fires.
+    // A FORGED second acceptance — authored by *us*, naming a DID we do not
+    // control — must not count toward quorum (votes are authorship claims,
+    // not data claims: `l.author == l.data.target` is the identity binding).
     f.perspective
         .add_link(
             Link {
                 source: minted[0].clone(),
                 predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
-                target: "did:key:other-agent".to_string(),
+                target: "did:key:forged-victim".to_string(),
             },
             LinkStatus::Shared,
             None,
             &f.ctx,
+        )
+        .await
+        .expect("forged acceptedBy link");
+    let fired = accept_flow_proposal(&mut f.perspective, &minted[0], &f.ctx)
+        .await
+        .expect("accept with forged vote present");
+    assert!(
+        fired.is_empty(),
+        "a forged acceptedBy (author != target) must not reach n=2: {fired:?}"
+    );
+
+    // A GENUINE second-agent acceptance arrives via sync: the link carries
+    // the foreign author itself, exactly as `diff_from_link_language` would
+    // deliver it. This one counts, quorum is met, the edge fires.
+    f.perspective
+        .add_link_expression(
+            crate::types::LinkExpression {
+                author: "did:key:other-agent".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                data: Link {
+                    source: minted[0].clone(),
+                    predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+                    target: "did:key:other-agent".to_string(),
+                },
+                proof: crate::types::ExpressionProof {
+                    key: "did:key:other-agent#key".to_string(),
+                    signature: "test-signature".to_string(),
+                },
+                status: Some(LinkStatus::Shared),
+            },
+            LinkStatus::Shared,
+            None,
         )
         .await
         .expect("second-agent acceptedBy link");

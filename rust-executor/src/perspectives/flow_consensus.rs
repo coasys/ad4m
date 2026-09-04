@@ -74,6 +74,9 @@ use std::collections::{BTreeMap, HashSet};
 
 /// Predicate marking a proposal as consumed by a firing. Absence = live.
 pub const RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
+/// Predicate carrying a proposal's proposer DID (mirrors the
+/// `flow_transition_proposal.json` hardwired-SDNA setter).
+pub const PROPOSER_PREDICATE: &str = "ad4m://flow/proposer";
 /// Predicate for acceptance links: proposal URI → accepting DID (§4.2).
 pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
 
@@ -431,6 +434,39 @@ pub async fn load_flow_transition_proposals(
         if !resolved.is_empty() {
             continue;
         }
+        // `proposer` above is a hydrated model property — writer-chosen
+        // data. Locally minted proposals are honest (the write path passes
+        // `acting_did`), but this pass deliberately counts proposals that
+        // arrived by sync, where the property is unverified input: a replica
+        // could sync in three proposals "from" three DIDs it controls none
+        // of, each with a valid content seal (seals cover graph state, not
+        // identity). Require a proposer link whose signed author IS the DID
+        // it claims; a proposal lying about its proposer is dropped, not
+        // counted at reduced weight.
+        let proposer_links = perspective
+            .get_links(&LinkQuery {
+                source: Some(record.uri.clone()),
+                predicate: Some(PROPOSER_PREDICATE.to_string()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "load_flow_transition_proposals: proposer lookup on {} failed: {e:#}",
+                    record.uri
+                )
+            })?;
+        if !proposer_links
+            .iter()
+            .any(|l| l.data.target == record.proposer && l.author == record.proposer)
+        {
+            log::warn!(
+                "load_flow_transition_proposals: dropping proposal {} — no proposer link authored by its claimed proposer {} (identity unverified)",
+                record.uri,
+                record.proposer
+            );
+            continue;
+        }
         let acceptances = perspective
             .get_links(&LinkQuery {
                 source: Some(record.uri.clone()),
@@ -444,8 +480,25 @@ pub async fn load_flow_transition_proposals(
                     record.uri
                 )
             })?;
-        let mut acceptors: Vec<String> =
-            acceptances.iter().map(|l| l.data.target.clone()).collect();
+        // A vote is an *authorship* claim, not a data claim: the link's
+        // signed author must be the DID it names as acceptor, otherwise any
+        // agent could write `acceptedBy → did:key:X` links for DIDs it does
+        // not control and clear an `{n}` quorum alone. Signature validity is
+        // the sync layer's job; identity binding is ours.
+        let mut acceptors: Vec<String> = acceptances
+            .iter()
+            .filter(|l| {
+                let ok = l.author == l.data.target;
+                if !ok {
+                    log::warn!(
+                        "load_flow_transition_proposals: dropping acceptedBy on {} naming {} but authored by {} (vote forgery shape)",
+                        record.uri, l.data.target, l.author
+                    );
+                }
+                ok
+            })
+            .map(|l| l.data.target.clone())
+            .collect();
         acceptors.sort();
         acceptors.dedup();
         record.acceptors = acceptors;
@@ -887,9 +940,10 @@ pub async fn reject_flow_proposal(
 ///   DIDs from the role rows".
 ///
 /// A role query that references the DID in *neither* way cannot
-/// discriminate between candidates: it is evaluated once and gates all
-/// candidates together (matched → everyone eligible), with a `warn!`
-/// because that is almost always a misconfigured rule.
+/// discriminate between candidates — "I cannot determine membership" must
+/// never degrade to "everyone is a member", so it is an `Err`: a `fromRole`
+/// is a security rule, and a misconfigured security rule admits nobody.
+/// The caller skips firing the instance and the operator sees the error.
 ///
 /// Fail-closed: a translation error or a store/query error aborts with
 /// `Err` — the caller must skip firing this pass rather than fire on a
@@ -901,24 +955,17 @@ pub async fn resolve_role_dids<Q: RequiresQueryable + ?Sized>(
     record: &FlowInstanceRecord,
     candidates: &[String],
 ) -> anyhow::Result<HashSet<String>> {
+    // `unwrap_or(false)` routes a serde failure into the same `Err` below —
+    // "couldn't even inspect the rule" is the purest can't-determine case.
     let did_dependent = role.did_property.is_some()
         || serde_json::to_string(role)
             .map(|s| s.contains("$did"))
             .unwrap_or(false);
 
     if !did_dependent {
-        log::warn!(
-            "resolve_role_dids: fromRole query on `{}` references neither `didProperty` nor `$did` — it cannot discriminate between DIDs and gates all candidates together",
+        anyhow::bail!(
+            "resolve_role_dids: fromRole query on `{}` references neither `didProperty` nor `$did` — it cannot discriminate between DIDs, so membership is undeterminable; refusing to gate (fail-closed)",
             role.class_name
-        );
-        let input = requires_query_input(role, record, "")?;
-        let matched = run_query(perspective, &role.class_name, &input).await?;
-        return Ok(
-            if cardinality_satisfied(role.count.as_ref(), matched.len()) {
-                candidates.iter().cloned().collect()
-            } else {
-                HashSet::new()
-            },
         );
     }
 
@@ -1042,7 +1089,10 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn did_independent_role_gates_all_candidates_together() {
+        async fn did_independent_role_is_an_error_not_allow_all() {
+            // A fromRole that can't discriminate between DIDs must never
+            // degrade to "everyone passes" — it errors, the caller skips
+            // firing, and the operator finds the misconfigured rule.
             let role = role(json!({ "className": "ns://Quorum", "where": { "open": true } }));
             let candidates = dids(&["did:key:alice", "did:key:bob"]);
 
@@ -1050,24 +1100,17 @@ mod tests {
                 unconditional_rows: Some(1),
                 ..Default::default()
             };
-            let eligible = resolve_role_dids(&stub, &role, &record(), &candidates)
+            let err = resolve_role_dids(&stub, &role, &record(), &candidates)
                 .await
-                .unwrap();
-            assert_eq!(eligible.len(), 2, "non-empty match gates everyone in");
-            assert_eq!(
-                stub.calls.lock().unwrap().len(),
-                1,
-                "DID-independent query is evaluated once, not per candidate"
+                .expect_err("DID-independent role query must fail closed");
+            assert!(
+                err.to_string().contains("cannot discriminate"),
+                "unexpected error: {err:#}"
             );
-
-            let empty = RoleStub {
-                unconditional_rows: Some(0),
-                ..Default::default()
-            };
-            let none = resolve_role_dids(&empty, &role, &record(), &candidates)
-                .await
-                .unwrap();
-            assert!(none.is_empty(), "empty match gates everyone out");
+            assert!(
+                stub.calls.lock().unwrap().is_empty(),
+                "no query should run for an undeterminable rule"
+            );
         }
 
         #[tokio::test]
