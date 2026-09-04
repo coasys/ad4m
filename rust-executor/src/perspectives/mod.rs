@@ -852,6 +852,7 @@ mod tests {
             proof: ExpressionProof {
                 key: "test-key".to_string(),
                 signature: "test-signature".to_string(),
+                ..Default::default()
             },
             status: Some(LinkStatus::Local),
         };

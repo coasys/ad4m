@@ -94,6 +94,11 @@ pub fn build_expression_rendered(
                 .to_string(),
             valid: p.get("valid").and_then(|v| v.as_bool()),
             invalid: p.get("invalid").and_then(|v| v.as_bool()),
+            key_id: p
+                .get("keyId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            kel_seq: p.get("kelSeq").and_then(|v| v.as_u64()),
         }
     } else {
         DecoratedExpressionProof::default()
