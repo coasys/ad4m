@@ -1,4 +1,4 @@
-import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import { LinkCallback, PerspectiveClient, SyncStateChangeCallback, FlowFireOutcome } from "./PerspectiveClient";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
@@ -687,6 +687,23 @@ export class PerspectiveProxy {
      */
     async rejectInterpretation(base: string, property?: string): Promise<boolean> {
         return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+    }
+
+    /**
+     * Accept a live FlowTransitionProposal on behalf of this agent and run
+     * the flow consensus pass immediately. Returns the fired transitions —
+     * empty when the flow's consensusRule threshold is not yet met.
+     */
+    async acceptFlowProposal(proposalUri: string): Promise<FlowFireOutcome[]> {
+        return await this.#client.acceptFlowProposal(this.#handle.uuid, proposalUri)
+    }
+
+    /**
+     * Reject (hard-delete) a live FlowTransitionProposal. Already-fired
+     * proposals are the kept flow record and cannot be rejected.
+     */
+    async rejectFlowProposal(proposalUri: string): Promise<boolean> {
+        return await this.#client.rejectFlowProposal(this.#handle.uuid, proposalUri)
     }
 
     /** Subscribe to this perspective's auto-processor step signals. */

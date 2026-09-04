@@ -13,6 +13,19 @@ import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
+/** One fired flow transition, as returned by `perspective.acceptFlowProposal`
+ *  (and, engine-side, by every consensus pass). */
+export interface FlowFireOutcome {
+    /** FlowInstance URI whose currentState was advanced. */
+    instanceUri: string;
+    fromState: string;
+    toState: string;
+    /** Distinct DIDs counted toward this consensus, sorted. */
+    firedByProposers: string[];
+    /** The kept-and-marked proposals this firing consumed. */
+    contributingProposalUris: string[];
+}
+
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
@@ -392,6 +405,24 @@ export class PerspectiveClient {
     async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
             'perspective.rejectInterpretation', { uuid, base, property },
+        )
+    }
+
+    /** Accept a live FlowTransitionProposal on behalf of this agent (idempotent
+     *  per DID) and run the flow consensus pass immediately. Returns the fired
+     *  transitions — empty when the flow's consensusRule threshold is not yet met.
+     *  Errors on unknown URIs and on already-resolved proposals. */
+    async acceptFlowProposal(uuid: string, proposalUri: string): Promise<FlowFireOutcome[]> {
+        return this.#apiClient.call<FlowFireOutcome[]>(
+            'perspective.acceptFlowProposal', { uuid, proposalUri },
+        )
+    }
+
+    /** Reject (hard-delete) a live FlowTransitionProposal. Already-fired
+     *  proposals are the kept flow record and cannot be rejected. */
+    async rejectFlowProposal(uuid: string, proposalUri: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.rejectFlowProposal', { uuid, proposalUri },
         )
     }
 

@@ -28,15 +28,18 @@
  * - `proposals()` — queries `FlowTransitionProposal` records that
  *   target this instance's URI.
  *
- * Mutations + subscriptions (`proposeTransition`, `accept`, `reject`,
- * `fireAction`, `onStateChange`, `onProposalAdded`, `onProposalResolved`)
- * land with the consensus-engine slice (§4.3 / slice 10.6). Rather than
- * ship them as `throw new Error("not yet")` stubs — which is a type-level
- * lie the caller only discovers at runtime — they are simply absent from
- * this class until the engine is wired.
+ * - `acceptProposal()` / `rejectProposal()` — the consensus write API
+ *   (slice 10.6): accept counts your DID toward the flow's consensusRule
+ *   and fires the transition at quorum; reject hard-deletes.
+ *
+ * Still absent (rather than shipped as `throw new Error("not yet")`
+ * stubs): `proposeTransition`, `fireAction`, and the subscriptions
+ * (`onStateChange`, `onProposalAdded`, `onProposalResolved`) — they land
+ * with the manual-proposal and subscription-topic slices.
  */
 
 import { PerspectiveProxy } from "./PerspectiveProxy";
+import { FlowFireOutcome } from "./PerspectiveClient";
 import { Ad4mModel } from "../model/Ad4mModel";
 import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
@@ -365,5 +368,26 @@ export class FlowInstance {
     return FlowTransitionProposal.findAll(this.perspective, {
       where: { flowInstance: this.uri },
     });
+  }
+
+  /**
+   * Accept a proposal targeting this instance: your DID is added to its
+   * acceptors (idempotent) and the consensus pass runs immediately — when
+   * the flow's `consensusRule` threshold is met the transition fires and
+   * the fired outcomes are returned. Accepts a proposal object or its URI.
+   */
+  async acceptProposal(proposal: FlowTransitionProposal | string): Promise<FlowFireOutcome[]> {
+    const uri = typeof proposal === "string" ? proposal : proposal.id;
+    return this.perspective.acceptFlowProposal(uri);
+  }
+
+  /**
+   * Reject a proposal targeting this instance: it is hard-deleted.
+   * Already-fired proposals are the kept flow record and cannot be
+   * rejected. Accepts a proposal object or its URI.
+   */
+  async rejectProposal(proposal: FlowTransitionProposal | string): Promise<boolean> {
+    const uri = typeof proposal === "string" ? proposal : proposal.id;
+    return this.perspective.rejectFlowProposal(uri);
   }
 }
