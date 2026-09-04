@@ -123,6 +123,14 @@ Cross-cutting findings that drive the ordering below:
 
 ## 2. Target layout
 
+**This tree is the target, not the current state** — if you are looking for
+where something lives *today*, use §1 and the module `AGENTS.md` files. The
+`agentic/` subtree below is superseded: item 7's cycle-break analysis stands,
+but the directory move is replaced by the aspect design in
+`planning/aspect-holons-refactor-2026-09-04.md` (phase 2), which makes `flow/`,
+`interpretation/` and `auto_processor/` sibling aspects hosted by
+`perspectives/` instead of grouping them by "uses an LLM".
+
 ```
 rust-executor/src
 ├── lib.rs                  boot sequence only (see item 11: AppContext)
@@ -408,7 +416,16 @@ Also:
 
 Estimated: −1,000 lines.
 
-### Item 7 — `agentic/` module and cycle break (M)
+### Item 7 — cycle break (M) — directory move superseded
+
+> **Scope change (2026-09-04 review):** steps 1–2 and 5–6 (the cycle break and
+> trait placement) stand and stay in phase 1. Steps 3–4 and 7 — the `agentic/`
+> directory moves — are superseded by
+> `planning/aspect-holons-refactor-2026-09-04.md`, which moves the same code as
+> sibling *aspects* in phase 2, after the host/aspect traits exist. Rationale:
+> harness, interpretation, flows and the auto-processor share a **host**, not a
+> domain — flows are a graph state machine, interpretation a text→graph
+> pipeline, the auto-processor a scheduler.
 
 1. Move `perspectives/auto_processor/events.rs` → `agentic/events.rs` first (one
    file, breaks `harness → perspectives` for events).
@@ -532,6 +549,9 @@ not freelance the other option.
   `0.13.0-test-interpretation-2`. Proposal: `env!("CARGO_PKG_VERSION")`, and
   `setVersion.js` writes Cargo.toml only. **Default: do not touch version
   strings in a refactor PR.**
+- **D6–D10 — aspect-phase decisions** (parent directory naming, types-only
+  import edges, notifications-as-aspect, client subpath exports): tracked in
+  `planning/aspect-holons-refactor-2026-09-04.md` §8, with defaults there.
 - **D5 — Snapshot artifacts in git.** `CUSTOM_DENO_SNAPSHOT.bin` (2.1 MB) and
   generated `residual_*.rs` (4 MB) are committed though `residual_lazy.rs:15`
   says they are ignored. Ignore + build, or keep committed for CI speed.
@@ -612,7 +632,7 @@ generated `.ts` in the same PR as the Rust type change.
 | 1 | 1 (Prolog isolation + fixes), 2 (MCP dedup), 5 (types) |
 | 2 | 3a, 3b (perspective_instance split), 4a (schema versioning) |
 | 3 | 3c (dedup), 4b (db split), 6 (CapSpec) |
-| 4 | 7 (agentic/), 8 (query-stack splits, start) |
+| 4 | 7 (cycle break, steps 1–2/5–6), 8 (query-stack splits, start) |
 | 5–6 | 8 (finish), 9 (service splits), 10 |
 | 7+ | 11 (AppContext), 12; item 2b (MCP via `model_query`) after item 8 |
 
