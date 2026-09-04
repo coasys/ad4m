@@ -217,6 +217,7 @@ mod tests {
     fn ensure_db() {
         INIT_DB.call_once(|| {
             Ad4mDb::init_global_instance(":memory:").unwrap();
+            crate::db_backend::init_db_backend(std::sync::Arc::new(crate::db_backend::LocalDb));
         });
     }
 

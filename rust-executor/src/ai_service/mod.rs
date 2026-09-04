@@ -2445,8 +2445,15 @@ impl AIService {
 mod tests {
     use super::*;
     use crate::db::Ad4mDb;
+    use crate::db_backend::{init_db_backend, LocalDb};
     use crate::types::{AIPromptExamplesInput, LocalModelInput};
+    use std::sync::Arc;
     use tokio::time::{sleep, Duration};
+
+    fn ensure_db() {
+        let _ = Ad4mDb::init_global_instance(":memory:");
+        init_db_backend(Arc::new(LocalDb));
+    }
 
     #[tokio::test]
     async fn test_progress_rate_limiting() {
@@ -2513,7 +2520,7 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_embedding() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        ensure_db();
         let service = AIService::new().expect("initialization to work");
         let vector = service
             .embed("bert".into(), "Test string".into(), None)
@@ -2525,7 +2532,7 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_prompt() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        ensure_db();
         let service = AIService::new().expect("initialization to work");
 
         let task = service.add_task(AITaskInput {
@@ -2550,7 +2557,7 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_prompt_stress() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        ensure_db();
         let service = AIService::new().expect("initialization to work");
 
         let task = service.add_task(AITaskInput {
@@ -2602,7 +2609,7 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_model_lifecycle() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        ensure_db();
         let service = AIService::new().expect("initialization to work");
 
         // Add a model
@@ -2655,7 +2662,7 @@ mod tests {
     #[ignore]
     #[tokio::test]
     async fn test_model_update_with_tasks() {
-        Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+        ensure_db();
         let service = AIService::new().expect("initialization to work");
 
         // Add a model

@@ -750,6 +750,7 @@ mod tests {
     fn setup() {
         crate::test_utils::setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::db_backend::init_db_backend(std::sync::Arc::new(crate::db_backend::LocalDb));
         crate::agent::AgentService::init_global_test_instance();
     }
 

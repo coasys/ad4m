@@ -34,6 +34,7 @@ async fn setup_perspective() -> PerspectiveInstance {
     setup_wallet();
     // Global DB is single-init; safe to call repeatedly under `Once` inside.
     let _ = Ad4mDb::init_global_instance(":memory:");
+    crate::db_backend::init_db_backend(std::sync::Arc::new(crate::db_backend::LocalDb));
     AgentService::init_global_test_instance();
     init_prolog_service().await;
 

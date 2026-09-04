@@ -574,6 +574,7 @@ fn init_test_db() {
             drop(guard);
             let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
         }
+        crate::db_backend::init_db_backend(std::sync::Arc::new(crate::db_backend::LocalDb));
     });
 }
 
