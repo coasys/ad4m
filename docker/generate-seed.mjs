@@ -13,7 +13,8 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // --- CID / multibase encoding (no npm deps) ---
 // Hand-rolled to avoid npm dependencies in the Docker build context.
@@ -106,9 +107,41 @@ for (const lang of LANGUAGES) {
     console.log(lang.role + ": " + hash);
 }
 
+// Trusted agents MUST come from the bootstrap seed committed in this repo
+// (`rust-executor/src/mainnet_seed.json`). Regular seed generation
+// (`cli/src/bootstrap_publish.rs`) writes the publishing agent's DID there;
+// language install refuses any language whose Expression `author` is not in
+// that list (or equal to the local agent DID). An empty array here is not
+// a valid standalone-mode shortcut.
+//
+// Language *hashes* in this file are still computed from the local
+// `bootstrap-languages/` copies (this image is a self-contained deploy, not
+// a republish of mainnet addresses). Their Expression `author` is left
+// empty at build time and rewritten to the container agent's DID on first
+// boot (`stamp_bootstrap_language_authors` in docker-entrypoint.sh) so
+// `agent_did == language_author` passes. Do not stamp a mainnet trusted
+// DID onto locally-hashed bundles — that would claim those agents published
+// code they did not.
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const committedSeedPath = join(repoRoot, "rust-executor/src/mainnet_seed.json");
+if (!existsSync(committedSeedPath)) {
+    console.error("Missing committed bootstrap seed: " + committedSeedPath);
+    process.exit(1);
+}
+const committedSeed = JSON.parse(readFileSync(committedSeedPath, "utf8"));
+const trustedAgents = Array.isArray(committedSeed.trustedAgents)
+    ? committedSeed.trustedAgents.filter((d) => typeof d === "string" && d.length > 0)
+    : [];
+if (trustedAgents.length === 0) {
+    console.error("Committed bootstrap seed has no trustedAgents: " + committedSeedPath);
+    process.exit(1);
+}
+console.log("trustedAgents (from committed seed):");
+for (const did of trustedAgents) console.log("  " + did);
+
 // Build seed JSON
 const seed = {
-    trustedAgents: [],
+    trustedAgents,
     knownLinkLanguages: [addresses.linkLanguage],
     directMessageLanguage: "",
     agentLanguage: addresses.agentLanguage,
@@ -133,6 +166,7 @@ for (const lang of LANGUAGES) {
     const addr = addresses[lang.role];
     kv[langLangAddr + "::bundle-" + addr] = bundles[lang.role];
 
+    // author left empty on purpose — stamped to the container DID at first boot.
     const expression = {
         author: "",
         timestamp: "1970-01-01T00:00:00.000Z",

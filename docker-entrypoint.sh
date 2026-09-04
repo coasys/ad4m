@@ -231,6 +231,52 @@ maybe_setup_agent() {
     fi
 }
 
+# Rewrite bootstrap language-language KV meta so Expression.author (and
+# data.author) is the container agent's DID. generate-seed.mjs hashes local
+# bootstrap-language files (own deploy) and cannot know that DID at image
+# build time. Runtime already trusts the local DID via get_trusted_agents();
+# the install path still requires language_author == that DID (or a seed
+# trustedAgent). Empty author fails with AgentIsUntrusted.
+stamp_bootstrap_language_authors() {
+    local kv_file did
+    if [ ! -f /opt/ad4m/language-language-kv/address.txt ]; then
+        return 0
+    fi
+    local ll_addr
+    ll_addr=$(cat /opt/ad4m/language-language-kv/address.txt)
+    kv_file="/data/ad4m/languages/${ll_addr}/ad4m-language-kv.json"
+    if [ ! -f "${kv_file}" ]; then
+        return 0
+    fi
+
+    local status_output
+    status_output=$(run_ad4m_cli agent status 2>&1 || true)
+    did=$(printf '%s' "${status_output}" | sed $'s/\x1b\\[[0-9;]*m//g' | grep -oE 'did:key:z[A-Za-z0-9]+' | head -1)
+    if [ -z "${did}" ]; then
+        echo "WARNING: could not read agent DID; bootstrap language authors left unsigned." >&2
+        return 0
+    fi
+
+    if ! jq --arg did "${did}" '
+        to_entries | map(
+            if (.key | test("::meta-")) then
+                .value |= (
+                    (try fromjson catch .) as $expr
+                    | if ($expr | type) == "object" then
+                        ($expr | .author = $did | .data.author = $did | tojson)
+                      else . end
+                )
+            else . end
+        ) | from_entries
+    ' "${kv_file}" > "${kv_file}.tmp"; then
+        echo "WARNING: failed to stamp bootstrap language authors with ${did}" >&2
+        rm -f "${kv_file}.tmp"
+        return 0
+    fi
+    mv "${kv_file}.tmp" "${kv_file}"
+    echo "Stamped bootstrap language meta authors as ${did}"
+}
+
 # ── AI model auto-registration ─────────────────────────────────────────────
 # When pre-cached models exist (INCLUDE_MODELS=true at build time), register
 # them with the executor via WebSocket RPC so Flux transcription and
@@ -480,6 +526,7 @@ EXECUTOR_PID=$!
 
 wait_for_executor
 maybe_setup_agent
+stamp_bootstrap_language_authors
 setup_ai_models || true
 setup_global_space
 inject_we_auth
