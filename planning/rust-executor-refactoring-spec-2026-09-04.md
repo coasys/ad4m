@@ -2,14 +2,16 @@
 
 Date: 2026-09-04. Status: proposed. Owner: core team.
 
-Companion navigation docs: `rust-executor/CLAUDE.md` and the per-module `CLAUDE.md`
-files it links to. Keep those in sync as items here land.
+Companion navigation docs: `rust-executor/AGENTS.md` and the per-module
+`AGENTS.md` files it links to. Sibling `CLAUDE.md` files are Claude Code
+entrypoints that contain only `@AGENTS.md` — same text, every agent. Keep the
+`AGENTS.md` files in sync as items here land.
 
 ## 0. Goals and ground rules
 
 Goal: a crate whose structure can be held in one head. Humans and AI agents should
 be able to answer "where does X live, what may I touch, what must I not break"
-from a directory listing plus a 30-line `CLAUDE.md`, without reading 7,000-line
+from a directory listing plus a 30-line `AGENTS.md`, without reading 7,000-line
 files.
 
 Ground rules for every refactoring PR:
@@ -19,22 +21,46 @@ Ground rules for every refactoring PR:
    compile. Behaviour fixes found on the way go into their own commit, called
    out in the PR description.
 2. **No file over ~800 lines of production code, no `mod.rs` over ~300.** Tests
-   count separately (see §5.3). Existing files above the cap are listed in §2 and
+   count separately (see §5.3). Existing files above the cap are listed in §1 and
    are the ones this spec splits.
 3. **Tests pass before and after:** `cd rust-executor && pnpm test` (which is
    `cargo test --release -- --test-threads=1`) plus the integration suites in
    `tests/js` (`pnpm run test-main` from the repo root). A PR that changes a WS
-   handler or MCP tool must run the relevant integration suite.
+   handler or MCP tool must run the relevant integration suite. Until item 11
+   lands, do not drop `--test-threads=1`.
 4. **Prolog stays an option.** `PrologMode::Disabled` is the runtime default and
    has been since 2026-02-11 (`prolog_service/mod.rs:51`). The engine, pools and
    SHACL→Prolog bridge are kept, isolated, and made switchable through config so
    they can come back without a rewrite. Nothing user-visible may depend on Prolog
    silently returning empty results (see item 1).
-5. **Every new directory gets a `CLAUDE.md`** (≤ 40 lines: purpose, files, entry
-   points, invariants, "do not"), and `AGENTS.md` pointing at it.
+5. **Every new directory gets an `AGENTS.md`** (≤ 40 lines: purpose, files, entry
+   points, invariants, "do not") and a sibling `CLAUDE.md` containing only
+   `@AGENTS.md`. Codex, Copilot, Cursor, Grok and others read `AGENTS.md`
+   natively; Claude Code reads `CLAUDE.md` and inlines the import. Do not put
+   unique rules in `CLAUDE.md`. First touch of an existing directory that lacks
+   `AGENTS.md` adds the pair in that PR.
 6. **Keep `pub` surface stable** for `rust-client`, `cli` and the JS SDK. Moving a
    type between modules requires a `pub use` re-export at the old path for one
-   release, unless the old path was crate-private.
+   release, unless the old path was crate-private. After any `#[ts(export)]`
+   change, regenerate `core/src/generated/api/` (see §5.7).
+
+## 0.1 Working this spec (humans and agents)
+
+Read, in order: repo-root `AGENTS.md`, `rust-executor/AGENTS.md`, the module
+`AGENTS.md` for the code you are touching, then **only** the spec item for this
+PR. Do not implement later items "while you're here".
+
+- One spec item (or one named PR inside an item: 3a, 3b, 4a, …) per PR.
+- Do not add methods to files listed in §1 as over the cap; put new `impl`
+  blocks in new files.
+- Do not resolve §4 decisions in a drive-by. Until the team picks, use the
+  defaults in §4.
+- Log-level policy is `rust-executor/LOGGING.md`. The crate uses `log`, not
+  `tracing`.
+- `languages/AGENTS.md` and `js_core/AGENTS.md` together cover the language
+  runtime; read both if you touch either.
+
+Good first PRs (independent, small): items 2, 5, 10.
 
 ## 1. Current state (measured 2026-09-04)
 
@@ -197,8 +223,10 @@ Steps:
    `rust-executor/README.md` bullets for js_core and Prolog. Update
    `SHACL_SDNA_ARCHITECTURE.md` "Implementation Status" to say Prolog is disabled by
    default and configurable.
-7. **Panic messages.** `agent/mod.rs:383,396` and `runtime_service/mod.rs:75-77`
-   say "Couldn't get lock on Ad4mDb" inside AgentService/RuntimeService. Fix.
+7. **Panic messages (audit leftover, separate commit in this PR).**
+   `agent/mod.rs:383,396` and `runtime_service/mod.rs:75-77` say "Couldn't get
+   lock on Ad4mDb" inside AgentService/RuntimeService. Fix the strings; do not
+   mix this into the Prolog commits.
 
 Acceptance: `pnpm test` green; `perspective.getSubjectData` integration test
 green; `AD4M_PROLOG_MODE=pooled cargo test -p ad4m-executor prolog` runs the pool
@@ -219,7 +247,8 @@ Files: `mcp/tools/subjects.rs`, `mcp/tools/dynamic.rs`, `mcp/shacl.rs`.
 2. `mcp/shacl.rs::load_class_properties` goes through `load_class` →
    `shape_to_shacl_class`; delete `load_class_properties_with_uri` (~240 lines).
    Add `impl From<&ModelShape> for ShaclClass` so the field mirror is one place.
-3. Follow-up (separate PR, M): reimplement `handle_dynamic_query`/`_list`/`_get` on
+3. Follow-up **item 2b** (separate PR, M, after item 8's `model_query` test split
+   if that has started): reimplement `handle_dynamic_query`/`_list`/`_get` on
    `perspective.model_query()` so MCP and WS agree on "instance of class X".
 
 Acceptance: MCP integration tests in `tests/js` green; a test that sets a property
@@ -256,7 +285,7 @@ PerspectiveInstance` per file. Target files and source clusters:
 | `sync.rs` | `ensure_link_language`, `nh_sync_loop`, `pending_diffs_loop`, `commit*`, `ensure_public_links_are_shared`, `fallback_sync_loop`, `diff_from_link_language` | 940 |
 | `prolog.rs` | every `prolog_*`/`ensure_prolog_engine_pool*`/`update_prolog_engine*`/`spawn_prolog_facts_update` | 1000 |
 | `sdna.rs` | `add_sdna*`, `get_sdna_links_local`, `get_subject_classes_from_shacl`, `remove_subject_class_shacl_links` | 400 |
-| `commands.rs` | `execute_commands`, `*_actions_from_shacl`, `resolve_property_value`, `create_subject`, `update_subject`, `get_subject_data` | 800 |
+| `commands.rs` | `execute_commands`, `*_actions_from_shacl`, `resolve_property_value`, `create_subject`, `update_subject`, `get_subject_data` | 800 (at the cap; split further rather than grow) |
 | `subscriptions.rs` | `subscribe_and_query`, `model_subscribe_and_query`, `check_subscribed_queries`, `subscribed_queries_loop`, `dispose_query_subscription`, `keepalive_query`, `record_changed_predicates` | 580 |
 | `telepresence.rs` | `others`, `online_agents`, `set_online_status`, `send_signal`, `send_broadcast`, `update_local_agents`, `telepresence_signal_from_link_language` | 335 |
 | `notifications.rs` | `notification_check_loop`, `calc_notification_trigger_matches`, `publish_notification_matches`, … | 190 |
@@ -372,10 +401,10 @@ Also:
   `From<AIServiceError>`, `From<BillingError>`; retire the 137×
   `internal(format!(e))` pattern one namespace at a time.
 - Events: `/api/v1/ws/events` is fully subsumed by the event stream inlined into
-  the RPC socket (`ws_rpc.rs:99-118`). Either remove the endpoint or make RPC
-  event fan-out opt-in via a first message. Delete `pubsub::subscribe_and_process`
-  (dead). Generalise `did_stream!` to take `is_admin` + `LazyDid` so the two
-  inlined auto-processor streams collapse.
+  the RPC socket (`ws_rpc.rs:99-118`). Until D3 is decided, **keep the
+  endpoint**. Delete `pubsub::subscribe_and_process` (dead). Generalise
+  `did_stream!` to take `is_admin` + `LazyDid` so the two inlined
+  auto-processor streams collapse.
 
 Estimated: −1,000 lines.
 
@@ -383,21 +412,34 @@ Estimated: −1,000 lines.
 
 1. Move `perspectives/auto_processor/events.rs` → `agentic/events.rs` first (one
    file, breaks `harness → perspectives` for events).
-2. Move `ai_service/harness/` → `agentic/harness/`; `ai_service` keeps only
-   `ToolProvider`/`ToolSchema`/`CreditGate` traits re-exported from
-   `agentic::harness::provider` (or move the traits into `ai_service/tools.rs`
-   and have `agentic` implement against them — pick the direction that leaves
-   `ai_service` with zero imports from `agentic`/`perspectives`).
+2. Extract `ToolProvider` / `ToolSchema` / `CreditGate` from
+   `ai_service/harness/provider.rs` into `ai_service/tools.rs` (step 5), then
+   move the rest of `ai_service/harness/` → `agentic/harness/` (loop, propose
+   tools, config). Re-export the traits from the old path so existing imports
+   keep compiling.
 3. Move `perspectives/interpretation/`, `flow_*`, `flow_context/`,
    `auto_processor/` → `agentic/`. `perspective_instance/auto_processor_loop.rs`
-   stays a thin caller.
-4. Move `api/openai_compat/tool_grammar.rs` → `agentic/tool_grammar.rs` and the
-   two `harness_bridge.rs` files → `agentic/bridges/{mcp,openai}.rs`.
-5. `agentic` depends on `perspectives`, `ai_service`, `mcp::shacl` one-way. Add a
-   `#[cfg(test)]` module-dependency test (or `cargo modules`/`cargo deny` rule if
-   adopted) that fails on `ai_service → agentic` or `perspectives → agentic`
-   imports.
-6. Move the four e2e files (`interpretation_e2e.rs`, `interpretation_harness_e2e.rs`,
+   stays a thin caller and **must not import `agentic`** (that would re-create
+   the cycle this item exists to break). Store a trait object / `Arc<dyn Fn…>`
+   on the instance (or on `AppContext` once item 11 exists) and wire
+   `agentic::auto_processor::run_tick` from `lib.rs`.
+4. Move `api/openai_compat/tool_grammar.rs` → `agentic/tool_grammar.rs`; move
+   `mcp/tools/{harness_bridge,provider_impl,side_effects}.rs` and
+   `api/openai_compat/harness_bridge.rs` → `agentic/bridges/`. MCP then does not
+   import `agentic`.
+5. **Trait placement:** `ToolProvider` / `ToolSchema` / `CreditGate` live in
+   `ai_service/tools.rs` so `ai_service` has zero imports from `agentic` /
+   `perspectives`. `agentic/bridges` implements them (the current
+   `mcp/tools/provider_impl.rs`). Do not put the traits in `agentic` — if
+   `mcp` still implemented them there, it would cycle with
+   `agentic → mcp::shacl`.
+6. Allowed one-way edges after this item: `api → agentic → perspectives`,
+   `agentic → ai_service`, `agentic → mcp` (tools + `mcp::shacl`, until shape
+   projections live on `ModelShape`), `mcp → perspectives`. Forbidden:
+   `ai_service → agentic`, `perspectives → agentic`, `mcp → agentic`. Enforce
+   with a `#[cfg(test)]` module-dependency test (or `cargo modules` / `cargo
+   deny` if adopted).
+7. Move the four e2e files (`interpretation_e2e.rs`, `interpretation_harness_e2e.rs`,
    `flow_evaluator_e2e.rs`, `flow_context/real_llm_e2e.rs`) under
    `agentic/e2e/` and gate on `#[cfg(feature = "llm-e2e")]` so plain `cargo test`
    does not call real LLMs.
@@ -430,7 +472,7 @@ Estimated: −1,000 lines.
 
 | File | Split | Also |
 |---|---|---|
-| `languages/mod.rs` | `controller.rs` (runtime lifecycle), `install.rs`, `registry.rs`, `expressions.rs` | `create_neighbourhood*`/`get_neighbourhood` → `neighbourhoods.rs`; `read_and_template_holochain_dna` + `apply_template_data` → `holochain_service/dna_template.rs`; narrow the 13 tokio guards held across JS-eval awaits; add tests (currently zero) |
+| `languages/mod.rs` | `controller.rs` (runtime lifecycle), `install.rs`, `registry.rs`, `expressions.rs` | `create_neighbourhood*`/`get_neighbourhood` → existing crate-level `src/neighbourhoods.rs` (not a new file under `languages/`); `read_and_template_holochain_dna` + `apply_template_data` → `holochain_service/dna_template.rs`; narrow the 13 tokio guards held across JS-eval awaits; add tests (currently zero) |
 | `ai_service/mod.rs` | `models.rs`, `llm.rs`, `tasks.rs`, `embed.rs`, `transcription/` | `bill_*_if_authed` behind `CreditGate`; whisper name table → const table |
 | `unyt_service.rs` | `unyt/{dna, client, payments}.rs` | `credit_and_complete` → `billing.rs`; add tests (currently zero) |
 | `wallet.rs` | `wallet/{crypto, backend, local, shared}.rs` | delete legacy `WALLET` singleton |
@@ -453,7 +495,12 @@ config }` built once in `lib.rs` and stored in a `OnceCell`. Existing
 through `RequestContext` (WS), `Ad4mMcpHandler` (MCP) and `PerspectiveInstance::new`.
 Tests construct their own `AppContext` with in-memory DB.
 
+Deno `#[op2]` ops have no `RequestContext`. They keep calling
+`X::global_instance()`; those accessors become shims over the `OnceCell`. Do
+not thread `AppContext` through the JS host.
+
 Success metric: delete `--test-threads=1` from `rust-executor/package.json`.
+Until this item lands, every other PR keeps serial tests.
 
 Also: `HolochainService::init` is currently called from HTTP handlers
 (`api/agent_ws.rs:305,416`); move into the boot sequence behind a flag.
@@ -468,19 +515,27 @@ pasted `match prolog_mode()` blocks), `ShapeCache` (drop `std::sync::RwLock`
 
 ## 4. Decisions needed from the team
 
+Until a decision is recorded here, agents and PRs use the **default** and do
+not freelance the other option.
+
 - **D1 — Prolog config surface.** Config key + env var as in item 1, or config
-  only? Proposal: both, env wins.
+  only? Proposal and **default: both, env wins.** Item 1 implements this.
 - **D2 — `perspectives/ordering`.** 1,118 lines of CRDT collection ordering,
   parsed into `ModelShape.ordering` and never read. Wire into `hydration.rs` and
   the collection setter/adder write path, or delete until needed.
+  **Default: leave the directory in place, unwired.** Do not delete it in a
+  split PR; do not wire it as a side effect of item 8.
 - **D3 — `/api/v1/ws/events`.** Remove, or make RPC-socket event fan-out opt-in.
-  Check `core/` SDK usage first.
+  Check `core/` SDK usage first. **Default: keep the endpoint.** Item 6 may
+  still delete dead `pubsub::subscribe_and_process`.
 - **D4 — Version string.** `globals.rs:7` and `package.json` both hardcode
   `0.13.0-test-interpretation-2`. Proposal: `env!("CARGO_PKG_VERSION")`, and
-  `setVersion.js` writes Cargo.toml only.
+  `setVersion.js` writes Cargo.toml only. **Default: do not touch version
+  strings in a refactor PR.**
 - **D5 — Snapshot artifacts in git.** `CUSTOM_DENO_SNAPSHOT.bin` (2.1 MB) and
   generated `residual_*.rs` (4 MB) are committed though `residual_lazy.rs:15`
   says they are ignored. Ignore + build, or keep committed for CI speed.
+  **Default: leave them committed.**
 
 ## 5. Conventions going forward
 
@@ -519,9 +574,36 @@ pasted `match prolog_mode()` blocks), `ShapeCache` (drop `std::sync::RwLock`
 - `.expect()` only in boot (`lib.rs`) with a message naming the actual subsystem.
 
 ### 5.5 Docs
-- `CLAUDE.md` per directory (see §0 rule 5). `AGENTS.md` = one line pointing at
-  `CLAUDE.md`. Root `AGENTS.md` keeps the Holochain/testing gotchas.
+- Canonical per-directory agent brief is `AGENTS.md` (≤ 40 lines for new dirs;
+  existing module guides may stay longer until that module is split). Sibling
+  `CLAUDE.md` contains only `@AGENTS.md`. Do not put unique rules in
+  `CLAUDE.md`. Root `AGENTS.md` holds the package map, repo-wide rules, and
+  Holochain/testing gotchas.
+- First touch of a directory that lacks `AGENTS.md` adds the pair in that PR
+  (see §0 rule 5). New dirs created by items 3, 4, 7, 8, 9 (`agentic/`, `db/`,
+  `perspective_instance/`, `sparql_store/`, `shacl/`, `unyt/`, `wallet/`, …)
+  get an `AGENTS.md` in the same PR that creates them.
+- Log-level policy: `rust-executor/LOGGING.md`. Do not introduce `tracing`.
 - Design docs live in `planning/`, dated. Stale ones are deleted, not left.
+
+### 5.6 Cross-surface invariants
+- MCP does not go through `api/` handlers; it calls `PerspectiveInstance`
+  directly. Behaviour reachable from both WS and MCP lands in the instance
+  (or `model_query` / `agentic`), not in one surface only.
+- Every new WS handler checks a capability, or is registered with
+  `CapSpec::None` (item 6) and a comment saying why. MCP uses
+  `get_readable_perspective` / `get_writable_perspective`.
+- Any signing, DID, or billing path takes `AgentContext` explicitly.
+- Never call an LLM without a billing decision (`bill_*_if_authed` /
+  `CreditGate`).
+
+### 5.7 Generated SDK types
+`#[ts(export)]` structs in `api/types.rs` and `types/{core,domain}.rs` generate
+into `core/src/generated/api/` via `pnpm generate:api-types` in `core/`
+(`TS_RS_EXPORT_DIR=../core/src/generated/api/ cargo test --lib` in
+`rust-executor`). Item 5's dead-struct deletions must confirm the generated
+files are unused, then regenerate so `core/` does not keep ghosts. Commit the
+generated `.ts` in the same PR as the Rust type change.
 
 ## 6. Suggested schedule
 
@@ -532,7 +614,23 @@ pasted `match prolog_mode()` blocks), `ShapeCache` (drop `std::sync::RwLock`
 | 3 | 3c (dedup), 4b (db split), 6 (CapSpec) |
 | 4 | 7 (agentic/), 8 (query-stack splits, start) |
 | 5–6 | 8 (finish), 9 (service splits), 10 |
-| 7+ | 11 (AppContext), 12 |
+| 7+ | 11 (AppContext), 12; item 2b (MCP via `model_query`) after item 8 |
 
 Items 2, 5, 10 are independent and good first tasks for a new contributor or an
 agent session.
+
+## 7. Crate-level done
+
+The refactor is done when all of the following hold, not merely when the
+schedule is exhausted:
+
+- No production file over ~800 lines, no `mod.rs` over ~300 (tests counted
+  separately, §5.3).
+- `pnpm test` runs without `--test-threads=1` (item 11).
+- The item 7 dependency test is green: no `ai_service → agentic`,
+  `perspectives → agentic`, or `mcp → agentic` imports.
+- With Prolog disabled (the default), Prolog RPCs/MCP `infer` return an
+  explicit error, and `get_subject_data` returns SHACL properties.
+- Every `src/<module>/` directory has `AGENTS.md` plus a `CLAUDE.md` stub.
+- Stale `PHASE1_*` docs are gone; `rust-executor/README.md` matches runtime
+  (Prolog off by default, Rust language controller, no "legacy executor").
