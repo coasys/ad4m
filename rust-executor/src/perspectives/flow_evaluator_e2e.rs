@@ -701,6 +701,25 @@ async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
     .await
     .expect("write superseded proposal");
 
+    // And one on the DECLARED edge with an EMPTY seal: unverifiable, and
+    // with the guard satisfied it would fire n=1 if it were counted — the
+    // sharpest form of the CWE-345 hole. It must be invalidated instead.
+    let empty_seal = write_flow_transition_proposal(
+        &mut f.perspective,
+        "empty-seal",
+        &acting_did,
+        &f.instance_uri.clone(),
+        "identified",
+        "scoped",
+        &[],
+        "",
+        None,
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("write empty-seal proposal");
+
     let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
     assert!(outcomes.is_empty(), "nothing may fire: {outcomes:?}");
 
@@ -712,6 +731,10 @@ async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
     assert!(
         f.links_by_predicate(&superseded).await.is_empty(),
         "superseded proposal must be deleted"
+    );
+    assert!(
+        f.links_by_predicate(&empty_seal).await.is_empty(),
+        "empty-seal proposal must be deleted"
     );
 
     // The instance did not move.
@@ -833,4 +856,83 @@ async fn reject_deletes_live_proposal_and_errors_on_missing_e2e() {
         .await
         .expect("load instances");
     assert_eq!(recs[0].current_state, "identified");
+}
+
+/// Only the DECLARED transition graph may fire (CWE-863 fix): a proposal
+/// with a VALID evidence seal targeting an existing state that no declared
+/// transition reaches from the current one is skipped — kept, not
+/// invalidated — and the instance does not move.
+#[tokio::test(flavor = "multi_thread")]
+async fn consensus_pass_skips_undeclared_transitions_e2e() {
+    use super::flow_consensus::run_flow_consensus_pass;
+    use super::flow_evaluator::recompute_evidence_hash;
+
+    let mut f = seed_satisfied_fixture(None).await;
+
+    // Walk the declared edge first: identified → scoped.
+    let minted = f.run_pass(&[], None).await;
+    assert_eq!(minted.len(), 1, "got {minted:?}");
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    assert_eq!(outcomes.len(), 1, "declared edge must fire: {outcomes:?}");
+
+    // Give "identified" a satisfiable guard so the backward proposal can
+    // carry a REAL seal — isolating the declared-transition gate from the
+    // empty-seal gate.
+    f.perspective
+        .add_link(
+            Link {
+                source: "delivery://Delivery.identified".to_string(),
+                predicate: Some("ad4m://requires".to_string()),
+                target: literal(r#"[{"className":"ns://Task","count":{"min":1}}]"#),
+            },
+            LinkStatus::Local,
+            None,
+            &f.ctx,
+        )
+        .await
+        .expect("add requires to identified");
+
+    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flow = flows.get(FLOW_URI).expect("delivery flow");
+    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
+        .await
+        .expect("records");
+    let acting_did = crate::agent::did_for_context(&f.ctx).expect("did_for_context");
+    let hash = recompute_evidence_hash(&f.perspective, flow, &recs[0], "identified", &acting_did)
+        .await
+        .expect("recompute")
+        .expect("guard satisfied");
+
+    // scoped → identified exists as states but NOT as a declared transition.
+    let back = write_flow_transition_proposal(
+        &mut f.perspective,
+        "undeclared-edge",
+        &acting_did,
+        &f.instance_uri.clone(),
+        "scoped",
+        "identified",
+        &["ad4m://task/1".to_string()],
+        &hash,
+        None,
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("write undeclared-edge proposal");
+
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    assert!(
+        outcomes.is_empty(),
+        "undeclared edge must not fire: {outcomes:?}"
+    );
+
+    // Skipped, NOT invalidated — the flow definition may gain the edge later.
+    assert!(
+        !f.links_by_predicate(&back).await.is_empty(),
+        "undeclared-edge proposal must be kept"
+    );
+    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
+        .await
+        .expect("records");
+    assert_eq!(recs[0].current_state, "scoped", "instance must not move");
 }
