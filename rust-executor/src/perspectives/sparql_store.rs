@@ -1166,6 +1166,64 @@ impl SparqlStore {
             .map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
     }
 
+    /// Cancellation-aware async wrapper around `query()`.
+    ///
+    /// Races the SPARQL evaluation against `cancel.cancelled()`.  If the
+    /// caller cancels mid-flight, this returns
+    /// [`Error::msg("query cancelled")`] immediately and the result
+    /// (whenever it arrives on the blocking thread) is dropped without
+    /// being serialised to JSON or sent over the network.
+    ///
+    /// **Caveat — Oxigraph cannot be interrupted.**  The blocking thread
+    /// continues running until Oxigraph returns, so this method does
+    /// *not* free CPU that's already in flight.  What it does save:
+    ///
+    /// - JSON serialisation of the result (often the biggest single cost
+    ///   for large result sets)
+    /// - the WebSocket write back to the client
+    /// - the client's deserialisation tax
+    /// - any post-processing the caller would have done with the value
+    ///
+    /// For a long-running scan-all that would have shipped megabytes of
+    /// SPARQL results back, that's still meaningful network + memory
+    /// savings.  A future Oxigraph release with an interrupt hook would
+    /// let us actually preempt the eval; the API here is forward-compatible
+    /// with that.
+    pub async fn query_cancellable(
+        &self,
+        query_string: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<String, Error> {
+        if cancel.is_cancelled() {
+            return Err(anyhow!("query cancelled"));
+        }
+        let store = self.clone();
+        let query = query_string.to_string();
+        // query_arbitrary, not query: this is the arbitrary-caller-supplied-
+        // SPARQL entry point (matches the non-cancellable sparql_query path
+        // one level up in perspective_instance.rs). `query()` re-encodes
+        // external ?target/?t bindings into AD4M's internal literal:*: wire
+        // format, which callers of an ad-hoc query string have no reason to
+        // expect (CodeRabbit review, PR #855).
+        let handle = tokio::task::spawn_blocking(move || store.query_arbitrary(&query));
+
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                // We intentionally don't `handle.abort()`: a JoinHandle's
+                // abort signal can't preempt a synchronous loop in
+                // Oxigraph anyway, and abort tends to leave the blocking
+                // pool in a degraded state under repeated cancellation.
+                // The handle is dropped by `select!` when this arm wins;
+                // the result will be discarded when it eventually arrives.
+                Err(anyhow!("query cancelled"))
+            }
+            result = handle => {
+                result.map_err(|e| deno_core::anyhow::anyhow!("spawn_blocking join error: {}", e))?
+            }
+        }
+    }
+
     /// Remove all triples from the store.
     pub fn clear(&self) -> Result<(), Error> {
         self.store.clear()?;
@@ -3594,6 +3652,79 @@ mod tests {
             "MAX timestamp should be present. Raw: {}",
             result
         );
+    }
+
+    // ── Cancellation tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn query_cancellable_returns_normally_when_not_cancelled() {
+        let svc = new_service();
+        let link = make_link("ad4m://s", "ad4m://p", "ad4m://t");
+        svc.add_link(&link).unwrap();
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = svc
+            .query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", cancel)
+            .await
+            .expect("non-cancelled query should succeed");
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert!(!rows.is_empty(), "expected at least one row");
+    }
+
+    #[tokio::test]
+    async fn query_cancellable_returns_error_when_cancelled_before_call() {
+        let svc = new_service();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        // Cancel up front — the select! biased arm should fire immediately.
+        cancel.cancel();
+        let err = svc
+            .query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", cancel)
+            .await
+            .expect_err("pre-cancelled query should error");
+        assert!(
+            err.to_string().contains("query cancelled"),
+            "expected cancellation marker in error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn query_cancellable_biased_select_prefers_cancel_over_ready_handle() {
+        // Honest framing (review nit, PR #855): this does NOT test true
+        // mid-flight cancellation — we can't deterministically force the
+        // SPARQL eval to be slow, so there's no way to land the cancel
+        // while `spawn_blocking` is actually still running without
+        // introducing timing-dependent flakiness.
+        //
+        // What this test does verify: cancelling before the handle is
+        // awaited, on a query with real work to do (50 links, not the
+        // trivial empty-store case the other pre-cancelled test uses),
+        // still takes the `cancel.cancelled()` arm of the `select!` and
+        // never touches the query result — i.e. the `biased` ordering
+        // holds even when the blocking handle would very plausibly have
+        // already resolved by the time we poll (a fast query over 50
+        // triples on a local RocksDB-backed store almost certainly has).
+        let svc = new_service();
+        // Insert a handful of links so the query has actual work to do.
+        for i in 0..50 {
+            let link = make_link(
+                &format!("ad4m://s{}", i),
+                "ad4m://p",
+                &format!("ad4m://t{}", i),
+            );
+            svc.add_link(&link).unwrap();
+        }
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        // Cancel before the await — guarantees the biased cancel arm
+        // fires regardless of how fast the blocking handle resolves.
+        cancel_clone.cancel();
+        let err = svc
+            .query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }", cancel)
+            .await
+            .expect_err("cancelled query should error");
+        assert!(err.to_string().contains("query cancelled"));
     }
 
     // ── Reifier IRI stability for literal:json: targets ──

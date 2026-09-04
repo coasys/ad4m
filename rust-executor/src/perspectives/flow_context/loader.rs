@@ -80,24 +80,44 @@ pub async fn load_flow_instances(
     if subjects.is_empty() {
         return Ok(vec![]);
     }
+    // `model_query` has no `in` operator, so only a single subject is
+    // pushed down; a batch loads everything and filters here.
     let query = if subjects.len() == 1 {
         serde_json::json!({ "where": { "subject": subjects[0].clone() } })
     } else {
         serde_json::json!({})
     };
+    let records = query_flow_instances(perspective, &query).await?;
+    Ok(records
+        .into_iter()
+        .filter(|r| subjects.contains(&r.subject))
+        .collect())
+}
+
+/// Load every live `FlowInstance` on the perspective, unfiltered. Used by
+/// component tests that need all instances without a subject filter.
+#[allow(dead_code)]
+pub async fn load_all_flow_instances(
+    perspective: &PerspectiveInstance,
+) -> anyhow::Result<Vec<FlowInstanceRecord>> {
+    query_flow_instances(perspective, &serde_json::json!({})).await
+}
+
+/// Returns `Ok(vec![])` when the `FlowInstance` class is not registered
+/// yet: a perspective on which no flow has ever been spawned has no live
+/// flows, and that must not fail the extraction pass.
+async fn query_flow_instances(
+    perspective: &PerspectiveInstance,
+    query: &serde_json::Value,
+) -> anyhow::Result<Vec<FlowInstanceRecord>> {
     let json = match perspective
         .model_query(FLOW_INSTANCE_CLASS, &query.to_string())
         .await
     {
         Ok(j) => j,
         Err(e) => {
-            // Absent-class case: no FlowInstances have ever been minted
-            // on this perspective, so the SHACL shape isn't registered
-            // yet. That's a valid steady state — return empty rather
-            // than propagating an error that would break Model C's
-            // extraction pass on every call.
             let msg = format!("{e:#}");
-            if msg.contains("Shape not found") || msg.contains("shape not found") {
+            if msg.to_lowercase().contains("no shacl shape stored") {
                 return Ok(vec![]);
             }
             return Err(anyhow::anyhow!(
@@ -107,16 +127,12 @@ pub async fn load_flow_instances(
     };
     let parsed: serde_json::Value = serde_json::from_str(&json)
         .map_err(|e| anyhow::anyhow!("load_flow_instances: response not JSON: {e:#}"))?;
-    let instances = parsed
+    Ok(parsed
         .get("instances")
         .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let subject_set: HashSet<&str> = subjects.iter().map(String::as_str).collect();
-    Ok(instances
-        .iter()
+        .into_iter()
+        .flatten()
         .filter_map(parse_flow_instance_from_hydrated)
-        .filter(|r| subject_set.contains(r.subject.as_str()))
         .collect())
 }
 
@@ -147,8 +163,8 @@ pub fn build_flow_contexts(
         .collect()
 }
 
-/// Slice 10.3c — compose the two loaders + [`build_flow_contexts`] into
-/// one call that the extraction pass (`run.rs`) can use directly.
+/// Compose the two loaders + [`build_flow_contexts`] into one call that
+/// the extraction pass (`run.rs`) can use directly.
 ///
 /// Returns the (possibly empty) list of [`FlowContext`]s. Any I/O
 /// failure is logged and downgraded to an empty result — the extraction
@@ -383,7 +399,7 @@ mod tests {
     use super::*;
     use crate::perspectives::shacl_parser::parse_flow_to_links;
 
-    // ------------- parse_flow_instance_from_hydrated (slice 10.1b) -------------
+    // ------------- parse_flow_instance_from_hydrated -------------
 
     #[test]
     fn parse_flow_instance_happy_path() {
@@ -472,7 +488,7 @@ mod tests {
         assert!(parse_flow_instance_from_hydrated(&v).is_none());
     }
 
-    // ------------- build_flow_contexts (slice 10.1b) -------------
+    // ------------- build_flow_contexts -------------
 
     /// Test-helper record builder — `flow` is now the flow's URI
     /// (`SHACLFlow.flow_uri()`), not the bare name (James PR #929 R5).
@@ -797,7 +813,7 @@ mod tests {
         );
     }
 
-    // ------------- scope_subject (slice 10.3c) -------------
+    // ------------- scope_subject -------------
 
     #[test]
     fn scope_subject_extracts_id_from_both_variants() {
