@@ -856,15 +856,15 @@ async fn accept_api_n2_quorum_fires_e2e() {
     // `serde_json::to_value(fired)` — lock the wire shape here so the
     // camelCase rename can't drift from core's `FlowFireOutcome` interface.
     let wire = serde_json::to_value(&fired).expect("serialize fired outcomes");
-    let obj = wire[0].as_object().expect("outcome must serialize as object");
+    let obj = wire[0]
+        .as_object()
+        .expect("outcome must serialize as object");
     assert_eq!(obj.len(), 5, "unexpected field count on the wire: {obj:?}");
     assert_eq!(wire[0]["instanceUri"], fired[0].instance_uri.as_str());
     assert_eq!(wire[0]["fromState"], fired[0].from_state.as_str());
     assert_eq!(wire[0]["toState"], fired[0].to_state.as_str());
     assert_eq!(
-        wire[0]["firedByProposers"]
-            .as_array()
-            .map(Vec::len),
+        wire[0]["firedByProposers"].as_array().map(Vec::len),
         Some(2)
     );
     assert!(wire[0]["contributingProposalUris"]
