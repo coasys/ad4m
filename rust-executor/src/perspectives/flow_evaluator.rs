@@ -470,7 +470,7 @@ pub async fn run_engine_proposal_pass(
         // `currentState`, so a satisfied-but-unconsumed transition reappears
         // on every pass — checking duplicates first means it costs two link
         // queries per pass instead of one LLM call per pass.
-        if proposal_already_exists(perspective, transition).await {
+        if proposal_already_exists(perspective, transition, &acting_did).await {
             log::debug!("run_engine_proposal_pass: {label} already proposed; skipping");
             continue;
         }
@@ -524,17 +524,23 @@ pub async fn run_engine_proposal_pass(
     minted
 }
 
-/// Check whether a proposal with the same evidence hash already exists for
-/// the same flow instance AND target state. Keeps the pass idempotent:
-/// minting does not advance `currentState`, so without this check every
-/// later pass re-proposes each satisfied-unconsumed transition — and a
-/// consensus rule counting proposals rather than distinct DIDs could then
-/// be gamed by one agent re-running its own pass. The `to_state` check
-/// matters because two distinct transitions can share identical `requires`
-/// guards and therefore identical evidence hashes.
+/// Check whether **this DID's** proposal with the same evidence hash already
+/// exists for the same flow instance AND target state. Keeps the pass
+/// idempotent: minting does not advance `currentState`, so without this
+/// check every later pass re-proposes each satisfied-unconsumed transition.
+/// The `to_state` check matters because two distinct transitions can share
+/// identical `requires` guards and therefore identical evidence hashes.
+///
+/// The dedup key carries the **proposer dimension** (firing-engine design
+/// §6, from Lal's #932 thread): a proposal synced from another agent's
+/// replica must NOT suppress this agent's own mint, or a multi-DID quorum
+/// could never grow past 1 — the consensus counter counts distinct DIDs, so
+/// each DID needs its own row (or an accept-link) to be countable. Re-mints
+/// by the *same* DID stay impossible, which is all idempotency requires.
 async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
+    acting_did: &str,
 ) -> bool {
     use crate::types::LinkQuery;
     let literal = |s: &str| format!("literal:string:{}", urlencoding::encode(s));
@@ -586,8 +592,20 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
             }
         }
         match links_to("ad4m://flow/to_state", literal(&transition.to_state)).await {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                fail_closed(e);
+                return true;
+            }
+        }
+        // Same (hash, instance, to_state) — but only OUR OWN row suppresses
+        // the mint (see the proposer-dimension invariant above). DIDs are
+        // URIs, so the setter stores the raw value — no `literal:` wrapper
+        // (same as `ad4m://flow/instance` above; the e2e locks this shape).
+        match links_to("ad4m://flow/proposer", acting_did.to_string()).await {
             Ok(true) => return true,
-            Ok(false) => {}
+            Ok(false) => continue,
             Err(e) => {
                 fail_closed(e);
                 return true;
@@ -1285,7 +1303,7 @@ mod tests {
                 by_predicate: HashMap::from([("ad4m://flow/evidence_hashes".to_string(), None)]),
             };
             assert!(
-                proposal_already_exists(&store, &transition()).await,
+                proposal_already_exists(&store, &transition(), "did:key:me").await,
                 "a failed evidence-hash lookup must skip the mint, not duplicate it"
             );
         }
@@ -1326,7 +1344,78 @@ mod tests {
                     ("ad4m://flow/instance".to_string(), None),
                 ]),
             };
-            assert!(proposal_already_exists(&store, &transition()).await);
+            assert!(proposal_already_exists(&store, &transition(), "did:key:me").await);
+        }
+
+        fn full_candidate_store(proposer: &str) -> ScriptedStore {
+            ScriptedStore {
+                by_predicate: HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/evidence_hashes",
+                            "literal:string:hash",
+                        )]),
+                    ),
+                    (
+                        "ad4m://flow/instance".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/instance",
+                            "ad4m://flow/instance/1",
+                        )]),
+                    ),
+                    (
+                        "ad4m://flow/to_state".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/to_state",
+                            "literal:string:scoped",
+                        )]),
+                    ),
+                    (
+                        "ad4m://flow/proposer".to_string(),
+                        // Raw DID target — DIDs are URIs, the setter never
+                        // literal-wraps them (locked by the e2e's
+                        // `assert_has_target(.., "ad4m://flow/proposer", &acting_did)`).
+                        Some(vec![link("proposal://1", "ad4m://flow/proposer", proposer)]),
+                    ),
+                ]),
+            }
+        }
+
+        #[tokio::test]
+        async fn own_matching_proposal_suppresses_the_mint() {
+            let store = full_candidate_store("did:key:me");
+            assert!(
+                proposal_already_exists(&store, &transition(), "did:key:me").await,
+                "re-running the pass must not duplicate this DID's proposal"
+            );
+        }
+
+        #[tokio::test]
+        async fn another_dids_matching_proposal_does_not_suppress() {
+            // The multi-agent quorum case (design §6): agent A's synced
+            // proposal must not block agent B's own — the consensus counter
+            // counts distinct DIDs, so B needs its own countable row.
+            let store = full_candidate_store("did:key:agent-a");
+            assert!(
+                !proposal_already_exists(&store, &transition(), "did:key:agent-b").await,
+                "a foreign proposal must not suppress this DID's mint"
+            );
+        }
+
+        #[tokio::test]
+        async fn proposer_lookup_error_reports_already_proposed() {
+            let mut store = full_candidate_store("did:key:me");
+            store
+                .by_predicate
+                .insert("ad4m://flow/proposer".to_string(), None);
+            assert!(
+                proposal_already_exists(&store, &transition(), "did:key:me").await,
+                "a failed proposer lookup must fail closed like the other lookups"
+            );
         }
 
         #[tokio::test]
@@ -1334,7 +1423,7 @@ mod tests {
             let store = ScriptedStore {
                 by_predicate: HashMap::new(),
             };
-            assert!(!proposal_already_exists(&store, &transition()).await);
+            assert!(!proposal_already_exists(&store, &transition(), "did:key:me").await);
         }
     }
 }

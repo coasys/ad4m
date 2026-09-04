@@ -304,6 +304,52 @@ async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
     );
 }
 
+/// Design §6 (firing engine): a proposal synced from ANOTHER agent must not
+/// suppress this agent's own mint — the consensus counter counts distinct
+/// DIDs, so each needs its own countable row. Locks the proposer dimension
+/// of the dedup key against the live store (raw-DID link shape included).
+#[tokio::test(flavor = "multi_thread")]
+async fn foreign_proposal_does_not_block_own_mint_e2e() {
+    let mut f = seed_satisfied_fixture(None).await;
+
+    // Simulate agent A's replica-synced proposal for the same satisfied
+    // transition: same instance, same to_state, same evidence hash the
+    // engine will compute for our own pass.
+    let satisfied = f.satisfied().await;
+    assert_eq!(
+        satisfied.len(),
+        1,
+        "fixture must satisfy exactly one transition"
+    );
+    write_flow_transition_proposal(
+        &mut f.perspective,
+        "foreign-1",
+        "did:key:agent-a",
+        &f.instance_uri,
+        &satisfied[0].from_state,
+        &satisfied[0].to_state,
+        &satisfied[0].evidence_ids,
+        &satisfied[0].evidence_hash,
+        None,
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("write foreign proposal");
+
+    // Our own pass still mints — quorum can grow past 1.
+    let minted = f.run_pass(&[], None).await;
+    assert_eq!(
+        minted.len(),
+        1,
+        "own mint must not be suppressed by agent-a's row: {minted:?}"
+    );
+
+    // And a re-run of our own pass mints nothing (same-DID idempotency).
+    let rerun = f.run_pass(&[], None).await;
+    assert!(rerun.is_empty(), "own re-run re-proposed: {rerun:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn run_engine_proposal_pass_e2e() {
     let mut f = seed_fixture(None).await;
