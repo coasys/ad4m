@@ -6,7 +6,7 @@
 //! behave end to end.
 
 use super::flow_classes::{mint_flow_instance, write_flow_transition_proposal};
-use super::flow_context::{load_flow_instances, load_shacl_flows};
+use super::flow_context::{load_flow_instances, load_shacl_flows, FlowInstanceRecord};
 use super::flow_evaluator::{
     evaluate_flow_transitions, evidence_hash, run_engine_proposal_pass, SatisfiedTransition,
 };
@@ -120,10 +120,73 @@ impl Fixture {
         .await;
     }
 
-    async fn satisfied(&self) -> Vec<SatisfiedTransition> {
-        let records = load_flow_instances(&self.perspective, &[BASE_URI.to_string()])
+    /// One `add_link` with the fixture's context, for the many test setups
+    /// that bolt a single link onto the seeded graph.
+    async fn link(&mut self, source: &str, predicate: &str, target: &str, status: LinkStatus) {
+        self.perspective
+            .add_link(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: target.to_string(),
+                },
+                status,
+                None,
+                &self.ctx,
+            )
             .await
-            .expect("load_flow_instances");
+            .unwrap_or_else(|e| panic!("add_link({predicate}): {e:#}"));
+    }
+
+    /// `write_flow_transition_proposal` with the fixture's own DID, instance
+    /// URI and context filled in.
+    async fn write_proposal(
+        &mut self,
+        proposal_id: &str,
+        from_state: &str,
+        to_state: &str,
+        evidence_ids: &[String],
+        evidence_hash: &str,
+    ) -> String {
+        let acting_did = crate::agent::did_for_context(&self.ctx).expect("did_for_context");
+        let instance_uri = self.instance_uri.clone();
+        write_flow_transition_proposal(
+            &mut self.perspective,
+            proposal_id,
+            &acting_did,
+            &instance_uri,
+            from_state,
+            to_state,
+            evidence_ids,
+            evidence_hash,
+            None,
+            None,
+            &self.ctx,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("write `{proposal_id}` proposal: {e:#}"))
+    }
+
+    async fn instances(&self) -> Vec<FlowInstanceRecord> {
+        load_flow_instances(&self.perspective, &[BASE_URI.to_string()])
+            .await
+            .expect("load_flow_instances")
+    }
+
+    /// `currentState` of the flow instance anchored on `BASE_URI`.
+    async fn current_state(&self) -> String {
+        self.instances().await[0].current_state.clone()
+    }
+
+    /// One proposal pass that must mint exactly one proposal; its URI.
+    async fn mint_one(&mut self) -> String {
+        let minted = self.run_pass(&[], None).await;
+        assert_eq!(minted.len(), 1, "got {minted:?}");
+        minted.into_iter().next().unwrap()
+    }
+
+    async fn satisfied(&self) -> Vec<SatisfiedTransition> {
+        let records = self.instances().await;
         let flows = load_shacl_flows(&self.perspective)
             .await
             .expect("load_shacl_flows");
@@ -650,16 +713,18 @@ async fn harness_propose_transition_tool_call_routes_rationale_to_graph_e2e() {
 // run_flow_consensus_pass — the firing half, against the live store.
 // ---------------------------------------------------------------------------
 
+use super::flow_consensus::{
+    accept_flow_proposal, load_flow_transition_proposals, reject_flow_proposal,
+    run_flow_consensus_pass, ACCEPTED_BY_PREDICATE,
+};
+
 /// Happy path with the default `{ n: 1 }` rule: the pass verifies the
 /// minted proposal's evidence against the live graph, fires the
 /// transition, keep-and-marks the proposal, and a re-run is a no-op.
 #[tokio::test(flavor = "multi_thread")]
 async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
-    use super::flow_consensus::{load_flow_transition_proposals, run_flow_consensus_pass};
-
     let mut f = seed_satisfied_fixture(None).await;
-    let minted = f.run_pass(&[], None).await;
-    assert_eq!(minted.len(), 1, "got {minted:?}");
+    let minted = f.mint_one().await;
 
     let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert_eq!(outcomes.len(), 1, "n=1 default rule fires immediately");
@@ -670,12 +735,10 @@ async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
         ),
         ("identified", "scoped")
     );
-    assert_eq!(outcomes[0].contributing_proposal_uris, minted);
+    assert_eq!(outcomes[0].contributing_proposal_uris, vec![minted.clone()]);
 
     // `currentState` advanced on-graph.
-    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
-        .await
-        .expect("load instances");
+    let recs = f.instances().await;
     assert_eq!(recs.len(), 1);
     assert_eq!(recs[0].current_state, "scoped");
 
@@ -685,7 +748,7 @@ async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
         .await
         .expect("load proposals");
     assert!(live.is_empty(), "fired proposal must be resolved: {live:?}");
-    let by_pred = f.links_by_predicate(&minted[0]).await;
+    let by_pred = f.links_by_predicate(&minted).await;
     assert_has_target(&by_pred, "ad4m://flow/resolved_as", &literal("fired"));
     assert_has_target(&by_pred, "ad4m://flow/instance", &f.instance_uri);
 
@@ -700,84 +763,46 @@ async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
 /// deleted (trigger a), and neither fires the transition.
 #[tokio::test(flavor = "multi_thread")]
 async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
-    use super::flow_consensus::run_flow_consensus_pass;
-
     let mut f = seed_satisfied_fixture(None).await;
-    let acting_did = crate::agent::did_for_context(&f.ctx).expect("did_for_context");
 
-    let stale_seal = write_flow_transition_proposal(
-        &mut f.perspective,
-        "stale-seal",
-        &acting_did,
-        &f.instance_uri.clone(),
-        "identified",
-        "scoped",
-        &["ad4m://task/1".to_string()],
-        "deadbeef-not-the-live-hash",
-        None,
-        None,
-        &f.ctx,
-    )
-    .await
-    .expect("write stale-seal proposal");
+    let cases: [(&str, &str, &str, &[String], &str); 3] = [
+        // Trigger (b): a seal the live graph cannot reproduce.
+        (
+            "stale-seal",
+            "identified",
+            "scoped",
+            &["ad4m://task/1".to_string()],
+            "deadbeef-not-the-live-hash",
+        ),
+        // Trigger (a): a `fromState` the instance already left.
+        ("superseded", "scoped", "identified", &[], ""),
+        // On the DECLARED edge with an EMPTY seal: unverifiable, and with the
+        // guard satisfied it would fire n=1 if it were counted — the sharpest
+        // form of the CWE-345 hole. It must be invalidated instead.
+        ("empty-seal", "identified", "scoped", &[], ""),
+    ];
 
-    let superseded = write_flow_transition_proposal(
-        &mut f.perspective,
-        "superseded",
-        &acting_did,
-        &f.instance_uri.clone(),
-        "scoped",
-        "identified",
-        &[],
-        "",
-        None,
-        None,
-        &f.ctx,
-    )
-    .await
-    .expect("write superseded proposal");
-
-    // And one on the DECLARED edge with an EMPTY seal: unverifiable, and
-    // with the guard satisfied it would fire n=1 if it were counted — the
-    // sharpest form of the CWE-345 hole. It must be invalidated instead.
-    let empty_seal = write_flow_transition_proposal(
-        &mut f.perspective,
-        "empty-seal",
-        &acting_did,
-        &f.instance_uri.clone(),
-        "identified",
-        "scoped",
-        &[],
-        "",
-        None,
-        None,
-        &f.ctx,
-    )
-    .await
-    .expect("write empty-seal proposal");
+    let mut uris = Vec::new();
+    for (id, from_state, to_state, evidence, hash) in cases {
+        uris.push(
+            f.write_proposal(id, from_state, to_state, evidence, hash)
+                .await,
+        );
+    }
 
     let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert!(outcomes.is_empty(), "nothing may fire: {outcomes:?}");
 
     // Hard-deleted, not marked: every source-link gone.
-    assert!(
-        f.links_by_predicate(&stale_seal).await.is_empty(),
-        "stale-sealed proposal must be deleted"
-    );
-    assert!(
-        f.links_by_predicate(&superseded).await.is_empty(),
-        "superseded proposal must be deleted"
-    );
-    assert!(
-        f.links_by_predicate(&empty_seal).await.is_empty(),
-        "empty-seal proposal must be deleted"
-    );
+    for ((id, ..), uri) in cases.iter().zip(&uris) {
+        assert!(
+            f.links_by_predicate(uri).await.is_empty(),
+            "{id} proposal must be deleted"
+        );
+    }
 
     // The instance did not move.
-    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
-        .await
-        .expect("load instances");
-    assert_eq!(recs[0].current_state, "identified");
+    assert_eq!(f.current_state().await, "identified");
 }
 
 /// Accept API + a real `{ n: 2 }` per-state rule: one DID holds, a second
@@ -785,27 +810,16 @@ async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
 /// the outcome without waiting for the next transcript.
 #[tokio::test(flavor = "multi_thread")]
 async fn accept_api_n2_quorum_fires_e2e() {
-    use super::flow_consensus::{
-        accept_flow_proposal, run_flow_consensus_pass, ACCEPTED_BY_PREDICATE,
-    };
-
     let mut f = seed_satisfied_fixture(None).await;
-    f.perspective
-        .add_link(
-            Link {
-                source: "delivery://Delivery.scoped".to_string(),
-                predicate: Some("ad4m://consensusRule".to_string()),
-                target: literal(r#"{"n":2}"#),
-            },
-            LinkStatus::Local,
-            None,
-            &f.ctx,
-        )
-        .await
-        .expect("add consensusRule link");
+    f.link(
+        "delivery://Delivery.scoped",
+        "ad4m://consensusRule",
+        &literal(r#"{"n":2}"#),
+        LinkStatus::Local,
+    )
+    .await;
 
-    let minted = f.run_pass(&[], None).await;
-    assert_eq!(minted.len(), 1, "got {minted:?}");
+    let minted = f.mint_one().await;
 
     // One distinct DID < n=2: nothing fires.
     let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
@@ -815,7 +829,7 @@ async fn accept_api_n2_quorum_fires_e2e() {
     // no second distinct DID — still no fire.
     let acting_did = crate::agent::did_for_context(&f.ctx).expect("did_for_context");
     for _ in 0..2 {
-        let fired = accept_flow_proposal(&mut f.perspective, &minted[0], &f.ctx)
+        let fired = accept_flow_proposal(&mut f.perspective, &minted, &f.ctx)
             .await
             .expect("self-accept");
         assert!(
@@ -823,7 +837,7 @@ async fn accept_api_n2_quorum_fires_e2e() {
             "self-accept must not reach n=2: {fired:?}"
         );
     }
-    let by_pred = f.links_by_predicate(&minted[0]).await;
+    let by_pred = f.links_by_predicate(&minted).await;
     assert_eq!(
         by_pred.get(ACCEPTED_BY_PREDICATE).map(Vec::len),
         Some(1),
@@ -833,20 +847,14 @@ async fn accept_api_n2_quorum_fires_e2e() {
     // A FORGED second acceptance — authored by *us*, naming a DID we do not
     // control — must not count toward quorum (votes are authorship claims,
     // not data claims: `l.author == l.data.target` is the identity binding).
-    f.perspective
-        .add_link(
-            Link {
-                source: minted[0].clone(),
-                predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
-                target: "did:key:forged-victim".to_string(),
-            },
-            LinkStatus::Shared,
-            None,
-            &f.ctx,
-        )
-        .await
-        .expect("forged acceptedBy link");
-    let fired = accept_flow_proposal(&mut f.perspective, &minted[0], &f.ctx)
+    f.link(
+        &minted,
+        ACCEPTED_BY_PREDICATE,
+        "did:key:forged-victim",
+        LinkStatus::Shared,
+    )
+    .await;
+    let fired = accept_flow_proposal(&mut f.perspective, &minted, &f.ctx)
         .await
         .expect("accept with forged vote present");
     assert!(
@@ -863,7 +871,7 @@ async fn accept_api_n2_quorum_fires_e2e() {
                 author: "did:key:other-agent".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 data: Link {
-                    source: minted[0].clone(),
+                    source: minted.clone(),
                     predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
                     target: "did:key:other-agent".to_string(),
                 },
@@ -878,7 +886,7 @@ async fn accept_api_n2_quorum_fires_e2e() {
         )
         .await
         .expect("second-agent acceptedBy link");
-    let fired = accept_flow_proposal(&mut f.perspective, &minted[0], &f.ctx)
+    let fired = accept_flow_proposal(&mut f.perspective, &minted, &f.ctx)
         .await
         .expect("accept with quorum");
     assert_eq!(fired.len(), 1, "n=2 met must fire: {fired:?}");
@@ -890,7 +898,7 @@ async fn accept_api_n2_quorum_fires_e2e() {
 
     // Resolved proposals are immutable to the API.
     assert!(
-        accept_flow_proposal(&mut f.perspective, &minted[0], &f.ctx)
+        accept_flow_proposal(&mut f.perspective, &minted, &f.ctx)
             .await
             .is_err(),
         "accept on a fired proposal must error"
@@ -962,30 +970,24 @@ async fn forged_accept_naming_acting_did_does_not_suppress_own_vote_e2e() {
 /// left to reject), and never moves the instance.
 #[tokio::test(flavor = "multi_thread")]
 async fn reject_deletes_live_proposal_and_errors_on_missing_e2e() {
-    use super::flow_consensus::reject_flow_proposal;
-
     let mut f = seed_satisfied_fixture(None).await;
-    let minted = f.run_pass(&[], None).await;
-    assert_eq!(minted.len(), 1, "got {minted:?}");
+    let minted = f.mint_one().await;
 
-    reject_flow_proposal(&mut f.perspective, &minted[0])
+    reject_flow_proposal(&mut f.perspective, &minted)
         .await
         .expect("reject");
     assert!(
-        f.links_by_predicate(&minted[0]).await.is_empty(),
+        f.links_by_predicate(&minted).await.is_empty(),
         "rejected proposal must be hard-deleted"
     );
     assert!(
-        reject_flow_proposal(&mut f.perspective, &minted[0])
+        reject_flow_proposal(&mut f.perspective, &minted)
             .await
             .is_err(),
         "rejecting a deleted proposal must error"
     );
 
-    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
-        .await
-        .expect("load instances");
-    assert_eq!(recs[0].current_state, "identified");
+    assert_eq!(f.current_state().await, "identified");
 }
 
 /// Only the DECLARED transition graph may fire (CWE-863 fix): a proposal
@@ -994,39 +996,29 @@ async fn reject_deletes_live_proposal_and_errors_on_missing_e2e() {
 /// invalidated — and the instance does not move.
 #[tokio::test(flavor = "multi_thread")]
 async fn consensus_pass_skips_undeclared_transitions_e2e() {
-    use super::flow_consensus::run_flow_consensus_pass;
     use super::flow_evaluator::recompute_evidence_hash;
 
     let mut f = seed_satisfied_fixture(None).await;
 
     // Walk the declared edge first: identified → scoped.
-    let minted = f.run_pass(&[], None).await;
-    assert_eq!(minted.len(), 1, "got {minted:?}");
+    f.mint_one().await;
     let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert_eq!(outcomes.len(), 1, "declared edge must fire: {outcomes:?}");
 
     // Give "identified" a satisfiable guard so the backward proposal can
     // carry a REAL seal — isolating the declared-transition gate from the
     // empty-seal gate.
-    f.perspective
-        .add_link(
-            Link {
-                source: "delivery://Delivery.identified".to_string(),
-                predicate: Some("ad4m://requires".to_string()),
-                target: literal(r#"[{"className":"ns://Task","count":{"min":1}}]"#),
-            },
-            LinkStatus::Local,
-            None,
-            &f.ctx,
-        )
-        .await
-        .expect("add requires to identified");
+    f.link(
+        "delivery://Delivery.identified",
+        "ad4m://requires",
+        &literal(r#"[{"className":"ns://Task","count":{"min":1}}]"#),
+        LinkStatus::Local,
+    )
+    .await;
 
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
     let flow = flows.get(FLOW_URI).expect("delivery flow");
-    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
-        .await
-        .expect("records");
+    let recs = f.instances().await;
     let acting_did = crate::agent::did_for_context(&f.ctx).expect("did_for_context");
     let hash = recompute_evidence_hash(&f.perspective, flow, &recs[0], "identified", &acting_did)
         .await
@@ -1034,21 +1026,15 @@ async fn consensus_pass_skips_undeclared_transitions_e2e() {
         .expect("guard satisfied");
 
     // scoped → identified exists as states but NOT as a declared transition.
-    let back = write_flow_transition_proposal(
-        &mut f.perspective,
-        "undeclared-edge",
-        &acting_did,
-        &f.instance_uri.clone(),
-        "scoped",
-        "identified",
-        &["ad4m://task/1".to_string()],
-        &hash,
-        None,
-        None,
-        &f.ctx,
-    )
-    .await
-    .expect("write undeclared-edge proposal");
+    let back = f
+        .write_proposal(
+            "undeclared-edge",
+            "scoped",
+            "identified",
+            &["ad4m://task/1".to_string()],
+            &hash,
+        )
+        .await;
 
     let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert!(
@@ -1061,10 +1047,7 @@ async fn consensus_pass_skips_undeclared_transitions_e2e() {
         !f.links_by_predicate(&back).await.is_empty(),
         "undeclared-edge proposal must be kept"
     );
-    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
-        .await
-        .expect("records");
-    assert_eq!(recs[0].current_state, "scoped", "instance must not move");
+    assert_eq!(f.current_state().await, "scoped", "instance must not move");
 }
 
 /// Design principle #5 against the live store: an instance still carrying
@@ -1075,19 +1058,13 @@ async fn overlay_pending_evidence_is_excluded_e2e() {
     let mut f = seed_fixture(None).await;
     f.seed_task("ad4m://task/pending", "Pending Task").await;
     // What `apply_with_overlay` leaves on a base until a human accepts it.
-    f.perspective
-        .add_link(
-            Link {
-                source: "ad4m://task/pending".to_string(),
-                predicate: Some("ad4m://interp/kind".to_string()),
-                target: literal("create"),
-            },
-            LinkStatus::Local,
-            None,
-            &f.ctx,
-        )
-        .await
-        .expect("add overlay kind link");
+    f.link(
+        "ad4m://task/pending",
+        "ad4m://interp/kind",
+        &literal("create"),
+        LinkStatus::Local,
+    )
+    .await;
 
     let minted = f.run_pass(&[], None).await;
     assert!(
@@ -1097,9 +1074,8 @@ async fn overlay_pending_evidence_is_excluded_e2e() {
 
     // A committed task satisfies it — and the proposal cites ONLY that one.
     f.seed_task("ad4m://task/committed", "Committed Task").await;
-    let minted = f.run_pass(&[], None).await;
-    assert_eq!(minted.len(), 1, "got {minted:?}");
-    let by_pred = f.links_by_predicate(&minted[0]).await;
+    let minted = f.mint_one().await;
+    let by_pred = f.links_by_predicate(&minted).await;
     let evidence = by_pred
         .get("ad4m://flow/evidence")
         .cloned()

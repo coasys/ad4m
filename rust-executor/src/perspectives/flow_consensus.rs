@@ -1041,48 +1041,43 @@ mod tests {
             }
         }
 
+        /// `(name, role query, member DIDs, candidates, expected eligible set,
+        /// expected query count)`. `Some(n)` in the last column asserts that
+        /// `n` membership queries ran — one per candidate, in order, each
+        /// carrying that candidate's own DID.
         #[tokio::test]
-        async fn shape1_did_property_filters_candidates() {
-            let stub = RoleStub {
-                member_dids: dids(&["did:key:alice"]),
-                rows_per_match: 1,
-                ..Default::default()
-            };
-            let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
-            let eligible = resolve_role_dids(
-                &stub,
-                &role,
-                &record(),
-                &dids(&["did:key:alice", "did:key:bob"]),
-            )
-            .await
-            .unwrap();
-            assert_eq!(eligible, HashSet::from(["did:key:alice".to_string()]));
-            let calls = stub.calls.lock().unwrap();
-            assert_eq!(calls.len(), 2, "one membership query per candidate");
-            assert!(
-                calls[0].contains("did:key:alice") && calls[1].contains("did:key:bob"),
-                "each query carries its candidate's DID: {calls:?}"
-            );
-        }
+        #[rustfmt::skip]
+        async fn resolve_role_dids_success_cases() {
+            let cases: Vec<(&str, Value, &[&str], &[&str], &[&str], Option<usize>)> = vec![
+                ("shape 1: didProperty filters candidates",
+                 json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
+                 &["did:key:alice"], &["did:key:alice", "did:key:bob"], &["did:key:alice"], Some(2)),
+                ("shape 2: $did token substitutes per candidate",
+                 json!({ "className": "ns://Member", "where": { "member": "$did" } }),
+                 &["did:key:bob"], &["did:key:alice", "did:key:bob"], &["did:key:bob"], None),
+                ("one role row does not satisfy count.min = 2",
+                 json!({ "className": "ns://Reviewer", "didProperty": "agent", "count": { "min": 2 } }),
+                 &["did:key:alice"], &["did:key:alice"], &[], None),
+            ];
 
-        #[tokio::test]
-        async fn shape2_did_token_substitutes_per_candidate() {
-            let stub = RoleStub {
-                member_dids: dids(&["did:key:bob"]),
-                rows_per_match: 1,
-                ..Default::default()
-            };
-            let role = role(json!({ "className": "ns://Member", "where": { "member": "$did" } }));
-            let eligible = resolve_role_dids(
-                &stub,
-                &role,
-                &record(),
-                &dids(&["did:key:alice", "did:key:bob"]),
-            )
-            .await
-            .unwrap();
-            assert_eq!(eligible, HashSet::from(["did:key:bob".to_string()]));
+            for (name, role_json, member_dids, candidates, expected, expect_calls) in cases {
+                let stub = RoleStub {
+                    member_dids: dids(member_dids), rows_per_match: 1, ..Default::default()
+                };
+                let eligible = resolve_role_dids(&stub, &role(role_json), &record(), &dids(candidates))
+                    .await
+                    .unwrap();
+                assert_eq!(eligible, dids(expected).into_iter().collect::<HashSet<_>>(), "{name}");
+
+                if let Some(n) = expect_calls {
+                    let calls = stub.calls.lock().unwrap();
+                    assert_eq!(calls.len(), n, "{name}: one membership query per candidate");
+                    for (call, candidate) in calls.iter().zip(candidates) {
+                        assert!(call.contains(candidate),
+                                "{name}: each query carries its candidate's DID: {calls:?}");
+                    }
+                }
+            }
         }
 
         #[tokio::test]
@@ -1110,54 +1105,27 @@ mod tests {
             );
         }
 
+        /// Both role-resolution failure modes must fail closed — error out,
+        /// never degrade to "everyone passes".
         #[tokio::test]
-        async fn count_bounds_apply_to_role_membership() {
-            let stub = RoleStub {
-                member_dids: dids(&["did:key:alice"]),
-                rows_per_match: 1,
-                ..Default::default()
-            };
-            let role = role(json!({
-                "className": "ns://Reviewer",
-                "didProperty": "agent",
-                "count": { "min": 2 }
-            }));
-            let eligible = resolve_role_dids(&stub, &role, &record(), &dids(&["did:key:alice"]))
-                .await
-                .unwrap();
-            assert!(
-                eligible.is_empty(),
-                "one role row does not satisfy count.min = 2"
-            );
-        }
+        #[rustfmt::skip]
+        async fn resolve_role_dids_error_cases() {
+            let cases: Vec<(&str, RoleStub, Value, &str)> = vec![
+                ("a store error must error, not pass everyone",
+                 RoleStub { error: Some("store down".into()), ..Default::default() },
+                 json!({ "className": "ns://Reviewer", "didProperty": "agent" }), "store down"),
+                ("a role query model_query cannot express must error, not pass everyone",
+                 RoleStub::default(),
+                 json!({ "className": "ns://Reviewer", "didProperty": "agent",
+                         "where": { "status": { "matches": ".*" } } }), ""),
+            ];
 
-        #[tokio::test]
-        async fn query_error_fails_closed() {
-            let stub = RoleStub {
-                error: Some("store down".into()),
-                ..Default::default()
-            };
-            let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
-            let err = resolve_role_dids(&stub, &role, &record(), &dids(&["did:key:alice"]))
-                .await
-                .unwrap_err();
-            assert!(err.to_string().contains("store down"), "got {err:#}");
-        }
-
-        #[tokio::test]
-        async fn untranslatable_role_query_fails_closed() {
-            let stub = RoleStub::default();
-            let role = role(json!({
-                "className": "ns://Reviewer",
-                "didProperty": "agent",
-                "where": { "status": { "matches": ".*" } }
-            }));
-            assert!(
-                resolve_role_dids(&stub, &role, &record(), &dids(&["did:key:alice"]))
+            for (name, stub, role_json, expect_contains) in cases {
+                let err = resolve_role_dids(&stub, &role(role_json), &record(), &dids(&["did:key:alice"]))
                     .await
-                    .is_err(),
-                "a role query model_query cannot express must error, not pass everyone"
-            );
+                    .expect_err(name);
+                assert!(err.to_string().contains(expect_contains), "{name}: got {err:#}");
+            }
         }
     }
 
@@ -1215,6 +1183,17 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+    fn accepted(
+        mut p: FlowTransitionProposalRecord,
+        acceptors: &[&str],
+    ) -> FlowTransitionProposalRecord {
+        p.acceptors = acceptors.iter().map(|s| s.to_string()).collect();
+        p
+    }
+
+    const T1: &str = "2026-01-01T00:00:00Z";
+    const T2: &str = "2026-01-02T00:00:00Z";
+
     // ---- aggregate_flow_votes -------------------------------------------
 
     #[test]
@@ -1229,13 +1208,98 @@ mod tests {
         assert!(err.to_string().contains("eligible_dids"), "{err}");
     }
 
+    /// The whole `aggregate_flow_votes` family in one table: every row is
+    /// the same call shape asserting the same five things, so the rows *are*
+    /// the differences between the cases. `required_count` is derived from
+    /// `rule` and checked on every tally, which also pins the §7.1 `n = 1`
+    /// default when `rule` is `None`.
+    ///
+    /// `(name, props, rule, eligible_dids, tally_count, distinct_proposers,
+    /// eligible_proposers, consensus_reached, fires)` — the four expectations
+    /// after `tally_count` are read off `tallies[0]`.
+    type TallyCase = (
+        &'static str,
+        Vec<FlowTransitionProposalRecord>,
+        Option<ConsensusRule>,
+        Option<HashSet<String>>,
+        usize,
+        &'static [&'static str],
+        &'static [&'static str],
+        bool,
+        bool,
+    );
+
     #[test]
-    fn accepts_from_role_plus_empty_eligible_set_no_fire() {
-        let props = vec![proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z")];
-        let out = aggregate_flow_votes(&props, Some(&from_role_rule(1)), Some(&dids(&[]))).unwrap();
-        assert_eq!(out.tallies.len(), 1);
-        assert!(!out.tallies[0].consensus_reached);
-        assert!(out.fires.is_none());
+    #[rustfmt::skip]
+    fn aggregate_flow_votes_tally_cases() {
+        let cases: Vec<TallyCase> = vec![
+            ("from_role with an empty eligible set never fires",
+             vec![proposal("a", "b", "did:alice", T1)], Some(from_role_rule(1)), Some(dids(&[])),
+             1, &["did:alice"], &[], false, false),
+            ("rule omitted defaults to n = 1",
+             vec![proposal("a", "b", "did:alice", T1)], None, None,
+             1, &["did:alice"], &["did:alice"], true, true),
+            ("the same DID twice for one target counts once",
+             vec![proposal("a", "b", "did:alice", T1), proposal("a", "b", "did:alice", T2)],
+             Some(rule(2)), None,
+             1, &["did:alice"], &["did:alice"], false, false),
+            ("n = 2: one distinct DID does not meet the threshold",
+             vec![proposal("a", "b", "did:alice", T1)], Some(rule(2)), None,
+             1, &["did:alice"], &["did:alice"], false, false),
+            ("n = 2: two distinct DIDs meet the threshold",
+             vec![proposal("a", "b", "did:alice", T1), proposal("a", "b", "did:bob", T2)],
+             Some(rule(2)), None,
+             1, &["did:alice", "did:bob"], &["did:alice", "did:bob"], true, true),
+            // Design §7.2: a DID qualifies iff it has proposed OR accepted. One
+            // proposal from Alice, accepted by Bob → n=2 is met without a second
+            // proposal — the accept-link path.
+            ("an acceptor counts like a second proposer",
+             vec![accepted(proposal("a", "b", "did:alice", T1), &["did:bob"])], Some(rule(2)), None,
+             1, &["did:alice", "did:bob"], &["did:alice", "did:bob"], true, true),
+            ("a proposer accepting their own proposal still counts once",
+             vec![accepted(proposal("a", "b", "did:alice", T1), &["did:alice"])], Some(rule(2)), None,
+             1, &["did:alice"], &["did:alice"], false, false),
+            // Bob (in role) accepts Alice's (not in role) proposal: only Bob
+            // counts, so n=1-with-role fires on the acceptor alone.
+            ("acceptors pass through the from_role gate",
+             vec![accepted(proposal("a", "b", "did:alice", T1), &["did:bob"])],
+             Some(from_role_rule(1)), Some(dids(&["did:bob"])),
+             1, &["did:alice", "did:bob"], &["did:bob"], true, true),
+            ("distinct_proposers is sorted lexicographically",
+             vec![proposal("a", "b", "did:zed", T1), proposal("a", "b", "did:alice", T2)],
+             Some(rule(1)), None,
+             1, &["did:alice", "did:zed"], &["did:alice", "did:zed"], true, true),
+            ("only eligible DIDs contribute to consensus",
+             vec![proposal("a", "b", "did:alice", T1), proposal("a", "b", "did:bob", T2)],
+             Some(from_role_rule(2)), Some(dids(&["did:alice"])),
+             1, &["did:alice", "did:bob"], &["did:alice"], false, false),
+            ("consensus fails when only a non-role DID proposed",
+             vec![proposal("a", "b", "did:mallory", T1)],
+             Some(from_role_rule(1)), Some(dids(&["did:alice"])),
+             1, &["did:mallory"], &[], false, false),
+            ("required_count is copied onto every tally",
+             vec![proposal("a", "b", "did:alice", T1), proposal("b", "c", "did:bob", T2)],
+             Some(rule(3)), None,
+             2, &["did:alice"], &["did:alice"], false, false),
+            ("without from_role, eligible_proposers equals distinct_proposers",
+             vec![proposal("a", "b", "did:alice", T1), proposal("a", "b", "did:bob", T2)],
+             Some(rule(1)), None,
+             1, &["did:alice", "did:bob"], &["did:alice", "did:bob"], true, true),
+        ];
+
+        for (name, props, rule, eligible, tally_count, distinct, eligible_out, reached, fires) in cases {
+            let required = rule.as_ref().map_or(1, |r| r.n);
+            let out = aggregate_flow_votes(&props, rule.as_ref(), eligible.as_ref())
+                .unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert_eq!(out.tallies.len(), tally_count, "{name}: tally count");
+            assert!(out.tallies.iter().all(|t| t.required_count == required),
+                    "{name}: required_count must be {required} on every tally: {:?}", out.tallies);
+            let t = &out.tallies[0];
+            assert_eq!(t.distinct_proposers, distinct, "{name}: distinct_proposers");
+            assert_eq!(t.eligible_proposers, eligible_out, "{name}: eligible_proposers");
+            assert_eq!(t.consensus_reached, reached, "{name}: consensus_reached");
+            assert_eq!(out.fires.is_some(), fires, "{name}: fires");
+        }
     }
 
     #[test]
@@ -1243,77 +1307,6 @@ mod tests {
         let out = aggregate_flow_votes(&[], Some(&rule(1)), None).unwrap();
         assert!(out.tallies.is_empty());
         assert!(out.fires.is_none());
-    }
-
-    #[test]
-    fn defaults_to_n_1_when_rule_omitted() {
-        let props = vec![proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z")];
-        let out = aggregate_flow_votes(&props, None, None).unwrap();
-        assert_eq!(out.tallies[0].required_count, 1);
-        assert!(out.tallies[0].consensus_reached);
-        assert!(out.fires.is_some());
-    }
-
-    #[test]
-    fn same_did_twice_for_one_target_counts_once() {
-        let props = vec![
-            proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z"),
-            proposal("a", "b", "did:alice", "2026-01-02T00:00:00Z"),
-        ];
-        let out = aggregate_flow_votes(&props, Some(&rule(2)), None).unwrap();
-        assert_eq!(out.tallies[0].distinct_proposers, vec!["did:alice"]);
-        assert!(!out.tallies[0].consensus_reached);
-    }
-
-    #[test]
-    fn n_2_threshold_two_distinct_meet_one_does_not() {
-        let one = vec![proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z")];
-        let out = aggregate_flow_votes(&one, Some(&rule(2)), None).unwrap();
-        assert!(!out.tallies[0].consensus_reached);
-
-        let two = vec![
-            proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z"),
-            proposal("a", "b", "did:bob", "2026-01-02T00:00:00Z"),
-        ];
-        let out = aggregate_flow_votes(&two, Some(&rule(2)), None).unwrap();
-        assert!(out.tallies[0].consensus_reached);
-    }
-
-    #[test]
-    fn an_acceptor_counts_like_a_second_proposer() {
-        // Design §7.2: a DID qualifies iff it has proposed OR accepted.
-        // One proposal from Alice, accepted by Bob → n=2 is met without a
-        // second proposal — the accept-link path.
-        let mut p = proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z");
-        p.acceptors = vec!["did:bob".to_string()];
-        let out = aggregate_flow_votes(&[p], Some(&rule(2)), None).unwrap();
-        assert_eq!(
-            out.tallies[0].distinct_proposers,
-            vec!["did:alice", "did:bob"]
-        );
-        assert!(out.tallies[0].consensus_reached);
-        assert!(out.fires.is_some());
-    }
-
-    #[test]
-    fn proposer_accepting_their_own_proposal_still_counts_once() {
-        let mut p = proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z");
-        p.acceptors = vec!["did:alice".to_string()];
-        let out = aggregate_flow_votes(&[p], Some(&rule(2)), None).unwrap();
-        assert_eq!(out.tallies[0].distinct_proposers, vec!["did:alice"]);
-        assert!(!out.tallies[0].consensus_reached);
-    }
-
-    #[test]
-    fn acceptors_pass_through_the_from_role_gate() {
-        // Bob (in role) accepts Alice's (not in role) proposal: only Bob
-        // counts, so n=1-with-role fires on the acceptor alone.
-        let mut p = proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z");
-        p.acceptors = vec!["did:bob".to_string()];
-        let out = aggregate_flow_votes(&[p], Some(&from_role_rule(1)), Some(&dids(&["did:bob"])))
-            .unwrap();
-        assert_eq!(out.tallies[0].eligible_proposers, vec!["did:bob"]);
-        assert!(out.tallies[0].consensus_reached);
     }
 
     #[test]
@@ -1342,19 +1335,6 @@ mod tests {
     }
 
     #[test]
-    fn distinct_proposers_sorted_lex() {
-        let props = vec![
-            proposal("a", "b", "did:zed", "2026-01-01T00:00:00Z"),
-            proposal("a", "b", "did:alice", "2026-01-02T00:00:00Z"),
-        ];
-        let out = aggregate_flow_votes(&props, Some(&rule(1)), None).unwrap();
-        assert_eq!(
-            out.tallies[0].distinct_proposers,
-            vec!["did:alice", "did:zed"]
-        );
-    }
-
-    #[test]
     fn contributing_preserves_input_ordering() {
         let props = vec![
             proposal_with_uri("ad4m://p2", "a", "b", "did:bob", "2026-01-02T00:00:00Z"),
@@ -1369,75 +1349,29 @@ mod tests {
         assert_eq!(uris, vec!["ad4m://p2", "ad4m://p1"]);
     }
 
+    /// Which tally `fires`: earliest `proposed_at` first, ties broken lex by
+    /// `(from_state, to_state)`, and nothing at all when no bucket reaches
+    /// its threshold. Rows are `(name, props, rule.n, expected (from, to))`.
     #[test]
-    fn only_eligible_dids_contribute_to_consensus() {
-        let props = vec![
-            proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z"),
-            proposal("a", "b", "did:bob", "2026-01-02T00:00:00Z"),
+    #[rustfmt::skip]
+    fn fires_picks_earliest_then_lex_lowest_reached_tally() {
+        let cases: Vec<(&str, Vec<FlowTransitionProposalRecord>, u32, Option<(&str, &str)>)> = vec![
+            ("earliest proposed_at across tallies wins",
+             vec![proposal("a", "c", "did:bob", "2026-01-05T00:00:00Z"),
+                  proposal("a", "b", "did:alice", T1)], 1, Some(("a", "b"))),
+            ("equal proposed_at breaks lex by (from, to)",
+             vec![proposal("a", "c", "did:bob", T1),
+                  proposal("a", "b", "did:alice", T1)], 1, Some(("a", "b"))),
+            ("no bucket clears the bar: nothing fires",
+             vec![proposal("a", "b", "did:alice", T1),
+                  proposal("a", "c", "did:bob", T2)], 2, None),
         ];
-        let out = aggregate_flow_votes(
-            &props,
-            Some(&from_role_rule(2)),
-            Some(&dids(&["did:alice"])),
-        )
-        .unwrap();
-        assert_eq!(
-            out.tallies[0].distinct_proposers,
-            vec!["did:alice", "did:bob"]
-        );
-        assert_eq!(out.tallies[0].eligible_proposers, vec!["did:alice"]);
-        assert!(!out.tallies[0].consensus_reached);
-    }
 
-    #[test]
-    fn consensus_fails_when_only_non_role_did_proposed() {
-        let props = vec![proposal("a", "b", "did:mallory", "2026-01-01T00:00:00Z")];
-        let out = aggregate_flow_votes(
-            &props,
-            Some(&from_role_rule(1)),
-            Some(&dids(&["did:alice"])),
-        )
-        .unwrap();
-        assert!(!out.tallies[0].consensus_reached);
-        assert!(out.fires.is_none());
-    }
-
-    #[test]
-    fn fires_selects_earliest_proposed_at_across_tallies() {
-        let props = vec![
-            proposal("a", "c", "did:bob", "2026-01-05T00:00:00Z"),
-            proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z"),
-        ];
-        let out = aggregate_flow_votes(&props, Some(&rule(1)), None).unwrap();
-        let fired = out.fires.expect("one tally fires");
-        assert_eq!(
-            (fired.from_state.as_str(), fired.to_state.as_str()),
-            ("a", "b")
-        );
-    }
-
-    #[test]
-    fn fires_breaks_ties_by_lex_from_then_to() {
-        let props = vec![
-            proposal("a", "c", "did:bob", "2026-01-01T00:00:00Z"),
-            proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z"),
-        ];
-        let out = aggregate_flow_votes(&props, Some(&rule(1)), None).unwrap();
-        let fired = out.fires.expect("one tally fires");
-        assert_eq!(
-            (fired.from_state.as_str(), fired.to_state.as_str()),
-            ("a", "b")
-        );
-    }
-
-    #[test]
-    fn fires_none_when_no_bucket_clears_the_bar() {
-        let props = vec![
-            proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z"),
-            proposal("a", "c", "did:bob", "2026-01-02T00:00:00Z"),
-        ];
-        let out = aggregate_flow_votes(&props, Some(&rule(2)), None).unwrap();
-        assert!(out.fires.is_none());
+        for (name, props, n, expected) in cases {
+            let out = aggregate_flow_votes(&props, Some(&rule(n)), None).unwrap();
+            let fired = out.fires.map(|f| (f.from_state, f.to_state));
+            assert_eq!(fired.as_ref().map(|(f, t)| (f.as_str(), t.as_str())), expected, "{name}");
+        }
     }
 
     #[test]
@@ -1451,105 +1385,70 @@ mod tests {
         assert_eq!(props, before);
     }
 
-    #[test]
-    fn required_count_copied_onto_every_tally() {
-        let props = vec![
-            proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z"),
-            proposal("b", "c", "did:bob", "2026-01-02T00:00:00Z"),
-        ];
-        let out = aggregate_flow_votes(&props, Some(&rule(3)), None).unwrap();
-        assert!(out.tallies.iter().all(|t| t.required_count == 3));
-    }
-
-    #[test]
-    fn without_from_role_eligible_equals_distinct() {
-        let props = vec![
-            proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z"),
-            proposal("a", "b", "did:bob", "2026-01-02T00:00:00Z"),
-        ];
-        let out = aggregate_flow_votes(&props, Some(&rule(1)), None).unwrap();
-        assert_eq!(
-            out.tallies[0].distinct_proposers,
-            out.tallies[0].eligible_proposers
-        );
-    }
-
     // ---- select_fire_candidate ------------------------------------------
 
     fn aggregate_firing(from: &str, to: &str) -> AggregateFlowVotesResult {
-        let props = vec![proposal(from, to, "did:alice", "2026-01-01T00:00:00Z")];
+        let props = vec![proposal(from, to, "did:alice", T1)];
         aggregate_flow_votes(&props, Some(&rule(1)), None).unwrap()
     }
 
     #[test]
-    fn select_fire_candidate_returns_none_when_aggregate_has_no_fires() {
-        let out = aggregate_flow_votes(&[], Some(&rule(1)), None).unwrap();
-        assert!(select_fire_candidate("a", &out).is_none());
-    }
+    #[rustfmt::skip]
+    fn select_fire_candidate_gates_on_the_instance_current_state() {
+        let no_fires = aggregate_flow_votes(&[], Some(&rule(1)), None).unwrap();
+        let firing = aggregate_firing("a", "b");
+        let cases = [
+            ("the aggregate has no fires", "a", &no_fires, None),
+            ("instance already advanced past `a` — votes are stale", "b", &firing, None),
+            ("from_state matches the instance's current state", "a", &firing, Some(("a", "b"))),
+        ];
 
-    #[test]
-    fn select_fire_candidate_returns_none_when_from_state_stale() {
-        let out = aggregate_firing("a", "b");
-        assert!(
-            select_fire_candidate("b", &out).is_none(),
-            "instance already advanced past `a` — votes are stale"
-        );
-    }
-
-    #[test]
-    fn select_fire_candidate_returns_the_tally_when_from_state_matches() {
-        let out = aggregate_firing("a", "b");
-        let t = select_fire_candidate("a", &out).expect("candidate");
-        assert_eq!((t.from_state.as_str(), t.to_state.as_str()), ("a", "b"));
+        for (name, current_state, out, expected) in cases {
+            let picked = select_fire_candidate(current_state, out)
+                .map(|t| (t.from_state.as_str(), t.to_state.as_str()));
+            assert_eq!(picked, expected, "{name}");
+        }
     }
 
     // ---- parse_flow_transition_proposal_from_hydrated -------------------
 
+    /// Rows are `(name, hydrated JSON, Some((proposed_at, evidence_hash)))`,
+    /// or `None` when the record must be skipped entirely.
     #[test]
-    fn parses_hydrated_proposal_reading_created_at_as_proposed_at() {
-        // The proposal SDNA has no `proposedAt` — Ad4mModel's synthesised
-        // `createdAt` is the propose time. This is the one field-mapping
-        // difference from the pre-restructure port source.
-        let v = serde_json::json!({
-            "id": "ad4m://flow/proposal/p1",
-            "fromState": "identified",
-            "toState": "scoped",
-            "proposer": "did:key:alice",
-            "createdAt": "2026-09-04T00:00:00Z",
-            "evidenceHashes": "abc123",
-        });
-        let r = parse_flow_transition_proposal_from_hydrated(&v).expect("parses");
-        assert_eq!(r.proposed_at, "2026-09-04T00:00:00Z");
-        assert_eq!(r.evidence_hash, "abc123");
-        assert!(
-            r.acceptors.is_empty(),
-            "acceptors come from links, not hydration"
-        );
-    }
+    #[rustfmt::skip]
+    fn parse_flow_transition_proposal_from_hydrated_cases() {
+        let cases: Vec<(&str, serde_json::Value, Option<(&str, &str)>)> = vec![
+            // The proposal SDNA has no `proposedAt` — Ad4mModel's synthesised
+            // `createdAt` is the propose time. This is the one field-mapping
+            // difference from the pre-restructure port source.
+            ("createdAt is read as proposed_at",
+             serde_json::json!({ "id": "ad4m://flow/proposal/p1", "fromState": "identified",
+                 "toState": "scoped", "proposer": "did:key:alice",
+                 "createdAt": "2026-09-04T00:00:00Z", "evidenceHashes": "abc123" }),
+             Some(("2026-09-04T00:00:00Z", "abc123"))),
+            ("a half-written proposal missing createdAt is skipped",
+             serde_json::json!({ "id": "ad4m://flow/proposal/p1", "fromState": "identified",
+                 "toState": "scoped", "proposer": "did:key:alice" }),
+             None),
+            // Unverifiable ≠ unparseable: the orchestrator decides what to do
+            // with a hash-less proposal (skip at fire time, fail-closed).
+            ("missing evidenceHashes defaults to empty, not skip",
+             serde_json::json!({ "id": "ad4m://flow/proposal/p1", "fromState": "a",
+                 "toState": "b", "proposer": "did:key:alice",
+                 "createdAt": "2026-09-04T00:00:00Z" }),
+             Some(("2026-09-04T00:00:00Z", ""))),
+        ];
 
-    #[test]
-    fn skips_half_written_proposal_missing_created_at() {
-        let v = serde_json::json!({
-            "id": "ad4m://flow/proposal/p1",
-            "fromState": "identified",
-            "toState": "scoped",
-            "proposer": "did:key:alice",
-        });
-        assert!(parse_flow_transition_proposal_from_hydrated(&v).is_none());
-    }
-
-    #[test]
-    fn missing_evidence_hashes_defaults_to_empty_not_skip() {
-        // Unverifiable ≠ unparseable: the orchestrator decides what to do
-        // with a hash-less proposal (skip at fire time, fail-closed).
-        let v = serde_json::json!({
-            "id": "ad4m://flow/proposal/p1",
-            "fromState": "a",
-            "toState": "b",
-            "proposer": "did:key:alice",
-            "createdAt": "2026-09-04T00:00:00Z",
-        });
-        let r = parse_flow_transition_proposal_from_hydrated(&v).expect("parses");
-        assert_eq!(r.evidence_hash, "");
+        for (name, v, expected) in cases {
+            match (parse_flow_transition_proposal_from_hydrated(&v), expected) {
+                (None, None) => {}
+                (Some(r), Some((proposed_at, evidence_hash))) => {
+                    assert_eq!(r.proposed_at, proposed_at, "{name}");
+                    assert_eq!(r.evidence_hash, evidence_hash, "{name}");
+                    assert!(r.acceptors.is_empty(), "{name}: acceptors come from links, not hydration");
+                }
+                (got, want) => panic!("{name}: expected {want:?}, got {got:?}"),
+            }
+        }
     }
 }

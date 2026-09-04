@@ -939,21 +939,17 @@ mod tests {
 
     #[tokio::test]
     async fn recompute_reproduces_the_minted_hash_and_detects_edits() {
-        let f = flow(
+        // `SHACLFlow` is not `Clone`, so build one and borrow it back out of
+        // the map the evaluator needs rather than constructing it twice.
+        let built = flow(
             "Delivery",
             "identified",
             "scoped",
             Some(vec![mq("ns://Vote")]),
         );
-        let flows = HashMap::from([(
-            f.flow_uri(),
-            flow(
-                "Delivery",
-                "identified",
-                "scoped",
-                Some(vec![mq("ns://Vote")]),
-            ),
-        )]);
+        let flow_uri = built.flow_uri();
+        let flows = HashMap::from([(flow_uri.clone(), built)]);
+        let f = &flows[&flow_uri];
 
         let stub = StubPerspective::default()
             .with_instance_objects("ns://Vote", vec![json!({"id": "v1", "value": "yes"})]);
@@ -961,7 +957,7 @@ mod tests {
         assert_eq!(minted.len(), 1);
 
         // Unchanged graph → recompute reproduces the sealed hash.
-        let same = recompute_evidence_hash(&stub, &f, &inst(), "scoped", "did:key:me")
+        let same = recompute_evidence_hash(&stub, f, &inst(), "scoped", "did:key:me")
             .await
             .unwrap();
         assert_eq!(same.as_deref(), Some(minted[0].evidence_hash.as_str()));
@@ -970,7 +966,7 @@ mod tests {
         // detection the consensus pass fires on (spec §11).
         let edited = StubPerspective::default()
             .with_instance_objects("ns://Vote", vec![json!({"id": "v1", "value": "no"})]);
-        let changed = recompute_evidence_hash(&edited, &f, &inst(), "scoped", "did:key:me")
+        let changed = recompute_evidence_hash(&edited, f, &inst(), "scoped", "did:key:me")
             .await
             .unwrap()
             .expect("guard still satisfied");
@@ -986,31 +982,23 @@ mod tests {
             Some(vec![mq("ns://Vote")]),
         );
 
-        // Guard no longer satisfied.
         let empty = StubPerspective::default().with_instances("ns://Vote", &[]);
-        assert_eq!(
-            recompute_evidence_hash(&empty, &f, &inst(), "scoped", "did:key:me")
-                .await
-                .unwrap(),
-            None
-        );
-
-        // Target state vanished from the flow definition.
-        assert_eq!(
-            recompute_evidence_hash(&empty, &f, &inst(), "shipped", "did:key:me")
-                .await
-                .unwrap(),
-            None
-        );
-
-        // Guard-less state: nothing to verify.
         let unguarded = flow("Delivery", "identified", "scoped", None);
-        assert_eq!(
-            recompute_evidence_hash(&empty, &unguarded, &inst(), "scoped", "did:key:me")
-                .await
-                .unwrap(),
-            None
-        );
+        #[rustfmt::skip]
+        let unverifiable = [
+            ("guard no longer satisfied", &empty, &f, "scoped"),
+            ("target state vanished from the flow definition", &empty, &f, "shipped"),
+            ("guard-less state: nothing to verify", &empty, &unguarded, "scoped"),
+        ];
+        for (name, store, flow, to_state) in unverifiable {
+            assert_eq!(
+                recompute_evidence_hash(store, flow, &inst(), to_state, "did:key:me")
+                    .await
+                    .unwrap(),
+                None,
+                "{name}"
+            );
+        }
 
         // Store error → Err, so the caller skips firing without invalidating.
         let broken = StubPerspective::default().with_error("ns://Vote", "store down");
