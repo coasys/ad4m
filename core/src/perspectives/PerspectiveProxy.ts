@@ -87,6 +87,15 @@ export class QuerySubscriptionProxy {
     #initReject?: (reason?: any) => void;
     #initTimeoutId?: NodeJS.Timeout;
     #query: string;
+    // Monotonic token guarding the three concurrent writers of
+    // `#unsubscribe`/`#subscriptionId` (full subscribe() from the keepalive
+    // and init-timeout retry paths, and the reconnect swap handler). Each
+    // writer bumps it on entry and re-checks after every await; a mismatch
+    // means a newer writer took over while we were suspended, so the stale
+    // continuation must back out instead of clobbering the newer state
+    // (worst case otherwise: an overwritten-but-never-called unsubscribe
+    // leaks its callback in ApiClient._wsCallbacks for the client lifetime).
+    #generation: number = 0;
 
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
@@ -108,6 +117,10 @@ export class QuerySubscriptionProxy {
     }
 
     async subscribe() {
+        // Invalidate any suspended writer (older subscribe() or reconnect
+        // swap parked on an await) — see #generation.
+        const generation = ++this.#generation;
+
         // Remove any prior reconnect listener FIRST — before we touch
         // `#unsubscribe`. Rationale: `#unsubscribe()` calls into
         // `ApiClient.subscribe()`'s deleter, which closes the WebSocket
@@ -118,7 +131,8 @@ export class QuerySubscriptionProxy {
         // in that set, it re-enters this method, closes the socket again,
         // reopens again … an endless resubscribe loop. Clearing the
         // listener up-front breaks the cycle; a fresh listener is
-        // installed at the end of a successful subscribe().
+        // installed at the end of a successful subscribe(), and a
+        // full-retry recovery listener in the catch block on failure.
         if (this.#reconnectUnsub) {
             this.#reconnectUnsub();
             this.#reconnectUnsub = undefined;
@@ -146,6 +160,17 @@ export class QuerySubscriptionProxy {
             // Initialize the query subscription
             let initialResult;
             initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
+
+            // A newer writer (another subscribe() or a reconnect swap) took
+            // over while we awaited — back out without touching shared state,
+            // and release the now-orphaned server-side subscription so it
+            // doesn't linger until its keepalive TTL expires.
+            if (this.#disposed || this.#generation !== generation) {
+                this.#client.disposeQuerySubscription(this.#uuid, initialResult.subscriptionId)
+                    .catch(e => console.error('Error disposing superseded query subscription:', e));
+                return;
+            }
+
             this.#subscriptionId = initialResult.subscriptionId;
 
             // Process the initial result immediately for fast UX.
@@ -153,14 +178,7 @@ export class QuerySubscriptionProxy {
             // so treat that as successful initialization instead of waiting for a
             // follow-up WebSocket update that may never arrive until the query changes.
             if (initialResult.result !== undefined) {
-                this.#latestResult = initialResult.result;
-                this.#notifyCallbacks(initialResult.result);
-
-                if (this.#initResolve) {
-                    this.#initResolve(true);
-                    this.#initResolve = undefined;
-                    this.#initReject = undefined;
-                }
+                this.#deliverResult(initialResult.result);
             } else {
                 console.warn('⚠️ No initial result returned from subscribeQuery!');
 
@@ -178,65 +196,47 @@ export class QuerySubscriptionProxy {
             // Subscribe to query updates
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(
                 this.#subscriptionId,
-                (updateResult) => {
-                    // Clear timeout on first message
-                    if (this.#initTimeoutId) {
-                        clearTimeout(this.#initTimeoutId);
-                        this.#initTimeoutId = undefined;
-                    }
-                    
-                    // Resolve the initialization promise (only resolves once)
-                    if (this.#initResolve) {
-                        this.#initResolve(true);
-                        this.#initResolve = undefined;  // Prevent double-resolve
-                        this.#initReject = undefined;
-                    }
-
-                    this.#latestResult = updateResult;
-                    this.#notifyCallbacks(updateResult);
-                }
+                (updateResult) => this.#deliverResult(updateResult)
             );
         } catch (error) {
             console.error('Error setting up subscription:', error);
-            
+
             // Reject the promise if this is the first attempt
             if (this.#initReject) {
                 this.#initReject(error);
                 this.#initResolve = undefined;
                 this.#initReject = undefined;
             }
-            
+
+            // Restore reconnect recovery before rethrowing. The listener was
+            // removed at the top of this method; without re-installing one
+            // here, a single failed resubscribe (e.g. subscribeQuery timing
+            // out during a network flap) would leave the proxy permanently
+            // dead: the keepalive loop stops itself on resubscribe failure,
+            // and nothing else retries. The recovery listener runs the FULL
+            // subscribe() (not the swap-in-place handler) because after a
+            // failed attempt there is no keepalive loop left to feed the new
+            // server subscription — subscribe() restarts it. This is
+            // loop-safe: in this failed state the proxy owns no
+            // `_wsCallbacks` entry (the old one was unsubscribed at the top
+            // of this method and no new one got registered), so the
+            // subscribe() it triggers has nothing to unsubscribe → the
+            // socket never closes/reopens under it → no re-entrant onopen.
+            if (!this.#disposed && this.#generation === generation && this.#client.onReconnect) {
+                this.#reconnectUnsub = this.#client.onReconnect(() => {
+                    if (this.#disposed) return;
+                    console.log('WebSocket reconnected — retrying failed subscription for query:', this.#query);
+                    this.subscribe().catch(e => {
+                        console.error('Error during subscription retry after reconnect:', e);
+                    });
+                });
+            }
+
             throw error; // Re-throw so caller knows it failed
         }
 
-        // Start keepalive loop using platform-agnostic setTimeout
-        const keepaliveLoop = async () => {
-            if (this.#disposed) return;
-            
-            try {
-                await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
-            } catch (e) {
-                console.error('Error in keepalive:', e);
-                // try to reinitialize the subscription
-                console.log('Reinitializing subscription for query:', this.#query);
-                try {
-                    await this.subscribe();
-                    console.log('Subscription reinitialized');
-                } catch (resubscribeError) {
-                    console.error('Error during resubscription from keepalive:', resubscribeError);
-                    // Don't schedule another keepalive on resubscribe failure
-                    return;
-                }
-            }
-
-            // Schedule next keepalive if not disposed
-            if (!this.#disposed) {
-                this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
-            }
-        };
-
-        // Start the first keepalive loop
-        this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+        // Start keepalive loop
+        this.#startKeepalive(generation);
 
         // Register for reconnect notification — on WebSocket reconnect,
         // immediately re-establish a fresh server-side subscription instead
@@ -266,40 +266,66 @@ export class QuerySubscriptionProxy {
         if (this.#client.onReconnect) {
             this.#reconnectUnsub = this.#client.onReconnect(async () => {
                 if (this.#disposed) return;
+                // The handler is a writer of `#unsubscribe`/`#subscriptionId`
+                // too, so it takes its own generation — see #generation.
+                const swapGeneration = ++this.#generation;
                 console.log(
                     'WebSocket reconnected — re-establishing server subscription for query:',
                     this.#query,
                 );
                 try {
                     const newInitial = await this.#client.subscribeQuery(this.#uuid, this.#query);
-                    if (this.#disposed) return;
+                    if (this.#disposed || this.#generation !== swapGeneration) {
+                        // A newer writer took over while we awaited — back out
+                        // and release the orphaned server-side subscription.
+                        this.#client.disposeQuerySubscription(this.#uuid, newInitial.subscriptionId)
+                            .catch(e => console.error('Error disposing superseded query subscription:', e));
+                        return;
+                    }
                     const newSubId = newInitial.subscriptionId;
 
                     // Register the NEW client-side callback BEFORE removing the
                     // old one — keeps `_wsCallbacks.size >= 1` across the swap.
                     const newUnsub = this.#client.subscribeToQueryUpdates(
                         newSubId,
-                        (updateResult) => {
-                            this.#latestResult = updateResult;
-                            this.#notifyCallbacks(updateResult);
-                        },
+                        (updateResult) => this.#deliverResult(updateResult),
                     );
                     const oldUnsub = this.#unsubscribe;
                     this.#unsubscribe = newUnsub;
                     this.#subscriptionId = newSubId;
                     if (oldUnsub) oldUnsub();
 
+                    // Our generation bump invalidated the running keepalive
+                    // loop — restart it under our generation so the new
+                    // server subscription keeps receiving keepalives.
+                    clearTimeout(this.#keepaliveTimer);
+                    this.#startKeepalive(swapGeneration);
+
                     // Deliver the fresh initial result if the server included one
                     // (matches the eager-delivery path in the main subscribe() body).
+                    // #deliverResult also clears a still-pending init timeout and
+                    // resolves #initialized, keeping this path symmetric with the
+                    // update callback in subscribe() — without it, a swap landing
+                    // while initialization was pending would leave the 30s init
+                    // timer armed and trigger a spurious full resubscribe.
                     if (newInitial.result !== undefined) {
-                        this.#latestResult = newInitial.result;
-                        this.#notifyCallbacks(newInitial.result);
+                        this.#deliverResult(newInitial.result);
                     }
                 } catch (error) {
                     console.error(
                         'Error re-establishing subscription after reconnect:',
                         error,
                     );
+                    // Our generation bump invalidated the running keepalive
+                    // loop; if nothing newer superseded us, restart it so
+                    // liveness is preserved — its keepAliveQuery against the
+                    // dead old subscription will fail and fall back to a
+                    // full subscribe(). The reconnect listener also remains
+                    // installed, so a later reconnect retries this handler.
+                    if (!this.#disposed && this.#generation === swapGeneration) {
+                        clearTimeout(this.#keepaliveTimer);
+                        this.#startKeepalive(swapGeneration);
+                    }
                 }
             });
         }
@@ -368,6 +394,69 @@ export class QuerySubscriptionProxy {
         return () => this.#callbacks.delete(callback);
     }
 
+    /** Deliver a result to consumers: complete a still-pending
+     *  initialization (clear the 30s init timeout, resolve #initialized),
+     *  record the result as latest, and notify all callbacks. Shared by the
+     *  initial-result path, the update callback, and the reconnect swap
+     *  handler so all three stay lifecycle-symmetric. */
+    #deliverResult(result: AllInstancesResult) {
+        if (this.#initTimeoutId) {
+            clearTimeout(this.#initTimeoutId);
+            this.#initTimeoutId = undefined;
+        }
+        // Resolve the initialization promise (only resolves once)
+        if (this.#initResolve) {
+            this.#initResolve(true);
+            this.#initResolve = undefined;  // Prevent double-resolve
+            this.#initReject = undefined;
+        }
+        this.#latestResult = result;
+        this.#notifyCallbacks(result);
+    }
+
+    /** Start the keepalive loop for the given generation. The loop runs
+     *  every 30s until it is superseded (generation mismatch — a newer
+     *  subscribe() or reconnect swap took over) or the proxy is disposed.
+     *  On a keepalive error it falls back to a full subscribe(). */
+    #startKeepalive(generation: number) {
+        const keepaliveLoop = async () => {
+            // Generation check kills orphaned loops: a loop whose
+            // keepAliveQuery was in flight while a newer writer ran is not
+            // cancelled by clearTimeout and would otherwise reschedule
+            // itself alongside the newer loop.
+            if (this.#disposed || this.#generation !== generation) return;
+
+            try {
+                await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
+            } catch (e) {
+                if (this.#disposed || this.#generation !== generation) return;
+                console.error('Error in keepalive:', e);
+                // try to reinitialize the subscription
+                console.log('Reinitializing subscription for query:', this.#query);
+                try {
+                    await this.subscribe();
+                    console.log('Subscription reinitialized');
+                } catch (resubscribeError) {
+                    console.error('Error during resubscription from keepalive:', resubscribeError);
+                    // Don't schedule another keepalive on resubscribe failure.
+                    // Recovery is not lost: the failed subscribe() installed a
+                    // reconnect listener that retries the full subscribe.
+                    return;
+                }
+                // subscribe() succeeded and started its own keepalive loop
+                // under a new generation — this loop is done.
+                return;
+            }
+
+            // Schedule next keepalive if still the active generation
+            if (!this.#disposed && this.#generation === generation) {
+                this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+            }
+        };
+
+        this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+    }
+
     /** Internal method to notify all callbacks of a new result */
     #notifyCallbacks(result: AllInstancesResult) {
         for (const callback of this.#callbacks) {
@@ -392,6 +481,9 @@ export class QuerySubscriptionProxy {
      */
     dispose() {
         this.#disposed = true;
+        // Invalidate any suspended writer so a mid-flight subscribe() or
+        // reconnect swap backs out instead of resurrecting state.
+        this.#generation++;
         clearTimeout(this.#keepaliveTimer);
         if (this.#unsubscribe) {
             this.#unsubscribe();

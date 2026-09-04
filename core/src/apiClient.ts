@@ -465,5 +465,10 @@ export class ApiClient {
         this._closeWs()
         this._wsCallbacks.clear()
         this._reconnectCallbacks.clear()
+        // Reset the first-connect gate so a reused client (closeAll() →
+        // later call()/subscribe() reopening via _ensureWs) does not fire
+        // freshly registered onReconnect callbacks on the initial open of
+        // the new connection — see the contract on onReconnect().
+        this._hasConnectedOnce = false
     }
 }

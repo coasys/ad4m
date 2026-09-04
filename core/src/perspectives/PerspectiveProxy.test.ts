@@ -85,36 +85,97 @@ describe('PerspectiveProxy.dispose', () => {
 });
 
 describe('ApiClient.onReconnect', () => {
+  // Injected WebSocket implementation (ApiClient constructor arg 3) so these
+  // tests drive the REAL onopen/onclose lifecycle instead of poking at
+  // private fields. Each call returns a fresh class with its own instance
+  // list.
+  function makeFakeWebSocketImpl() {
+    class FakeWebSocket {
+      static instances: FakeWebSocket[] = [];
+      url: string;
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: any) => void) | null = null;
+      onerror: ((e: any) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(url: string) {
+        this.url = url;
+        FakeWebSocket.instances.push(this);
+      }
+      send(_data: any) {}
+      close() { this.readyState = 3; }
+      /** Test helper: simulate the server accepting the connection. */
+      open() { this.readyState = 1; this.onopen?.(); }
+      /** Test helper: simulate the connection dropping. */
+      drop() { this.readyState = 3; this.onclose?.(); }
+    }
+    return FakeWebSocket;
+  }
+
   it('fires reconnect callbacks only on reconnect, not first connect', () => {
-    // Import directly to test the reconnect callback mechanism
     const { ApiClient } = require('../apiClient');
-    const client = new ApiClient('http://localhost:12000');
+    const FakeWs = makeFakeWebSocketImpl();
+    const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
     const reconnectCb = jest.fn();
     client.onReconnect(reconnectCb);
 
-    // Simulate first connect — should NOT fire reconnect
-    // Access internal state to simulate connection lifecycle
-    (client as any)._hasConnectedOnce = false;
-    // Simulate: ws.onopen fires, hasConnectedOnce was false → no callback
+    // First connection: onopen must NOT fire the reconnect callback
+    client.connect();
+    FakeWs.instances[0].open();
     expect(reconnectCb).not.toHaveBeenCalled();
 
-    // After marking as connected once and simulating a second onopen, it should fire
-    (client as any)._hasConnectedOnce = true;
-    for (const cb of (client as any)._reconnectCallbacks) {
-      cb();
-    }
+    // Drop and reconnect: the second onopen must fire it exactly once
+    FakeWs.instances[0].drop();
+    client.connect();
+    FakeWs.instances[1].open();
     expect(reconnectCb).toHaveBeenCalledTimes(1);
+
+    client.closeAll();
   });
 
-  it('unsubscribe function removes the callback', () => {
+  it('unsubscribed callbacks do not fire on reconnect', () => {
     const { ApiClient } = require('../apiClient');
-    const client = new ApiClient('http://localhost:12000');
+    const FakeWs = makeFakeWebSocketImpl();
+    const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
     const reconnectCb = jest.fn();
     const unsub = client.onReconnect(reconnectCb);
 
-    // Remove and verify
+    client.connect();
+    FakeWs.instances[0].open();
     unsub();
-    expect((client as any)._reconnectCallbacks.size).toBe(0);
+
+    FakeWs.instances[0].drop();
+    client.connect();
+    FakeWs.instances[1].open();
+    expect(reconnectCb).not.toHaveBeenCalled();
+
+    client.closeAll();
+  });
+
+  it('closeAll resets the first-connect gate for client reuse', () => {
+    const { ApiClient } = require('../apiClient');
+    const FakeWs = makeFakeWebSocketImpl();
+    const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
+
+    client.connect();
+    FakeWs.instances[0].open();
+    client.closeAll();
+
+    // Reuse after closeAll: the first open of the NEW connection is an
+    // initial connect again, not a reconnect.
+    const reconnectCb = jest.fn();
+    client.onReconnect(reconnectCb);
+    client.connect();
+    FakeWs.instances[1].open();
+    expect(reconnectCb).not.toHaveBeenCalled();
+
+    // …but a genuine reconnect within the new lifecycle still fires.
+    FakeWs.instances[1].drop();
+    client.connect();
+    FakeWs.instances[2].open();
+    expect(reconnectCb).toHaveBeenCalledTimes(1);
+
+    client.closeAll();
   });
 });
 
@@ -187,10 +248,13 @@ describe('QuerySubscriptionProxy', () => {
     expect(mockClient.onReconnect).toHaveBeenCalledTimes(1);
     expect(reconnectCallback).toBeDefined();
 
-    // Reset call counts to isolate the reconnect re-subscribe
+    // Reset call counts to isolate the reconnect re-subscribe — but do NOT
+    // reset the monotonic counter: the mock must keep returning DISTINCT
+    // unsubscribers so the assertions below can tell "old callback disposed"
+    // apart from "new callback disposed" (they'd be the same jest.fn if the
+    // counter restarted at 1).
     mockClient.subscribeQuery.mockClear();
     mockClient.subscribeToQueryUpdates.mockClear();
-    subscribeToUpdatesCall = 0;
 
     // Return a fresh subscriptionId on reconnect
     mockClient.subscribeQuery.mockResolvedValue({
@@ -208,9 +272,14 @@ describe('QuerySubscriptionProxy', () => {
     // BEFORE the old one is disposed (so the WS never dips to 0 subscribers).
     expect(mockClient.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT ?x WHERE { ?x ?p ?o }');
     expect(mockClient.subscribeToQueryUpdates).toHaveBeenCalledWith('sub-2', expect.any(Function));
+    // The OLD callback was disposed, the NEW one was not.
     expect(initialUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(reconnectUnsubscribe).not.toHaveBeenCalled();
 
     subscription.dispose();
+    // dispose() tears down the callback that is live at that point — the
+    // reconnect-registered one.
+    expect(reconnectUnsubscribe).toHaveBeenCalledTimes(1);
   });
 
   it('cleans up reconnect listener on dispose', async () => {
@@ -336,5 +405,127 @@ describe('QuerySubscriptionProxy', () => {
     // Dispose drops both the live callback and the reconnect listener.
     expect(liveCallbacks).toBe(0);
     expect(reconnectCallbacks.size).toBe(0);
+  });
+
+  // Regression for the review-blocker on PR #899: a failed full resubscribe
+  // (the keepalive / init-timeout retry path) used to remove the reconnect
+  // listener at the top of subscribe() and only re-register on success —
+  // one subscribeQuery failure during a network flap left the proxy
+  // permanently dead (keepalive loop stops itself on resubscribe failure,
+  // no listener left to retry). The catch block must install a recovery
+  // listener so the next reconnect retries the full subscribe.
+  it('keeps reconnect recovery alive after a failed resubscribe attempt', async () => {
+    let reconnectCallback: (() => void) | undefined;
+    const mockClient = {
+      subscribeQuery: jest.fn()
+        .mockResolvedValueOnce({ subscriptionId: 'sub-1', result: [] })   // initial subscribe OK
+        .mockRejectedValueOnce(new Error('flap'))                          // resubscribe attempt fails
+        .mockResolvedValueOnce({ subscriptionId: 'sub-2', result: [] }),  // recovery succeeds
+      subscribeToQueryUpdates: jest.fn().mockReturnValue(jest.fn()),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn((cb: () => void) => {
+        reconnectCallback = cb;
+        return jest.fn();
+      }),
+    } as any;
+
+    const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+    await subscription.subscribe();
+    expect(subscription.id).toBe('sub-1');
+
+    // A retry-subscribe fails (this is what the keepalive path does when
+    // the server subscription died).
+    await expect(subscription.subscribe()).rejects.toThrow('flap');
+
+    // The failure must have installed a recovery listener — total listener
+    // registrations: initial subscribe + failure recovery.
+    expect(mockClient.onReconnect).toHaveBeenCalledTimes(2);
+    expect(reconnectCallback).toBeDefined();
+
+    // A reconnect arrives → the recovery listener runs a full subscribe()
+    // and the proxy comes back to life on a fresh server subscription.
+    reconnectCallback!();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(mockClient.subscribeQuery).toHaveBeenCalledTimes(3);
+    expect(subscription.id).toBe('sub-2');
+
+    subscription.dispose();
+  });
+
+  // Regression for the concurrent-writers race flagged in the PR #899
+  // review: the reconnect swap handler, the keepalive-retry subscribe() and
+  // the init-timeout retry subscribe() all write `#unsubscribe` /
+  // `#subscriptionId`. Without the generation guard, a swap handler parked
+  // on its subscribeQuery while a full subscribe() ran could register a
+  // client-side callback that the subscribe() then overwrote WITHOUT
+  // disposing — leaking the callback in ApiClient._wsCallbacks for the
+  // client lifetime (holding the socket open and firing into a dead
+  // subscription). The stale writer must back out and release its
+  // server-side subscription instead.
+  it('a reconnect swap superseded by a concurrent resubscribe backs out without leaking callbacks', async () => {
+    let reconnectCallback: (() => void) | undefined;
+    // Deferred subscribeQuery responses so the test controls interleaving.
+    const deferreds: Array<{ resolve: (v: any) => void }> = [];
+    let subCounter = 0;
+    let liveCallbacks = 0;
+    const disposedServerSubs: string[] = [];
+
+    const mockClient = {
+      subscribeQuery: jest.fn(() => new Promise((resolve) => {
+        deferreds.push({ resolve });
+      })),
+      subscribeToQueryUpdates: jest.fn(() => {
+        liveCallbacks++;
+        return jest.fn(() => { liveCallbacks--; });
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn((_uuid: string, subId: string) => {
+        disposedServerSubs.push(subId);
+        return Promise.resolve(true);
+      }),
+      onReconnect: jest.fn((cb: () => void) => {
+        reconnectCallback = cb;
+        return jest.fn();
+      }),
+    } as any;
+
+    const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+
+    // Initial subscribe.
+    const initial = subscription.subscribe();
+    deferreds[0].resolve({ subscriptionId: `sub-${++subCounter}`, result: [] });
+    await initial;
+    expect(liveCallbacks).toBe(1);
+
+    // 1. Reconnect fires; the swap handler parks on its subscribeQuery.
+    reconnectCallback!();
+    expect(deferreds.length).toBe(2);
+
+    // 2. While the handler is parked, a full resubscribe runs (keepalive
+    //    retry analogue) and parks on ITS subscribeQuery.
+    const retry = subscription.subscribe();
+    expect(deferreds.length).toBe(3);
+
+    // 3. The handler's subscribeQuery resolves FIRST — the handler is now
+    //    stale (the full subscribe superseded it) and must back out.
+    deferreds[1].resolve({ subscriptionId: 'sub-stale', result: [] });
+    await new Promise((r) => setTimeout(r, 5));
+
+    // 4. The full subscribe's subscribeQuery resolves and completes.
+    deferreds[2].resolve({ subscriptionId: `sub-${++subCounter}`, result: [] });
+    await retry;
+
+    // Exactly ONE live client-side callback — the stale handler must not
+    // have left an orphaned one behind (nor disposed the winner's).
+    expect(liveCallbacks).toBe(1);
+    // The winner's subscription is active…
+    expect(subscription.id).toBe('sub-2');
+    // …and the stale handler released its orphaned server-side subscription.
+    expect(disposedServerSubs).toContain('sub-stale');
+
+    subscription.dispose();
+    expect(liveCallbacks).toBe(0);
   });
 });
