@@ -6540,6 +6540,67 @@ mod tests {
         );
     }
 
+    /// An ordering declaration survives registration and comes back off the
+    /// stored shape.
+    ///
+    /// This is the boundary the ordering feature actually crosses in
+    /// production: `@Model` classes register through `ensureSubjectClass`,
+    /// which ships `SHACLShape.toJSON()` to `add_sdna`, which turns it into
+    /// links via `parse_shacl_to_links` — and `load_shape` reads the strategy
+    /// back only from the `ad4m://ordering` link that produces. Both halves of
+    /// the feature hang off `ShapeProperty::ordering`: the setter writes no
+    /// entries without it, and hydration never reorders. Every other test for
+    /// this feature builds its shape from JSON directly, so none of them touch
+    /// this path.
+    #[tokio::test]
+    async fn test_ordering_declaration_survives_sdna_registration() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "we://Collection",
+            "properties": [
+                { "path": "we://name", "name": "name", "datatype": "xsd://string",
+                  "min_count": 1, "max_count": 1, "resolve_language": "literal" },
+                { "path": "we://children", "name": "children", "ordering": "linkedList" },
+                { "path": "we://tags", "name": "tags" }
+            ]
+        }"#;
+
+        perspective
+            .add_sdna(
+                "Collection".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        let shape = perspective.get_shape("Collection").expect("shape");
+        let children = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "children")
+            .expect("children property is in the stored shape");
+
+        assert_eq!(
+            children.ordering.as_deref(),
+            Some("linkedList"),
+            "the ordering declaration reached the store and came back — without \
+             it both the setter and hydration silently do nothing"
+        );
+
+        let tags = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "tags")
+            .expect("tags property is in the stored shape");
+        assert_eq!(
+            tags.ordering, None,
+            "a relation that declares no ordering stays unordered"
+        );
+    }
+
     /// Drive `collectionSetter` once per desired set, all in one batch, and
     /// report what the batch holds for `(source, predicate)` at the end.
     ///
