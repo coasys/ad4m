@@ -807,8 +807,15 @@ pub async fn run_interpretation_with_strategy_and_model(
 
         // The affected instance base URIs (created, updated, or given new
         // relations). Links are owned by `create_subject` / `update_subject`.
-        let flow_proposals =
-            run_flow_post_pass(perspective, scope, context, &llm_proposals, &task.task_id).await;
+        let pass_subjects = flow_pass_subjects(&bases, &flow_subjects);
+        let flow_proposals = run_flow_post_pass(
+            perspective,
+            &pass_subjects,
+            context,
+            &llm_proposals,
+            &task.task_id,
+        )
+        .await;
 
         Ok(InterpretationOutcome {
             bases,
@@ -842,13 +849,14 @@ pub async fn run_interpretation_with_strategy_and_model(
 
 /// Shared flow post-processing for both interpretation paths (single-shot
 /// strategy and harness): the LLM's writes are on the graph now, so
-/// re-evaluate every active flow's `requires` guards against the fresh
-/// evidence. The LLM's own proposals only contribute a rationale; the
-/// semantic check reuses the extraction task so both share one worker and
-/// billing scope.
+/// re-evaluate the guards of every flow anchored on `subjects` — the union
+/// of what this pass wrote (`bases`) and what the LLM was shown
+/// (`flow_subjects`, i.e. cursor sources / scope anchor). The LLM's own
+/// proposals only contribute a rationale; the semantic check reuses the
+/// extraction task so both share one worker and billing scope.
 async fn run_flow_post_pass(
     perspective: &mut PerspectiveInstance,
-    scope: Option<&Scope>,
+    subjects: &[String],
     context: &AgentContext,
     llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
     task_id: &str,
@@ -858,12 +866,25 @@ async fn run_flow_post_pass(
     };
     crate::perspectives::flow_evaluator::run_engine_proposal_pass(
         perspective,
-        scope,
+        subjects,
         context,
         llm_proposals,
         Some(&semantic_check),
     )
     .await
+}
+
+/// The subject set `run_flow_post_pass` is bounded to: everything the pass
+/// wrote plus everything the LLM was shown flow context for, deduplicated.
+/// Never empty-by-accident on a pass that did work, never a sweep.
+fn flow_pass_subjects(bases: &[String], flow_subjects: &[String]) -> Vec<String> {
+    let mut subjects: Vec<String> = bases.to_vec();
+    for s in flow_subjects {
+        if !subjects.contains(s) {
+            subjects.push(s.clone());
+        }
+    }
+    subjects
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
@@ -1110,9 +1131,10 @@ pub async fn run_interpretation_with_harness_and_model(
 
     // Same flow post-processing as the single-shot path, returned the same
     // way: callers get the minted proposal URIs, not just a log line.
+    let pass_subjects = flow_pass_subjects(&bases, &flow_subjects);
     let flow_proposals = run_flow_post_pass(
         perspective,
-        scope,
+        &pass_subjects,
         context,
         &flow_buffer.drain(),
         &task.task_id,
