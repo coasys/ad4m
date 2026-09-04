@@ -20,34 +20,6 @@
 //!   spec-literal delete is one small change in [`resolve_proposals_fired`].
 //!   Rejection stays delete, per §4.2.
 //!
-//! # What this module owns
-//!
-//! - [`FlowTransitionProposalRecord`] — data mirror of the on-graph proposal.
-//! - [`aggregate_flow_votes`] — pure aggregation: bucket by
-//!   `(from_state, to_state)`, count distinct qualifying DIDs, apply the
-//!   `ConsensusRule` threshold.
-//! - [`select_fire_candidate`] — pure stale-`from_state` guard.
-//! - [`fire_flow_consensus`] — async composition: preconditions →
-//!   [`super::flow_classes::advance_flow_instance_state`] → [`FireOutcome`].
-//! - [`load_flow_transition_proposals`] — `model_query` loader for the live
-//!   (unresolved) proposals targeting one `FlowInstance`.
-//! - [`resolve_proposals_fired`] — the keep-and-mark write.
-//!
-//! - [`resolve_role_dids`] — `fromRole` gate resolution: per-candidate
-//!   membership check reusing the `requires` guard-translation layer.
-//!   [`aggregate_flow_votes`] stays pure and takes the resolved set; when
-//!   the rule has `from_role`, omitting the set errors, because a silent
-//!   "all DIDs eligible" would misreport consensus.
-//! - [`run_flow_consensus_pass`] — the orchestrator: auto-invalidation
-//!   (superseded + stale-seal via
-//!   [`super::flow_evaluator::recompute_evidence_hash`]), per-target rule
-//!   resolution, role gates, firing, keep-and-mark.
-//! - [`delete_flow_proposal`] — hard delete, shared by auto-invalidation
-//!   and [`reject_flow_proposal`].
-//! - [`accept_flow_proposal`] / [`reject_flow_proposal`] — the write API
-//!   (§4.3 / §7): accept adds an idempotent `acceptedBy` link and runs the
-//!   pass immediately; reject hard-deletes. Both refuse resolved proposals.
-//!
 //! # Non-goals here (later slices)
 //!
 //! - WS-RPC + MCP + TS surfaces over accept/reject.
@@ -136,6 +108,15 @@ pub struct AggregateFlowVotesResult {
     pub fires: Option<FlowVoteTally>,
 }
 
+/// Canonical three-key ordering for `fires` selection: earliest `proposed_at`
+/// first, then lex `(from_state, to_state)` to break ties deterministically.
+fn tally_ord(a: &FlowVoteTally, b: &FlowVoteTally) -> std::cmp::Ordering {
+    earliest_proposed_at(&a.contributing)
+        .cmp(&earliest_proposed_at(&b.contributing))
+        .then_with(|| a.from_state.cmp(&b.from_state))
+        .then_with(|| a.to_state.cmp(&b.to_state))
+}
+
 /// Pure aggregation entry point.
 ///
 /// - `proposals`: every live record for one `FlowInstance`; grouped by
@@ -148,17 +129,11 @@ pub fn aggregate_flow_votes(
     consensus_rule: Option<&ConsensusRule>,
     eligible_dids: Option<&HashSet<String>>,
 ) -> anyhow::Result<AggregateFlowVotesResult> {
-    let default_rule;
-    let rule: &ConsensusRule = match consensus_rule {
-        Some(r) => r,
-        None => {
-            default_rule = ConsensusRule {
-                n: 1,
-                from_role: None,
-            };
-            &default_rule
-        }
+    const DEFAULT_RULE: ConsensusRule = ConsensusRule {
+        n: 1,
+        from_role: None,
     };
+    let rule: &ConsensusRule = consensus_rule.unwrap_or(&DEFAULT_RULE);
     if rule.n == 0 {
         return Err(anyhow::anyhow!(
             "aggregate_flow_votes: consensus_rule.n must be a positive integer, got 0"
@@ -207,31 +182,11 @@ pub fn aggregate_flow_votes(
         });
     }
 
-    let mut fires: Option<FlowVoteTally> = None;
-    let mut fires_earliest: Option<String> = None;
-    for t in &tallies {
-        if !t.consensus_reached {
-            continue;
-        }
-        let earliest = earliest_proposed_at(&t.contributing);
-        let take = match (&fires, &fires_earliest) {
-            (None, _) => true,
-            (Some(f), Some(fe)) => match earliest.cmp(fe) {
-                std::cmp::Ordering::Less => true,
-                std::cmp::Ordering::Equal => match t.from_state.cmp(&f.from_state) {
-                    std::cmp::Ordering::Less => true,
-                    std::cmp::Ordering::Equal => t.to_state < f.to_state,
-                    std::cmp::Ordering::Greater => false,
-                },
-                std::cmp::Ordering::Greater => false,
-            },
-            _ => false,
-        };
-        if take {
-            fires = Some(t.clone());
-            fires_earliest = Some(earliest);
-        }
-    }
+    let fires = tallies
+        .iter()
+        .filter(|t| t.consensus_reached)
+        .min_by(|a, b| tally_ord(a, b))
+        .cloned();
 
     Ok(AggregateFlowVotesResult { tallies, fires })
 }
@@ -419,19 +374,16 @@ pub async fn load_flow_transition_proposals(
         };
         // Resolution + acceptance ride as raw links, not model properties —
         // one bounded link query per proposal for each.
-        let resolved = perspective
-            .get_links(&LinkQuery {
-                source: Some(record.uri.clone()),
-                predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "load_flow_transition_proposals: resolved-as lookup on {} failed: {e:#}",
-                    record.uri
-                )
-            })?;
+        let resolved = source_links(
+            perspective,
+            &record.uri,
+            Some(RESOLVED_AS_PREDICATE),
+            &format!(
+                "load_flow_transition_proposals: resolved-as lookup on {} failed",
+                record.uri
+            ),
+        )
+        .await?;
         if !resolved.is_empty() {
             continue;
         }
@@ -444,19 +396,16 @@ pub async fn load_flow_transition_proposals(
         // identity). Require a proposer link whose signed author IS the DID
         // it claims; a proposal lying about its proposer is dropped, not
         // counted at reduced weight.
-        let proposer_links = perspective
-            .get_links(&LinkQuery {
-                source: Some(record.uri.clone()),
-                predicate: Some(PROPOSER_PREDICATE.to_string()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "load_flow_transition_proposals: proposer lookup on {} failed: {e:#}",
-                    record.uri
-                )
-            })?;
+        let proposer_links = source_links(
+            perspective,
+            &record.uri,
+            Some(PROPOSER_PREDICATE),
+            &format!(
+                "load_flow_transition_proposals: proposer lookup on {} failed",
+                record.uri
+            ),
+        )
+        .await?;
         if !proposer_links
             .iter()
             .any(|l| l.data.target == record.proposer && l.author == record.proposer)
@@ -468,19 +417,16 @@ pub async fn load_flow_transition_proposals(
             );
             continue;
         }
-        let acceptances = perspective
-            .get_links(&LinkQuery {
-                source: Some(record.uri.clone()),
-                predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "load_flow_transition_proposals: acceptedBy lookup on {} failed: {e:#}",
-                    record.uri
-                )
-            })?;
+        let acceptances = source_links(
+            perspective,
+            &record.uri,
+            Some(ACCEPTED_BY_PREDICATE),
+            &format!(
+                "load_flow_transition_proposals: acceptedBy lookup on {} failed",
+                record.uri
+            ),
+        )
+        .await?;
         // A vote is an *authorship* claim, not a data claim: the link's
         // signed author must be the DID it names as acceptor, otherwise any
         // agent could write `acceptedBy → did:key:X` links for DIDs it does
@@ -545,16 +491,11 @@ pub fn parse_flow_transition_proposal_from_hydrated(
 /// real value — a de-facto tie-breaker winner, the safest failure mode
 /// (fires first, exposes the bug).
 fn earliest_proposed_at(bucket: &[FlowTransitionProposalRecord]) -> String {
-    let mut earliest = bucket
-        .first()
+    bucket
+        .iter()
         .map(|p| p.proposed_at.clone())
-        .unwrap_or_default();
-    for p in bucket.iter().skip(1) {
-        if p.proposed_at < earliest {
-            earliest = p.proposed_at.clone();
-        }
-    }
-    earliest
+        .min()
+        .unwrap_or_default()
 }
 
 /// Hard-delete a proposal: every link the proposal authors hangs off its
@@ -566,13 +507,13 @@ pub async fn delete_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
 ) -> anyhow::Result<()> {
-    let links = perspective
-        .get_links(&LinkQuery {
-            source: Some(proposal_uri.to_string()),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("delete_flow_proposal: get_links({proposal_uri}): {e:#}"))?;
+    let links = source_links(
+        perspective,
+        proposal_uri,
+        None,
+        &format!("delete_flow_proposal: get_links({proposal_uri})"),
+    )
+    .await?;
     if links.is_empty() {
         return Ok(());
     }
@@ -581,6 +522,24 @@ pub async fn delete_flow_proposal(
         anyhow::anyhow!("delete_flow_proposal: remove_links({proposal_uri}): {e:#}")
     })?;
     Ok(())
+}
+
+/// `get_links` wrapper: source-filtered (+ optional predicate) with a
+/// caller-supplied context string in the error.
+async fn source_links(
+    perspective: &PerspectiveInstance,
+    uri: &str,
+    predicate: Option<&str>,
+    what: &str,
+) -> anyhow::Result<Vec<DecoratedLinkExpression>> {
+    perspective
+        .get_links(&LinkQuery {
+            source: Some(uri.to_string()),
+            predicate: predicate.map(str::to_string),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("{what}: {e:#}"))
 }
 
 /// The rule governing a transition INTO `to_state`: the target state's own
@@ -749,7 +708,7 @@ pub async fn run_flow_consensus_pass(
         for p in verified {
             groups.entry(p.to_state.clone()).or_default().push(p);
         }
-        let mut fire: Option<(String, FlowVoteTally)> = None;
+        let mut fire: Option<FlowVoteTally> = None;
         for (to_state, bucket) in &groups {
             // Only DECLARED transitions may fire (CodeRabbit #967 CWE-863):
             // the mint side already walks `flow.transitions` via
@@ -802,18 +761,17 @@ pub async fn run_flow_consensus_pass(
                 }
             };
             if let Some(tally) = select_fire_candidate(&record.current_state, &agg) {
-                let key = earliest_proposed_at(&tally.contributing);
-                let earlier = match &fire {
+                let better = match &fire {
                     None => true,
-                    Some((best, _)) => key < *best,
+                    Some(best) => tally_ord(tally, best).is_lt(),
                 };
-                if earlier {
-                    fire = Some((key, tally.clone()));
+                if better {
+                    fire = Some(tally.clone());
                 }
             }
         }
 
-        let Some((_, tally)) = fire else {
+        let Some(tally) = fire else {
             continue;
         };
         // Advance + keep-and-mark land in ONE batch: a crash or store error
@@ -872,13 +830,13 @@ async fn live_proposal_links(
     perspective: &PerspectiveInstance,
     proposal_uri: &str,
 ) -> anyhow::Result<Vec<DecoratedLinkExpression>> {
-    let links = perspective
-        .get_links(&LinkQuery {
-            source: Some(proposal_uri.to_string()),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("proposal lookup on {proposal_uri} failed: {e:#}"))?;
+    let links = source_links(
+        perspective,
+        proposal_uri,
+        None,
+        &format!("proposal lookup on {proposal_uri} failed"),
+    )
+    .await?;
     if links.is_empty() {
         return Err(anyhow::anyhow!(
             "no FlowTransitionProposal at {proposal_uri}"
@@ -901,9 +859,9 @@ async fn live_proposal_links(
 /// loader reads acceptors — then run the consensus pass immediately, so a
 /// click resolves now rather than on the next transcript (design §7).
 ///
-/// The immediate pass runs unscoped: accepts are rare, user-initiated
-/// events, and the pass is idempotent for every uninvolved instance it
-/// sweeps. Returns whatever fired (possibly nothing, e.g. n not yet met).
+/// The immediate pass is scoped to the proposal's own `FlowInstance` — one
+/// accept must not sweep every instance on the perspective. Returns whatever
+/// fired (possibly nothing, e.g. n not yet met).
 pub async fn accept_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
