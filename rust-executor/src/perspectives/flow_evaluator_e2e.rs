@@ -253,7 +253,7 @@ async fn evaluate_flow_transitions_e2e() {
     assert_eq!(t.evidence_ids, vec!["ad4m://task/1".to_string()]);
     assert_eq!(
         t.evidence_hash,
-        evidence_hash(&["ns://Task".to_string()], &t.evidence_ids)
+        evidence_hash(&["ns://Task".to_string()], &t.evidence)
     );
     assert_eq!(t.semantic_check.as_deref(), Some(SCOPE_HINT));
 }
