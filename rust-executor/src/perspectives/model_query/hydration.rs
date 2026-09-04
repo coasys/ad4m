@@ -80,7 +80,13 @@ fn reorder_collection(
     let strategy = match create_strategy(strategy_name) {
         Ok(s) => s,
         Err(e) => {
-            log::warn!("ordering: {e}");
+            // `debug`, not `warn`: this fires once per instance per ordered
+            // collection per query, so a `findAll` over 200 rows whose shape
+            // names an unknown strategy would log 200 times for one stable
+            // fact — the shape does not change between rows. The write side
+            // warns once per save in `apply_collection_ordering`, which is the
+            // actionable place.
+            log::debug!("ordering: {e}");
             return None;
         }
     };
