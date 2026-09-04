@@ -1970,6 +1970,55 @@ async fn accept_interpretation_handler(
     Ok(Value::Bool(true))
 }
 
+/// `perspective.acceptFlowProposal` — accept a live `FlowTransitionProposal`
+/// on behalf of the authenticated agent (idempotent `acceptedBy` link) and
+/// run the consensus pass immediately, so the acceptance resolves now
+/// rather than on the next transcript (firing-engine design §7). Returns
+/// the fired outcomes — possibly empty when the rule's `n` is not yet met.
+async fn accept_flow_proposal_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let proposal_uri = params.require_str("proposalUri")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let fired = crate::perspectives::flow_consensus::accept_flow_proposal(
+        &mut perspective,
+        &proposal_uri,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(fired)?)
+}
+
+/// `perspective.rejectFlowProposal` — hard-delete a live proposal (spec
+/// §4.2). Errors on missing URIs and on resolved proposals: fired
+/// proposals are the kept flow-atom record and are immutable to this API.
+async fn reject_flow_proposal_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let proposal_uri = params.require_str("proposalUri")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    crate::perspectives::flow_consensus::reject_flow_proposal(&mut perspective, &proposal_uri)
+        .await
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
 /// `perspective.rejectInterpretation` — drop the overlay's suggestion(s); a
 /// whole-base reject of a `create` deletes the suggested instance.
 async fn reject_interpretation_handler(
@@ -2435,6 +2484,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register(
         "perspective.interpretationOverlays",
         interpretation_overlays_handler,
+    );
+    map.register(
+        "perspective.acceptFlowProposal",
+        accept_flow_proposal_handler,
+    );
+    map.register(
+        "perspective.rejectFlowProposal",
+        reject_flow_proposal_handler,
     );
     map.register("perspective.getShaclNames", get_shacl_names);
     map.register("perspective.getShaclTargetClass", get_shacl_target_class);

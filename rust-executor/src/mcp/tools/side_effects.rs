@@ -107,6 +107,11 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // `flow_run_action` executes an action — writes the action's effect
     // + advances the flow's state.
     ("flow_run_action", SideEffect::Write),
+    // `flow_proposal_accept` writes an acceptedBy link and may fire the
+    // transition (currentState advance + keep-and-mark);
+    // `flow_proposal_reject` hard-deletes the proposal.
+    ("flow_proposal_accept", SideEffect::Write),
+    ("flow_proposal_reject", SideEffect::Write),
     // ── children.rs ─────────────────────────────────────────────────
     ("add_child", SideEffect::Write),
     ("get_children", SideEffect::Read),

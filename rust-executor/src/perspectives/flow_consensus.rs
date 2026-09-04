@@ -237,7 +237,8 @@ pub fn aggregate_flow_votes(
 }
 
 /// Snapshot of what [`fire_flow_consensus`] wrote.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FireOutcome {
     /// The `FlowInstance` URI whose `currentState` was advanced.
     pub instance_uri: String,
