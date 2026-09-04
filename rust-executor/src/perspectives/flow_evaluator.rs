@@ -324,12 +324,34 @@ fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value
 #[async_trait]
 pub trait RequiresQueryable: Send + Sync {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String>;
+
+    /// Is this base still carrying an unaccepted interpretation overlay?
+    /// Design principle #5: overlays don't count as evidence — only
+    /// committed (accepted or human-written) graph state satisfies
+    /// `requires`, grants role eligibility, or enters an evidence hash.
+    /// Defaults to `false` so pure stubs keep their pre-overlay behavior.
+    async fn has_pending_overlay(&self, _base: &str) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 #[async_trait]
 impl RequiresQueryable for PerspectiveInstance {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
         PerspectiveInstance::model_query(self, class_name, query_json).await
+    }
+
+    async fn has_pending_overlay(&self, base: &str) -> Result<bool> {
+        let links = self
+            .get_links(&crate::types::LinkQuery {
+                source: Some(base.to_string()),
+                predicate: Some(
+                    crate::perspectives::interpretation::overlay::OVERLAY_KIND_PRED.to_string(),
+                ),
+                ..Default::default()
+            })
+            .await?;
+        Ok(!links.is_empty())
     }
 }
 
@@ -355,7 +377,7 @@ pub(crate) async fn run_query<Q: RequiresQueryable + ?Sized>(
         .model_query(class_name, &input.to_string())
         .await?;
     let result: Value = serde_json::from_str(&raw)?;
-    let matched = result
+    let candidates: Vec<EvidenceItem> = result
         .get("instances")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("model_query for `{class_name}` returned no `instances` array"))?
@@ -369,6 +391,21 @@ pub(crate) async fn run_query<Q: RequiresQueryable + ?Sized>(
             })
         })
         .collect();
+    // Overlay exclusion (design principle #5): an instance still carrying an
+    // unaccepted interpretation overlay is not committed graph state — it
+    // neither satisfies a guard nor enters the evidence hash. A lookup error
+    // propagates (fail closed at the caller) rather than silently counting.
+    let mut matched = Vec::with_capacity(candidates.len());
+    for item in candidates {
+        if perspective.has_pending_overlay(&item.id).await? {
+            log::debug!(
+                "run_query: excluding `{}` from `{class_name}` evidence — pending overlay",
+                item.id
+            );
+            continue;
+        }
+        matched.push(item);
+    }
     Ok(matched)
 }
 
@@ -1192,6 +1229,8 @@ mod tests {
     struct StubPerspective {
         calls: Mutex<Vec<(String, String)>>,
         responses: HashMap<String, Result<Vec<Value>, String>>,
+        /// Instance IDs `has_pending_overlay` reports as overlay-pending.
+        pending: Vec<String>,
     }
 
     impl StubPerspective {
@@ -1204,6 +1243,10 @@ mod tests {
         }
         fn with_error(mut self, class: &str, msg: &str) -> Self {
             self.responses.insert(class.into(), Err(msg.into()));
+            self
+        }
+        fn with_pending(mut self, id: &str) -> Self {
+            self.pending.push(id.to_string());
             self
         }
         fn calls_for(&self, class: &str) -> Vec<String> {
@@ -1233,6 +1276,10 @@ mod tests {
                 Some(Err(msg)) => Err(anyhow!(msg.clone())),
                 None => Err(anyhow!("no canned response for `{class_name}`")),
             }
+        }
+
+        async fn has_pending_overlay(&self, base: &str) -> Result<bool> {
+            Ok(self.pending.iter().any(|p| p == base))
         }
     }
 
@@ -1347,6 +1394,35 @@ mod tests {
         assert_eq!(
             out[0].evidence_hash,
             evidence_hash(&["ns://Task".into()], &out[0].evidence)
+        );
+    }
+
+    #[tokio::test]
+    async fn overlay_pending_matches_neither_satisfy_nor_enter_evidence() {
+        // Guard needs one Task; the only match is overlay-pending → Unmet.
+        let flows = delivery(vec![mq("ns://Task")]);
+        let recs = vec![record(DELIVERY, "ad4m://flow/instance/1", "identified")];
+        let stub = StubPerspective::default()
+            .with_instances("ns://Task", &["ad4m://task/pending"])
+            .with_pending("ad4m://task/pending");
+        assert!(
+            evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x")
+                .await
+                .is_empty(),
+            "design principle #5: a pending overlay is not evidence"
+        );
+
+        // Mixed: the pending match is excluded from evidence AND the hash.
+        let stub = StubPerspective::default()
+            .with_instances("ns://Task", &["ad4m://task/pending", "ad4m://task/real"])
+            .with_pending("ad4m://task/pending");
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x").await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].evidence_ids, vec!["ad4m://task/real"]);
+        assert_eq!(
+            out[0].evidence_hash,
+            evidence_hash(&["ns://Task".into()], &out[0].evidence),
+            "hash seals only the committed subset"
         );
     }
 
