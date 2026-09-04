@@ -14,7 +14,7 @@ use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
-        .unwrap_or(true);
+        .unwrap_or(false);
     if global_free {
         return Ok(());
     }

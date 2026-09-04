@@ -298,6 +298,12 @@ pub trait DbBackend: Send + Sync {
     // ── Auth / Verification ───────────────────────────────────────────────────
 
     fn has_verification_code(&self, email: &str) -> Ad4mDbResult<bool>;
+    fn create_verification_code(
+        &self,
+        email: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<String>;
+    fn verify_code(&self, email: &str, code: &str, verification_type: &str) -> Ad4mDbResult<bool>;
     fn cleanup_expired_codes(&self) -> Ad4mDbResult<()>;
     fn check_and_update_rate_limit(&self, email: &str) -> Ad4mDbResult<()>;
     fn set_verification_code_expiry(
@@ -917,6 +923,16 @@ impl DbBackend for LocalDb {
     fn has_verification_code(&self, email: &str) -> Ad4mDbResult<bool> {
         Ad4mDb::with_global_instance(|db| db.has_verification_code(email))
     }
+    fn create_verification_code(
+        &self,
+        email: &str,
+        verification_type: &str,
+    ) -> Ad4mDbResult<String> {
+        Ad4mDb::with_global_instance(|db| db.create_verification_code(email, verification_type))
+    }
+    fn verify_code(&self, email: &str, code: &str, verification_type: &str) -> Ad4mDbResult<bool> {
+        Ad4mDb::with_global_instance(|db| db.verify_code(email, code, verification_type))
+    }
     fn cleanup_expired_codes(&self) -> Ad4mDbResult<()> {
         Ad4mDb::with_global_instance(|db| db.cleanup_expired_codes())
     }
@@ -1286,6 +1302,8 @@ impl DbBackend for SharedDb {
 
     // Auth / Verification
     shared_not_supported!(has_verification_code(email: &str) -> Ad4mDbResult<bool>);
+    shared_not_supported!(create_verification_code(email: &str, verification_type: &str) -> Ad4mDbResult<String>);
+    shared_not_supported!(verify_code(email: &str, code: &str, verification_type: &str) -> Ad4mDbResult<bool>);
     shared_not_supported!(cleanup_expired_codes() -> Ad4mDbResult<()>);
     shared_not_supported!(check_and_update_rate_limit(email: &str) -> Ad4mDbResult<()>);
     shared_not_supported!(set_verification_code_expiry(email: &str, verification_type: &str, expires_at: i64) -> Ad4mDbResult<()>);

@@ -119,7 +119,20 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         }));
     }
 
-    let user_exists = crate::db_backend::db_backend().get_user(&email).is_ok();
+    let user_exists = match crate::db_backend::db_backend().get_user(&email) {
+        Ok(_) => true,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("No user") {
+                false
+            } else {
+                return Err(WsRpcError::internal(format!(
+                    "Failed to check user: {}",
+                    msg
+                )));
+            }
+        }
+    };
 
     if user_exists {
         match um::verify_credentials(&email, &body.password) {
@@ -284,7 +297,20 @@ async fn request_verification(
         }));
     }
 
-    let user_exists = crate::db_backend::db_backend().get_user(&email).is_ok();
+    let user_exists = match crate::db_backend::db_backend().get_user(&email) {
+        Ok(_) => true,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("No user") {
+                false
+            } else {
+                return Err(WsRpcError::internal(format!(
+                    "Failed to check user: {}",
+                    msg
+                )));
+            }
+        }
+    };
 
     if !user_exists {
         return Ok(serde_json::json!({

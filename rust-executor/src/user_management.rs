@@ -18,20 +18,14 @@ pub fn is_multi_user_enabled() -> bool {
 
 /// Create a verification code for the given email and type ("signup" or "login").
 pub fn create_verification_code(email: &str, verification_type: &str) -> Result<String, String> {
-    let db = Ad4mDb::global_instance();
-    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-    db_ref
+    crate::db_backend::db_backend()
         .create_verification_code(email, verification_type)
         .map_err(|e| format!("Failed to create verification code: {}", e))
 }
 
 /// Verify a code for the given email and type.
 pub fn verify_code(email: &str, code: &str, verification_type: &str) -> Result<bool, String> {
-    let db = Ad4mDb::global_instance();
-    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-    db_ref
+    crate::db_backend::db_backend()
         .verify_code(email, code, verification_type)
         .map_err(|e| format!("Verification failed: {}", e))
 }
@@ -95,7 +89,17 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
     });
 
     // Check if user already exists (local DB or shared DB)
-    let user_exists = crate::db_backend::db_backend().get_user(email).is_ok();
+    let user_exists = match crate::db_backend::db_backend().get_user(email) {
+        Ok(_) => true,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("No user") {
+                false
+            } else {
+                return Err(format!("Failed to check user: {}", msg));
+            }
+        }
+    };
     if user_exists {
         return Err("User already exists".to_string());
     }
@@ -116,14 +120,9 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
         Ad4mDb::hash_password(password).map_err(|e| format!("Failed to hash password: {}", e))?;
 
     // Add user to local DB
-    {
-        let db = Ad4mDb::global_instance();
-        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-        db_ref
-            .add_user_prehashed(email, &did, &password_hash)
-            .map_err(|e| format!("Failed to add user: {}", e))?;
-    }
+    crate::db_backend::db_backend()
+        .add_user_prehashed(email, &did, &password_hash)
+        .map_err(|e| format!("Failed to add user: {}", e))?;
 
     // Also store in shared DB for cross-executor access
     if config.db_backend.as_deref() == Some("shared") {
@@ -216,13 +215,9 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
 
     // Import user to local DB for future logins
     let user_did = user_data.get("did").and_then(|d| d.as_str()).unwrap_or("");
+    if let Err(e) = crate::db_backend::db_backend().add_user_prehashed(email, user_did, stored_hash)
     {
-        let db = Ad4mDb::global_instance();
-        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-        if let Err(e) = db_ref.add_user_prehashed(email, user_did, stored_hash) {
-            log::warn!("Failed to import user to local DB: {}", e);
-        }
+        log::warn!("Failed to import user to local DB: {}", e);
     }
 
     Ok(())
@@ -290,7 +285,17 @@ pub fn verify_and_login(
 
 /// Check if a user exists in both DB and AgentService.
 pub fn user_exists(email: &str) -> Result<(), String> {
-    let db_exists = crate::db_backend::db_backend().get_user(email).is_ok();
+    let db_exists = match crate::db_backend::db_backend().get_user(email) {
+        Ok(_) => true,
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("not found") || msg.contains("No user") {
+                false
+            } else {
+                return Err(format!("Failed to check user: {}", msg));
+            }
+        }
+    };
     if !db_exists {
         return Err("User not found".to_string());
     }

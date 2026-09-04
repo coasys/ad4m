@@ -244,7 +244,9 @@ async fn add_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let friends = RuntimeService::with_global_instance(|runtime| {
-        runtime.add_friend(body.dids);
+        runtime
+            .add_friend(body.dids)
+            .map_err(|e| WsRpcError::internal(e))?;
         Ok::<Vec<String>, WsRpcError>(runtime.get_friends())
     })?;
     Ok(serde_json::to_value(friends)?)
@@ -258,7 +260,9 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let friends = RuntimeService::with_global_instance(|runtime| {
-        runtime.remove_friend(body.dids);
+        runtime
+            .remove_friend(body.dids)
+            .map_err(|e| WsRpcError::internal(e))?;
         Ok::<Vec<String>, WsRpcError>(runtime.get_friends())
     })?;
     Ok(serde_json::to_value(friends)?)
@@ -278,8 +282,9 @@ async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<
         runtime.add_message_to_outbox(SentMessage {
             message: message_expr,
             recipient: did.clone(),
-        });
-    });
+        })
+    })
+    .map_err(|e| WsRpcError::internal(e))?;
 
     Ok(Value::Bool(true))
 }
@@ -444,7 +449,9 @@ async fn add_link_language_templates(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let templates = RuntimeService::with_global_instance(|runtime| {
-        runtime.add_know_link_language(body.addresses);
+        runtime
+            .add_know_link_language(body.addresses)
+            .map_err(|e| WsRpcError::internal(e))?;
         Ok::<Vec<String>, WsRpcError>(runtime.get_know_link_languages())
     })?;
     Ok(serde_json::to_value(templates)?)
@@ -464,7 +471,9 @@ async fn remove_link_language_templates(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let templates = RuntimeService::with_global_instance(|runtime| {
-        runtime.remove_know_link_language(body.addresses);
+        runtime
+            .remove_know_link_language(body.addresses)
+            .map_err(|e| WsRpcError::internal(e))?;
         Ok::<Vec<String>, WsRpcError>(runtime.get_know_link_languages())
     })?;
     Ok(serde_json::to_value(templates)?)

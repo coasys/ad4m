@@ -110,16 +110,16 @@ impl RuntimeService {
         trusted_agents
     }
 
-    pub fn add_trusted_agent(&self, new_agents: Vec<String>) {
-        let _ = crate::db_backend::db_backend()
+    pub fn add_trusted_agent(&self, new_agents: Vec<String>) -> Result<(), String> {
+        crate::db_backend::db_backend()
             .add_trusted_agents(new_agents)
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())
     }
 
-    pub fn remove_trusted_agent(&self, agents_to_remove: Vec<String>) {
-        let _ = crate::db_backend::db_backend()
+    pub fn remove_trusted_agent(&self, agents_to_remove: Vec<String>) -> Result<(), String> {
+        crate::db_backend::db_backend()
             .remove_trusted_agents(agents_to_remove)
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())
     }
 
     pub fn get_know_link_languages(&self) -> Vec<String> {
@@ -134,16 +134,16 @@ impl RuntimeService {
         languages
     }
 
-    pub fn add_know_link_language(&self, language: Vec<String>) {
-        let _ = crate::db_backend::db_backend()
+    pub fn add_know_link_language(&self, language: Vec<String>) -> Result<(), String> {
+        crate::db_backend::db_backend()
             .add_known_link_languages(language)
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())
     }
 
-    pub fn remove_know_link_language(&self, language_to_remove: Vec<String>) {
-        let _ = crate::db_backend::db_backend()
+    pub fn remove_know_link_language(&self, language_to_remove: Vec<String>) -> Result<(), String> {
+        crate::db_backend::db_backend()
             .remove_known_link_languages(language_to_remove)
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())
     }
 
     pub fn get_friends(&self) -> Vec<String> {
@@ -153,16 +153,16 @@ impl RuntimeService {
             .unwrap_or_default()
     }
 
-    pub fn add_friend(&self, friends: Vec<String>) {
-        let _ = crate::db_backend::db_backend()
+    pub fn add_friend(&self, friends: Vec<String>) -> Result<(), String> {
+        crate::db_backend::db_backend()
             .add_friends(friends)
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())
     }
 
-    pub fn remove_friend(&self, friend_to_remove: Vec<String>) {
-        let _ = crate::db_backend::db_backend()
+    pub fn remove_friend(&self, friend_to_remove: Vec<String>) -> Result<(), String> {
+        crate::db_backend::db_backend()
             .remove_friends(friend_to_remove)
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())
     }
 
     pub fn get_outbox(&self) -> Vec<SentMessage> {
@@ -172,10 +172,10 @@ impl RuntimeService {
             .unwrap_or_default()
     }
 
-    pub fn add_message_to_outbox(&self, message: SentMessage) {
-        let _ = crate::db_backend::db_backend()
+    pub fn add_message_to_outbox(&self, message: SentMessage) -> Result<(), String> {
+        crate::db_backend::db_backend()
             .add_to_outbox(&message.message, message.recipient)
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())
     }
 
     pub async fn request_install_notification(

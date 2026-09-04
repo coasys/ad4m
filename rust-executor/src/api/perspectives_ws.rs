@@ -126,7 +126,7 @@ async fn get_perspective_with_access(
 fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
-        .unwrap_or(true);
+        .unwrap_or(false);
     if global_free {
         return Ok(());
     }
@@ -149,7 +149,7 @@ fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
 fn reserve_credits(user_email: &Option<String>, amount: f64) -> Result<(), WsRpcError> {
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
-        .unwrap_or(true);
+        .unwrap_or(false);
     if global_free {
         return Ok(());
     }
