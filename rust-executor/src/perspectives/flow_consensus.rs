@@ -346,6 +346,7 @@ pub async fn fire_flow_consensus(
 pub async fn resolve_proposals_fired(
     perspective: &mut PerspectiveInstance,
     proposal_uris: &[String],
+    batch_id: Option<String>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
     for uri in proposal_uris {
@@ -357,7 +358,7 @@ pub async fn resolve_proposals_fired(
                     target: format!("literal:string:{}", urlencoding::encode("fired")),
                 },
                 LinkStatus::Shared,
-                None,
+                batch_id.clone(),
                 context,
             )
             .await
@@ -634,6 +635,7 @@ pub async fn run_flow_consensus_pass(
     scope: Option<&Scope>,
     context: &AgentContext,
     flow_filter: Option<&[String]>,
+    instance_filter: Option<&str>,
 ) -> Vec<FireOutcome> {
     let loaded = async {
         let mut flows_by_uri = load_shacl_flows(perspective).await?;
@@ -652,6 +654,14 @@ pub async fn run_flow_consensus_pass(
             return Vec::new();
         }
     };
+    // `instance_filter` narrows the sweep to one FlowInstance — the accept
+    // path uses it so a single user click never re-runs every guard of
+    // every live proposal on the perspective (Marvin's #967 follow-up:
+    // unscoped, that is remotely-triggerable amplification once accept is
+    // a wire surface).
+    if let Some(only) = instance_filter {
+        records.retain(|r| r.instance_uri == only);
+    }
     records.sort_by(|a, b| a.instance_uri.cmp(&b.instance_uri));
 
     let mut outcomes = Vec::new();
@@ -806,25 +816,41 @@ pub async fn run_flow_consensus_pass(
         let Some((_, tally)) = fire else {
             continue;
         };
-        match fire_flow_consensus(perspective, record, &tally, None, context).await {
-            Ok(outcome) => {
-                if let Err(e) = resolve_proposals_fired(
-                    perspective,
-                    &outcome.contributing_proposal_uris,
-                    context,
-                )
-                .await
-                {
+        // Advance + keep-and-mark land in ONE batch: a crash or store error
+        // between the two writes would otherwise turn the co-signed flow-atom
+        // record into superseded proposals the next pass hard-deletes
+        // (Marvin's #967 follow-up). Either both commit or the fire rolls
+        // back and re-validates next pass.
+        let batch_id = perspective.create_batch().await;
+        let fired = async {
+            let outcome =
+                fire_flow_consensus(perspective, record, &tally, Some(batch_id.clone()), context)
+                    .await?;
+            resolve_proposals_fired(
+                perspective,
+                &outcome.contributing_proposal_uris,
+                Some(batch_id.clone()),
+                context,
+            )
+            .await?;
+            anyhow::Ok(outcome)
+        }
+        .await;
+        match fired {
+            Ok(outcome) => match perspective.commit_batch(batch_id.clone(), context).await {
+                Ok(_) => outcomes.push(outcome),
+                Err(e) => {
+                    perspective.discard_batch(&batch_id).await;
                     log::warn!(
-                        "run_flow_consensus_pass: fired {} → {} but keep-and-mark failed (proposals stay live; superseded cleanup catches them next pass): {e:#}",
-                        outcome.from_state, outcome.to_state
+                        "run_flow_consensus_pass: firing {} rolled back (commit_batch failed; re-validates next pass): {e:#}",
+                        record.instance_uri
                     );
                 }
-                outcomes.push(outcome);
-            }
+            },
             Err(e) => {
+                perspective.discard_batch(&batch_id).await;
                 log::warn!(
-                    "run_flow_consensus_pass: firing {} failed: {e:#}",
+                    "run_flow_consensus_pass: firing {} rolled back: {e:#}",
                     record.instance_uri
                 );
             }
@@ -906,7 +932,15 @@ pub async fn accept_flow_proposal(
             .await
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
-    Ok(run_flow_consensus_pass(perspective, None, context, None).await)
+    // Scope the immediate pass to the proposal's own FlowInstance — one
+    // accept must not sweep every instance on the perspective. A proposal
+    // without an instance link can't be loaded by the consensus pass anyway,
+    // so the unscoped fallback only preserves the old behavior for shapes
+    // that would fire nothing.
+    let instance_uri = links.iter().find_map(|l| {
+        (l.data.predicate.as_deref() == Some("ad4m://flow/instance")).then(|| l.data.target.clone())
+    });
+    Ok(run_flow_consensus_pass(perspective, None, context, None, instance_uri.as_deref()).await)
 }
 
 /// Reject a live proposal: hard delete, per spec §4.2 — a rejected proposal
