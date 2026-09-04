@@ -2283,7 +2283,6 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
 #[ignore = "llm-e2e"]
 async fn auto_processor_election_only_online_participants_process() {
     use crate::agent::{did_for_context, AgentContext, AgentService};
-    use crate::db::Ad4mDb;
     use crate::perspectives::auto_processor::config::AutoProcessorConfig;
     use crate::perspectives::auto_processor::watcher::{run_one_pass, PassOutcome, PendingTurn};
     use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;

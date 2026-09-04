@@ -2444,6 +2444,7 @@ impl AIService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Ad4mDb;
     use crate::types::{AIPromptExamplesInput, LocalModelInput};
     use tokio::time::{sleep, Duration};
 

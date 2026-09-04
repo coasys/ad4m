@@ -1091,7 +1091,6 @@ pub async fn run_interpretation_with_harness_and_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Ad4mDb;
     use crate::perspectives::interpretation::*;
     use crate::perspectives::interpretation_test_support::*;
     use crate::types::{AITask, Link};

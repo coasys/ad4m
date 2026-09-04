@@ -204,6 +204,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Ad4mDb;
     use crate::perspectives::sparql_store::SparqlStore;
     use crate::types::LinkStatus;
     use crate::types::{ExpressionProof, Link, LinkExpression};
