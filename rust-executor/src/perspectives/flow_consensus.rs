@@ -38,10 +38,17 @@
 //!   [`aggregate_flow_votes`] stays pure and takes the resolved set; when
 //!   the rule has `from_role`, omitting the set errors, because a silent
 //!   "all DIDs eligible" would misreport consensus.
+//! - [`run_flow_consensus_pass`] — the orchestrator: auto-invalidation
+//!   (superseded + stale-seal via
+//!   [`super::flow_evaluator::recompute_evidence_hash`]), per-target rule
+//!   resolution, role gates, firing, keep-and-mark.
+//! - [`delete_flow_proposal`] — hard delete, shared by auto-invalidation
+//!   and the upcoming reject API.
 //!
-//! # Non-goals here (owned by the pass orchestrator / later commits)
+//! # Non-goals here (later slices)
 //!
-//! - Evidence-hash re-verification (pass orchestrator, before firing).
+//! - Accept/reject API + auto-processor wiring (consumes this module).
+//! - `flow-state-changed` subscription topics (§7).
 //! - Weighted / delegation / time-decay consensus (v1.5+).
 
 use crate::agent::AgentContext;
