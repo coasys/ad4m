@@ -795,6 +795,33 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
         });
     }
 
+    // Sort states by `value`, matching TS `SHACLFlow.fromLinks`
+    // (`core/src/shacl/SHACLFlow.ts`) and for the same reason: link order is
+    // not preserved on the graph, so the only stable ordering is the declared
+    // `value`. The convention that rests on it — "the initial state is
+    // `states[0]`", which `FlowInstance.start` consumes on the TS side — would
+    // otherwise resolve differently in the two runtimes whenever
+    // link-discovery order differs from value order, and a Rust-side spawn
+    // would mint instances in the wrong starting state. Ties keep discovery
+    // order (`sort_by` is stable), which is as arbitrary as the declaration
+    // that produced them.
+    //
+    // `NaN` sorts last rather than comparing equal to everything. The value
+    // arrives from `decode_literal_number`, which is `str::parse::<f64>` — so
+    // a literal of `NaN` on the graph decodes to one, and
+    // `partial_cmp(…).unwrap_or(Equal)` would then break the total order
+    // `sort_by` requires, leaving the *finite* states in arbitrary relative
+    // order too. Since `states[0]` is the initial state, that would pick the
+    // wrong one. A state whose ordering value is undecodable has no claim to
+    // being first.
+    flow.states
+        .sort_by(|a, b| match (a.value.is_nan(), b.value.is_nan()) {
+            (false, false) => a.value.total_cmp(&b.value),
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+        });
+
     // Transitions — walk every `hasTransition` edge, resolve endpoints
     // via the state-name index.
     for transition_link in find_links(links, flow_uri, "ad4m://hasTransition") {
@@ -2103,5 +2130,80 @@ mod tests {
         let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
         assert!(flow.input_types.is_empty());
         assert!(flow.output_types.is_empty());
+    }
+
+    #[test]
+    fn parse_flow_from_links_sorts_states_by_value() {
+        // Link order on the graph is not preserved, so the reader must impose
+        // the same `value` ordering TS `SHACLFlow.fromLinks` does. The
+        // convention riding on it — "initial state = states[0]", which
+        // `FlowInstance.start` consumes — would otherwise resolve differently
+        // in the two runtimes, and a Rust-side spawn would mint instances in
+        // whichever state happened to be discovered first.
+        let flow_uri = "order://OrderFlow";
+        let mut links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Order")),
+            mk_link(flow_uri, "ad4m://namespace", &lit_str("order://")),
+        ];
+        // Declared deliberately out of order: last, first, middle.
+        for (name, value) in [("done", 1.0), ("identified", 0.0), ("scoped", 0.5)] {
+            let state_uri = format!("order://Order.{name}");
+            links.push(mk_link(flow_uri, "ad4m://hasState", &state_uri));
+            links.push(mk_link(&state_uri, "ad4m://stateName", &lit_str(name)));
+            links.push(mk_link(&state_uri, "ad4m://stateValue", &lit_num(value)));
+        }
+
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+
+        assert_eq!(
+            flow.states
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["identified", "scoped", "done"],
+            "states must come back ordered by declared value, not link order"
+        );
+    }
+
+    #[test]
+    fn parse_flow_from_links_sorts_nan_state_values_last() {
+        // `decode_literal_number` is `str::parse::<f64>`, so a literal of `NaN`
+        // on the graph decodes to one. Comparing it as "equal to everything"
+        // would break `sort_by`'s total-order contract and scramble the
+        // *finite* states along with it — and `states[0]` is the initial state,
+        // so the spawn would start in the wrong place. A state whose ordering
+        // value is undecodable has no claim to being first.
+        let flow_uri = "nan://NanFlow";
+        let mut links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Nan")),
+            mk_link(flow_uri, "ad4m://namespace", &lit_str("nan://")),
+        ];
+        for (name, value) in [
+            ("done", 1.0_f64),
+            ("broken", f64::NAN),
+            ("identified", 0.0_f64),
+        ] {
+            let state_uri = format!("nan://Nan.{name}");
+            links.push(mk_link(flow_uri, "ad4m://hasState", &state_uri));
+            links.push(mk_link(&state_uri, "ad4m://stateName", &lit_str(name)));
+            links.push(mk_link(&state_uri, "ad4m://stateValue", &lit_num(value)));
+        }
+
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+
+        assert!(
+            flow.states.iter().any(|s| s.value.is_nan()),
+            "fixture must actually round-trip a NaN, otherwise this proves nothing"
+        );
+        assert_eq!(
+            flow.states
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["identified", "done", "broken"],
+            "finite states keep value order and the NaN one sorts last"
+        );
     }
 }
