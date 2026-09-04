@@ -1,26 +1,31 @@
 use super::types::*;
-use crate::wallet::Wallet;
+use crate::config::get_global_config;
+use crate::wallet::wallet_backend;
 use deno_core::{anyhow::anyhow, error::AnyError};
 use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
+
+/// Resolve the signing key name from global config.
+pub fn signing_key_name() -> String {
+    get_global_config().signing_key_name()
+}
 
 pub fn generate_jwt(
     audience: String,
     expiration_time: u64,
     capabilities: AuthInfo,
 ) -> Result<String, AnyError> {
-    // Get the private key
-    let wallet = Wallet::instance();
-    let wallet_lock = wallet.lock().expect("wallet lock");
-    let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
-    let name = "main".to_string();
+    let backend = wallet_backend();
+    let name = signing_key_name();
 
-    let secret_key = wallet_ref
-        .get_secret_key(&name)
-        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+    let secret_key = backend.get_secret_key(&name).ok_or(anyhow!(
+        "{} key not found. call createMainKey() first",
+        name
+    ))?;
 
-    let did_document = wallet_ref
-        .get_did_document(&name)
-        .ok_or(anyhow!("main did not found. call createMainKey() first"))?;
+    let did_document = backend.get_did_document(&name).ok_or(anyhow!(
+        "{} did not found. call createMainKey() first",
+        name
+    ))?;
 
     let payload = Claims::new(did_document.id, audience, expiration_time, capabilities);
 
@@ -34,15 +39,12 @@ pub fn generate_jwt(
 }
 
 pub fn decode_jwt(token: String) -> Result<Claims, AnyError> {
-    //Get the private key
-    let wallet = Wallet::instance();
-    let wallet_lock = wallet.lock().expect("wallet lock");
-    let wallet_ref = wallet_lock.as_ref().expect("wallet instance");
-    let name = "main".to_string();
+    let backend = wallet_backend();
+    let name = signing_key_name();
 
-    let secret_key = wallet_ref
+    let secret_key = backend
         .get_secret_key(&name)
-        .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
+        .ok_or(anyhow!("{} key not found", name))?;
 
     let result = jsonwebtoken::decode::<Claims>(
         &token,
