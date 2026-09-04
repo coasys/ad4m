@@ -2,13 +2,13 @@
 //!
 //! The watch loop and [`super::watcher::run_one_pass`] publish an
 //! [`AutoProcessorEvent`] at each meaningful step of a pass onto the global
-//! [`AUTO_PROCESSOR_EVENT_TOPIC`] PubSub topic. This is the same mechanism
-//! every GraphQL subscription already rides, so:
+//! [`AUTO_PROCESSOR_EVENT_TOPIC`] PubSub topic. This is the same PubSub
+//! mechanism the WS-RPC layer already rides for its own subscriptions, so:
 //!   * **tests** can `subscribe()` and `await` a specific step instead of
 //!     polling the graph or sleeping — the whole pass is observable without
 //!     manually driving interpretation, and
-//!   * **the WebSocket layer (#881)** can forward the topic to clients as a
-//!     GraphQL subscription for near-free, so a Flux-style UI can show
+//!   * **the WS-RPC layer** can forward the topic to clients as a
+//!     WS subscription for near-free, so a Flux-style UI can show
 //!     "collecting → running LLM → done" and await the next batch.
 //!
 //! Emission is fire-and-forget: a pass never fails or blocks because nobody is
