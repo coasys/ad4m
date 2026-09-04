@@ -91,3 +91,4 @@ rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
 
 # Overnight watchdog scratch — logs and repro scripts, not source
 .overnight-status/
+.codegraph/

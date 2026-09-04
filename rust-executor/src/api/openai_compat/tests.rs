@@ -988,13 +988,24 @@ use crate::ai_service::{AIService, PromptResult};
 /// between mint and decode would break verification.
 fn user_jwt_token(email: &str) -> String {
     use jsonwebtoken::{encode, EncodingKey, Header};
-    let wallet = crate::wallet::Wallet::instance();
-    let mut w = wallet.lock().unwrap();
-    let w = w.as_mut().unwrap();
-    if w.get_secret_key(&"main".to_string()).is_none() {
-        w.generate_keypair("main".to_string());
+    // Use the trait-based wallet_backend (same path as decode_jwt) so the
+    // signing and verification keys match.
+    let local = std::sync::Arc::new(crate::wallet::LocalWallet::new());
+    let _ = crate::wallet::try_init_wallet_backend(
+        local as std::sync::Arc<dyn crate::wallet::WalletBackend>,
+    );
+    crate::config::set_global_config(crate::config::Ad4mConfig::default());
+
+    let backend = crate::wallet::wallet_backend();
+    let key_name = crate::agent::capabilities::token::signing_key_name();
+    if !backend.key_exists(&key_name) {
+        backend
+            .generate_keypair(&key_name)
+            .expect("generate signing key");
     }
-    let secret = w.get_secret_key(&"main".to_string()).unwrap();
+    let secret = backend
+        .get_secret_key(&key_name)
+        .expect("signing key must exist");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
