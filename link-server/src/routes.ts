@@ -2,14 +2,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { didToPublicKey, hashMessageForVerify, verifyHex, type AuthManager, type ChallengeStore } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
 import { rotateRoomKey, type EncryptedKeyPayload } from "./encryption.js";
-import type { FederateResult, FederationIdentity, FederationManager } from "./federation.js";
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import {
-  type FederateRequestBody,
   isEncryptedLinkData,
   type LinkExpression,
-  type ReconcileRequestBody,
   type RoomParams,
 } from "./types.js";
 import type { WsManager } from "./ws.js";
@@ -20,8 +17,6 @@ export interface RouteContext {
   challenges: ChallengeStore;
   ws: WsManager;
   telepresence: TelepresenceManager;
-  federation: FederationManager;
-  identity: FederationIdentity;
   autoAdmit: boolean;
   rateLimits: {
     authIp: SlidingWindowLimiter;
@@ -86,12 +81,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
 
   app.get("/health", async (_request, reply) => {
     return reply.send({ status: "ok" });
-  });
-
-  // ---- server identity (public, not room-scoped) ----
-
-  app.get("/server/identity", async (_request, reply) => {
-    return reply.send({ publicKey: ctx.identity.publicKey });
   });
 
   // ---- auth: DID challenge-response ----
@@ -203,10 +192,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       }
 
       // Enforce E2E: once a room has been rotated to E2E, reject plaintext
-      // links. A single unencrypted link in an otherwise-encrypted room
-      // leaks its full content (author, timestamp, data) to the server and
-      // any federation peers — exactly the confidentiality hole E2E exists
-      // to close.
+      // links.
       const room = ctx.db.getRoom(claims.roomId);
       if (room && room.e2e_enabled) {
         for (const link of [...additions, ...removals]) {
@@ -252,7 +238,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         { type: "diff", payload: { additions, removals }, revision, sequence },
         { excludeDid: claims.did }
       );
-      void ctx.federation.forwardDiff(claims.roomId, { additions, removals }, sequence, revision);
 
       return reply.send({ sequence, revision });
     }
@@ -349,82 +334,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       return reply.send({ admin: room.admin_did, members: acl.map((a) => a.did) });
     }
   );
-
-  // ---- federation peer management ----
-
-  app.post(
-    "/rooms/:roomId/federation",
-    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
-    async (request, reply) => {
-      const claims = request.authClaims!;
-      const body = request.body as { action?: string; peerUrl?: string } | null;
-      if (body?.action !== "add" && body?.action !== "remove") {
-        return reply.code(400).send({ error: 'action must be "add" or "remove"' });
-      }
-      if (typeof body.peerUrl !== "string") {
-        return reply.code(400).send({ error: "peerUrl is required" });
-      }
-      if (body.action === "add") {
-        await ctx.federation.addPeer(claims.roomId, body.peerUrl);
-      } else {
-        ctx.federation.removePeer(claims.roomId, body.peerUrl);
-      }
-      return reply.send({ peers: ctx.federation.listPeers(claims.roomId) });
-    }
-  );
-
-  app.get(
-    "/rooms/:roomId/federation",
-    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
-    async (request, reply) => {
-      const claims = request.authClaims!;
-      return reply.send({ peers: ctx.federation.listPeers(claims.roomId) });
-    }
-  );
-
-  // ---- federation transport (server-to-server; authenticated by server signature, not JWT) ----
-  // Rate-limited by IP (same pool as auth) since these endpoints accept
-  // unauthenticated requests — the signature check happens inside the handler.
-
-  app.post("/rooms/:roomId/federate", { preHandler: ipRateLimit(ctx.rateLimits.authIp) }, async (request, reply) => {
-    const { roomId } = request.params as RoomParams;
-    const body = request.body as Partial<FederateRequestBody> | null;
-    if (
-      !body ||
-      !body.diff ||
-      !Array.isArray(body.diff.additions) ||
-      !Array.isArray(body.diff.removals) ||
-      typeof body.serverPublicKey !== "string" ||
-      typeof body.serverSignature !== "string" ||
-      typeof body.sequence !== "number" ||
-      typeof body.revision !== "string"
-    ) {
-      return reply.code(400).send({ error: "malformed federate payload" });
-    }
-    const result: FederateResult = await ctx.federation.handleIncomingFederate(
-      roomId,
-      body as FederateRequestBody
-    );
-    if (!result.ok) return reply.code(result.status).send({ error: result.error });
-    return reply.send({ applied: result.applied, revision: result.revision, sequence: result.sequence });
-  });
-
-  app.post("/rooms/:roomId/reconcile", { preHandler: ipRateLimit(ctx.rateLimits.authIp) }, async (request, reply) => {
-    const { roomId } = request.params as RoomParams;
-    const body = request.body as Partial<ReconcileRequestBody> | null;
-    if (
-      !body ||
-      typeof body.sinceSequence !== "number" ||
-      typeof body.revision !== "string" ||
-      typeof body.serverPublicKey !== "string" ||
-      typeof body.serverSignature !== "string"
-    ) {
-      return reply.code(400).send({ error: "malformed reconcile payload" });
-    }
-    const result = await ctx.federation.handleIncomingReconcile(roomId, body as ReconcileRequestBody);
-    if (!result.ok) return reply.code(result.status).send({ error: result.error });
-    return reply.send(result.response);
-  });
 
   // ---- E2E room keys ----
 

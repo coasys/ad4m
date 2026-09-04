@@ -26,9 +26,8 @@ export interface WsManagerOptions {
 /**
  * Owns the live WebSocket connection registry, room presence broadcast, and
  * telepresence-signal routing. Depends only on AuthManager + TelepresenceManager
- * (one-directional) — routes.ts and federation.ts call into this to push
- * server-originated events, but this module never imports them, so there's
- * no import cycle.
+ * (one-directional) — routes.ts calls into this to push server-originated
+ * events, but this module never imports it, so there's no import cycle.
  *
  * Auth: first-message pattern — the WebSocket upgrade succeeds without
  * credentials; the client must send `{type:"auth",token:"<jwt>"}` as its

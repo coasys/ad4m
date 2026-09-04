@@ -42,7 +42,7 @@ Deploy a [**link-server**](../../link-server/README.md) instance on your own har
 npx @coasys/link-server --port 3457 --data ./my-data
 ```
 
-See the [link-server README](../../link-server/README.md) for Docker setup, access control, federation, and encryption options.
+See the [link-server README](../../link-server/README.md) for Docker setup, access control, and encryption options.
 
 #### 2. Publish the language template (one time)
 

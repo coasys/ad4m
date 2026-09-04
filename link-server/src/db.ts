@@ -51,14 +51,6 @@ CREATE TABLE IF NOT EXISTS room_keys (
   version INTEGER,
   PRIMARY KEY (room_id, did, version)
 );
-CREATE TABLE IF NOT EXISTS federation_peers (
-  room_id TEXT,
-  peer_url TEXT,
-  added_at TEXT,
-  peer_public_key TEXT,
-  last_peer_sequence INTEGER DEFAULT 0,
-  PRIMARY KEY (room_id, peer_url)
-);
 CREATE TABLE IF NOT EXISTS server_identity (
   key_type TEXT PRIMARY KEY,
   public_key TEXT,
@@ -112,14 +104,6 @@ export interface RoomKeyRow {
   did: string;
   encrypted_key: string;
   version: number;
-}
-
-export interface FederationPeerRow {
-  room_id: string;
-  peer_url: string;
-  added_at: string;
-  peer_public_key: string | null;
-  last_peer_sequence: number;
 }
 
 export interface ServerIdentityRow {
@@ -221,26 +205,6 @@ export class LinkServerDB {
          VALUES (?, ?, ?, ?)`
       ),
 
-      addFederationPeer: this.raw.prepare(
-        `INSERT INTO federation_peers (room_id, peer_url, added_at, peer_public_key)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(room_id, peer_url) DO UPDATE SET peer_public_key = COALESCE(excluded.peer_public_key, federation_peers.peer_public_key)`
-      ),
-      removeFederationPeer: this.raw.prepare(
-        "DELETE FROM federation_peers WHERE room_id = ? AND peer_url = ?"
-      ),
-      getFederationPeers: this.raw.prepare("SELECT * FROM federation_peers WHERE room_id = ?"),
-      setFederationPeerPubkey: this.raw.prepare(
-        "UPDATE federation_peers SET peer_public_key = ? WHERE room_id = ? AND peer_url = ?"
-      ),
-      findPeerByPubkey: this.raw.prepare(
-        "SELECT * FROM federation_peers WHERE room_id = ? AND peer_public_key = ?"
-      ),
-      findPeerByUrl: this.raw.prepare(
-        "SELECT * FROM federation_peers WHERE room_id = ? AND peer_url = ?"
-      ),
-      listRoomsWithPeers: this.raw.prepare("SELECT DISTINCT room_id FROM federation_peers"),
-
       getIdentity: this.raw.prepare("SELECT * FROM server_identity WHERE key_type = ?"),
       setIdentity: this.raw.prepare(
         `INSERT OR REPLACE INTO server_identity (key_type, public_key, private_key)
@@ -261,13 +225,6 @@ export class LinkServerDB {
         "DELETE FROM sessions WHERE expires_at < ?"
       ),
 
-      // federation peer sequence tracking
-      getPeerLastSequence: this.raw.prepare(
-        "SELECT last_peer_sequence FROM federation_peers WHERE room_id = ? AND peer_url = ?"
-      ),
-      setPeerLastSequence: this.raw.prepare(
-        "UPDATE federation_peers SET last_peer_sequence = ? WHERE room_id = ? AND peer_url = ?"
-      ),
     };
   }
 
@@ -393,9 +350,7 @@ export class LinkServerDB {
   /**
    * Applies a PerspectiveDiff's additions/removals to the active link set
    * (OR-Set: add-wins insert, remove-by-hash) and appends it to the
-   * append-only diff log, all in one transaction. Shared by local commits
-   * (routes.ts) and federation (federation.ts) so both paths guarantee
-   * identical merge + revision semantics.
+   * append-only diff log, all in one transaction.
    *
    * Revision is maintained incrementally via XOR — O(1) per link, regardless
    * of room size. XOR is commutative and self-inverse: adding a hash XORs
@@ -489,43 +444,6 @@ export class LinkServerDB {
     return info.changes > 0;
   }
 
-  // ---- federation peers ----
-
-  addFederationPeer(roomId: string, peerUrl: string, peerPublicKey?: string): void {
-    this.stmts.addFederationPeer.run(roomId, peerUrl, new Date().toISOString(), peerPublicKey ?? null);
-  }
-
-  removeFederationPeer(roomId: string, peerUrl: string): void {
-    this.stmts.removeFederationPeer.run(roomId, peerUrl);
-  }
-
-  getFederationPeers(roomId: string): FederationPeerRow[] {
-    return this.stmts.getFederationPeers.all(roomId) as FederationPeerRow[];
-  }
-
-  setFederationPeerPublicKey(roomId: string, peerUrl: string, pubkey: string): void {
-    this.stmts.setFederationPeerPubkey.run(pubkey, roomId, peerUrl);
-  }
-
-  findFederationPeerByPublicKey(
-    roomId: string,
-    publicKey: string
-  ): FederationPeerRow | undefined {
-    return this.stmts.findPeerByPubkey.get(roomId, publicKey) as FederationPeerRow | undefined;
-  }
-
-  findFederationPeerByUrl(
-    roomId: string,
-    peerUrl: string
-  ): FederationPeerRow | undefined {
-    return this.stmts.findPeerByUrl.get(roomId, peerUrl) as FederationPeerRow | undefined;
-  }
-
-  listAllRoomsWithPeers(): string[] {
-    const rows = this.stmts.listRoomsWithPeers.all() as { room_id: string }[];
-    return rows.map((r) => r.room_id);
-  }
-
   // ---- server identity ----
 
   getIdentity(keyType: string): ServerIdentityRow | undefined {
@@ -556,14 +474,4 @@ export class LinkServerDB {
     return info.changes;
   }
 
-  // ---- federation peer sequence tracking ----
-
-  getPeerLastSequence(roomId: string, peerUrl: string): number {
-    const row = this.stmts.getPeerLastSequence.get(roomId, peerUrl) as { last_peer_sequence: number } | undefined;
-    return row?.last_peer_sequence ?? 0;
-  }
-
-  setPeerLastSequence(roomId: string, peerUrl: string, sequence: number): void {
-    this.stmts.setPeerLastSequence.run(sequence, roomId, peerUrl);
-  }
 }

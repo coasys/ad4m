@@ -5,20 +5,18 @@ interface CliArgs {
   port: number;
   host: string;
   dataDir: string;
-  selfUrl?: string;
   autoAdmit: boolean;
 }
 
 const USAGE = `link-server — self-hostable link language server for AD4M
 
 Usage:
-  link-server [--port <number>] [--data <dir>] [--host <address>] [--self-url <url>]
+  link-server [--port <number>] [--data <dir>] [--host <address>]
 
 Options:
   --port <number>    Port to listen on (default: 3456)
   --data <dir>       Directory for the SQLite database (default: ./data)
   --host <address>   Address to bind (default: 0.0.0.0)
-  --self-url <url>   This server's externally-reachable base URL, advertised to federation peers
   -h, --help         Show this help
 `;
 
@@ -38,7 +36,6 @@ function parseArgs(argv: string[]): CliArgs {
   }
   let host = process.env.HOST ?? "0.0.0.0";
   let dataDir = process.env.DATA_DIR ?? "./data";
-  let selfUrl: string | undefined = process.env.SELF_URL;
   let autoAdmit = envBool("AUTO_ADMIT");
 
   for (let i = 0; i < argv.length; i++) {
@@ -72,15 +69,6 @@ function parseArgs(argv: string[]): CliArgs {
         dataDir = value;
         break;
       }
-      case "--self-url": {
-        const value = argv[++i];
-        if (!value || value.startsWith("-")) {
-          console.error(`Missing value for --self-url`);
-          process.exit(1);
-        }
-        selfUrl = value;
-        break;
-      }
       case "--auto-admit":
         autoAdmit = true;
         break;
@@ -96,14 +84,13 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
 
-  return { port, host, dataDir, selfUrl, autoAdmit };
+  return { port, host, dataDir, autoAdmit };
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const { app } = await buildServer({
     dataDir: args.dataDir,
-    selfUrl: args.selfUrl,
     autoAdmit: args.autoAdmit,
     logger: true,
   });

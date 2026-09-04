@@ -85,9 +85,6 @@ export async function startTestServer(opts: Partial<ServerOptions> = {}): Promis
   const built = await buildServer({
     dataDir,
     logger: false,
-    // Keep the background reconciliation loop from firing mid-assertion;
-    // federation tests call built.federation.reconcileRoom(...) directly.
-    reconcileIntervalMs: 3_600_000,
     telepresenceGraceMs: 300,
     ...opts,
   });

@@ -19,7 +19,7 @@ cd link-server
 docker compose up -d
 ```
 
-The server generates its own ed25519 identity keypair on first run (`<data-dir>/data.sqlite`, `server_identity` table) and creates rooms on demand — there's no separate provisioning step.
+The server generates its own JWT signing secret on first run (`<data-dir>/data.sqlite`) and creates rooms on demand — there's no separate provisioning step.
 
 ## Run with Docker
 
@@ -40,7 +40,6 @@ PORT=4000 AUTO_ADMIT=true docker compose up -d
 |---|---|---|
 | `PORT` | `3456` | Listen port (host and container) |
 | `AUTO_ADMIT` | `false` | Admit every authenticating agent automatically |
-| `SELF_URL` | — | Externally-reachable base URL (for federation) |
 
 The Dockerfile includes a `HEALTHCHECK` that polls `GET /health` every 30 seconds. Use `docker inspect` or `docker compose ps` to confirm the container reports healthy.
 
@@ -60,7 +59,7 @@ Control the server through environment variables or CLI flags:
 | Environment variable | CLI flag | Default | What it does |
 |---|---|---|---|
 | `PORT` | `--port` | `3456` | Listen port |
-| `DATA_DIR` | `--data` | `./data` | Storage directory (SQLite database + server identity) |
+| `DATA_DIR` | `--data` | `./data` | Storage directory (SQLite database) |
 | `AUTO_ADMIT` | `--auto-admit` | `false` | Admit every agent automatically when they authenticate |
 | `MAX_DIFFS_PER_ROOM` | `--max-diffs` | `10000` | Maximum diff entries retained per room (older entries pruned) |
 | `BODY_LIMIT` | `--body-limit` | `10485760` | Maximum HTTP request body size in bytes (10 MiB) |
@@ -97,20 +96,6 @@ For open communities, start the server with `AUTO_ADMIT=true` and skip member ma
 
 The server handles storage and sync — it does not speak AD4M on its own. The companion [**server-link-language**](../bootstrap-languages/server-link-language/README.md) bridges the gap: AD4M agents load that language, which then connects to this server, authenticates, and syncs links automatically. See that package for instructions on publishing the language and creating neighbourhoods.
 
-### Federation (optional)
-
-Connect two link-server instances so they keep a room in sync:
-
-```bash
-# Add a federation peer (admin only)
-curl -X POST https://your-server:3456/rooms/YOUR_ROOM/federation \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"action": "add", "peerUrl": "https://backup.example.com:3456"}'
-```
-
-Both servers forward committed diffs to each other automatically. Agents connected to either server see the same links.
-
 ### End-to-end encryption (optional)
 
 Encrypt link data so it cannot be read at rest or during transit:
@@ -132,14 +117,13 @@ After adding a new member to an encrypted room, run `keys/rotate` again so they 
 - **ACL** gates every room endpoint. Only the admin can add/remove DIDs.
 - **Links** are stored as an append-only diff log (`PerspectiveDiff` = additions/removals of signed `LinkExpression`s) plus a derived active-set table, so the room's state is always `replay(diffs)`. The **revision** is a content hash of the active set's link hashes — order-independent, so two servers with the same active links converge to the same revision regardless of how they got there.
 - **WebSocket** push delivers committed diffs and telepresence events in real time.
-- **Federation** forwards committed diffs to peer servers (server-to-server, authenticated by the sending server's own ed25519 signature) and offers pull-based reconciliation to catch up on anything missed.
 - **E2E encryption** is opt-in per room: the entire `LinkExpression` (author, timestamp, proof, and data) becomes an opaque ciphertext blob. The server sees only `{ciphertext, nonce}` plus a client-computed `link_hash` for OR-Set dedup. Once enabled, the server rejects plaintext commits.
 
 See [`AGENTS.md`](./AGENTS.md) for architecture, file layout, and implementation decisions made where the spec was ambiguous.
 
 ## API
 
-All endpoints except `/rooms/:roomId/auth`, `/server/identity`, and the federation transport (`/federate`, `/reconcile`) require `Authorization: Bearer <jwt>`.
+All endpoints except `/rooms/:roomId/auth` require `Authorization: Bearer <jwt>`.
 
 ```text
 POST /rooms/:roomId/auth      { did } -> { challenge }
@@ -151,14 +135,9 @@ GET  /rooms/:roomId/revision  -> { revision, sequence }
 GET  /rooms/:roomId/peers     -> { peers: string[] }               (currently online agents)
 POST /rooms/:roomId/acl       { action: "add"|"remove", did } (admin only)
 GET  /rooms/:roomId/acl       -> { admin, members: string[] }
-POST /rooms/:roomId/federation { action: "add"|"remove", peerUrl } (admin only)
-GET  /rooms/:roomId/federation -> { peers: string[] }
-POST /rooms/:roomId/federate   (peer servers only, signature-authenticated)
-POST /rooms/:roomId/reconcile  (peer servers only, signature-authenticated)
 GET  /rooms/:roomId/keys       -> { keys: [...], e2e_enabled } | 404 (no E2E)
 GET  /rooms/:roomId/keys/missing  (admin only) -> { membersNeedingHistoricalKeys }
 POST /rooms/:roomId/keys/rotate (admin only) -> { version, recipients, membersNeedingHistoricalKeys }
-GET  /server/identity          -> { publicKey }
 GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be {type:"auth",token:"<jwt>"})
 ```
 
