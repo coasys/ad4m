@@ -62,9 +62,19 @@ export interface ModelQuery {
    */
   count?: { min?: number; max?: number };
   /**
-   * How the matched instance connects back to the flow — `"flow"` /
-   * `"base"` for the two canonical anchors; the object form names a
-   * predicate `via` and one of the two anchors as `to`.
+   * Scope the query to instances linked from a flow anchor. The anchor
+   * (base subject or flow instance URI) is the **source** of the link and
+   * the matched item is the **target**: `linkedTo: "base"` finds items
+   * where the base subject links TO them via the default predicate
+   * `ad4m://has_child`.
+   *
+   * `"base"` / `"flow"` use `ad4m://has_child`; the object form
+   * `{ via, to }` names a custom predicate (e.g.
+   * `{ via: "ns://about", to: "flow" }`).
+   *
+   * For the reverse direction (matched instance → anchor), use
+   * `where: { about: "$flow.base" }` instead — `linkedTo` cannot
+   * express that direction.
    */
   linkedTo?: "flow" | "base" | { via: string; to: "flow" | "base" };
   /**
@@ -84,9 +94,14 @@ export interface ModelQuery {
   /**
    * OR-compose a role expression across multiple ModelQueries. Semantics:
    * a DID counts if it appears in the result of ANY branch (design §7.3
-   * multi-role hybrid example — "either reviewer OR admin"). Each branch
-   * is a full ModelQuery, so branches can each carry their own
-   * `didProperty` / `where` / `linkedTo`.
+   * multi-role hybrid example — "either reviewer OR admin"). Branches
+   * can carry their own `didProperty` / `where`, but NOT `linkedTo`
+   * (which must be on the outer query — `linkedTo` on a branch is
+   * rejected at translation time).
+   *
+   * Every branch must use the same `className` as the outer query and
+   * cannot declare its own `count` — the outer query's class and
+   * cardinality apply to the combined result set.
    *
    * A ModelQuery with a non-empty `or` array acts as a composition node;
    * its own `className` / `where` etc. still count as an additional
