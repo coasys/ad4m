@@ -556,10 +556,13 @@ fn effective_consensus_rule<'a>(flow: &'a SHACLFlow, to_state: &str) -> Option<&
 ///    [`recompute_evidence_hash`] with the PROPOSER's DID — hash mismatch or
 ///    nothing-verifiable deletes it (trigger b), a transient store error
 ///    skips the whole instance this pass WITHOUT invalidating (fail
-///    closed); an unsealed proposal (empty hash — e.g. a future manual
-///    proposal) passes through unverified;
-/// 3. survivors are grouped by `toState` — each target may carry its own
-///    `consensusRule` override — `fromRole` gates resolve via
+///    closed); an EMPTY seal is invalidated too — unverifiable proposals
+///    never count (manual proposals get real seals via the server-side
+///    evidence-collection path, design §4);
+/// 3. survivors are grouped by `toState`; a target with no DECLARED
+///    `fromState → toState` transition on the flow is skipped (kept, not
+///    invalidated) — only the declared graph may fire. Each target may
+///    carry its own `consensusRule` override; `fromRole` gates resolve via
 ///    [`resolve_role_dids`] over that group's qualifying DIDs (role
 ///    resolution errors also skip the instance, fail closed);
 /// 4. among groups whose threshold is met, the earliest-proposed fires:
@@ -638,11 +641,19 @@ pub async fn run_flow_consensus_pass(
         let mut verified: Vec<FlowTransitionProposalRecord> = Vec::with_capacity(live.len());
         for p in live {
             if p.evidence_hash.is_empty() {
-                log::debug!(
-                    "run_flow_consensus_pass: proposal {} carries no evidence seal; counting unverified",
+                // An empty seal is unverifiable and would count toward quorum
+                // with zero evidence — any replica could sync such a proposal
+                // in (CodeRabbit #967 CWE-345). Manual proposals get real
+                // seals through the server-side evidence-collection path
+                // (design §4, Nico's requirement), so nothing legitimate
+                // writes an empty one.
+                log::warn!(
+                    "run_flow_consensus_pass: proposal {} carries an empty evidence seal; invalidating",
                     p.uri
                 );
-                verified.push(p);
+                if let Err(e) = delete_flow_proposal(perspective, &p.uri).await {
+                    log::warn!("run_flow_consensus_pass: {e:#}");
+                }
                 continue;
             }
             match recompute_evidence_hash(perspective, flow, record, &p.to_state, &p.proposer).await
@@ -678,6 +689,24 @@ pub async fn run_flow_consensus_pass(
         }
         let mut fire: Option<(String, FlowVoteTally)> = None;
         for (to_state, bucket) in &groups {
+            // Only DECLARED transitions may fire (CodeRabbit #967 CWE-863):
+            // the mint side already walks `flow.transitions` via
+            // `reachable_next_states`, so this closes the same rule over
+            // proposals that arrived any other way. The group is skipped,
+            // not invalidated — a flow definition may legitimately gain the
+            // edge later.
+            let declared = flow
+                .transitions
+                .iter()
+                .any(|t| t.from_state == record.current_state && t.to_state == *to_state);
+            if !declared {
+                log::warn!(
+                    "run_flow_consensus_pass: no declared transition {} → {to_state} on {}; skipping target",
+                    record.current_state,
+                    record.flow_uri
+                );
+                continue;
+            }
             let rule = effective_consensus_rule(flow, to_state);
             let eligible = match rule.and_then(|r| r.from_role.as_ref()) {
                 Some(role) => {
