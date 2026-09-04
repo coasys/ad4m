@@ -1,0 +1,33 @@
+{
+  "name": "@coasys/soa",
+  "version": "0.1.0",
+  "description": "State of Affairs ontology for AD4M — universal knowledge representation as trees and graphs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "files": [
+    "dist/",
+    "src/"
+  ],
+  "keywords": [
+    "ad4m",
+    "state-of-affairs",
+    "ontology",
+    "knowledge-graph",
+    "eve",
+    "collective-intelligence"
+  ],
+  "author": "Coasys",
+  "license": "CAL-1.0",
+  "peerDependencies": {
+    "@coasys/ad4m": ">=0.11.0"
+  }
+}
