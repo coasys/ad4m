@@ -936,3 +936,50 @@ async fn consensus_pass_skips_undeclared_transitions_e2e() {
         .expect("records");
     assert_eq!(recs[0].current_state, "scoped", "instance must not move");
 }
+
+/// Design principle #5 against the live store: an instance still carrying
+/// an unaccepted interpretation overlay (its `ad4m://interp/kind` link)
+/// neither satisfies a `requires` guard nor gets cited as evidence.
+#[tokio::test(flavor = "multi_thread")]
+async fn overlay_pending_evidence_is_excluded_e2e() {
+    let mut f = seed_fixture(None).await;
+    f.seed_task("ad4m://task/pending", "Pending Task").await;
+    // What `apply_with_overlay` leaves on a base until a human accepts it.
+    f.perspective
+        .add_link(
+            Link {
+                source: "ad4m://task/pending".to_string(),
+                predicate: Some("ad4m://interp/kind".to_string()),
+                target: literal("create"),
+            },
+            LinkStatus::Local,
+            None,
+            &f.ctx,
+        )
+        .await
+        .expect("add overlay kind link");
+
+    let minted = f.run_pass(&[], None).await;
+    assert!(
+        minted.is_empty(),
+        "overlay-pending evidence must not satisfy the guard: {minted:?}"
+    );
+
+    // A committed task satisfies it — and the proposal cites ONLY that one.
+    f.seed_task("ad4m://task/committed", "Committed Task").await;
+    let minted = f.run_pass(&[], None).await;
+    assert_eq!(minted.len(), 1, "got {minted:?}");
+    let by_pred = f.links_by_predicate(&minted[0]).await;
+    let evidence = by_pred
+        .get("ad4m://flow/evidence")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        evidence.iter().any(|t| t.contains("committed")),
+        "committed instance must be cited: {evidence:?}"
+    );
+    assert!(
+        !evidence.iter().any(|t| t.contains("pending")),
+        "pending instance must not be cited: {evidence:?}"
+    );
+}
