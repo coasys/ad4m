@@ -110,8 +110,20 @@ pub fn spawn_candidates(
 /// `SHACLFlow.fromLinks` and enforced in `parse_flow_from_links`: states are
 /// sorted by declared `value`, because link order isn't preserved on the graph.
 /// `None` for a zero-state (atomic-action) flow.
+///
+/// Also `None` when `states[0]` has an empty name. A `hasState` edge whose
+/// `stateName` link hasn't synced yet parses as `""` at value `0.0` and sorts
+/// to (or ties for) the front — partially-observed revisions are a real
+/// phenomenon (see the 2026-08-20 flake notes in `interpretation/overlay`).
+/// An instance minted at `currentState: ""` would be permanently stuck: no
+/// transition leaves `""`, and dedup suppresses on `(flow_uri, subject)`
+/// regardless of state, so the correct instance could never be minted either.
+/// A half-synced definition must spawn nothing.
 pub fn initial_state_of(flow: &SHACLFlow) -> Option<String> {
-    flow.states.first().map(|s| s.name.clone())
+    flow.states
+        .first()
+        .filter(|s| !s.name.is_empty())
+        .map(|s| s.name.clone())
 }
 
 /// One `FlowInstance` minted by [`run_flow_spawn_pass`].
@@ -134,11 +146,20 @@ pub struct SpawnOutcome {
 /// edits it, which is a different (and much louder) behaviour than the one
 /// specified.
 ///
-/// **Soft-fail throughout**, matching `run_engine_proposal_pass` and
-/// `run_flow_consensus_pass`: a class lookup, catalogue read, or mint that fails
-/// is logged and skipped. Extraction has already committed its writes by the
-/// time this runs, so returning an error here would fail a run whose actual work
-/// succeeded.
+/// **Soft-fail throughout — but, unlike `run_engine_proposal_pass`, NOT
+/// self-healing.** The proposal pass re-derives eligibility from graph state
+/// every pass, so a dropped write there costs one cycle. Spawn eligibility
+/// comes from `created_bases` — the op list of the one run that created the
+/// item — so every skipped or failed mint here is *permanent*: nothing ever
+/// re-offers the item. The same gap means editing a processor's `flows`
+/// selection does not backfill items created before the edit. The missing
+/// piece is a reconciliation read ("which items of a selected flow's
+/// `inputTypes` carry no instance of it?") — deliberately a later slice,
+/// because whether pre-existing items should auto-spawn at all is an open
+/// product call (see the #954 review discussion on spawn boundedness).
+/// Until then, failures below log at `error` level because there is no retry.
+/// Extraction has already committed its writes by the time this runs, so
+/// returning an error would fail a run whose actual work succeeded.
 ///
 /// **Zero-state flows are skipped.** They are candidates in the pure rule — the
 /// affordance is real — but an instance with no state has nothing to track, and
@@ -171,13 +192,25 @@ pub async fn run_flow_spawn_pass(
     let classes_by_uri = match perspective.subject_classes_of(created_bases) {
         Ok(map) => map,
         Err(e) => {
-            log::warn!("run_flow_spawn_pass: subject_classes_of failed, no flows spawned: {e:#}");
+            log::error!(
+                "run_flow_spawn_pass: subject_classes_of failed, no flows spawned — \
+                 spawn is not retried for these items: {e:#}"
+            );
             return Vec::new();
         }
     };
 
+    // One batch around the whole fan-out: a pass that creates 20 items
+    // matching 3 flows would otherwise publish 60 separate `Shared`
+    // p-diff-sync revisions, and peers running their own spawn passes would
+    // read the dedup set mid-fan-out. All-or-nothing on failure — a mint
+    // error may have left partial writes in the batch, and committing those
+    // would publish a half-minted instance (the exact 2026-08-20 bug shape).
+    let batch_id = perspective.create_batch().await;
+    let mut batch_failed = false;
+
     let mut spawned = Vec::new();
-    for base in created_bases {
+    'bases: for base in created_bases {
         let Some(classes) = classes_by_uri.get(base) else {
             // Absent means no *registered* class matched — see
             // `subject_classes_of`. Nothing to match `inputTypes` against.
@@ -187,8 +220,9 @@ pub async fn run_flow_spawn_pass(
         let live = match load_flow_instances(perspective, std::slice::from_ref(base)).await {
             Ok(live) => live,
             Err(e) => {
-                log::warn!(
-                    "run_flow_spawn_pass: load_flow_instances({base}) failed, skipping: {e:#}"
+                log::error!(
+                    "run_flow_spawn_pass: load_flow_instances({base}) failed — \
+                     spawn is not retried for this item: {e:#}"
                 );
                 continue;
             }
@@ -196,10 +230,24 @@ pub async fn run_flow_spawn_pass(
 
         for candidate in spawn_candidates(&flows, &live, base, classes) {
             let Some(initial_state) = candidate.initial_state.clone() else {
-                log::debug!(
-                    "run_flow_spawn_pass: {} is zero-state (atomic action) — not instantiating on {base}",
-                    candidate.flow_uri
-                );
+                let is_atomic = flows
+                    .get(&candidate.flow_uri)
+                    .is_some_and(|f| f.states.is_empty());
+                if is_atomic {
+                    log::debug!(
+                        "run_flow_spawn_pass: {} is zero-state (atomic action) — not instantiating on {base}",
+                        candidate.flow_uri
+                    );
+                } else {
+                    // States exist but the first has no name — a half-synced
+                    // definition (see `initial_state_of`). Spawn will NOT be
+                    // retried for this item once the definition finishes
+                    // syncing, hence the loud level.
+                    log::error!(
+                        "run_flow_spawn_pass: {} looks half-synced (first state unnamed) — not instantiating on {base}, and spawn is not retried",
+                        candidate.flow_uri
+                    );
+                }
                 continue;
             };
 
@@ -210,7 +258,7 @@ pub async fn run_flow_spawn_pass(
                 base,
                 &initial_state,
                 &instance_id,
-                None,
+                Some(batch_id.clone()),
                 context,
             )
             .await
@@ -227,12 +275,41 @@ pub async fn run_flow_spawn_pass(
                         initial_state,
                     });
                 }
-                Err(e) => log::warn!(
-                    "run_flow_spawn_pass: mint_flow_instance({}, {base}) failed, skipping: {e:#}",
-                    candidate.flow_uri
-                ),
+                Err(e) => {
+                    // The failed mint may have written partial links into the
+                    // shared batch; committing the rest would publish them.
+                    log::error!(
+                        "run_flow_spawn_pass: mint_flow_instance({}, {base}) failed — \
+                         discarding the pass's batch; spawn is not retried: {e:#}",
+                        candidate.flow_uri
+                    );
+                    batch_failed = true;
+                    break 'bases;
+                }
             }
         }
+    }
+
+    if batch_failed {
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Vec::new();
+    }
+    if spawned.is_empty() {
+        // Nothing written — drop the empty batch rather than committing a
+        // no-op revision.
+        let _ = perspective.discard_batch(&batch_id).await;
+        return spawned;
+    }
+    if let Err(e) = perspective.commit_batch(batch_id.clone(), context).await {
+        // Defense-in-depth, matching `write_processor`: `commit_batch` removes
+        // the batch on failure per its contract, but drop it explicitly so a
+        // control-flow change there can't strand a stale batch.
+        let _ = perspective.discard_batch(&batch_id).await;
+        log::error!(
+            "run_flow_spawn_pass: commit_batch failed — nothing spawned, \
+             and spawn is not retried for these items: {e:#}"
+        );
+        return Vec::new();
     }
 
     spawned
@@ -477,6 +554,30 @@ mod tests {
             got[0].initial_state, None,
             "a zero-state flow has no state to start in"
         );
+    }
+
+    #[test]
+    fn half_synced_flow_with_empty_state_name_yields_no_initial_state() {
+        // A `hasState` edge whose `stateName` link hasn't synced parses as
+        // `""` at value 0.0 and sorts to the front. Minting `currentState: ""`
+        // would wedge the instance forever (no transition leaves `""`) AND
+        // suppress the correct mint via (flow_uri, subject) dedup — so the
+        // accessor must answer "spawn nothing" instead.
+        let f = flow("delivery://", &[TASK], &[("", 0.0), ("identified", 0.5)]);
+        assert_eq!(initial_state_of(&f), None);
+
+        // Through the candidate rule the flow still appears (the affordance is
+        // real once the definition finishes syncing) but carries no initial
+        // state, which the write half skips exactly like a zero-state flow.
+        let flows = catalogue(vec![("delivery://DeliveryFlow", {
+            let mut f = flow("delivery://", &[TASK], &[("", 0.0), ("identified", 0.5)]);
+            f.states
+                .sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap());
+            f
+        })]);
+        let got = spawn_candidates(&flows, &[], ITEM, &[TASK.to_string()]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].initial_state, None);
     }
 
     #[test]

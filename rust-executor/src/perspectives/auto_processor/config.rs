@@ -567,16 +567,19 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
 
     // Flow selection: optional collection, same hydrated-array shape as
     // `interpretationClasses`. Absent (pre-flow config) → empty = no flow
-    // features. Sorted + deduped for the same stable-iteration reason.
-    let mut flows: Vec<String> = instance
-        .get("flows")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    // features. Present-but-malformed bails (`None`) like every other typed
+    // field — `interpretation_classes` above gets the loud `first_report_for`
+    // warn on malformed data, and a silently flow-blind processor must not be
+    // indistinguishable from a deliberately flow-blind one. Sorted + deduped
+    // for the same stable-iteration reason.
+    let mut flows: Vec<String> = match instance.get("flows") {
+        None => Vec::new(),
+        Some(v) => v
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+    };
     flows.sort();
     flows.dedup();
 

@@ -173,6 +173,19 @@ pub fn retain_selected_flows(
     flow_filter: Option<&[String]>,
 ) {
     if let Some(selected) = flow_filter {
+        // A selection entry matching nothing in the catalogue is otherwise a
+        // silent no-op, and the canonical form (`{namespace}{name}Flow`)
+        // makes near-misses cheap (`DeliveryFlow` vs `delivery://DeliveryFlow`).
+        // Warn so a misconfigured processor is distinguishable from a
+        // correctly configured one whose flows simply have nothing to do.
+        for entry in selected {
+            if !flows_by_uri.contains_key(entry) {
+                log::warn!(
+                    "retain_selected_flows: selection entry `{entry}` matches no flow in the \
+                     catalogue — check the canonical form `{{namespace}}{{name}}Flow`"
+                );
+            }
+        }
         flows_by_uri.retain(|uri, _| selected.iter().any(|s| s == uri));
     }
 }
