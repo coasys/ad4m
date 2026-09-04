@@ -429,11 +429,12 @@ async fn semantic_check_yes_mints_proposal_real_llm() {
         last = Some((tasks, proposals));
     }
 
+    let (last_tasks, last_proposals) = last.unzip();
     panic!(
         "semantic-check YES path never minted a proposal in {attempts} attempts \
-         (last attempt: tasks={:?}); either extraction kept missing the Task or the \
-         real LLM kept failing a plainly-satisfied check",
-        last
+         (last attempt: tasks={last_tasks:?} proposals={last_proposals:?}); either \
+         extraction kept missing the Task or the real LLM kept failing a \
+         plainly-satisfied check"
     );
 }
 
