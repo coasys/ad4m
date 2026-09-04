@@ -850,8 +850,10 @@ describe("FlowInstance.acceptProposal / rejectProposal — consensus write API",
   }
 
   /** Write a proposal the way the Rust engine does: raw URI target for the
-   *  identity link, literal-wrapped scalars, empty evidence seal (a manual
-   *  proposal — the engine counts it unverified rather than re-verifying). */
+   *  identity link, literal-wrapped scalars — but with an EMPTY evidence
+   *  seal, which the consensus pass treats as unverifiable and
+   *  auto-invalidates (client-side writes cannot produce a valid seal;
+   *  only the engine's evidence-collection path can). */
   async function seedProposal(instanceUri: string, fromState: string, toState: string): Promise<string> {
     const proposal = `ad4m://flow/proposal/js-test-${Math.random().toString(36).slice(2)}`;
     await p.add(new Link({ source: proposal, predicate: "ad4m://flow/instance", target: instanceUri }));
@@ -862,34 +864,34 @@ describe("FlowInstance.acceptProposal / rejectProposal — consensus write API",
     return proposal;
   }
 
-  it("acceptProposal on an n=1 proposal fires the transition and advances currentState", async () => {
+  it("acceptProposal counts the vote, and the pass auto-invalidates the unverifiable seal", async () => {
     await p.addFlow("Delivery", makeDeliveryFlow());
     const instance = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
     expect(instance.currentStateName).to.equal("Identified");
     const proposal = await seedProposal(instance.uri, "Identified", "InProgress");
 
+    // The wire round-trip: accept succeeds (vote recorded, pass runs), but a
+    // client-seeded proposal cannot carry a valid evidence seal, so the pass
+    // invalidates it rather than firing — nothing an external writer can put
+    // on the graph advances a flow without engine-verifiable evidence. (The
+    // fire-at-quorum path itself is covered by the Rust live-store e2es,
+    // where the engine mints validly-sealed proposals.)
     const fired = await instance.acceptProposal(proposal);
-    expect(fired).to.have.lengthOf(1);
-    expect(fired[0].instanceUri).to.equal(instance.uri);
-    expect(fired[0].fromState).to.equal("Identified");
-    expect(fired[0].toState).to.equal("InProgress");
-    // The seeded proposer counts; the accepting agent's DID rides along too.
-    expect(fired[0].firedByProposers).to.include("did:example:proposer");
-    expect(fired[0].contributingProposalUris).to.include(proposal);
+    expect(fired).to.have.lengthOf(0);
 
-    // The state advance is on-graph, visible through the normal read side.
-    const all = await FlowInstance.findAll(p);
-    expect(all).to.have.lengthOf(1);
-    expect(all[0].currentStateName).to.equal("InProgress");
-
-    // Fired proposals are kept-and-marked and immutable to the API.
+    // The unverifiable proposal is gone: a second accept has nothing to act on.
     let threw = false;
     try {
       await instance.acceptProposal(proposal);
     } catch {
       threw = true;
     }
-    expect(threw, "accept on a fired proposal must error").to.equal(true);
+    expect(threw, "accept on an invalidated proposal must error").to.equal(true);
+
+    // And the instance never moved.
+    const all = await FlowInstance.findAll(p);
+    expect(all).to.have.lengthOf(1);
+    expect(all[0].currentStateName).to.equal("Identified");
   });
 
   it("rejectProposal hard-deletes a live proposal and errors on unknown URIs", async () => {
