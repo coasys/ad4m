@@ -1,4 +1,4 @@
-# languages/ and js_core/ — agent guide
+# languages/ — agent guide
 
 AD4M Languages are JS bundles (built with ALDK, see `../../ad4m-ldk/`) that
 implement expression/link-language adapters. The executor runs each loaded
@@ -19,20 +19,10 @@ sites in `mod.rs`). A malformed template used to deadlock that language forever
 (`js_core/mod.rs` comments). Keep templates small and escape inputs with
 `serde_json::to_string`.
 
-## js_core/
-
-| File | Role |
-|---|---|
-| `mod.rs` | `JsCore`: Deno `MainWorker` construction from the custom snapshot, extension registration, `new_for_language` |
-| `language_bootstrap.js` | Main module of every language isolate: loads the bundle, wires `ad4m:host` |
-| `host.js` | `ad4m:host` shim: ~28 functions (agent, holochain, http, hashing, language ctx, emit, storage) backed by ops |
-| `*_extension.rs` + `.js` | `#[op2]` ops per area: agent (19), languages (8), wallet (9), utils (5), signature (2), pubsub (1). Holochain (15), runtime (3), entanglement (5) ops live in their service dirs |
-| `string_module_loader.rs`, `options.rs`, `futures.rs`, `error.rs` | module loading from strings, worker options, future bridging |
-| `residual_lazy.rs`, `../../CUSTOM_DENO_SNAPSHOT.bin` | snapshot artifacts; rebuild with `pnpm build` after any `.js` change |
-
-Rules: JS files here must be pure ASCII (`ascii_str_include!`). Changing any op or
-`.js` requires `pnpm build` (snapshot), not just `cargo build`. `main.js` is
-unreferenced (deleted in spec item 1).
+The Deno isolate machinery (worker construction, `ad4m:host` shim, `#[op2]`
+extensions, snapshot) lives in `js_core/` — read
+[`../js_core/AGENTS.md`](../js_core/AGENTS.md) as well; do not duplicate its
+file table here.
 
 Obsolete: the "Phase 1" hybrid where JS owned the language controller. There is no
 `core.languageController` any more; Rust owns everything, JS only runs bundles.
