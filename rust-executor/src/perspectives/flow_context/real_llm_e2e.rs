@@ -1,6 +1,4 @@
-//! Real-LLM end-to-end test for the Model C data path — PR #929 review R5
-//! (Nico, 2026-08-27: "this PR/onion layer should have real LLM based
-//! interpretation tests already").
+//! Real-LLM end-to-end test for the flow-aware extraction data path.
 //!
 //! Complements the sibling `e2e_tests` module (no-LLM composition proof —
 //! walks the whole gather → prompt-builder chain against fixture inputs)
@@ -16,17 +14,18 @@
 //! 1. Prompt integration doesn't malform LLM output: the extractor
 //!    still returns JSON the parser can decode when `contexts.len() > 0`.
 //! 2. `run_interpretation` completes end-to-end with the flow-aware
-//!    slice 10.3c wiring live — one full pass against a real model.
+//!    wiring live — one full pass against a real model.
 //! 3. The extracted instance carries evidence the LLM's understanding of
 //!    the scope conversation, i.e. the new prompt section didn't cause
 //!    the model to hallucinate types outside the offered class set.
 //!
-//! # What it does *not* prove (deferred to PR #932 / slice 10.5+)
+//! # What it does *not* prove
 //!
-//! - The engine acts on the extracted instance (that's `run_engine_proposal_pass`
-//!   post-processing, PR #932).
-//! - The LLM proposes a `FlowTransitionProposal` on its own (that's the
-//!   `flow_proposals` output field, also PR #932).
+//! - The engine acts on the extracted instance (that's the
+//!   `run_engine_proposal_pass` post-processing pass covered by its own
+//!   e2e tests).
+//! - The LLM proposes a `FlowTransitionProposal` on its own (covered by
+//!   the `flow_proposals` output-field tests).
 //!
 //! # Endpoint + retry
 //!
@@ -144,13 +143,14 @@ async fn seed_delivery_flow_and_instance(
     .expect("mint_flow_instance")
 }
 
-/// The onion-shell R5 test: real LLM + active-flow context in the prompt.
+/// Real LLM + active-flow context in the prompt — the onion-shell test
+/// above the pure composition proof in the sibling `e2e_tests` module.
 ///
-/// Verifies that when the extraction pass runs against a real model with the
-/// slice 10.3c wiring live, the added `active_flows` prompt block does not
-/// derail the LLM's ability to produce parseable output — the pass still
-/// lands at least one typed instance for a transcript unambiguously about
-/// scoping the referenced Task subject.
+/// Verifies that when the extraction pass runs against a real model
+/// with the flow-aware wiring live, the added `active_flows` prompt
+/// block does not derail the LLM's ability to produce parseable output
+/// — the pass still lands at least one typed instance for a transcript
+/// unambiguously about scoping the referenced Task subject.
 ///
 /// Retries up to 3× to soak single-sample flake from the small local model
 /// (`gemma3:12b` occasionally files a scope-discussion turn as a `belief` on
@@ -169,8 +169,8 @@ async fn model_c_real_llm_extraction_with_active_flow_in_prompt() {
 
         let inst_uri = seed_delivery_flow_and_instance(&mut perspective, &ctx, base_uri).await;
 
-        // Sanity check the wiring — the gather half of slice 10.3c must see
-        // the just-minted instance, else the LLM can't possibly get flow
+        // Sanity check the wiring — the gather half must see the
+        // just-minted instance, else the LLM can't possibly get flow
         // context and this test is measuring nothing.
         let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()]).await;
         assert_eq!(

@@ -1609,7 +1609,9 @@ export class PerspectiveProxy {
      * with the properties of the subject class.
      * @param exprAddr The address of the expression to be turned into a subject instance
      * @param initialValues Optional initial values for properties. If provided, these will be
-     * merged with constructor actions for better performance.
+     * merged with constructor actions for better performance. A collection property accepts
+     * an array value and stores one entry per element; scalar properties store arrays/objects
+     * as a single JSON value.
      * @param batchId Optional batch ID for grouping operations. If provided, returns the expression address
      * instead of the subject proxy since the subject won't exist until the batch is committed.
      * @returns A proxy object for the created subject, or just the expression address if in batch mode

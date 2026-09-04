@@ -822,6 +822,29 @@ pub(crate) async fn graph_owners_lower(
     owners
 }
 
+/// Set of every base URI persisted (readable back via `model_query`) across the
+/// given shape classes. Extracted so retry-loop gates can pre-check the same
+/// invariant [`assert_persisted`] enforces post-loop — otherwise a run where the
+/// LLM emits a malformed URI (e.g. a template placeholder like
+/// `soa://ext/intention/...[intention_create response]`) can satisfy every
+/// content-level guard on the successful attempt yet still panic on the
+/// post-loop persisted assertion.
+pub(crate) async fn persisted_ids(
+    perspective: &PerspectiveInstance,
+    shapes: &[ModelShape],
+) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for shape in shapes {
+        let class = class_local_name(&shape.target_class);
+        for inst in model_instances(perspective, class, &["title"]).await {
+            if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
 /// Every affected base must be readable back as a persisted instance via
 /// `model_query` (proves the writes happened, not just that the interpretation
 /// computed some ids). Reads each class's instances through the model-query API
@@ -832,19 +855,11 @@ pub(crate) async fn assert_persisted(
     shapes: &[ModelShape],
     placements: &[(String, Vec<Link>)],
 ) {
-    let mut persisted_ids = std::collections::HashSet::new();
-    for shape in shapes {
-        let class = class_local_name(&shape.target_class);
-        for inst in model_instances(perspective, class, &["title"]).await {
-            if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
-                persisted_ids.insert(id.to_string());
-            }
-        }
-    }
+    let ids = persisted_ids(perspective, shapes).await;
     for (base, _links) in placements {
         assert!(
-            persisted_ids.contains(base),
-            "base {base} not readable back as a model instance; persisted ids: {persisted_ids:?}"
+            ids.contains(base),
+            "base {base} not readable back as a model instance; persisted ids: {ids:?}"
         );
     }
 }

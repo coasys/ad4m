@@ -4963,6 +4963,21 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Mint a new instance of a subject class at `expression_address`: runs
+    /// the class's `ad4m://constructor` actions merged with the
+    /// `ad4m://setter` actions for every property in `initial_values`.
+    ///
+    /// Value encoding per property:
+    ///   - scalars (string / number / bool) become deterministic typed
+    ///     literals, unless the property opts into a `resolveLanguage`
+    ///     (see [`Self::resolve_property_value`]);
+    ///   - a JSON **array on a collection property** — one whose setter
+    ///     actions are all `addLink` — is expanded into one setter run per
+    ///     element, landing as N links in the same batch;
+    ///   - any other array or object is stored as a single `literal:json:`
+    ///     value (a scalar property may legitimately hold a JSON blob).
+    ///
+    /// Properties with no declared setter are skipped with a warning.
     pub async fn create_subject(
         &mut self,
         subject_class: SubjectClassOption,
@@ -4996,32 +5011,53 @@ impl PerspectiveInstance {
                     if let Some(setter_commands) =
                         self.get_property_setter_actions(&class_name, prop).await?
                     {
-                        let target_value = self
-                            .resolve_property_value(&class_name, prop, value, context)
-                            .await?;
+                        // An array value on a property whose setter actions are all
+                        // `addLink` is a collection write: one setter execution per
+                        // element, accumulating N links. Everywhere else an array
+                        // stays a single `literal:json:` value (a scalar property may
+                        // legitimately hold a JSON blob), because expanding over a
+                        // `setSingleTarget` setter would run last-element-wins and
+                        // silently drop the rest.
+                        let expand_collection = matches!(value, serde_json::Value::Array(_))
+                            && setter_commands.iter().all(|c| c.action == Action::AddLink);
+                        let elements: Vec<serde_json::Value> = match (expand_collection, value) {
+                            (true, serde_json::Value::Array(items)) => items.clone(),
+                            _ => vec![value.clone()],
+                        };
 
-                        //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
-                        //    prop, prop_start.elapsed());
+                        for (idx, element) in elements.iter().enumerate() {
+                            let target_value = self
+                                .resolve_property_value(&class_name, prop, element, context)
+                                .await?;
 
-                        // Compare predicates between setter and constructor commands
-                        for setter_cmd in setter_commands.iter() {
-                            let mut overwritten = false;
-                            if let Some(setter_pred) = &setter_cmd.predicate {
-                                for cmd in commands.iter_mut() {
-                                    if let Some(pred) = &cmd.predicate {
-                                        if pred == setter_pred {
-                                            cmd.target = Some(target_value.clone());
-                                            overwritten = true;
-                                            break;
+                            //log::info!("🎯 CREATE SUBJECT: Property '{}' setter resolved in {:?}",
+                            //    prop, prop_start.elapsed());
+
+                            // Compare predicates between setter and constructor commands.
+                            // Only the first element may overwrite a constructor
+                            // placeholder; every further collection element must append,
+                            // or they would all collapse onto the same command.
+                            for setter_cmd in setter_commands.iter() {
+                                let mut overwritten = false;
+                                if idx == 0 {
+                                    if let Some(setter_pred) = &setter_cmd.predicate {
+                                        for cmd in commands.iter_mut() {
+                                            if let Some(pred) = &cmd.predicate {
+                                                if pred == setter_pred {
+                                                    cmd.target = Some(target_value.clone());
+                                                    overwritten = true;
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            if !overwritten {
-                                commands.push(Command {
-                                    target: Some(target_value.clone()),
-                                    ..setter_cmd.clone()
-                                });
+                                if !overwritten {
+                                    commands.push(Command {
+                                        target: Some(target_value.clone()),
+                                        ..setter_cmd.clone()
+                                    });
+                                }
                             }
                         }
                     } else {
@@ -5101,9 +5137,8 @@ impl PerspectiveInstance {
                     self.get_property_setter_actions(&class_name, prop).await?
                 else {
                     // Same silent drop as `create_subject`, same reason for saying so out loud —
-                    // see the comment there. `update_subject` is the path a collection's second and
-                    // subsequent members go through, so a class whose collection has no setter
-                    // loses every one of them here without a word.
+                    // see the comment there. A class whose collection has no setter loses every
+                    // supplied member here without a word.
                     log::warn!(
                         "update_subject: class `{}` declares no setter for property `{}` — \
                          the supplied value was NOT written",
@@ -5112,14 +5147,25 @@ impl PerspectiveInstance {
                     );
                     continue;
                 };
-                let target_value = self
-                    .resolve_property_value(&class_name, prop, value, context)
-                    .await?;
-                for setter_cmd in setter_commands.iter() {
-                    commands.push(Command {
-                        target: Some(target_value.clone()),
-                        ..setter_cmd.clone()
-                    });
+                // Same collection expansion as `create_subject`: an array on an
+                // all-`addLink` setter appends one link per element; any other
+                // array stays a single `literal:json:` value.
+                let expand_collection = matches!(value, serde_json::Value::Array(_))
+                    && setter_commands.iter().all(|c| c.action == Action::AddLink);
+                let elements: Vec<serde_json::Value> = match (expand_collection, value) {
+                    (true, serde_json::Value::Array(items)) => items.clone(),
+                    _ => vec![value.clone()],
+                };
+                for element in &elements {
+                    let target_value = self
+                        .resolve_property_value(&class_name, prop, element, context)
+                        .await?;
+                    for setter_cmd in setter_commands.iter() {
+                        commands.push(Command {
+                            target: Some(target_value.clone()),
+                            ..setter_cmd.clone()
+                        });
+                    }
                 }
             }
         }
@@ -7209,6 +7255,126 @@ mod tests {
 
         let links_after = perspective.get_links(&query).await.unwrap();
         assert_eq!(links_after.len(), 2);
+    }
+
+    /// The collection-expansion gate in `create_subject` / `update_subject`:
+    /// a JSON array on a property whose setter actions are all `addLink`
+    /// becomes one link per element, while an array on a `setSingleTarget`
+    /// property keeps the single `literal:json:` encoding (a scalar property
+    /// may legitimately hold a JSON blob, and expanding over
+    /// `setSingleTarget` would keep only the last element).
+    #[tokio::test]
+    async fn create_subject_expands_arrays_only_on_add_link_setters() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "node_shape_uri": "t://ItemShape",
+            "target_class": "t://Item",
+            "properties": [
+                {
+                    "path": "t://tag",
+                    "name": "tags",
+                    "collection": true,
+                    "datatype": "xsd://string",
+                    "min_count": 0,
+                    "writable": true,
+                    "setter": [{"action": "addLink", "source": "this", "predicate": "t://tag", "target": "value"}]
+                },
+                {
+                    "path": "t://meta",
+                    "name": "meta",
+                    "max_count": 1,
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://meta", "target": "value"}]
+                }
+            ],
+            "constructor_actions": [{"action": "addLink", "source": "this", "predicate": "t://type", "target": "t://Item"}],
+            "destructor_actions": []
+        }"#;
+        perspective
+            .add_sdna(
+                "Item".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let ctx = AgentContext::main_agent();
+
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Item".to_string()),
+                    query: None,
+                },
+                "t://item/1".to_string(),
+                Some(serde_json::json!({
+                    "tags": ["a", "b"],
+                    "meta": ["x", "y"],
+                })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        let links_for = |predicate: &str| LinkQuery {
+            source: Some("t://item/1".to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        };
+        let lit = |s: &str| {
+            Literal::from_string(s.to_string())
+                .to_url()
+                .expect("literal encoding")
+        };
+
+        // Collection: the array expanded into one addLink per element.
+        let tag_links = perspective.get_links(&links_for("t://tag")).await.unwrap();
+        let mut tag_targets: Vec<String> =
+            tag_links.iter().map(|l| l.data.target.clone()).collect();
+        tag_targets.sort();
+        assert_eq!(
+            tag_targets,
+            vec![lit("a"), lit("b")],
+            "array on an addLink-setter collection must become one link per element",
+        );
+
+        // Scalar: the array stayed a single literal:json: value.
+        let meta_links = perspective.get_links(&links_for("t://meta")).await.unwrap();
+        assert_eq!(
+            meta_links.len(),
+            1,
+            "array on a setSingleTarget property must stay one link",
+        );
+        assert!(
+            meta_links[0].data.target.starts_with("literal:json:"),
+            "scalar array value must keep the literal:json: encoding, got {}",
+            meta_links[0].data.target,
+        );
+
+        // update_subject appends further collection elements through the
+        // same expansion.
+        perspective
+            .update_subject(
+                SubjectClassOption {
+                    class_name: Some("Item".to_string()),
+                    query: None,
+                },
+                "t://item/1".to_string(),
+                serde_json::json!({ "tags": ["c", "d"] }),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("update_subject");
+        let tag_links = perspective.get_links(&links_for("t://tag")).await.unwrap();
+        assert_eq!(
+            tag_links.len(),
+            4,
+            "update_subject must append each array element as its own link",
+        );
     }
 
     // #[tokio::test]

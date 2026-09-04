@@ -578,6 +578,9 @@ pub struct InterpretationDebug {
 pub struct InterpretationOutcome {
     pub bases: Vec<String>,
     pub debug: Option<InterpretationDebug>,
+    /// URIs of the `FlowTransitionProposal`s the deterministic flow pass
+    /// minted after this pass's writes were committed.
+    pub flow_proposals: Vec<String>,
 }
 
 pub async fn run_interpretation_with_strategy_and_model(
@@ -798,18 +801,29 @@ pub async fn run_interpretation_with_strategy_and_model(
         )
         .await?;
 
-        // The affected instance base URIs (created, updated, or given new
-        // relations). Links are owned by `create_subject` / `update_subject`.
-        Ok(InterpretationOutcome { bases, debug })
+        // Re-evaluate flow guards for the subjects the LLM just wrote.
+        let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+            perspective,
+            &bases,
+            context,
+        )
+        .await;
+
+        Ok(InterpretationOutcome {
+            bases,
+            debug,
+            flow_proposals,
+        })
     }
     .await;
     match outcome_result {
         Ok(outcome) => {
             log::info!(
-                "✅ 🧠 interpretation done model={} latency={}ms bases_written={}",
+                "✅ 🧠 interpretation done model={} latency={}ms bases_written={} flow_proposals={}",
                 model_override.unwrap_or("<default>"),
                 interpretation_started.elapsed().as_millis(),
-                outcome.bases.len()
+                outcome.bases.len(),
+                outcome.flow_proposals.len()
             );
             Ok(outcome)
         }
@@ -1058,6 +1072,18 @@ pub async fn run_interpretation_with_harness_and_model(
     .await?;
 
     log::warn!("harness: apply_with_overlay produced {} bases", bases.len());
+
+    // Same flow post-processing as the single-shot path. The harness
+    // returns bases only, so the minted proposals are just logged here.
+    let flow_proposals =
+        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, &bases, context)
+            .await;
+    if !flow_proposals.is_empty() {
+        log::warn!(
+            "harness: flow pass minted {} proposal(s): {flow_proposals:?}",
+            flow_proposals.len()
+        );
+    }
 
     Ok(bases)
 }
