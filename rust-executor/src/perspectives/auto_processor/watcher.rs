@@ -992,20 +992,12 @@ mod tests {
             source_scope_query: format!(
                 "SELECT ?speaker ?text WHERE {{ ?s <ns://{id}/turn> ?t . }}"
             ),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
-            flows: vec![],
             debounce_ms,
             batch_min: 1,
             batch_max,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         }
     }
 

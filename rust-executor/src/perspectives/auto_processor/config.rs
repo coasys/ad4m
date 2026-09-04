@@ -60,6 +60,46 @@ fn first_report_for(instance_id: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// `processor_id` → the flow selection last logged for it. `load_processors`
+/// runs on every watch tick, so the selection line logs once per processor
+/// (and again on change), not once per tick. Bounded by the number of
+/// distinct processors, like [`REPORTED_BAD_INSTANCES`].
+static REPORTED_FLOW_SELECTIONS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+> = std::sync::OnceLock::new();
+
+/// Log a processor's flow selection when first seen or changed. The empty
+/// case is stated outright because it is the migration surface: every
+/// processor registered before flow selection existed loads `flows: []` and
+/// stops doing flow work, and without this line "flows are off by design"
+/// and "flows regressed" are indistinguishable in a log file.
+fn log_flow_selection_once(cfg: &AutoProcessorConfig) {
+    let Ok(mut seen) = REPORTED_FLOW_SELECTIONS
+        .get_or_init(Default::default)
+        .lock()
+    else {
+        // Poisoned mutex: skip rather than re-log — this line is purely
+        // informational, unlike the failure report above.
+        return;
+    };
+    if seen.get(&cfg.processor_id) != Some(&cfg.flows) {
+        if cfg.flows.is_empty() {
+            log::info!(
+                "load_processors: processor `{}` has no flow selection — flow features are off \
+                 for it",
+                cfg.processor_id
+            );
+        } else {
+            log::info!(
+                "load_processors: processor `{}` flow selection: {:?}",
+                cfg.processor_id,
+                cfg.flows
+            );
+        }
+        seen.insert(cfg.processor_id.clone(), cfg.flows.clone());
+    }
+}
+
 /// Local subject-class name of a processor config.
 pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
 /// Target-class URI of [`AUTO_PROCESSOR_CLASS`] — used to detect prior
@@ -90,7 +130,7 @@ const AUTO_PROCESSOR_SDNA: &str = include_str!("../hardwired_sdna/auto_processor
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
 /// auto-processor pass over a source perspective.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AutoProcessorConfig {
     /// Human-meaningful processor name. Also part of the batch-node URI in
     /// [`super::claim::batch_node`], so claims by different processors never
@@ -504,7 +544,10 @@ pub async fn load_processors(
     let mut out = Vec::new();
     for instance in result["instances"].as_array().into_iter().flatten() {
         match config_from_instance(instance) {
-            Some(cfg) => out.push(cfg),
+            Some(cfg) => {
+                log_flow_selection_once(&cfg);
+                out.push(cfg);
+            }
             /*
                The instance itself, not just the fact that it failed.
 
@@ -567,16 +610,19 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
 
     // Flow selection: optional collection, same hydrated-array shape as
     // `interpretationClasses`. Absent (pre-flow config) → empty = no flow
-    // features. Sorted + deduped for the same stable-iteration reason.
-    let mut flows: Vec<String> = instance
-        .get("flows")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+    // features. Present-but-malformed bails (`None`) like every other typed
+    // field — `interpretation_classes` above gets the loud `first_report_for`
+    // warn on malformed data, and a silently flow-blind processor must not be
+    // indistinguishable from a deliberately flow-blind one. Sorted + deduped
+    // for the same stable-iteration reason.
+    let mut flows: Vec<String> = match instance.get("flows") {
+        None => Vec::new(),
+        Some(v) => v
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+    };
     flows.sort();
     flows.dedup();
 
@@ -706,18 +752,13 @@ mod tests {
             // [`interpretation_classes_multiple_roundtrip_sorted`] below for
             // the "input order is arbitrary; output order is sorted" contract.
             interpretation_classes: vec!["ns://Question".into(), "ns://Task".into()],
-            flows: vec![],
             debounce_ms: 5_000,
             batch_min: 3,
             batch_max: 32,
             max_wait_ms: Some(60_000),
             claim_ttl_ms: 120_000,
             dedup_strategy_json: Some(r#"{"kind":"normalized"}"#.into()),
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         }
     }
 
@@ -1084,6 +1125,21 @@ mod tests {
             ],
             "flows must load sorted and deduped"
         );
+
+        // Single-element selection — the shape almost every real config will
+        // have. Guards the hydration edge where a one-element collection
+        // could come back as a scalar instead of a one-element array.
+        let mut cfg = sample_config("flow-one");
+        cfg.flows = vec!["delivery://DeliveryFlow".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        let one = loaded
+            .iter()
+            .find(|c| c.processor_id == "flow-one")
+            .expect("flow-one loads");
+        assert_eq!(one.flows, vec!["delivery://DeliveryFlow".to_string()]);
     }
 
     /// Duplicate `interpretation_class` targets are collapsed by the loader

@@ -1875,7 +1875,7 @@ async fn add_auto_processor_handler(
         source_scope_query: body.source_scope_query,
         base_prefix: body.base_prefix,
         interpretation_classes: body.interpretation_classes,
-        flows: body.flows,
+        flows: body.flows.unwrap_or_default(),
         debounce_ms: body.debounce_ms,
         batch_min: body.batch_min.unwrap_or(1),
         batch_max: body.batch_max,

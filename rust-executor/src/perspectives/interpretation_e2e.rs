@@ -1535,20 +1535,12 @@ async fn auto_processor_pass_lands_interpretation_instance() {
     let cfg = AutoProcessorConfig {
         processor_id: "smoke-auto-processor".into(),
         source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-        base_prefix: None,
         interpretation_classes: vec!["ns://Intention".into()],
-        flows: vec![],
         debounce_ms: 50,
         batch_min: 1,
         batch_max: 32,
-        max_wait_ms: None,
         claim_ttl_ms: 60_000,
-        dedup_strategy_json: None,
-        source_window_ms: None,
-        existing_scope: None,
-        mint_scope: None,
-        max_tool_calls: None,
-        emit_debug_events: false,
+        ..Default::default()
     };
     write_processor(&mut perspective, &cfg, Some(false), &ctx)
         .await
@@ -1737,38 +1729,22 @@ async fn auto_processor_two_configs_no_cross_contamination() {
     let intent_cfg = AutoProcessorConfig {
         processor_id: "pc-intent-proc".into(),
         source_scope_query: source_scope.into(),
-        base_prefix: None,
         interpretation_classes: vec!["ns://Intention".into()],
-        flows: vec![],
         debounce_ms: 50,
         batch_min: 1,
         batch_max: 32,
-        max_wait_ms: None,
         claim_ttl_ms: 60_000,
-        dedup_strategy_json: None,
-        source_window_ms: None,
-        existing_scope: None,
-        mint_scope: None,
-        max_tool_calls: None,
-        emit_debug_events: false,
+        ..Default::default()
     };
     let task_cfg = AutoProcessorConfig {
         processor_id: "pc-task-proc".into(),
         source_scope_query: source_scope.into(),
-        base_prefix: None,
         interpretation_classes: vec!["ns://Task".into()],
-        flows: vec![],
         debounce_ms: 50,
         batch_min: 1,
         batch_max: 32,
-        max_wait_ms: None,
         claim_ttl_ms: 60_000,
-        dedup_strategy_json: None,
-        source_window_ms: None,
-        existing_scope: None,
-        mint_scope: None,
-        max_tool_calls: None,
-        emit_debug_events: false,
+        ..Default::default()
     };
 
     write_processor(&mut perspective, &intent_cfg, Some(false), &ctx)
@@ -2002,20 +1978,12 @@ async fn auto_processor_high_level_signal_driven_pass() {
             processor_id: processor_id.into(),
             source_scope_query:
                 crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://ConversationSubgroup".into()],
-            flows: vec![],
             debounce_ms: 50,
             batch_min: 2,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         };
         write_processor(&mut perspective, &cfg, Some(false), &ctx)
             .await
@@ -2183,20 +2151,12 @@ async fn auto_processor_two_users_one_executor_no_double_processing() {
             processor_id: processor_id.into(),
             source_scope_query:
                 crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://ConversationSubgroup".into()],
-            flows: vec![],
             debounce_ms: 100,
             batch_min: 2,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         };
         write_processor(&mut perspective, &cfg, Some(false), &ctx_main)
             .await
@@ -2330,20 +2290,11 @@ async fn auto_processor_election_only_online_participants_process() {
     let cfg = AutoProcessorConfig {
         processor_id: "election".into(),
         source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-        base_prefix: None,
         interpretation_classes: vec!["ns://ConversationSubgroup".into()],
-        flows: vec![],
-        debounce_ms: 0,
         batch_min: 1,
         batch_max: 32,
-        max_wait_ms: None,
         claim_ttl_ms: 60_000,
-        dedup_strategy_json: None,
-        source_window_ms: None,
-        existing_scope: None,
-        mint_scope: None,
-        max_tool_calls: None,
-        emit_debug_events: false,
+        ..Default::default()
     };
 
     // Case 1 — a batch authored by carol (offline) then bob (online), in that

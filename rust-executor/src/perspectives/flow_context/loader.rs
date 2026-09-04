@@ -116,8 +116,16 @@ async fn query_flow_instances(
     {
         Ok(j) => j,
         Err(e) => {
+            // Absent-class case: no FlowInstances have ever been minted
+            // on this perspective, so the SHACL shape isn't registered
+            // yet. That's a valid steady state — return empty rather
+            // than failing the extraction pass. Matches both the
+            // model_query/shape.rs message ("No SHACL shape stored for
+            // class 'FlowInstance'…") and legacy "shape not found"
+            // variants.
             let msg = format!("{e:#}");
-            if msg.to_lowercase().contains("no shacl shape stored") {
+            let lower = msg.to_lowercase();
+            if lower.contains("no shacl shape stored") || lower.contains("shape not found") {
                 return Ok(vec![]);
             }
             return Err(anyhow::anyhow!(
@@ -173,6 +181,22 @@ pub fn retain_selected_flows(
     flow_filter: Option<&[String]>,
 ) {
     if let Some(selected) = flow_filter {
+        // A selection entry matching nothing in the catalogue is otherwise a
+        // silent no-op, and the canonical form (`{namespace}{name}Flow`)
+        // makes near-misses cheap (`DeliveryFlow` vs `delivery://DeliveryFlow`).
+        // One warn per pass listing all unmatched entries — not one per
+        // entry — so a misconfigured processor is distinguishable from a
+        // correctly configured one without flooding the log every tick.
+        let unmatched: Vec<&String> = selected
+            .iter()
+            .filter(|entry| !flows_by_uri.contains_key(*entry))
+            .collect();
+        if !unmatched.is_empty() {
+            log::warn!(
+                "retain_selected_flows: selection entries {unmatched:?} match no flow in the \
+                 catalogue — check the canonical form `{{namespace}}{{name}}Flow`"
+            );
+        }
         flows_by_uri.retain(|uri, _| selected.iter().any(|s| s == uri));
     }
 }
@@ -414,6 +438,60 @@ pub async fn load_shacl_flows(
 mod tests {
     use super::*;
     use crate::perspectives::shacl_parser::parse_flow_to_links;
+
+    // ------------- retain_selected_flows -------------
+
+    fn catalogue(uris: &[(&str, &str)]) -> HashMap<String, SHACLFlow> {
+        uris.iter()
+            .map(|(name, namespace)| {
+                let flow: SHACLFlow = serde_json::from_value(
+                    serde_json::json!({ "name": name, "namespace": namespace }),
+                )
+                .expect("minimal SHACLFlow deserializes");
+                (flow.flow_uri(), flow)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn retain_selected_flows_none_keeps_all() {
+        let mut flows = catalogue(&[("Delivery", "delivery://"), ("Deliberation", "coasys://")]);
+        retain_selected_flows(&mut flows, None);
+        assert_eq!(flows.len(), 2, "no filter = direct runs see every flow");
+    }
+
+    #[test]
+    fn retain_selected_flows_keeps_only_listed() {
+        let mut flows = catalogue(&[("Delivery", "delivery://"), ("Deliberation", "coasys://")]);
+        let selection = vec!["delivery://DeliveryFlow".to_string()];
+        retain_selected_flows(&mut flows, Some(&selection));
+        assert_eq!(flows.len(), 1);
+        assert!(flows.contains_key("delivery://DeliveryFlow"));
+    }
+
+    #[test]
+    fn retain_selected_flows_unmatched_entry_keeps_nothing_extra() {
+        // The near-miss shape the warn is about: a bare name instead of the
+        // canonical `{namespace}{name}Flow`. It must not match, and must not
+        // disturb the entries that do.
+        let mut flows = catalogue(&[("Delivery", "delivery://"), ("Deliberation", "coasys://")]);
+        let selection = vec![
+            "DeliveryFlow".to_string(),
+            "coasys://DeliberationFlow".to_string(),
+        ];
+        retain_selected_flows(&mut flows, Some(&selection));
+        assert_eq!(flows.len(), 1);
+        assert!(flows.contains_key("coasys://DeliberationFlow"));
+    }
+
+    #[test]
+    fn retain_selected_flows_empty_selection_drops_all() {
+        // `Some(&[])` is a deliberate "no flow features" selection, distinct
+        // from `None` — the pre-flow-config migration default.
+        let mut flows = catalogue(&[("Delivery", "delivery://")]);
+        retain_selected_flows(&mut flows, Some(&[]));
+        assert!(flows.is_empty());
+    }
 
     // ------------- parse_flow_instance_from_hydrated -------------
 

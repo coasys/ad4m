@@ -104,21 +104,39 @@ fn clean_llm_json(raw: &str) -> String {
             }
         }
     }
-    // Among the strict-parsing candidates, prefer the first that has the
-    // SHAPE of an interpretation payload (an array, or an object with an
-    // `instances` key): a model may emit an unrelated-but-valid JSON object
-    // in its prose before the real payload, and taking it just because it
-    // parses would fail the semantic parse (`missing field instances`) and
-    // burn a retry while the real payload sits ignored right behind it.
-    // When no candidate has the shape, keep the first valid one — the
-    // semantic parse then reports the mismatch exactly as before.
+    // Among the strict-parsing candidates, prefer the first that actually
+    // DESERIALIZES as a NON-EMPTY interpretation payload: a model may emit
+    // an unrelated-but-valid JSON value in its prose before the real
+    // payload — an object (`{"model": "gemma3"}`), a scalar array
+    // (`["Task"]`), or an empty array (`No changes needed: []. Actually,
+    // here: [{…}]`) — and taking it just because it parses would either
+    // fail the semantic parse and burn a retry, or (for `[]`) silently
+    // report zero instances, while the real payload sits ignored right
+    // behind it. When nothing non-empty deserializes, fall back to the
+    // first candidate merely SHAPED like a non-empty payload, so a
+    // slightly-malformed real payload still wins over prose values
+    // (including a prose `[]`) and the semantic parse reports ITS mismatch
+    // rather than the prose value's. Then any payload-shaped candidate —
+    // this is where a legitimate sole-`[]` "no instances" response lands,
+    // so it stays parseable. When even that misses, keep the first valid
+    // value — old behaviour.
     let strict_candidates: Vec<String> = top_level_starts
         .iter()
         .filter_map(|&i| extract_first_json_value(candidate, i))
         .collect();
     let extracted = strict_candidates
         .iter()
-        .find(|c| looks_like_interpretation_payload(c))
+        .find(|c| parses_as_nonempty_interpretation_payload(c))
+        .or_else(|| {
+            strict_candidates
+                .iter()
+                .find(|c| looks_like_nonempty_interpretation_payload(c))
+        })
+        .or_else(|| {
+            strict_candidates
+                .iter()
+                .find(|c| looks_like_interpretation_payload(c))
+        })
         .or_else(|| strict_candidates.first())
         .cloned()
         .or_else(|| extract_bracketed(candidate, '[', ']'))
@@ -131,9 +149,55 @@ fn clean_llm_json(raw: &str) -> String {
     strip_trailing_commas(&extracted)
 }
 
-/// Structural (not semantic) payload check used to rank strict candidates:
-/// an array, or an object carrying an `instances` key. Cheap by design —
-/// full deserialization stays in `parse_interpretation_output`.
+/// Semantic payload check used as the first ranking tier for strict
+/// candidates: does this JSON actually deserialize into one of the two
+/// accepted payload shapes (bare instance array, or wrapper object) *with
+/// content*? An unrelated scalar array like `["Task"]` parses as JSON and
+/// passes the structural check below, but fails here — so the real payload
+/// behind it still wins. An **empty** array in prose ("No changes: []")
+/// deserializes fine but is rejected by the non-empty requirement, or it
+/// would silently yield zero instances with the real payload sitting right
+/// behind it. A wrapper counts as non-empty when either `instances` or
+/// `flow_proposals` carries entries — a proposals-only payload is real
+/// work.
+///
+/// Load-bearing detail: `InterpretationOutput::instances` has NO
+/// `#[serde(default)]`, which is what makes a prose object like
+/// `{"model": "gemma3"}` fail this tier. If `instances` ever gains a
+/// default, any prose object starts winning here.
+fn parses_as_nonempty_interpretation_payload(candidate: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(candidate) {
+        Ok(v @ serde_json::Value::Array(_)) => serde_json::from_value::<Vec<ProposedInstance>>(v)
+            .map(|instances| !instances.is_empty())
+            .unwrap_or(false),
+        Ok(v @ serde_json::Value::Object(_)) => serde_json::from_value::<InterpretationOutput>(v)
+            .map(|out| !out.instances.is_empty() || !out.flow_proposals.is_empty())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Structural (not semantic) non-empty payload check — second ranking tier:
+/// an array with at least one element, or an object whose `instances` key
+/// holds a non-empty array. Keeps a slightly-malformed real payload ranked
+/// above prose values — including a prose `[]` — so the semantic parse
+/// error points at the payload, not the prose.
+fn looks_like_nonempty_interpretation_payload(candidate: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(candidate) {
+        Ok(serde_json::Value::Array(items)) => !items.is_empty(),
+        Ok(serde_json::Value::Object(map)) => map
+            .get("instances")
+            .and_then(|v| v.as_array())
+            .map(|items| !items.is_empty())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Any-payload-shaped check — third ranking tier: an array (empty included),
+/// or an object carrying an `instances` key. This is where a legitimate
+/// sole-`[]` "no instances" response is picked up, so it stays parseable
+/// while never outranking real content.
 fn looks_like_interpretation_payload(candidate: &str) -> bool {
     match serde_json::from_str::<serde_json::Value>(candidate) {
         Ok(serde_json::Value::Array(_)) => true,
@@ -292,6 +356,47 @@ mod tests {
         // No payload-shaped candidate at all: first valid value is still
         // taken and the semantic parse reports the mismatch (old behaviour).
         assert!(parse_interpretation_output(r#"Just: {"note": "hi"}"#).is_err());
+    }
+
+    #[test]
+    fn unrelated_scalar_array_before_the_real_payload_is_skipped() {
+        // A scalar array is valid JSON and array-shaped, but does not
+        // deserialize as instances — it must not outrank the real payload.
+        let raw = r#"Classes seen: ["Task"]. Result: {"instances":[{"class":"Task","title":"A"}],"flow_proposals":[]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+
+        // Same with a bare-array payload after the unrelated scalar array.
+        let raw = r#"Classes seen: ["Task", "Belief"] then [{"class":"Task","title":"B"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(prop_values(&out, "title"), vec!["B"]);
+    }
+
+    #[test]
+    fn empty_array_in_prose_before_the_real_payload_is_skipped() {
+        // `[]` deserializes as a perfectly valid (empty) instance vector, so
+        // without the non-empty requirement it would win the ranking and the
+        // pass would silently report zero instances — no parse error, no
+        // retry — with the real payload sitting right behind it.
+        let raw = r#"No changes needed: []. Actually, here: [{"class":"Task","title":"A"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(prop_values(&out, "title"), vec!["A"]);
+
+        // Same silent-drop shape with an empty wrapper object in the prose.
+        let raw = r#"Result: {"instances":[]} — wait: {"instances":[{"class":"Task","title":"B"}],"flow_proposals":[]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+
+        // A proposals-only wrapper is real content, not "empty" — it must
+        // still win over prose that precedes it.
+        let raw = r#"Config: {"model":"gemma3"}. Result: {"instances":[],"flow_proposals":[{"instance":"ad4m://flow/instance/1","toState":"scoped"}]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert!(out.instances.is_empty());
+        assert_eq!(out.flow_proposals.len(), 1);
     }
 
     #[test]

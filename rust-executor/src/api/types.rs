@@ -680,9 +680,13 @@ pub struct AddAutoProcessorRequest {
     pub interpretation_classes: Vec<String>,
     /// Canonical flow URIs this processor is flow-aware of. Flow features
     /// (flow-aware prompt, proposal pass, auto-spawn) run only on the flows
-    /// listed here. Omit or pass `[]` for no flow processing.
+    /// listed here. Omit or pass `[]` for no flow processing. `Option` rather
+    /// than `#[serde(default)]` so "omitted" and "explicitly empty" stay
+    /// distinguishable at the wire — the same distinction
+    /// `flow_filter: Option<&[String]>` preserves downstream — even though
+    /// both currently resolve to flow-blind.
     #[serde(default)]
-    pub flows: Vec<String>,
+    pub flows: Option<Vec<String>>,
     /// Quiet-window (ms) after the last new item before a pass runs.
     pub debounce_ms: i64,
     /// Minimum items before a pass runs (Flux "wait for N inputs"). Default 1.

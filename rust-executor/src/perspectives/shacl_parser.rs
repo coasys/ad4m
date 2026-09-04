@@ -790,7 +790,12 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     // Sort states by `value`, matching TS `SHACLFlow.fromLinks`
     // (`core/src/shacl/SHACLFlow.ts`) and for the same reason: link order is
     // not preserved on the graph, so the only stable ordering is the declared
-    // `value`. The convention that rests on it — "the initial state is
+    // `value`. Parity holds for *finite* values only: TS sorts with
+    // `(a, b) => a.value - b.value`, whose NaN comparisons are engine-defined
+    // rather than NaN-last, so the runtimes can diverge on exactly the
+    // undecodable-value input the guard below handles. Mirroring the guard in
+    // TS is a three-line comparator — until then, don't lean on `states[0]`
+    // agreeing cross-runtime when a state value is NaN. The convention that rests on it — "the initial state is
     // `states[0]`", which `FlowInstance.start` consumes on the TS side — would
     // otherwise resolve differently in the two runtimes whenever
     // link-discovery order differs from value order, and a Rust-side spawn

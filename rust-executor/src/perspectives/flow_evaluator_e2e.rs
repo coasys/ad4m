@@ -38,47 +38,42 @@ fn literal(s: &str) -> String {
 
 /// Two-state Delivery flow (`identified → scoped`) whose `scoped` state
 /// requires at least one `ns://Task` and optionally carries a
-/// `semanticCheck` hint, plus one FlowInstance sitting in `identified`. The
-/// `requires` and `semanticCheck` links are added by hand because
-/// `parse_flow_to_links` does not emit them yet.
+/// `semanticCheck` hint, plus one FlowInstance sitting in `identified`.
+/// `requires` and `semanticCheck` are declared in the flow JSON so
+/// `parse_flow_to_links` emits the production links.
 async fn seed_fixture(semantic_check: Option<&str>) -> Fixture {
     seed_fixture_with_requires(
-        r#"[{"className":"ns://Task","count":{"min":1}}]"#,
+        serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]),
         semantic_check,
     )
     .await
 }
 
-async fn seed_fixture_with_requires(requires_json: &str, semantic_check: Option<&str>) -> Fixture {
+async fn seed_fixture_with_requires(
+    requires: serde_json::Value,
+    semantic_check: Option<&str>,
+) -> Fixture {
     let (mut perspective, mut shapes, ctx) =
         setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
 
+    let mut scoped_state =
+        serde_json::json!({ "name": "scoped", "value": 0.5, "requires": requires });
+    if let Some(hint) = semantic_check {
+        scoped_state["semanticCheck"] = serde_json::Value::String(hint.to_string());
+    }
     let flow_json = serde_json::json!({
         "name": "Delivery",
         "namespace": "delivery://",
         "states": [
             { "name": "identified", "value": 0.0 },
-            { "name": "scoped", "value": 0.5 }
+            scoped_state
         ],
         "transitions": [
             { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
         ],
     })
     .to_string();
-    let mut links = parse_flow_to_links(&flow_json, "Delivery").expect("parse_flow_to_links");
-    let scoped = "delivery://Delivery.scoped";
-    links.push(Link {
-        source: scoped.to_string(),
-        predicate: Some("ad4m://requires".to_string()),
-        target: literal(requires_json),
-    });
-    if let Some(hint) = semantic_check {
-        links.push(Link {
-            source: scoped.to_string(),
-            predicate: Some("ad4m://semanticCheck".to_string()),
-            target: literal(hint),
-        });
-    }
+    let links = parse_flow_to_links(&flow_json, "Delivery").expect("parse_flow_to_links");
     for link in links {
         perspective
             .add_link(link, LinkStatus::Local, None, &ctx)
@@ -140,9 +135,19 @@ impl Fixture {
         llm_proposals: &[LlmFlowProposal],
         semantic_check: Option<&dyn SemanticCheckLlm>,
     ) -> Vec<String> {
+        self.run_pass_scoped(&[BASE_URI.to_string()], llm_proposals, semantic_check)
+            .await
+    }
+
+    async fn run_pass_scoped(
+        &mut self,
+        subjects: &[String],
+        llm_proposals: &[LlmFlowProposal],
+        semantic_check: Option<&dyn SemanticCheckLlm>,
+    ) -> Vec<String> {
         run_engine_proposal_pass(
             &mut self.perspective,
-            None,
+            subjects,
             &self.ctx,
             llm_proposals,
             semantic_check,
@@ -235,7 +240,7 @@ async fn evaluate_flow_transitions_e2e() {
     assert_eq!(
         scoped.requires.as_ref().map(|r| r[0].class_name.as_str()),
         Some("ns://Task"),
-        "hand-seeded requires link must round-trip through the flow reader"
+        "parser-emitted requires link must round-trip through the flow reader"
     );
 
     assert!(f.satisfied().await.is_empty(), "no Task yet → guard unmet");
@@ -381,6 +386,37 @@ async fn run_engine_proposal_pass_e2e() {
     );
 }
 
+/// The pass is bounded to the subjects it is handed (PR #940 review): a
+/// satisfied transition anchored on a base OUTSIDE the subject set must not
+/// mint — an empty set returns immediately (no whole-perspective sweep) and
+/// an unrelated subject set loads nothing. Only the pass that names the
+/// instance's base mints its proposal.
+#[tokio::test(flavor = "multi_thread")]
+async fn proposal_pass_is_bounded_to_subjects_e2e() {
+    let mut f = seed_satisfied_fixture(None).await;
+
+    let swept = f.run_pass_scoped(&[], &[], None).await;
+    assert!(
+        swept.is_empty(),
+        "empty subjects must early-return, not sweep the perspective: {swept:?}"
+    );
+
+    let unrelated = f
+        .run_pass_scoped(&["ad4m://task/unrelated".to_string()], &[], None)
+        .await;
+    assert!(
+        unrelated.is_empty(),
+        "subjects not anchoring the instance must not mint: {unrelated:?}"
+    );
+
+    let scoped = f.run_pass(&[], None).await;
+    assert_eq!(
+        scoped.len(),
+        1,
+        "the pass naming the instance's base must mint: {scoped:?}"
+    );
+}
+
 /// With a `semanticCheck` hint on the target state the gate consults the
 /// LLM exactly once and only a YES lets the proposal through. NO, UNCLEAR
 /// and an LLM error all discard it.
@@ -419,7 +455,7 @@ async fn semantic_check_gate_fires_only_on_yes_e2e() {
 async fn semantic_check_without_evidence_discards_without_llm_call_e2e() {
     // Negative guard, no tasks seeded: satisfied with ZERO evidence.
     let mut f = seed_fixture_with_requires(
-        r#"[{"className":"ns://Task","count":{"max":0}}]"#,
+        serde_json::json!([{ "className": "ns://Task", "count": { "max": 0 } }]),
         Some(SCOPE_HINT),
     )
     .await;
