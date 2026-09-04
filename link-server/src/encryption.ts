@@ -113,7 +113,7 @@ export function decryptRoomKeyWithX25519(
 }
 
 
-export interface MemberKeyGap {
+export interface MemberMissingKeys {
   did: string;
   missingVersions: number[];
   x25519PublicKey: string;
@@ -123,7 +123,7 @@ export interface RotateResult {
   version: number;
   recipients: string[];
   /** Members in the ACL who lack one or more historical key versions. */
-  membersNeedingHistoricalKeys: MemberKeyGap[];
+  membersNeedingHistoricalKeys: MemberMissingKeys[];
 }
 
 /**
@@ -161,7 +161,7 @@ export function rotateRoomKey(db: LinkServerDB, roomId: string): RotateResult {
   db.setE2eEnabled(roomId, true);
 
   // Detect members missing historical versions so the admin can grant them.
-  const membersNeedingHistoricalKeys: MemberKeyGap[] = [];
+  const membersNeedingHistoricalKeys: MemberMissingKeys[] = [];
   if (version > 1) {
     const allVersions = db.getAllMemberKeyVersions(roomId);
     const expectedVersions = Array.from({ length: version }, (_, i) => i + 1);

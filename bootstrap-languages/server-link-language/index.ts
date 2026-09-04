@@ -155,7 +155,7 @@ async function refreshKeyRingIfNeeded(): Promise<boolean> {
  * detect members missing historical key versions and re-seal those
  * versions for them. Runs after setupKeyRing and on peer-joined events.
  *
- * This closes the "late-member history" gap: when a member joins an
+ * This closes the "late-member history" problem: when a member joins an
  * encrypted room, the admin's language instance automatically grants
  * them every historical key version the admin holds, so the new member
  * can decrypt the room's full link history.
@@ -165,14 +165,14 @@ async function performAdminKeyGrants(): Promise<void> {
     const config = getConfig();
     try {
         const token = await auth.getValidToken();
-        const gapsRes = await api.fetchKeyGaps(config, token);
-        const gaps = gapsRes.membersNeedingHistoricalKeys;
-        if (gaps.length === 0) return;
+        const missingRes = await api.fetchMissingKeys(config, token);
+        const members = missingRes.membersNeedingHistoricalKeys;
+        if (members.length === 0) return;
 
-        for (const gap of gaps) {
-            const recipientPub = hexToBytes(gap.x25519PublicKey);
+        for (const member of members) {
+            const recipientPub = hexToBytes(member.x25519PublicKey);
             const sealedKeys: Array<{ version: number; encryptedKey: ReturnType<typeof sealRoomKeyForRecipient> }> = [];
-            for (const version of gap.missingVersions) {
+            for (const version of member.missingVersions) {
                 const roomKey = keyRing.get(version);
                 if (!roomKey) continue; // admin also lacks this version — skip
                 sealedKeys.push({
@@ -181,10 +181,10 @@ async function performAdminKeyGrants(): Promise<void> {
                 });
             }
             if (sealedKeys.length === 0) continue;
-            const granted = await api.grantKeys(config, token, gap.did, sealedKeys);
+            const granted = await api.grantKeys(config, token, member.did, sealedKeys);
             if (granted.length > 0) {
                 console.log(
-                    `[server-link-language] admin auto-granted key versions [${granted.join(", ")}] to ${gap.did}`,
+                    `[server-link-language] admin auto-granted key versions [${granted.join(", ")}] to ${member.did}`,
                 );
             }
         }
@@ -268,7 +268,7 @@ const language = defineLanguage({
                 onPeerJoined(msg) {
                     telepresenceModule.handlePeerJoined(msg);
                     // When a new peer joins, if we hold admin rights and
-                    // the key ring has keys, check for and fill key gaps
+                    // the key ring has keys, check for and grant missing keys
                     // so the new member can decrypt the room's history.
                     void performAdminKeyGrants().catch((err) => {
                         console.error("[server-link-language] peer-joined admin grant failed:", err);

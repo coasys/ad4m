@@ -15,7 +15,7 @@ import {
   decryptRoomKeyWithX25519,
   encryptRoomKeyForRecipient,
   type EncryptedKeyPayload,
-  type MemberKeyGap,
+  type MemberMissingKeys,
 } from "../src/encryption.js";
 import type { EncryptedLinkData, LinkExpression } from "../src/types.js";
 
@@ -385,9 +385,9 @@ test("admin can grant historical key versions to a late member", async () => {
     const adminPriv = testAgentX25519PrivateKey(admin);
     const roomKeyV1 = decryptRoomKeyWithX25519(adminV1.encryptedKey, adminPriv);
 
-    const gap = rotateRes.body.membersNeedingHistoricalKeys[0];
+    const missingKeys = rotateRes.body.membersNeedingHistoricalKeys[0];
     const { hexToBytes } = await import("@noble/ed25519").then((m) => m.etc);
-    const latePub = hexToBytes(gap.x25519PublicKey);
+    const latePub = hexToBytes(missingKeys.x25519PublicKey);
     const resealedV1 = encryptRoomKeyForRecipient(roomKeyV1, latePub);
 
     const grantRes = await postJson<{ granted: number[] }>(
@@ -581,9 +581,9 @@ test("GET /keys returns 404 for non-E2E room", async () => {
   });
 });
 
-// ---- GET /keys/gaps ----
+// ---- GET /keys/missing ----
 
-test("GET /keys/gaps returns members missing historical key versions", async () => {
+test("GET /keys/missing returns members missing historical key versions", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const admin = await createTestAgent();
@@ -602,7 +602,7 @@ test("GET /keys/gaps returns members missing historical key versions", async () 
 
     const res = await getJson<{
       membersNeedingHistoricalKeys: Array<{ did: string; missingVersions: number[] }>;
-    }>(`${server.url}/rooms/${roomId}/keys/gaps`, adminToken);
+    }>(`${server.url}/rooms/${roomId}/keys/missing`, adminToken);
 
     assert.equal(res.status, 200);
     assert.equal(res.body.membersNeedingHistoricalKeys.length, 1);
@@ -611,7 +611,7 @@ test("GET /keys/gaps returns members missing historical key versions", async () 
   });
 });
 
-test("GET /keys/gaps requires admin", async () => {
+test("GET /keys/missing requires admin", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const admin = await createTestAgent();
@@ -620,12 +620,12 @@ test("GET /keys/gaps requires admin", async () => {
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     const memberToken = await authenticateAgent(server.url, roomId, member);
 
-    const res = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/keys/gaps`, memberToken);
+    const res = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/keys/missing`, memberToken);
     assert.equal(res.status, 403);
   });
 });
 
-test("GET /keys/gaps returns empty when no members have gaps", async () => {
+test("GET /keys/missing returns empty when no members have missing keys", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const admin = await createTestAgent();
@@ -639,7 +639,7 @@ test("GET /keys/gaps returns empty when no members have gaps", async () => {
 
     const res = await getJson<{
       membersNeedingHistoricalKeys: unknown[];
-    }>(`${server.url}/rooms/${roomId}/keys/gaps`, adminToken);
+    }>(`${server.url}/rooms/${roomId}/keys/missing`, adminToken);
 
     assert.equal(res.status, 200);
     assert.equal(res.body.membersNeedingHistoricalKeys.length, 0);

@@ -11,7 +11,7 @@ import type {
     AclResponse,
     AuthChallengeResponse,
     AuthTokenResponse,
-    KeyGapsResponse,
+    MissingKeysResponse,
     KeysResponse,
     PeersResponse,
     RenderResponse,
@@ -193,13 +193,13 @@ export async function grantKeys(
 }
 
 // ---------------------------------------------------------------------------
-// E2E admin: key gaps + ACL query
+// E2E admin: missing keys + ACL query
 // ---------------------------------------------------------------------------
 
 /** Admin only. Returns members missing historical key versions. */
-export async function fetchKeyGaps(config: RoomConfig, token: string): Promise<KeyGapsResponse> {
-    const res = await request<Partial<KeyGapsResponse>>(
-        roomUrl(config, "/keys/gaps"), "GET", jsonHeaders(token),
+export async function fetchMissingKeys(config: RoomConfig, token: string): Promise<MissingKeysResponse> {
+    const res = await request<Partial<MissingKeysResponse>>(
+        roomUrl(config, "/keys/missing"), "GET", jsonHeaders(token),
     );
     return { membersNeedingHistoricalKeys: res.membersNeedingHistoricalKeys ?? [] };
 }

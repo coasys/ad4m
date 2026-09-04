@@ -184,14 +184,14 @@ export interface KeysResponse {
     e2e_enabled?: boolean;
 }
 
-export interface MemberKeyGap {
+export interface MemberMissingKeys {
     did: string;
     missingVersions: number[];
     x25519PublicKey: string;
 }
 
-export interface KeyGapsResponse {
-    membersNeedingHistoricalKeys: MemberKeyGap[];
+export interface MissingKeysResponse {
+    membersNeedingHistoricalKeys: MemberMissingKeys[];
 }
 
 // ---------------------------------------------------------------------------

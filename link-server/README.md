@@ -156,7 +156,7 @@ GET  /rooms/:roomId/federation -> { peers: string[] }
 POST /rooms/:roomId/federate   (peer servers only, signature-authenticated)
 POST /rooms/:roomId/reconcile  (peer servers only, signature-authenticated)
 GET  /rooms/:roomId/keys       -> { keys: [...], e2e_enabled } | 404 (no E2E)
-GET  /rooms/:roomId/keys/gaps  (admin only) -> { membersNeedingHistoricalKeys }
+GET  /rooms/:roomId/keys/missing  (admin only) -> { membersNeedingHistoricalKeys }
 POST /rooms/:roomId/keys/rotate (admin only) -> { version, recipients, membersNeedingHistoricalKeys }
 GET  /server/identity          -> { publicKey }
 GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be {type:"auth",token:"<jwt>"})
@@ -204,7 +204,7 @@ the plaintext key leaves memory). It does **not** protect against a
   (`membersNeedingHistoricalKeys`), causing the admin to seal historical keys
   to the server instead. Fix: require the client to send
   `signature = sign(x25519PublicKey)` at registration, store it, return it in
-  rotate/gaps responses, and have the admin verify the DID signature before
+  rotate/missing-keys responses, and have the admin verify the DID signature before
   sealing. The signing capability already exists.
 
 Until these are addressed, the E2E guarantee should be understood as

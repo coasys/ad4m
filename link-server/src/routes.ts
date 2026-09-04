@@ -464,10 +464,10 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     }
   );
 
-  // ---- E2E key gaps (admin query — who needs historical keys?) ----
+  // ---- E2E missing keys (admin query — who needs historical keys?) ----
 
   app.get(
-    "/rooms/:roomId/keys/gaps",
+    "/rooms/:roomId/keys/missing",
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
     async (request, reply) => {
       const claims = request.authClaims!;
@@ -478,16 +478,16 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const aclRows = ctx.db.getAcl(claims.roomId);
       const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
       const expectedVersions = Array.from({ length: latestVersion }, (_, i) => i + 1);
-      const gaps: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string }> = [];
+      const missingKeys: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string }> = [];
       for (const row of aclRows) {
         if (!row.x25519_public_key) continue;
         const memberVersions = new Set(allVersions.get(row.did) ?? []);
         const missing = expectedVersions.filter((v) => !memberVersions.has(v));
         if (missing.length > 0) {
-          gaps.push({ did: row.did, missingVersions: missing, x25519PublicKey: row.x25519_public_key });
+          missingKeys.push({ did: row.did, missingVersions: missing, x25519PublicKey: row.x25519_public_key });
         }
       }
-      return reply.send({ membersNeedingHistoricalKeys: gaps });
+      return reply.send({ membersNeedingHistoricalKeys: missingKeys });
     }
   );
 
