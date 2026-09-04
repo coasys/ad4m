@@ -5,14 +5,19 @@ pub(crate) mod flow_evaluator;
 #[cfg(test)]
 mod flow_evaluator_e2e;
 pub(crate) mod flow_semantic_check;
+pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
 #[cfg(test)]
 mod interpretation_harness_e2e;
+// `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
+// tools, which read flow state through the same loaders) can seed a real
+// `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
+// so it never reaches a release build.
 #[cfg(test)]
-mod interpretation_test_support;
+pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
