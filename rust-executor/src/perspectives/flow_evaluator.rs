@@ -121,27 +121,41 @@ fn canonical_json(v: &Value) -> String {
     }
 }
 
-/// Order-independent seal over a satisfied guard's evidence: SHA256 of the
-/// class names joined by `|`, a NUL, then one line per evidence item —
-/// `class\0id\0canonical-content` — sorted. Two evaluations of the same
-/// guard against the same graph produce the same hash regardless of result
-/// order; **editing a cited instance changes the hash** (spec §4.2), which
-/// is what lets the consensus pass detect a stale seal before firing.
+/// Order-independent seal over a satisfied guard's evidence: SHA256 over
+/// the class names followed by each evidence item's
+/// `(class, id, canonical-content)` triple, sorted. Every field is
+/// length-prefixed before hashing, so no field's *content* can shift bytes
+/// across a boundary — two different evidence bags can never collide by
+/// smuggling delimiter bytes (relevant only for the non-JSON content
+/// fallback, but a seal is exactly where "unreachable" ages badly). Two
+/// evaluations of the same guard against the same graph produce the same
+/// hash regardless of result order; **editing a cited instance changes the
+/// hash** (spec §4.2), which is what lets the consensus pass detect a
+/// stale seal before firing.
 pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> String {
-    let mut lines: Vec<String> = evidence
+    fn frame(hasher: &mut Sha256, field: &str) {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+    let mut items: Vec<(String, String, String)> = evidence
         .iter()
         .map(|e| {
             let canonical = serde_json::from_str::<Value>(&e.content)
                 .map(|v| canonical_json(&v))
                 .unwrap_or_else(|_| e.content.clone());
-            format!("{}\0{}\0{}", e.class_name, e.id, canonical)
+            (e.class_name.clone(), e.id.clone(), canonical)
         })
         .collect();
-    lines.sort();
+    items.sort();
     let mut hasher = Sha256::new();
-    hasher.update(class_names.join("|"));
-    hasher.update(b"\0");
-    hasher.update(lines.join("\n"));
+    for name in class_names {
+        frame(&mut hasher, name);
+    }
+    for (class, id, content) in &items {
+        frame(&mut hasher, class);
+        frame(&mut hasher, id);
+        frame(&mut hasher, content);
+    }
     hex::encode(hasher.finalize())
 }
 
@@ -717,6 +731,30 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                  ({e:#}); treating as already-proposed (fail-closed, skipping mint)"
             );
         };
+        // Keep-and-mark symmetry with the consensus loader: a proposal
+        // carrying `resolved_as` is the kept flow-atom record, not a live
+        // row, and must not suppress a re-mint. Without this a cyclic flow
+        // (review → changes_requested → review) wedges permanently — same
+        // graph → same content seal → the fired proposal matches the whole
+        // dedup key, the mint is skipped, and the consensus pass (which
+        // filters resolved rows) never sees anything to fire again.
+        match store
+            .get_proposal_links(&LinkQuery {
+                source: Some(proposal_uri.clone()),
+                predicate: Some(
+                    crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE.to_string(),
+                ),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => continue,
+            Ok(_) => {}
+            Err(e) => {
+                fail_closed(e);
+                return true;
+            }
+        }
         match links_to("ad4m://flow/instance", transition.instance_uri.clone()).await {
             Ok(false) => continue,
             Ok(true) => {}
