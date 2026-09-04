@@ -128,7 +128,7 @@ export interface SHACLPropertyShape {
    * CRDT ordering strategy for this collection ("linkedList"), when it has one.
    *
    * Declared in the shape rather than passed per query so the executor applies
-   * it to every writer — the ORM, MCP agents, raw GraphQL callers, another app
+   * it to every writer — the ORM, MCP agents, raw WS-RPC callers, another app
    * on the same neighbourhood.
    */
   ordering?: string;
