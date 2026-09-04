@@ -451,8 +451,9 @@ impl Ad4mMcpHandler {
     /// perspective ownership. This prevents unauthenticated clients from reading main-agent
     /// perspectives by exploiting the "no JWT → main agent context" fallback.
     ///
-    /// In single-user mode (no admin_credential), behaviour mirrors REST: local trust model,
-    /// unauthenticated access is allowed (same as GQL localhost behaviour).
+    /// In single-user mode (no admin_credential), behaviour mirrors the rest of the executor's
+    /// public API: local trust model, unauthenticated access is allowed (same as the WS-RPC
+    /// localhost behaviour).
     pub(crate) async fn get_readable_perspective(
         &self,
         perspective_id: &str,

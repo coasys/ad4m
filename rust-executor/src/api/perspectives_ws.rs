@@ -23,16 +23,93 @@ use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 // ── Helpers ──
 
-fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
-    get_perspective(uuid)
-        .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))
+/// Async wrapper: `rehydrate_perspective_from_backend` calls
+/// `DbBackend::get`, which is a blocking `reqwest::blocking` HTTP call on
+/// `SharedDb`. Running it directly on the async request thread stalls the
+/// tokio runtime for the whole RPC round-trip. Wrap it in
+/// `spawn_blocking` so only a blocking-pool worker waits on the network.
+async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
+    if let Some(p) = get_perspective(uuid) {
+        return Ok(p);
+    }
+
+    // Shared-backend fallback: try to rehydrate perspective from the platform DB
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() == Some("shared") {
+        let uuid_owned = uuid.to_string();
+        let rehydrated =
+            tokio::task::spawn_blocking(move || rehydrate_perspective_from_backend(&uuid_owned))
+                .await
+                .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
+        if let Ok(Some(perspective)) = rehydrated {
+            return Ok(perspective);
+        }
+    }
+
+    Err(WsRpcError::not_found(format!(
+        "Perspective {} not found",
+        uuid
+    )))
+}
+
+/// Fetch perspective metadata from the shared backend, create it locally, and populate links.
+fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveInstance>, String> {
+    let backend = crate::db_backend::db_backend();
+
+    // Fetch perspective metadata
+    let meta = backend
+        .get("shared:platform", "perspectives", uuid)
+        .map_err(|e| format!("Shared-backend perspective lookup failed: {}", e))?;
+
+    let meta = match meta {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    let name = meta
+        .get("name")
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string());
+    let owners: Option<Vec<String>> = meta
+        .get("owners")
+        .and_then(|o| serde_json::from_value(o.clone()).ok());
+
+    // Build PerspectiveHandle with the stored UUID (not a new one)
+    let handle = PerspectiveHandle {
+        uuid: uuid.to_string(),
+        name,
+        neighbourhood: None,
+        shared_url: None,
+        state: PerspectiveState::Synced,
+        owners,
+    };
+
+    // Store in local DB
+    Ad4mDb::global_instance()
+        .lock()
+        .expect("Couldn't get write lock on Ad4mDb")
+        .as_ref()
+        .expect("Ad4mDb not initialized")
+        .add_perspective(&handle)
+        .map_err(|e| e.to_string())?;
+
+    // Create the PerspectiveInstance
+    let p = PerspectiveInstance::new(handle.clone(), None);
+
+    // Register in the global PERSPECTIVES map
+    crate::perspectives::register_perspective(uuid.to_string(), p.clone());
+
+    // Start background tasks
+    tokio::task::spawn(p.clone().start_background_tasks());
+
+    Ok(Some(p))
 }
 
 async fn get_perspective_with_access(
     uuid: &str,
     ctx: &RequestContext,
 ) -> Result<PerspectiveInstance, WsRpcError> {
-    let perspective = get_perspective_or_404(uuid)?;
+    let perspective = get_perspective_or_404(uuid).await?;
 
     if !ctx.is_admin_credential {
         let handle = perspective.persisted.lock().await.clone();
@@ -140,6 +217,31 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
         &perspective_query_capability(vec![WILD_CARD.to_string()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
+
+    // In shared mode, rehydrate any backend perspectives not yet loaded
+    // locally. Both `DbBackend::list` (network) and
+    // `rehydrate_perspective_from_backend` (network + DB writes) are
+    // synchronous blocking calls; running them on the async request
+    // thread stalls the tokio runtime while a slow platform Worker
+    // responds. Wrap the whole scan in `spawn_blocking`.
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() == Some("shared") {
+        tokio::task::spawn_blocking(|| {
+            let backend = crate::db_backend::db_backend();
+            if let Ok(remote_perspectives) = backend.list("shared:platform", "perspectives") {
+                for meta in remote_perspectives {
+                    if let Some(uuid) = meta.get("uuid").and_then(|u| u.as_str()) {
+                        // Only rehydrate if not already loaded
+                        if crate::perspectives::get_perspective(uuid).is_none() {
+                            let _ = rehydrate_perspective_from_backend(uuid);
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
+    }
 
     let all: Vec<PerspectiveInstance> = crate::perspectives::all_perspectives();
 
