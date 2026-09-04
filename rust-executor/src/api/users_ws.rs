@@ -123,7 +123,10 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         Ok(_) => true,
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("No user") {
+            if msg.contains("not found")
+                || msg.contains("No user")
+                || msg.contains("Query returned no rows")
+            {
                 false
             } else {
                 return Err(WsRpcError::internal(format!(
@@ -301,7 +304,10 @@ async fn request_verification(
         Ok(_) => true,
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("No user") {
+            if msg.contains("not found")
+                || msg.contains("No user")
+                || msg.contains("Query returned no rows")
+            {
                 false
             } else {
                 return Err(WsRpcError::internal(format!(

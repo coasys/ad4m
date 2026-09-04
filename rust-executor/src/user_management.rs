@@ -93,7 +93,10 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
         Ok(_) => true,
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("No user") {
+            if msg.contains("not found")
+                || msg.contains("No user")
+                || msg.contains("Query returned no rows")
+            {
                 false
             } else {
                 return Err(format!("Failed to check user: {}", msg));
@@ -289,7 +292,10 @@ pub fn user_exists(email: &str) -> Result<(), String> {
         Ok(_) => true,
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("No user") {
+            if msg.contains("not found")
+                || msg.contains("No user")
+                || msg.contains("Query returned no rows")
+            {
                 false
             } else {
                 return Err(format!("Failed to check user: {}", msg));
