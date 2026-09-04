@@ -104,7 +104,7 @@ pub fn evidence_hash(class_names: &[String], evidence_ids: &[String]) -> String 
 
 /// `count.{min,max}` check with inclusive bounds. An unset `count` means
 /// "at least one match"; `{ max: 0 }` is a valid negative guard.
-fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool {
+pub(crate) fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool {
     match count {
         None => actual >= 1,
         Some(c) => {
@@ -153,7 +153,7 @@ fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str)
 /// `exists` and `matches` have no `model_query` counterpart yet, so a
 /// guard using them fails translation and is skipped instead of being
 /// evaluated against a wrong query.
-fn requires_query_input(
+pub(crate) fn requires_query_input(
     query: &ModelQuery,
     record: &FlowInstanceRecord,
     acting_did: &str,
@@ -303,7 +303,7 @@ enum RequiresResult {
 /// Run one already-translated guard query. Returns the matched instances,
 /// hydrated with the JSON `model_query` already returned for each (no
 /// second read).
-async fn run_query<Q: RequiresQueryable + ?Sized>(
+pub(crate) async fn run_query<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     class_name: &str,
     input: &Value,

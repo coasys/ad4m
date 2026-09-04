@@ -33,12 +33,14 @@
 //!   (unresolved) proposals targeting one `FlowInstance`.
 //! - [`resolve_proposals_fired`] — the keep-and-mark write.
 //!
+//! - [`resolve_role_dids`] — `fromRole` gate resolution: per-candidate
+//!   membership check reusing the `requires` guard-translation layer.
+//!   [`aggregate_flow_votes`] stays pure and takes the resolved set; when
+//!   the rule has `from_role`, omitting the set errors, because a silent
+//!   "all DIDs eligible" would misreport consensus.
+//!
 //! # Non-goals here (owned by the pass orchestrator / later commits)
 //!
-//! - `fromRole` resolution — caller passes the pre-resolved eligible-DID
-//!   set. When the rule has `from_role` the caller MUST supply it; omitting
-//!   it errors, because a silent "all DIDs eligible" would misreport
-//!   consensus.
 //! - Evidence-hash re-verification (pass orchestrator, before firing).
 //! - Weighted / delegation / time-decay consensus (v1.5+).
 
@@ -47,8 +49,11 @@ use crate::perspectives::flow_classes::{
     advance_flow_instance_state, FLOW_TRANSITION_PROPOSAL_CLASS,
 };
 use crate::perspectives::flow_context::FlowInstanceRecord;
+use crate::perspectives::flow_evaluator::{
+    cardinality_satisfied, requires_query_input, run_query, RequiresQueryable,
+};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::perspectives::shacl_parser::ConsensusRule;
+use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery};
 use crate::types::{Link, LinkQuery, LinkStatus};
 use std::collections::{BTreeMap, HashSet};
 
@@ -483,9 +488,259 @@ fn earliest_proposed_at(bucket: &[FlowTransitionProposalRecord]) -> String {
     earliest
 }
 
+// ---------------------------------------------------------------------------
+// fromRole resolution (firing-engine design §2 step 4, spec §7.2)
+// ---------------------------------------------------------------------------
+
+/// Resolve a `consensusRule.fromRole` gate into the subset of `candidates`
+/// that satisfy it.
+///
+/// Both spec §7.2 shapes collapse into one per-candidate membership check,
+/// because the tally only ever intersects the role set with the qualifying
+/// DIDs (proposers + acceptors) — which the caller already holds:
+///
+/// - **Shape 2** (`$did`-templated query) is the direct reading: substitute
+///   the candidate's DID, run the query, matched within `count` bounds →
+///   eligible.
+/// - **Shape 1** (`didProperty`) reuses the guard-translation rule
+///   `didProperty` → `where.<prop> = candidate_did`, which asks "does a
+///   role row naming this DID exist" — the membership form of "extract all
+///   DIDs from the role rows".
+///
+/// A role query that references the DID in *neither* way cannot
+/// discriminate between candidates: it is evaluated once and gates all
+/// candidates together (matched → everyone eligible), with a `warn!`
+/// because that is almost always a misconfigured rule.
+///
+/// Fail-closed: a translation error or a store/query error aborts with
+/// `Err` — the caller must skip firing this pass rather than fire on a
+/// wrong eligible set (design §9: store error during count/verify → no
+/// fire).
+pub async fn resolve_role_dids<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    role: &ModelQuery,
+    record: &FlowInstanceRecord,
+    candidates: &[String],
+) -> anyhow::Result<HashSet<String>> {
+    let did_dependent = role.did_property.is_some()
+        || serde_json::to_string(role)
+            .map(|s| s.contains("$did"))
+            .unwrap_or(false);
+
+    if !did_dependent {
+        log::warn!(
+            "resolve_role_dids: fromRole query on `{}` references neither `didProperty` nor `$did` — it cannot discriminate between DIDs and gates all candidates together",
+            role.class_name
+        );
+        let input = requires_query_input(role, record, "")?;
+        let matched = run_query(perspective, &role.class_name, &input).await?;
+        return Ok(
+            if cardinality_satisfied(role.count.as_ref(), matched.len()) {
+                candidates.iter().cloned().collect()
+            } else {
+                HashSet::new()
+            },
+        );
+    }
+
+    let mut eligible = HashSet::new();
+    for did in candidates {
+        let input = requires_query_input(role, record, did)?;
+        let matched = run_query(perspective, &role.class_name, &input).await?;
+        if cardinality_satisfied(role.count.as_ref(), matched.len()) {
+            eligible.insert(did.clone());
+        }
+    }
+    Ok(eligible)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod role_resolution {
+        use super::*;
+        use async_trait::async_trait;
+        use serde_json::{json, Value};
+        use std::sync::Mutex;
+
+        fn record() -> FlowInstanceRecord {
+            FlowInstanceRecord {
+                flow_uri: "delivery://DeliveryFlow".into(),
+                instance_uri: "ad4m://flow/instance/1".into(),
+                subject: "ad4m://task/onboarding".into(),
+                current_state: "review".into(),
+                created_at: None,
+            }
+        }
+
+        fn role(v: Value) -> ModelQuery {
+            serde_json::from_value(v).expect("role query deserializes")
+        }
+
+        fn dids(names: &[&str]) -> Vec<String> {
+            names.iter().map(|s| s.to_string()).collect()
+        }
+
+        /// Query-aware stub: a call whose JSON mentions one of
+        /// `member_dids` returns `rows_per_match` instances;
+        /// `unconditional_rows` (for DID-independent queries) wins over
+        /// matching when set; `error` fails every call.
+        #[derive(Default)]
+        struct RoleStub {
+            member_dids: Vec<String>,
+            rows_per_match: usize,
+            unconditional_rows: Option<usize>,
+            error: Option<String>,
+            calls: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl RequiresQueryable for RoleStub {
+            async fn model_query(&self, _class: &str, query_json: &str) -> anyhow::Result<String> {
+                self.calls.lock().unwrap().push(query_json.to_string());
+                if let Some(msg) = &self.error {
+                    return Err(anyhow::anyhow!(msg.clone()));
+                }
+                let n = self.unconditional_rows.unwrap_or_else(|| {
+                    if self
+                        .member_dids
+                        .iter()
+                        .any(|d| query_json.contains(d.as_str()))
+                    {
+                        self.rows_per_match
+                    } else {
+                        0
+                    }
+                });
+                let rows: Vec<Value> = (0..n).map(|i| json!({ "id": format!("r{i}") })).collect();
+                Ok(json!({ "instances": rows, "totalCount": n }).to_string())
+            }
+        }
+
+        #[tokio::test]
+        async fn shape1_did_property_filters_candidates() {
+            let stub = RoleStub {
+                member_dids: dids(&["did:key:alice"]),
+                rows_per_match: 1,
+                ..Default::default()
+            };
+            let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+            let eligible = resolve_role_dids(
+                &stub,
+                &role,
+                &record(),
+                &dids(&["did:key:alice", "did:key:bob"]),
+            )
+            .await
+            .unwrap();
+            assert_eq!(eligible, HashSet::from(["did:key:alice".to_string()]));
+            let calls = stub.calls.lock().unwrap();
+            assert_eq!(calls.len(), 2, "one membership query per candidate");
+            assert!(
+                calls[0].contains("did:key:alice") && calls[1].contains("did:key:bob"),
+                "each query carries its candidate's DID: {calls:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn shape2_did_token_substitutes_per_candidate() {
+            let stub = RoleStub {
+                member_dids: dids(&["did:key:bob"]),
+                rows_per_match: 1,
+                ..Default::default()
+            };
+            let role = role(json!({ "className": "ns://Member", "where": { "member": "$did" } }));
+            let eligible = resolve_role_dids(
+                &stub,
+                &role,
+                &record(),
+                &dids(&["did:key:alice", "did:key:bob"]),
+            )
+            .await
+            .unwrap();
+            assert_eq!(eligible, HashSet::from(["did:key:bob".to_string()]));
+        }
+
+        #[tokio::test]
+        async fn did_independent_role_gates_all_candidates_together() {
+            let role = role(json!({ "className": "ns://Quorum", "where": { "open": true } }));
+            let candidates = dids(&["did:key:alice", "did:key:bob"]);
+
+            let stub = RoleStub {
+                unconditional_rows: Some(1),
+                ..Default::default()
+            };
+            let eligible = resolve_role_dids(&stub, &role, &record(), &candidates)
+                .await
+                .unwrap();
+            assert_eq!(eligible.len(), 2, "non-empty match gates everyone in");
+            assert_eq!(
+                stub.calls.lock().unwrap().len(),
+                1,
+                "DID-independent query is evaluated once, not per candidate"
+            );
+
+            let empty = RoleStub {
+                unconditional_rows: Some(0),
+                ..Default::default()
+            };
+            let none = resolve_role_dids(&empty, &role, &record(), &candidates)
+                .await
+                .unwrap();
+            assert!(none.is_empty(), "empty match gates everyone out");
+        }
+
+        #[tokio::test]
+        async fn count_bounds_apply_to_role_membership() {
+            let stub = RoleStub {
+                member_dids: dids(&["did:key:alice"]),
+                rows_per_match: 1,
+                ..Default::default()
+            };
+            let role = role(json!({
+                "className": "ns://Reviewer",
+                "didProperty": "agent",
+                "count": { "min": 2 }
+            }));
+            let eligible = resolve_role_dids(&stub, &role, &record(), &dids(&["did:key:alice"]))
+                .await
+                .unwrap();
+            assert!(
+                eligible.is_empty(),
+                "one role row does not satisfy count.min = 2"
+            );
+        }
+
+        #[tokio::test]
+        async fn query_error_fails_closed() {
+            let stub = RoleStub {
+                error: Some("store down".into()),
+                ..Default::default()
+            };
+            let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+            let err = resolve_role_dids(&stub, &role, &record(), &dids(&["did:key:alice"]))
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("store down"), "got {err:#}");
+        }
+
+        #[tokio::test]
+        async fn untranslatable_role_query_fails_closed() {
+            let stub = RoleStub::default();
+            let role = role(json!({
+                "className": "ns://Reviewer",
+                "didProperty": "agent",
+                "where": { "status": { "matches": ".*" } }
+            }));
+            assert!(
+                resolve_role_dids(&stub, &role, &record(), &dids(&["did:key:alice"]))
+                    .await
+                    .is_err(),
+                "a role query model_query cannot express must error, not pass everyone"
+            );
+        }
+    }
 
     fn proposal(
         from_state: &str,
