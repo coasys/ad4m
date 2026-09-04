@@ -625,7 +625,7 @@ async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
     let minted = f.run_pass(&[], None).await;
     assert_eq!(minted.len(), 1, "got {minted:?}");
 
-    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert_eq!(outcomes.len(), 1, "n=1 default rule fires immediately");
     assert_eq!(
         (
@@ -654,7 +654,7 @@ async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
     assert_has_target(&by_pred, "ad4m://flow/instance", &f.instance_uri);
 
     // Idempotency: nothing live → nothing fires, state stays.
-    let rerun = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    let rerun = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert!(rerun.is_empty(), "re-run fired again: {rerun:?}");
 }
 
@@ -720,7 +720,7 @@ async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
     .await
     .expect("write empty-seal proposal");
 
-    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert!(outcomes.is_empty(), "nothing may fire: {outcomes:?}");
 
     // Hard-deleted, not marked: every source-link gone.
@@ -772,7 +772,7 @@ async fn accept_api_n2_quorum_fires_e2e() {
     assert_eq!(minted.len(), 1, "got {minted:?}");
 
     // One distinct DID < n=2: nothing fires.
-    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert!(outcomes.is_empty(), "1 < n=2 must hold: {outcomes:?}");
 
     // Self-accept (proposer's own DID) is idempotent across calls and adds
@@ -924,7 +924,7 @@ async fn consensus_pass_skips_undeclared_transitions_e2e() {
     // Walk the declared edge first: identified → scoped.
     let minted = f.run_pass(&[], None).await;
     assert_eq!(minted.len(), 1, "got {minted:?}");
-    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert_eq!(outcomes.len(), 1, "declared edge must fire: {outcomes:?}");
 
     // Give "identified" a satisfiable guard so the backward proposal can
@@ -972,7 +972,7 @@ async fn consensus_pass_skips_undeclared_transitions_e2e() {
     .await
     .expect("write undeclared-edge proposal");
 
-    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None, None).await;
     assert!(
         outcomes.is_empty(),
         "undeclared edge must not fire: {outcomes:?}"

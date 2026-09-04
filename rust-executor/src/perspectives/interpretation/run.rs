@@ -909,6 +909,7 @@ async fn run_flow_post_pass(
         scope,
         context,
         flow_filter,
+        None,
     )
     .await;
     for outcome in &fired {
