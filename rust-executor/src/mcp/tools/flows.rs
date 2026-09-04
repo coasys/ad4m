@@ -47,19 +47,6 @@ pub struct FlowExprParams {
     pub expression_address: String,
 }
 
-/// Parameters for running a flow action
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct FlowRunActionParams {
-    /// Perspective UUID
-    pub perspective_id: String,
-    /// Flow name
-    pub flow_name: String,
-    /// Expression address
-    pub expression_address: String,
-    /// Action name to execute
-    pub action_name: String,
-}
-
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -325,35 +312,13 @@ impl Ad4mMcpHandler {
         .unwrap_or_else(|e| format!("Error: {}", e))
     }
 
-    /// Start a flow on an expression
-    ///
-    /// Still a stub, but no longer for the stated reason: SHACL flow parsing
-    /// in Rust exists (`parse_flow_from_links` / `load_shacl_flows`) and the
-    /// writer exists (`mint_flow_instance`). What's missing is the write-side
-    /// plumbing on this handler — a mutable `PerspectiveInstance` plus an
-    /// `AgentContext` to author the mint under, and a duplicate-instance
-    /// guard. Keep the message accurate so agents aren't told a capability is
-    /// blocked on work that already landed.
-    #[tool(
-        description = "[NOT YET IMPLEMENTED] Start a flow (state machine) on an expression, putting it into the initial state. Read-only MCP handler cannot author the FlowInstance mint yet."
-    )]
-    pub async fn flow_start(&self, params: Parameters<FlowExprParams>) -> String {
-        let p = &params.0;
-        json!({"error": "flow_start is not yet implemented — the MCP flow handler has no authoring path (needs a writable perspective + AgentContext to call mint_flow_instance)", "expression": p.expression_address, "flow": p.flow_name}).to_string()
-    }
-
-    /// Execute a transition action on an expression in a flow
-    ///
-    /// Same stub status and same real blocker as [`Self::flow_start`]: the
-    /// engine-side transition writer (`advance_flow_instance_state`) and the
-    /// consensus path exist; this handler has no authoring path to them.
-    #[tool(
-        description = "[NOT YET IMPLEMENTED] Execute a transition action on an expression within a flow (state machine). Read-only MCP handler cannot author the state transition yet."
-    )]
-    pub async fn flow_run_action(&self, params: Parameters<FlowRunActionParams>) -> String {
-        let p = &params.0;
-        json!({"error": "flow_run_action is not yet implemented — the MCP flow handler has no authoring path (needs a writable perspective + AgentContext to advance the FlowInstance state)", "expression": p.expression_address, "flow": p.flow_name, "action": p.action_name}).to_string()
-    }
+    // Flow WRITE surfaces (start / run-action) deliberately do not exist on
+    // this endpoint. With the flow engine, external agents don't write state
+    // transitions directly — they propose them and consensus fires them,
+    // exactly like the internal LLM harness. That propose/accept surface
+    // ships with the firing-engine stack (flow_proposal_accept/reject, plus
+    // a propose tool as follow-up); offering direct-write tools here would
+    // bypass the consensus path.
 }
 
 #[cfg(test)]
