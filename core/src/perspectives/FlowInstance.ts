@@ -286,7 +286,14 @@ export class FlowInstance {
    * `FlowTransitionProposal.flowInstance` references).
    */
   get uri(): string {
-    return (this.record as any).baseExpression as string;
+    // `id` is Ad4mModel's getter over the private `_baseExpression` — the
+    // only accessor populated on BOTH construction paths (create/save and
+    // findAll hydration). The previous read of a raw `.baseExpression`
+    // property returned undefined on every path: hydration deliberately
+    // skips assigning that key, and create never sets it. First caught by
+    // the accept/reject wire tests; `proposals()` inherited the same bug
+    // (its where-filter matched on undefined).
+    return this.record.id;
   }
 
   /**
