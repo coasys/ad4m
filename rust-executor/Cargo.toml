@@ -188,6 +188,8 @@ reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking"] }
 rusqlite = "0.40.0"
 fake = { version = "2.9.2", features = ["derive"] }
 sha2 = "0.10.8"
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }  # X25519 DH key agreement
+chacha20poly1305 = "0.10"   # AEAD wrapping for DEK management
 regex = "1.5.4"
 json5 = "0.4"
 serde_yaml = "0.9"
