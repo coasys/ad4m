@@ -116,7 +116,7 @@ async fn query_flow_instances(
     {
         Ok(j) => j,
         Err(e) => {
-// Absent-class case: no FlowInstances have ever been minted
+            // Absent-class case: no FlowInstances have ever been minted
             // on this perspective, so the SHACL shape isn't registered
             // yet. That's a valid steady state — return empty rather
             // than failing the extraction pass. Matches both the
