@@ -714,7 +714,7 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
             return true;
         }
     };
-    for link in &hash_links {
+    'candidates: for link in &hash_links {
         let proposal_uri = &link.data.source;
         let links_to = |predicate: &'static str, want: String| async move {
             store
@@ -756,34 +756,28 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                 return true;
             }
         }
-        match links_to("ad4m://flow/instance", transition.instance_uri.clone()).await {
-            Ok(false) => continue,
-            Ok(true) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
+        // The remaining dedup dimensions: a candidate must match ALL of them
+        // to suppress the mint, so the first miss moves on to the next
+        // candidate. `proposer` is the last one because only OUR OWN row
+        // suppresses (see the proposer-dimension invariant above). DIDs and
+        // instance URIs are URIs, so the setter stores them raw — no
+        // `literal:` wrapper, unlike `to_state` (the e2e locks this shape).
+        for (predicate, want) in [
+            ("ad4m://flow/instance", transition.instance_uri.clone()),
+            ("ad4m://flow/to_state", literal(&transition.to_state)),
+            ("ad4m://flow/proposer", acting_did.to_string()),
+        ] {
+            match links_to(predicate, want).await {
+                Ok(true) => {}
+                Ok(false) => continue 'candidates,
+                Err(e) => {
+                    fail_closed(e);
+                    return true;
+                }
             }
         }
-        match links_to("ad4m://flow/to_state", literal(&transition.to_state)).await {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
-        }
-        // Same (hash, instance, to_state) — but only OUR OWN row suppresses
-        // the mint (see the proposer-dimension invariant above). DIDs are
-        // URIs, so the setter stores the raw value — no `literal:` wrapper
-        // (same as `ad4m://flow/instance` above; the e2e locks this shape).
-        match links_to("ad4m://flow/proposer", acting_did.to_string()).await {
-            Ok(true) => return true,
-            Ok(false) => continue,
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
-        }
+        // Every dimension matched: this candidate is our own live duplicate.
+        return true;
     }
     false
 }

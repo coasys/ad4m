@@ -524,6 +524,16 @@ pub async fn delete_flow_proposal(
     Ok(())
 }
 
+/// Drop a proposal the consensus pass has ruled out. A failed delete is
+/// logged and swallowed: invalidation is best-effort cleanup, and a proposal
+/// that survives it is simply re-examined — and re-ruled-out — next pass,
+/// whereas aborting here would strand the instance's remaining proposals.
+async fn invalidate_proposal(perspective: &mut PerspectiveInstance, uri: &str) {
+    if let Err(e) = delete_flow_proposal(perspective, uri).await {
+        log::warn!("run_flow_consensus_pass: {e:#}");
+    }
+}
+
 /// `get_links` wrapper: source-filtered (+ optional predicate) with a
 /// caller-supplied context string in the error.
 async fn source_links(
@@ -653,9 +663,7 @@ pub async fn run_flow_consensus_pass(
                 "run_flow_consensus_pass: invalidating superseded proposal {} ({} → {}, instance now at {})",
                 p.uri, p.from_state, p.to_state, record.current_state
             );
-            if let Err(e) = delete_flow_proposal(perspective, &p.uri).await {
-                log::warn!("run_flow_consensus_pass: {e:#}");
-            }
+            invalidate_proposal(perspective, &p.uri).await;
         }
 
         // Trigger (b): stale seals.
@@ -672,9 +680,7 @@ pub async fn run_flow_consensus_pass(
                     "run_flow_consensus_pass: proposal {} carries an empty evidence seal; invalidating",
                     p.uri
                 );
-                if let Err(e) = delete_flow_proposal(perspective, &p.uri).await {
-                    log::warn!("run_flow_consensus_pass: {e:#}");
-                }
+                invalidate_proposal(perspective, &p.uri).await;
                 continue;
             }
             match recompute_evidence_hash(perspective, flow, record, &p.to_state, &p.proposer).await
@@ -685,9 +691,7 @@ pub async fn run_flow_consensus_pass(
                         "run_flow_consensus_pass: evidence for proposal {} no longer verifies against the live graph; invalidating",
                         p.uri
                     );
-                    if let Err(e) = delete_flow_proposal(perspective, &p.uri).await {
-                        log::warn!("run_flow_consensus_pass: {e:#}");
-                    }
+                    invalidate_proposal(perspective, &p.uri).await;
                 }
                 Err(e) => {
                     log::warn!(
