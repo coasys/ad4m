@@ -180,7 +180,10 @@ pub async fn run_flow_spawn_pass(
         Ok(flows) if !flows.is_empty() => flows,
         Ok(_) => return Vec::new(),
         Err(e) => {
-            log::warn!("run_flow_spawn_pass: load_shacl_flows failed, no flows spawned: {e:#}");
+            log::error!(
+                "run_flow_spawn_pass: load_shacl_flows failed, no flows spawned for \
+                 {created_bases:?} — spawn is not retried for these items: {e:#}"
+            );
             return Vec::new();
         }
     };
@@ -193,8 +196,8 @@ pub async fn run_flow_spawn_pass(
         Ok(map) => map,
         Err(e) => {
             log::error!(
-                "run_flow_spawn_pass: subject_classes_of failed, no flows spawned — \
-                 spawn is not retried for these items: {e:#}"
+                "run_flow_spawn_pass: subject_classes_of failed, no flows spawned for \
+                 {created_bases:?} — spawn is not retried for these items: {e:#}"
             );
             return Vec::new();
         }
@@ -306,8 +309,8 @@ pub async fn run_flow_spawn_pass(
         // control-flow change there can't strand a stale batch.
         let _ = perspective.discard_batch(&batch_id).await;
         log::error!(
-            "run_flow_spawn_pass: commit_batch failed — nothing spawned, \
-             and spawn is not retried for these items: {e:#}"
+            "run_flow_spawn_pass: commit_batch failed — nothing spawned for \
+             {created_bases:?}, and spawn is not retried for these items: {e:#}"
         );
         return Vec::new();
     }
