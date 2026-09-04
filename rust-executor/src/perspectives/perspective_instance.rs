@@ -3386,10 +3386,31 @@ impl PerspectiveInstance {
     /// shared links is ordinary social-DNA reuse, so that is a reachable way to
     /// reintroduce exactly the scramble this feature exists to prevent.
     ///
+    /// Classification counts the batch's staged links as well as the store's,
+    /// because a subject is *created* inside a batch: the constructor actions
+    /// that write its class flags and the setter that populates its collection
+    /// are staged together, and the store sees neither until commit. Asking the
+    /// store alone would answer "no class" for every ordered collection created
+    /// and populated in one save — which is the ordinary create path, and would
+    /// leave it with no ordering entries at all.
+    ///
     /// Answering `None` — because the source is not a subject instance, or no
     /// conforming class declares anything — is the ordinary case.
-    async fn ordering_strategy_for(&self, source: &str, predicate: &str) -> Option<String> {
-        let classes = self.subject_classes_of(&[source.to_string()]).ok()?;
+    async fn ordering_strategy_for(
+        &self,
+        source: &str,
+        predicate: &str,
+        batch_id: Option<&str>,
+    ) -> Option<String> {
+        let pending = self.staged_triples_for(source, batch_id).await;
+        let resolver = self.shape_resolver();
+        let classes = super::subject_classes_of::subject_classes_of_with_pending(
+            &self.sparql_store,
+            &resolver,
+            &[source.to_string()],
+            &pending,
+        )
+        .ok()?;
         for class_name in classes.get(source)? {
             let Ok(shape) = self.get_shape(class_name) else {
                 continue;
@@ -3404,6 +3425,36 @@ impl PerspectiveInstance {
             }
         }
         None
+    }
+
+    /// The `(source, predicate, target)` triples an open batch has staged for
+    /// `source`, for classifying a subject that does not exist in the store yet.
+    ///
+    /// Empty without a batch, which is every caller outside a transaction.
+    async fn staged_triples_for(
+        &self,
+        source: &str,
+        batch_id: Option<&str>,
+    ) -> Vec<(String, String, String)> {
+        let Some(bid) = batch_id else {
+            return Vec::new();
+        };
+        let batches = self.batch_store.read().await;
+        let Some(batch) = batches.get(bid) else {
+            return Vec::new();
+        };
+        batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| l.data.source == source)
+            .filter_map(|l| {
+                l.data
+                    .predicate
+                    .as_ref()
+                    .map(|p| (l.data.source.clone(), p.clone(), l.data.target.clone()))
+            })
+            .collect()
     }
 
     /// Fold a batch's own pending work into a set of persisted links.
@@ -3487,7 +3538,10 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<(), AnyError> {
-        let strategy_name = match self.ordering_strategy_for(source, predicate).await {
+        let strategy_name = match self
+            .ordering_strategy_for(source, predicate, batch_id.as_deref())
+            .await
+        {
             Some(s) => s,
             None => return Ok(()),
         };
@@ -6537,6 +6591,103 @@ mod tests {
             vec!["we://a", "we://b", "we://c"],
             "each member staged exactly once — before the batch-aware read the \
              second run re-added a and b, which the store could not yet see"
+        );
+    }
+
+    /// A collection set in the same batch that creates its instance still gets
+    /// ordering entries.
+    ///
+    /// This is the create path: `save()` on a new instance opens one batch,
+    /// runs the constructor actions that write the class's flag links, sets the
+    /// relations, and commits. The strategy lookup classifies the source, and
+    /// classification reads the store — where those flag links do not exist
+    /// yet.
+    #[tokio::test]
+    async fn test_ordered_collection_created_in_one_batch_gets_entries() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/5";
+        let predicate = "we://children";
+
+        let shacl = r#"{
+            "target_class": "we://Collection",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://collection",
+                  "min_count": 1, "max_count": 1 },
+                { "path": "we://children", "name": "children", "ordering": "linkedList" }
+            ]
+        }"#;
+        perspective
+            .add_sdna(
+                "Collection".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &context,
+            )
+            .await
+            .expect("add_sdna");
+
+        // One batch: write the flag link that makes this URI an instance, then
+        // set the ordered collection — exactly what `save()` does on create.
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([
+            { "source": "this", "predicate": "we://flag", "target": "we://collection",
+              "action": "addLink" },
+        ]))
+        .unwrap();
+        let setter: Vec<Command> = serde_json::from_value(serde_json::json!([
+            { "source": "this", "predicate": predicate, "target": "value",
+              "action": "collectionSetter" },
+        ]))
+        .unwrap();
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .execute_commands(
+                commands,
+                source.to_string(),
+                vec![],
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let params: Vec<Parameter> = serde_json::from_value(serde_json::json!([
+            { "name": "value", "value": "we://x/a" },
+            { "name": "value", "value": "we://x/b" },
+        ]))
+        .unwrap();
+        perspective
+            .execute_commands(
+                setter,
+                source.to_string(),
+                params,
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let order_links: Vec<&str> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| {
+                l.data.source == source
+                    && l.data.predicate.as_deref()
+                        == Some(crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE)
+            })
+            .map(|l| l.data.target.as_str())
+            .collect();
+
+        assert!(
+            !order_links.is_empty(),
+            "an ordered collection created in one batch gets its entries — the \
+             flag link that classifies the source is staged in the same batch, \
+             not yet in the store"
         );
     }
 
