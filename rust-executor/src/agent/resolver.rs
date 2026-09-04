@@ -126,11 +126,12 @@ impl AgentLanguageResolver {
             return Err(ResolveError::Backend(e.to_string()));
         }
 
-        // Step 4: Update reverse index with all known keys.
-        let seq = at_seq.unwrap_or(kel_state.head_seq());
-        for key in kel_state.keys_at(seq) {
-            self.reverse_index.insert(&key.id, &master);
+        // Step 4: Update reverse index with ALL ever-delegated keys (including
+        // revoked), so revoked keys still resolve to Revoked rather than NotFound.
+        for key_id in kel_state.all_key_ids() {
+            self.reverse_index.insert(key_id, &master);
         }
+        let seq = at_seq.unwrap_or(kel_state.head_seq());
 
         // Step 5: Build the Agent struct.
         let valid_keys = kel_state
