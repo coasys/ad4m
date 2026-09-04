@@ -275,14 +275,9 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
                 .properties
                 .iter()
                 .find(|p| p.name == name)
-                .and_then(|p| p.ordering.as_deref())
-                .and_then(|strategy| {
-                    let relation_predicate = shape
-                        .properties
-                        .iter()
-                        .find(|p| p.name == name)
-                        .map(|p| p.predicate.clone())?;
-                    reorder_collection(strategy, &values, &ordering_targets, &relation_predicate)
+                .and_then(|p| {
+                    let strategy = p.ordering.as_deref()?;
+                    reorder_collection(strategy, &values, &ordering_targets, &p.predicate)
                 });
 
             let arr: Vec<Value> = match ordered {
