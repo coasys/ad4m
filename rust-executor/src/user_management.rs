@@ -11,7 +11,9 @@ use crate::db::Ad4mDb;
 
 /// Check if multi-user mode is enabled.
 pub fn is_multi_user_enabled() -> bool {
-    Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false))
+    crate::db_backend::db_backend()
+        .get_multi_user_enabled()
+        .unwrap_or(false)
 }
 
 /// Create a verification code for the given email and type ("signup" or "login").
@@ -93,7 +95,7 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
     });
 
     // Check if user already exists (local DB or shared DB)
-    let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+    let user_exists = crate::db_backend::db_backend().get_user(email).is_ok();
     if user_exists {
         return Err("User already exists".to_string());
     }
@@ -163,7 +165,7 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
 /// Falls back to shared DB when the user record only exists on another executor.
 pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
     // Try local DB first
-    let local_result = Ad4mDb::with_global_instance(|db| db.verify_user_password(email, password));
+    let local_result = crate::db_backend::db_backend().verify_user_password(email, password);
 
     match local_result {
         Ok(true) => {
@@ -257,7 +259,8 @@ pub async fn request_login_code(email: &str, app_name: Option<&str>) -> Result<(
     }
     user_exists(email)?;
 
-    Ad4mDb::with_global_instance(|db| db.check_and_update_rate_limit(email))
+    crate::db_backend::db_backend()
+        .check_and_update_rate_limit(email)
         .map_err(|e| e.to_string())?;
 
     let code = create_verification_code(email, "login")?;
@@ -287,7 +290,7 @@ pub fn verify_and_login(
 
 /// Check if a user exists in both DB and AgentService.
 pub fn user_exists(email: &str) -> Result<(), String> {
-    let db_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+    let db_exists = crate::db_backend::db_backend().get_user(email).is_ok();
     if !db_exists {
         return Err("User not found".to_string());
     }

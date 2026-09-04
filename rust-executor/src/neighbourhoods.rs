@@ -95,9 +95,7 @@ pub async fn install_neighbourhood_with_context(
                 let user_did = crate::agent::AgentService::get_user_did_by_email(user_email)?;
 
                 // Update database
-                crate::db::Ad4mDb::with_global_instance(|db| {
-                    db.add_owner_to_neighbourhood(&url, &user_did)
-                })?;
+                crate::db_backend::db_backend().add_owner_to_neighbourhood(&url, &user_did)?;
 
                 // Add user to owners list
                 // Update in-memory handle
@@ -122,9 +120,8 @@ pub async fn install_neighbourhood_with_context(
                 let main_agent_did = crate::agent::did_for_context(context)?;
 
                 // Update database
-                crate::db::Ad4mDb::with_global_instance(|db| {
-                    db.add_owner_to_neighbourhood(&url, &main_agent_did)
-                })?;
+                crate::db_backend::db_backend()
+                    .add_owner_to_neighbourhood(&url, &main_agent_did)?;
 
                 // Add main agent to owners list in memory
                 handle.add_owner(&main_agent_did);

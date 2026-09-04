@@ -1,4 +1,5 @@
 use self::error::AIServiceError;
+use crate::pubsub::get_global_pubsub;
 use crate::pubsub::AI_MODEL_LOADING_STATUS;
 #[allow(unused_imports)]
 use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
@@ -6,7 +7,6 @@ use crate::types::ModelInput;
 #[allow(unused_imports)]
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
 use crate::types::{AITask, LocalModel, Model, ModelType};
-use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use candle_core::Device;
 use chat_gpt_lib_rs::{ChatGPTClient, ChatInput, Message, Role};
@@ -242,16 +242,13 @@ async fn publish_model_status(
         loaded,
     };
 
-    let _ = Ad4mDb::with_global_instance(|db| {
-        let model = model.clone();
-        db.create_or_update_model_status(
-            &model.model,
-            model.progress,
-            &model.status,
-            model.downloaded,
-            model.loaded,
-        )
-    });
+    let _ = crate::db_backend::db_backend().create_or_update_model_status(
+        &model.model,
+        model.progress,
+        &model.status,
+        model.downloaded,
+        model.loaded,
+    );
 
     get_global_pubsub()
         .await
@@ -393,7 +390,7 @@ impl AIService {
 
     pub async fn load(&self) -> Result<()> {
         // Get all models
-        let models = Ad4mDb::with_global_instance(|db| db.get_models())?;
+        let models = crate::db_backend::db_backend().get_models()?;
 
         // Create a future for each, initialzing that model
         let mut futures: Vec<Pin<Box<dyn Future<Output = ()> + Send>>> = vec![];
@@ -437,7 +434,8 @@ impl AIService {
         // caller that just spawned a worker + Spawn'd a task into it can wipe
         // that task_descriptions entry mid-flight when `load()` re-spawns
         // the worker via `init_model` and then bails before re-registering.
-        let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        let tasks = crate::db_backend::db_backend()
+            .get_tasks()
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         for task in tasks {
             let task_name = task.name.clone();
@@ -462,10 +460,11 @@ impl AIService {
     }
 
     pub async fn add_model(&self, model: ModelInput) -> Result<String> {
-        let model = Ad4mDb::with_global_instance(|db| {
-            let id = db.add_model(&model)?;
-            db.get_model(id)
-        })
+        let model = {
+            let _db = crate::db_backend::db_backend();
+            let id = _db.add_model(&model)?;
+            _db.get_model(id)
+        }
         .map_err(|e| anyhow::anyhow!("{}", e))?
         .expect("since we just added it");
         self.init_model(model.clone()).await?;
@@ -474,10 +473,11 @@ impl AIService {
 
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
         if ModelType::Llm == model_type {
-            Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))?;
+            crate::db_backend::db_backend().set_default_model(model_type, &model_id)?;
 
             // Respawn task on new default model
-            let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            let tasks = crate::db_backend::db_backend()
+                .get_tasks()
                 .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
             for task in tasks.into_iter().filter(|t| t.model_id == "default") {
@@ -488,7 +488,8 @@ impl AIService {
     }
 
     pub async fn model_status(model_id: String) -> Result<AIModelLoadingStatus> {
-        let status = Ad4mDb::with_global_instance(|db| db.get_model_status(&model_id))
+        let status = crate::db_backend::db_backend()
+            .get_model_status(&model_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
             .ok_or(AIServiceError::ModelNotFound)?;
 
@@ -1122,14 +1123,15 @@ impl AIService {
     // -------------------------------------
 
     pub fn get_tasks() -> Result<Vec<AITask>> {
-        let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        let tasks = crate::db_backend::db_backend()
+            .get_tasks()
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         Ok(tasks)
     }
 
     pub async fn add_task(&self, task: AITaskInput) -> Result<AITask> {
-        let task_id = Ad4mDb::with_global_instance(|db| {
-            db.add_task(
+        let task_id = crate::db_backend::db_backend()
+            .add_task(
                 task.name.clone(),
                 task.model_id.clone(),
                 task.system_prompt.clone(),
@@ -1139,10 +1141,10 @@ impl AIService {
                     .collect(),
                 task.meta_data.clone(),
             )
-        })
-        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
-        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
+        let task = crate::db_backend::db_backend()
+            .get_task(task_id)?
             .expect("to get task that we just created");
 
         self.spawn_task(task.clone()).await?;
@@ -1151,7 +1153,8 @@ impl AIService {
 
     fn replace_model_variables(model_id: &String) -> Result<String> {
         Ok(if model_id == "default" {
-            Ad4mDb::with_global_instance(|db| db.get_default_model(ModelType::Llm))?
+            crate::db_backend::db_backend()
+                .get_default_model(ModelType::Llm)?
                 .ok_or_else(|| anyhow::anyhow!("Task needs default model but no default set"))?
         } else {
             model_id.clone()
@@ -1192,8 +1195,8 @@ impl AIService {
 
     pub async fn update_task(&self, task: AITask) -> Result<AITask> {
         let task_id = task.task_id.clone();
-        Ad4mDb::with_global_instance(|db| {
-            db.update_task(
+        crate::db_backend::db_backend()
+            .update_task(
                 task.task_id,
                 task.name,
                 task.model_id,
@@ -1201,12 +1204,12 @@ impl AIService {
                 task.prompt_examples,
                 task.meta_data,
             )
-        })
-        .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
+            .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
         self.remove_task(task_id.clone()).await?;
 
-        let updated_task = Ad4mDb::with_global_instance(|db| db.get_task(task_id.clone()))
+        let updated_task = crate::db_backend::db_backend()
+            .get_task(task_id.clone())
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?
             .ok_or(AIServiceError::TaskNotFound)?;
 
@@ -1217,7 +1220,8 @@ impl AIService {
 
     pub async fn delete_task(&self, task_id: String) -> Result<bool> {
         self.remove_task(task_id.clone()).await?;
-        Ad4mDb::with_global_instance(|db| db.remove_task(task_id))
+        crate::db_backend::db_backend()
+            .remove_task(task_id)
             .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
         Ok(true)
     }
@@ -1498,7 +1502,8 @@ impl AIService {
         let (result_sender, rx) = oneshot::channel();
 
         // Retrieve the task to find the associated model_id
-        let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id.clone()))
+        let task = crate::db_backend::db_backend()
+            .get_task(task_id.clone())
             .map_err(|e| anyhow::anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow::anyhow!("Task not found for task_id: {}", task_id))?;
 
@@ -1807,7 +1812,7 @@ impl AIService {
         }
 
         // Try to get model from DB by ID
-        if let Ok(Some(model)) = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone())) {
+        if let Ok(Some(model)) = crate::db_backend::db_backend().get_model(model_id.clone()) {
             if model.model_type != ModelType::Transcription {
                 return Err(anyhow!("Model '{}' is not a transcription model", model_id));
             }
@@ -1819,7 +1824,7 @@ impl AIService {
 
         // if nothing above works, see if we have a transcription model in the DB and use that
         // Try to find first transcription model in DB
-        if let Ok(models) = Ad4mDb::with_global_instance(|db| db.get_models()) {
+        if let Ok(models) = crate::db_backend::db_backend().get_models() {
             if let Some(model) = models
                 .into_iter()
                 .find(|m| m.model_type == ModelType::Transcription)
@@ -2006,18 +2011,14 @@ impl AIService {
                             if word_count > 0 {
                                 if let Some(ref email) = billing_email {
                                     let rate_key =
-                                        crate::db::Ad4mDb::with_global_instance(|db| {
-                                            db.get_model(billing_model_id.clone())
-                                        })
+                                        crate::db_backend::db_backend().get_model(billing_model_id.clone())
                                         .ok()
                                         .flatten()
                                         .map(|m| m.name)
                                         .unwrap_or_else(|| billing_model_id.clone());
 
                                     let rate =
-                                        crate::db::Ad4mDb::with_global_instance(|db| {
-                                            db.get_host_rate(&rate_key)
-                                        })
+                                        crate::db_backend::db_backend().get_host_rate(&rate_key)
                                         .ok()
                                         .flatten()
                                         .unwrap_or(0.0);
@@ -2233,9 +2234,9 @@ impl AIService {
     /// In single-user mode, ownership is not enforced.
     /// In multi-user mode, both the session and the caller must have valid emails that match.
     fn verify_stream_ownership(session: &TranscriptionSession, auth_token: &str) -> Result<()> {
-        let multi_user_enabled = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.get_multi_user_enabled().unwrap_or(false)
-        });
+        let multi_user_enabled = crate::db_backend::db_backend()
+            .get_multi_user_enabled()
+            .unwrap_or(false);
 
         if !multi_user_enabled {
             // Single-user mode — no ownership enforcement
@@ -2315,16 +2316,19 @@ impl AIService {
     pub async fn update_model(&self, model_id: String, model_config: ModelInput) -> Result<()> {
         log::info!("Updating model: {} with: {:?}", model_id, model_config);
         // First get the existing model to determine its type
-        let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let existing_model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
 
         // Update the model in the database
-        Ad4mDb::with_global_instance(|db| db.update_model(&model_id, &model_config))
+        crate::db_backend::db_backend()
+            .update_model(&model_id, &model_config)
             .map_err(|e| anyhow!("Failed to update model in database: {}", e))?;
 
         // Get the updated model from the database
-        let updated_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let updated_model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found after update: {}", model_id))?;
 
@@ -2369,7 +2373,8 @@ impl AIService {
                 model_ready_rx.await?;
 
                 // Respawn all tasks for this model
-                let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
+                let tasks = crate::db_backend::db_backend()
+                    .get_tasks()
                     .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
 
                 for task in tasks.into_iter().filter(|t| t.model_id == model_id) {
@@ -2389,7 +2394,8 @@ impl AIService {
 
     pub async fn remove_model(&self, model_id: String) -> Result<()> {
         // First get the existing model to determine its type
-        let existing_model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let existing_model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .map_err(|e| anyhow!("Database error: {}", e))?
             .ok_or_else(|| anyhow!("Model not found: {}", model_id))?;
 
@@ -2427,7 +2433,8 @@ impl AIService {
         }
 
         // Remove the model from the database
-        Ad4mDb::with_global_instance(|db| db.remove_model(&model_id))
+        crate::db_backend::db_backend()
+            .remove_model(&model_id)
             .map_err(|e| anyhow!("Failed to remove model from database: {}", e))?;
 
         Ok(())
@@ -2626,7 +2633,8 @@ mod tests {
             .expect("model to be updated");
 
         // Verify the update
-        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .expect("to get model");
         assert_eq!(model.unwrap().name, "Updated Test Model");
 
@@ -2637,7 +2645,8 @@ mod tests {
             .expect("model to be removed");
 
         // Verify removal
-        let model = Ad4mDb::with_global_instance(|db| db.get_model(model_id.clone()))
+        let model = crate::db_backend::db_backend()
+            .get_model(model_id.clone())
             .expect("to get model");
         assert!(model.is_none());
     }

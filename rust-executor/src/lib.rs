@@ -439,7 +439,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     if let Some(enable_multi_user) = config.enable_multi_user {
         if enable_multi_user {
             info!("Enabling multi-user mode...");
-            Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true))
+            crate::db_backend::db_backend()
+                .set_multi_user_enabled(true)
                 .expect("Failed to enable multi-user mode");
         }
     }
@@ -467,7 +468,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     tokio::spawn(async {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
-            if let Err(e) = Ad4mDb::with_global_instance(|db| db.cleanup_expired_codes()) {
+            if let Err(e) = crate::db_backend::db_backend().cleanup_expired_codes() {
                 error!("Failed to cleanup expired verification codes: {}", e);
             } else {
                 info!("Cleaned up expired verification codes");
@@ -599,7 +600,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // When any credit mutation marks a user dirty, this drains the set
     // and publishes updated HostingUserInfo only for affected users.
     tokio::spawn(async {
-        use crate::db::Ad4mDb;
         use crate::pubsub::{
             get_global_pubsub, COMPUTE_LOG_UPDATED_TOPIC, DIRTY_CREDIT_USERS,
             HOSTING_USER_INFO_CHANGED_TOPIC, PENDING_COMPUTE_LOG_ENTRIES,
@@ -625,8 +625,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             }
 
             let pubsub = get_global_pubsub().await;
-            let global_free = match Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
-            {
+            let global_free = match crate::db_backend::db_backend().get_free_hosting_enabled() {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Credit flush: get_free_hosting_enabled failed: {}", e);
@@ -637,7 +636,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 let free_access = if global_free {
                     true
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
+                    match crate::db_backend::db_backend().get_user_free_access(email) {
                         Ok(v) => v,
                         Err(e) => {
                             error!(
@@ -651,7 +650,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 let remaining_credits = if free_access {
                     "unlimited".to_string()
                 } else {
-                    match Ad4mDb::with_global_instance(|db| db.get_user_credits(email)) {
+                    match crate::db_backend::db_backend().get_user_credits(email) {
                         Ok(credits) => format!("{}", credits),
                         Err(e) => {
                             error!("Credit flush: get_user_credits failed for {}: {}", email, e);
@@ -660,7 +659,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                     }
                 };
                 let hot_wallet_address =
-                    match Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email)) {
+                    match crate::db_backend::db_backend().get_user_hot_wallet(email) {
                         Ok(v) => v,
                         Err(e) => {
                             error!(

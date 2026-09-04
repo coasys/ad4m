@@ -2297,7 +2297,9 @@ async fn auto_processor_election_only_online_participants_process() {
         AgentService::ensure_user_key_exists(email).expect("user key");
         let ctx = AgentContext::for_user_email(email.to_string());
         let did = did_for_context(&ctx).expect("did");
-        Ad4mDb::with_global_instance(|db| db.add_user(email, &did, "pw")).expect("add_user");
+        crate::db_backend::db_backend()
+            .add_user(email, &did, "pw")
+            .expect("add_user");
         (ctx, did)
     };
     let (_ctx_carol, did_carol) = mk("carol@e2e");
@@ -2319,7 +2321,9 @@ async fn auto_processor_election_only_online_participants_process() {
     }
     // "Log in" bob, alice, dave (recent last_seen ⇒ online). carol stays offline.
     for email in ["bob@e2e", "alice@e2e", "dave@e2e"] {
-        Ad4mDb::with_global_instance(|db| db.update_user_last_seen(email)).expect("last_seen");
+        crate::db_backend::db_backend()
+            .update_user_last_seen(email)
+            .expect("last_seen");
     }
 
     let cfg = AutoProcessorConfig {

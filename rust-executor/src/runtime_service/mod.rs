@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
 use crate::types::{ExceptionInfo, ExceptionType, NotificationInput};
-use crate::{agent::did, db::Ad4mDb, types::SentMessage};
+use crate::{agent::did, types::SentMessage};
 
 lazy_static! {
     static ref RUNTIME_INSTANCE: Arc<Mutex<Option<RuntimeService>>> = Arc::new(Mutex::new(None));
@@ -99,7 +99,8 @@ impl RuntimeService {
 
     pub fn get_trusted_agents(&self) -> Vec<String> {
         let mut trusted_agents: Vec<String> = self.seed.trusted_agents.clone();
-        let mut stored_agents = Ad4mDb::with_global_instance(|db| db.get_all_trusted_agents())
+        let mut stored_agents = crate::db_backend::db_backend()
+            .get_all_trusted_agents()
             .map_err(|e| e.to_string())
             .unwrap_or_default();
         trusted_agents.push(did());
@@ -110,21 +111,23 @@ impl RuntimeService {
     }
 
     pub fn add_trusted_agent(&self, new_agents: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| db.add_trusted_agents(new_agents))
+        let _ = crate::db_backend::db_backend()
+            .add_trusted_agents(new_agents)
             .map_err(|e| e.to_string());
     }
 
     pub fn remove_trusted_agent(&self, agents_to_remove: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| db.remove_trusted_agents(agents_to_remove))
+        let _ = crate::db_backend::db_backend()
+            .remove_trusted_agents(agents_to_remove)
             .map_err(|e| e.to_string());
     }
 
     pub fn get_know_link_languages(&self) -> Vec<String> {
         let mut languages: Vec<String> = self.seed.known_link_languages.clone();
-        let mut stored_languages =
-            Ad4mDb::with_global_instance(|db| db.get_all_known_link_languages())
-                .map_err(|e| e.to_string())
-                .unwrap_or_default();
+        let mut stored_languages = crate::db_backend::db_backend()
+            .get_all_known_link_languages()
+            .map_err(|e| e.to_string())
+            .unwrap_or_default();
         languages.append(&mut stored_languages);
         languages.sort();
         languages.dedup();
@@ -132,74 +135,76 @@ impl RuntimeService {
     }
 
     pub fn add_know_link_language(&self, language: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| db.add_known_link_languages(language))
+        let _ = crate::db_backend::db_backend()
+            .add_known_link_languages(language)
             .map_err(|e| e.to_string());
     }
 
     pub fn remove_know_link_language(&self, language_to_remove: Vec<String>) {
-        let _ =
-            Ad4mDb::with_global_instance(|db| db.remove_known_link_languages(language_to_remove))
-                .map_err(|e| e.to_string());
+        let _ = crate::db_backend::db_backend()
+            .remove_known_link_languages(language_to_remove)
+            .map_err(|e| e.to_string());
     }
 
     pub fn get_friends(&self) -> Vec<String> {
-        Ad4mDb::with_global_instance(|db| db.get_all_friends())
+        crate::db_backend::db_backend()
+            .get_all_friends()
             .map_err(|e| e.to_string())
             .unwrap_or_default()
     }
 
     pub fn add_friend(&self, friends: Vec<String>) {
-        let _ =
-            Ad4mDb::with_global_instance(|db| db.add_friends(friends)).map_err(|e| e.to_string());
+        let _ = crate::db_backend::db_backend()
+            .add_friends(friends)
+            .map_err(|e| e.to_string());
     }
 
     pub fn remove_friend(&self, friend_to_remove: Vec<String>) {
-        let _ = Ad4mDb::with_global_instance(|db| db.remove_friends(friend_to_remove))
+        let _ = crate::db_backend::db_backend()
+            .remove_friends(friend_to_remove)
             .map_err(|e| e.to_string());
     }
 
     pub fn get_outbox(&self) -> Vec<SentMessage> {
-        Ad4mDb::with_global_instance(|db| db.get_all_from_outbox())
+        crate::db_backend::db_backend()
+            .get_all_from_outbox()
             .map_err(|e| e.to_string())
             .unwrap_or_default()
     }
 
     pub fn add_message_to_outbox(&self, message: SentMessage) {
-        let _ = Ad4mDb::with_global_instance(|db| {
-            db.add_to_outbox(&message.message, message.recipient)
-        })
-        .map_err(|e| e.to_string());
+        let _ = crate::db_backend::db_backend()
+            .add_to_outbox(&message.message, message.recipient)
+            .map_err(|e| e.to_string());
     }
 
     pub async fn request_install_notification(
         notification_input: NotificationInput,
         user_email: Option<String>,
     ) -> Result<String, String> {
-        let notification_id = Ad4mDb::with_global_instance(|db| {
-            db.add_notification(notification_input, user_email.clone())
-        })
-        .map_err(|e| e.to_string())?;
+        let notification_id = crate::db_backend::db_backend()
+            .add_notification(notification_input, user_email.clone())
+            .map_err(|e| e.to_string())?;
 
         // For managed users (user_email is Some), auto-grant the notification
         // Only the main agent (user_email is None) needs manual approval
         if user_email.is_some() {
-            let mut notification =
-                Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
-                    .map_err(|e| e.to_string())?
-                    .ok_or("Notification with given id not found")?;
+            let mut notification = crate::db_backend::db_backend()
+                .get_notification(notification_id.clone())
+                .map_err(|e| e.to_string())?
+                .ok_or("Notification with given id not found")?;
 
             notification.granted = true;
 
-            Ad4mDb::with_global_instance(|db| {
-                db.update_notification(notification_id.clone(), &notification)
-            })
-            .map_err(|e| e.to_string())?;
+            crate::db_backend::db_backend()
+                .update_notification(notification_id.clone(), &notification)
+                .map_err(|e| e.to_string())?;
         } else {
             // Main agent needs manual approval via ADAM Launcher
-            let notification =
-                Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
-                    .map_err(|e| e.to_string())?
-                    .ok_or("Notification with given id not found")?;
+            let notification = crate::db_backend::db_backend()
+                .get_notification(notification_id.clone())
+                .map_err(|e| e.to_string())?
+                .ok_or("Notification with given id not found")?;
 
             let exception_info = ExceptionInfo {
                 title: "Request to install notifications for the app".to_string(),

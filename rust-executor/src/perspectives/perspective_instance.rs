@@ -23,13 +23,13 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
+use crate::types::*;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
     OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
     PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
     PerspectiveStateFilter,
 };
-use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
 use chrono::DateTime;
 use deno_core::anyhow::anyhow;
@@ -701,8 +701,9 @@ impl PerspectiveInstance {
                 }
             };
 
-            let users_result =
-                Ad4mDb::with_global_instance(|db| db.list_users()).map_err(|e| e.to_string());
+            let users_result = crate::db_backend::db_backend()
+                .list_users()
+                .map_err(|e| e.to_string());
             let user_tuples: Vec<(String, Option<i64>)> = match users_result {
                 Ok(users) => users
                     .into_iter()
@@ -1069,10 +1070,9 @@ impl PerspectiveInstance {
             interval.tick().await;
 
             if self.has_link_language().await {
-                let (_, ids) = Ad4mDb::with_global_instance(|db| {
-                    db.get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
-                })
-                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+                let (_, ids) = crate::db_backend::db_backend()
+                    .get_pending_diffs(&uuid, Some(MAX_PENDING_DIFFS_COUNT))
+                    .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
                 if ids.is_empty() {
                     continue;
@@ -1122,9 +1122,8 @@ impl PerspectiveInstance {
     async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.uuid.clone();
 
-        let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
-            db.get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))
-        })?;
+        let (pending_diffs, pending_ids) = crate::db_backend::db_backend()
+            .get_pending_diffs_by_size(&uuid, MAX_COMMIT_BYTES, Some(MAX_PENDING_DIFFS_COUNT))?;
 
         if !pending_ids.is_empty() {
             let link_language_clone = {
@@ -1146,9 +1145,7 @@ impl PerspectiveInstance {
                     // the retry path is "commit didn't throw" — clear the
                     // diffs regardless of whether a revision came back.
                     Ok(_) => {
-                        Ad4mDb::with_global_instance(|db| {
-                            db.clear_pending_diffs(&uuid, pending_ids)
-                        })?;
+                        crate::db_backend::db_backend().clear_pending_diffs(&uuid, pending_ids)?;
                         // Reset immediate commits counter after successful commit
                         self.set_immediate_commits(IMMEDIATE_COMMITS_COUNT).await;
                         log::debug!("✅ 💾 successfully committed pending diffs");
@@ -1338,7 +1335,7 @@ impl PerspectiveInstance {
                 );
             }
 
-            //Ad4mDb::with_global_instance(|db| db.add_many_links(&self.persisted.lock().await.uuid, &remote_links)).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
+            //crate::db_backend::db_backend().add_many_links(&self.persisted.lock().await.uuid, &remote_links).unwrap(); // Assuming add_many_links takes a reference to a Vec<LinkExpression> and returns Result<(), AnyError>
             return true;
         }
         false
@@ -1384,9 +1381,9 @@ impl PerspectiveInstance {
         }
 
         // Seeing if we already have pending diffs, to not overtake older commits but instead add this one to the queue
-        let (_, pending_ids) =
-            Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
-                .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
+        let (_, pending_ids) = crate::db_backend::db_backend()
+            .get_pending_diffs(&handle.uuid, Some(1))
+            .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
         let commit_result = if pending_ids.is_empty() {
             // No pending diffs, let's try
@@ -1448,7 +1445,7 @@ impl PerspectiveInstance {
 
         if !ok {
             // Store diff in DB
-            Ad4mDb::with_global_instance(|db| db.add_pending_diff(&handle.uuid, diff))?;
+            crate::db_backend::db_backend().add_pending_diff(&handle.uuid, diff)?;
             // Update or start timer
             let mut timer = self.commit_debounce_timer.lock().await;
             *timer = Some(tokio::time::Instant::now());
@@ -1470,9 +1467,7 @@ impl PerspectiveInstance {
             if let Err(e) = self_clone.commit(&diff_clone).await {
                 log::error!("PerspectiveInstance::commit() returned error: {:?}\nStoring in pending diffs for later", e);
                 let handle_clone = self_clone.persisted.lock().await.clone();
-                Ad4mDb::with_global_instance(|db|
-                    db.add_pending_diff(&handle_clone.uuid, &diff_clone)
-                ).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
+                crate::db_backend::db_backend().add_pending_diff(&handle_clone.uuid, &diff_clone).expect("Couldn't write pending diff. DB should be initialized and usable at this point");
             }
         });
     }
@@ -3678,7 +3673,8 @@ impl PerspectiveInstance {
     }
 
     fn all_notifications_for_perspective_id(uuid: String) -> Result<Vec<Notification>, AnyError> {
-        Ok(Ad4mDb::with_global_instance(|db| db.get_notifications())?
+        Ok(crate::db_backend::db_backend()
+            .get_notifications()?
             .into_iter()
             .filter(|n| n.perspective_ids.contains(&uuid))
             .collect())
@@ -3963,8 +3959,9 @@ impl PerspectiveInstance {
             let owners: Vec<String> = handle.owners.clone().unwrap_or_default();
             if !owners.is_empty() {
                 let now = chrono::Utc::now().timestamp();
-                let managed =
-                    Ad4mDb::with_global_instance(|db| db.list_users()).unwrap_or_default();
+                let managed = crate::db_backend::db_backend()
+                    .list_users()
+                    .unwrap_or_default();
                 for user in managed {
                     let recently_active = user
                         .last_seen

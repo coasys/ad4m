@@ -124,16 +124,19 @@ async fn get_perspective_with_access(
 }
 
 fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .unwrap_or(true);
     if global_free {
         return Ok(());
     }
     if let Some(ref email) = user_email {
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+        let free = crate::db_backend::db_backend()
+            .get_user_free_access(email)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+            let credits = crate::db_backend::db_backend()
+                .get_user_credits(email)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             if credits <= 0.0 {
                 return Err(WsRpcError::forbidden("Insufficient compute credits"));
@@ -144,16 +147,19 @@ fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
 }
 
 fn reserve_credits(user_email: &Option<String>, amount: f64) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .unwrap_or(true);
     if global_free {
         return Ok(());
     }
     if let Some(ref email) = user_email {
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+        let free = crate::db_backend::db_backend()
+            .get_user_free_access(email)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            Ad4mDb::with_global_instance(|db| db.deduct_user_credits_if_available(email, amount))
+            crate::db_backend::db_backend()
+                .deduct_user_credits_if_available(email, amount)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             mark_credits_dirty(email);
         }
