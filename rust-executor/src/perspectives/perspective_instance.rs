@@ -3369,20 +3369,41 @@ impl PerspectiveInstance {
 
     /// The ordering strategy declared for `(source, predicate)`, if any.
     ///
-    /// Resolved by asking which class this source is an instance of and reading
-    /// that class's shape. Class membership is not exclusive, so the most
-    /// specific match is taken. Answering `None` — because the source is not a
-    /// subject instance, or its class declares nothing — is the ordinary case
-    /// and costs one classification.
+    /// Resolved by asking which classes this source is an instance of and
+    /// reading their shapes. Membership is not exclusive, so every conforming
+    /// class is scanned, most specific first, and the first declaration for this
+    /// predicate wins. Specificity still decides when several classes declare a
+    /// strategy — including the case where they disagree, which at least makes
+    /// the answer deterministic.
+    ///
+    /// Asking only the most specific class would make a declaration on a less
+    /// specific one invisible to the writer while the reader still honoured it:
+    /// [`hydration`](super::model_query::hydration) resolves ordering from
+    /// whatever shape the query came through. The setter would then write no
+    /// entries for a read that expects them, and the collection would fall back
+    /// to link timestamps — which, now that the diff deliberately preserves
+    /// them, no longer follow the assigned array. Overlapping classes over
+    /// shared links is ordinary social-DNA reuse, so that is a reachable way to
+    /// reintroduce exactly the scramble this feature exists to prevent.
+    ///
+    /// Answering `None` — because the source is not a subject instance, or no
+    /// conforming class declares anything — is the ordinary case.
     async fn ordering_strategy_for(&self, source: &str, predicate: &str) -> Option<String> {
         let classes = self.subject_classes_of(&[source.to_string()]).ok()?;
-        let class_name = classes.get(source)?.first()?;
-        let shape = self.get_shape(class_name).ok()?;
-        shape
-            .properties
-            .iter()
-            .find(|p| p.predicate == predicate && p.ordering.is_some())
-            .and_then(|p| p.ordering.clone())
+        for class_name in classes.get(source)? {
+            let Ok(shape) = self.get_shape(class_name) else {
+                continue;
+            };
+            let declared = shape
+                .properties
+                .iter()
+                .find(|p| p.predicate == predicate && p.ordering.is_some())
+                .and_then(|p| p.ordering.clone());
+            if declared.is_some() {
+                return declared;
+            }
+        }
+        None
     }
 
     /// Fold a batch's own pending work into a set of persisted links.
