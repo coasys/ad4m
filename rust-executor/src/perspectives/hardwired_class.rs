@@ -52,10 +52,6 @@ pub(crate) async fn shacl_path_present(
             ..Default::default()
         })
         .await?;
-    if shape_links.is_empty() {
-        return Ok(false);
-    }
-
     let mut prop_nodes = std::collections::HashSet::new();
     for shape in &shape_links {
         let props = perspective
@@ -66,9 +62,6 @@ pub(crate) async fn shacl_path_present(
             })
             .await?;
         prop_nodes.extend(props.into_iter().map(|l| l.data.target));
-    }
-    if prop_nodes.is_empty() {
-        return Ok(false);
     }
 
     let path_links = perspective

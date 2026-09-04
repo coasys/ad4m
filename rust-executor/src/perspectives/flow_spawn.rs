@@ -342,6 +342,7 @@ pub fn created_bases_of(ops: &[super::interpretation::InterpretationOp]) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perspectives::interpretation_test_support::{delivery_flow_json_for, seed_flow};
 
     fn flow(namespace: &str, input_types: &[&str], states: &[(&str, f64)]) -> SHACLFlow {
         serde_json::from_value(serde_json::json!({
@@ -607,53 +608,25 @@ mod tests {
     // Write half — against a real PerspectiveInstance, no LLM.
     // ---------------------------------------------------------------------
 
-    /// Delivery flow accepting `Todo`, the class `setup_perspective_no_llm`
-    /// registers, so a created Todo is a genuine spawn target.
-    fn delivery_flow_json_for(input_type: &str) -> String {
-        serde_json::json!({
-            "name": "Delivery",
-            "namespace": "delivery://",
-            "start_action": [],
-            "states": [
-                { "name": "identified", "value": 0.0 },
-                { "name": "scoped", "value": 0.5 },
-            ],
-            "transitions": [
-                {
-                    "action_name": "Scope",
-                    "from_state": "identified",
-                    "to_state": "scoped",
-                    "actions": []
-                }
-            ],
-            "inputTypes": [input_type],
-            "outputTypes": [],
-        })
-        .to_string()
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn spawn_pass_mints_an_instance_and_is_idempotent() {
         use crate::perspectives::flow_context::load_flow_instances;
         use crate::perspectives::interpretation_test_support::{
             setup_perspective_no_llm, TASK_SDNA,
         };
-        use crate::perspectives::shacl_parser::parse_flow_to_links;
-        use crate::types::LinkStatus;
 
         let (mut perspective, _shapes, ctx) =
             setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
 
         // `inputTypes` holds class *names* — what `subject_classes_of` returns
         // and what TS `availableFlows` compares against.
-        for link in parse_flow_to_links(&delivery_flow_json_for("Task"), "Delivery")
-            .expect("parse_flow_to_links")
-        {
-            perspective
-                .add_link(link, LinkStatus::Local, None, &ctx)
-                .await
-                .expect("add_link(flow definition)");
-        }
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
 
         // Create a Task the way the extraction pass does, so the spawn pass
         // sees exactly what a real run hands it.
@@ -765,20 +738,17 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn spawn_pass_mints_nothing_when_no_flow_accepts_the_class() {
         use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
-        use crate::perspectives::shacl_parser::parse_flow_to_links;
-        use crate::types::LinkStatus;
 
         let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
 
         // Flow accepts a class nothing on this perspective is.
-        for link in parse_flow_to_links(&delivery_flow_json_for("SomethingElse"), "Delivery")
-            .expect("parse_flow_to_links")
-        {
-            perspective
-                .add_link(link, LinkStatus::Local, None, &ctx)
-                .await
-                .expect("add_link(flow definition)");
-        }
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("SomethingElse"),
+            "Delivery",
+        )
+        .await;
 
         let spawned = run_flow_spawn_pass(
             &mut perspective,
@@ -813,19 +783,16 @@ mod tests {
         use crate::perspectives::interpretation_test_support::{
             setup_perspective_no_llm, TASK_SDNA,
         };
-        use crate::perspectives::shacl_parser::parse_flow_to_links;
-        use crate::types::LinkStatus;
 
         let (mut perspective, _shapes, ctx) =
             setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
-        for link in parse_flow_to_links(&delivery_flow_json_for("Task"), "Delivery")
-            .expect("parse_flow_to_links")
-        {
-            perspective
-                .add_link(link, LinkStatus::Local, None, &ctx)
-                .await
-                .expect("add_link(flow definition)");
-        }
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
         let base = "ad4m://task/selection".to_string();
         perspective
             .create_subject(
@@ -894,34 +861,37 @@ mod tests {
         }
 
         #[test]
-        fn keeps_creates_only_in_op_order() {
-            let ops = vec![
-                update("ad4m://a"),
-                create("ad4m://b"),
-                InterpretationOp::AddLinks {
-                    source: "ad4m://c".to_string(),
-                    links: vec![],
-                },
-                create("ad4m://d"),
-            ];
-            assert_eq!(created_bases_of(&ops), vec!["ad4m://b", "ad4m://d"]);
-        }
-
-        #[test]
-        fn dedups_repeated_create_bases() {
-            let ops = vec![create("ad4m://a"), create("ad4m://b"), create("ad4m://a")];
-            assert_eq!(created_bases_of(&ops), vec!["ad4m://a", "ad4m://b"]);
-        }
-
-        #[test]
-        fn update_on_a_created_base_does_not_remove_it() {
-            let ops = vec![create("ad4m://a"), update("ad4m://a")];
-            assert_eq!(created_bases_of(&ops), vec!["ad4m://a"]);
-        }
-
-        #[test]
-        fn empty_ops_yield_no_bases() {
-            assert!(created_bases_of(&[]).is_empty());
+        fn created_bases_of_cases() {
+            for (name, ops, want) in [
+                (
+                    "keeps-creates-in-order",
+                    vec![
+                        update("ad4m://a"),
+                        create("ad4m://b"),
+                        InterpretationOp::AddLinks {
+                            source: "ad4m://c".to_string(),
+                            links: vec![],
+                        },
+                        create("ad4m://d"),
+                    ],
+                    vec!["ad4m://b", "ad4m://d"],
+                ),
+                (
+                    "dedups-repeated",
+                    vec![create("ad4m://a"), create("ad4m://b"), create("ad4m://a")],
+                    vec!["ad4m://a", "ad4m://b"],
+                ),
+                (
+                    "update-on-created-base-keeps-it",
+                    vec![create("ad4m://a"), update("ad4m://a")],
+                    vec!["ad4m://a"],
+                ),
+                ("empty-ops-empty", vec![], vec![]),
+            ] {
+                let got: Vec<String> = created_bases_of(&ops);
+                let want: Vec<String> = want.into_iter().map(String::from).collect();
+                assert_eq!(got, want, "{name}");
+            }
         }
     }
 }

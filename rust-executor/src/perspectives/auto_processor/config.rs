@@ -130,7 +130,7 @@ const AUTO_PROCESSOR_SDNA: &str = include_str!("../hardwired_sdna/auto_processor
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
 /// auto-processor pass over a source perspective.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AutoProcessorConfig {
     /// Human-meaningful processor name. Also part of the batch-node URI in
     /// [`super::claim::batch_node`], so claims by different processors never
@@ -752,18 +752,13 @@ mod tests {
             // [`interpretation_classes_multiple_roundtrip_sorted`] below for
             // the "input order is arbitrary; output order is sorted" contract.
             interpretation_classes: vec!["ns://Question".into(), "ns://Task".into()],
-            flows: vec![],
             debounce_ms: 5_000,
             batch_min: 3,
             batch_max: 32,
             max_wait_ms: Some(60_000),
             claim_ttl_ms: 120_000,
             dedup_strategy_json: Some(r#"{"kind":"normalized"}"#.into()),
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         }
     }
 
