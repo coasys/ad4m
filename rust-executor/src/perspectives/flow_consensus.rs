@@ -860,14 +860,44 @@ async fn live_proposal_links(
 /// click resolves now rather than on the next transcript (design §7).
 ///
 /// The immediate pass is scoped to the proposal's own `FlowInstance` — one
-/// accept must not sweep every instance on the perspective. Returns whatever
-/// fired (possibly nothing, e.g. n not yet met).
+/// accept must not sweep every instance on the perspective.
+///
+/// Errors when the proposal is not ENGINE-VISIBLE — i.e. not returned by
+/// [`load_flow_transition_proposals`] (unparseable, or its proposer link is
+/// absent / not self-authored). The pass only ever counts loader-visible
+/// proposals, so accepting an invisible one would write a vote that can
+/// never count and return the same empty `Vec<FireOutcome>` as the
+/// legitimate "counted, quorum not yet met" result — a silent no-op the
+/// client cannot distinguish from a landed vote. The gate runs BEFORE the
+/// `acceptedBy` write so no stray vote link reaches the shared graph. The
+/// proposal itself is deliberately left in place: a mid-sync proposer link
+/// may still arrive and make it acceptable, and a genuinely forged one
+/// stays rejectable noise (`reject_flow_proposal` is not gated).
+///
+/// Returns whatever fired (possibly nothing, e.g. n not yet met).
 pub async fn accept_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<FireOutcome>> {
     let links = live_proposal_links(perspective, proposal_uri).await?;
+    let Some(instance_uri) = links.iter().find_map(|l| {
+        (l.data.predicate.as_deref() == Some("ad4m://flow/instance")).then(|| l.data.target.clone())
+    }) else {
+        return Err(anyhow::anyhow!(
+            "proposal {proposal_uri} carries no ad4m://flow/instance link — not engine-visible, accept not recorded"
+        ));
+    };
+    let visible = load_flow_transition_proposals(perspective, &instance_uri)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("accept_flow_proposal: engine-visibility check failed: {e:#}")
+        })?;
+    if !visible.iter().any(|p| p.uri == proposal_uri) {
+        return Err(anyhow::anyhow!(
+            "proposal {proposal_uri} is not engine-visible (identity unverified: proposer link absent or not self-authored — may be mid-sync) — accept not recorded"
+        ));
+    }
     let did = crate::agent::did_for_context(context)
         .map_err(|e| anyhow::anyhow!("accept_flow_proposal: no acting DID: {e:#}"))?;
     // Authorship-bound, mirroring the loader: a forged `acceptedBy` naming
@@ -896,14 +926,9 @@ pub async fn accept_flow_proposal(
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
     // Scope the immediate pass to the proposal's own FlowInstance — one
-    // accept must not sweep every instance on the perspective. A proposal
-    // without an instance link can't be loaded by the consensus pass anyway,
-    // so the unscoped fallback only preserves the old behavior for shapes
-    // that would fire nothing.
-    let instance_uri = links.iter().find_map(|l| {
-        (l.data.predicate.as_deref() == Some("ad4m://flow/instance")).then(|| l.data.target.clone())
-    });
-    Ok(run_flow_consensus_pass(perspective, None, context, None, instance_uri.as_deref()).await)
+    // accept must not sweep every instance on the perspective. (The
+    // visibility gate above already resolved that instance link.)
+    Ok(run_flow_consensus_pass(perspective, None, context, None, Some(&instance_uri)).await)
 }
 
 /// Reject a live proposal: hard delete, per spec §4.2 — a rejected proposal

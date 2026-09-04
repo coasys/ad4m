@@ -966,6 +966,57 @@ async fn forged_accept_naming_acting_did_does_not_suppress_own_vote_e2e() {
     );
 }
 
+/// Accept on a proposal the loader drops (identity-unverified proposer)
+/// must fail loudly, not silently no-op — and must not write a vote link.
+/// Before the engine-visibility gate this returned `Ok([])` — the same
+/// value as the legitimate "counted, quorum not yet met" result — while
+/// writing a stray `acceptedBy` link on a proposal no pass would ever
+/// count or invalidate: the visibility hole behind the proposer-forgery
+/// fix. The proposal itself stays on the graph (mid-sync proposer links
+/// may still complete it; forged ones stay rejectable noise).
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_on_unverified_proposal_errors_not_silently_e2e() {
+    let mut f = seed_satisfied_fixture(None).await;
+
+    // Sanity first: an engine-minted, loader-visible proposal accepts fine.
+    let minted = f.mint_one().await;
+    accept_flow_proposal(&mut f.perspective, &minted, &f.ctx)
+        .await
+        .expect("accept on a loader-visible proposal");
+
+    // A client-shaped proposal claiming a proposer we are not: every link
+    // below is authored by the acting agent, so the loader's identity check
+    // (`l.author == record.proposer`) drops it and no pass can see it.
+    let forged = "ad4m://flow/proposal/forged-proposer";
+    let instance_uri = f.instance_uri.clone();
+    let from_lit = literal("identified");
+    let to_lit = literal("scoped");
+    let evidence_lit = literal("");
+    for (pred, target) in [
+        ("ad4m://flow/instance", instance_uri.as_str()),
+        ("ad4m://flow/from_state", from_lit.as_str()),
+        ("ad4m://flow/to_state", to_lit.as_str()),
+        ("ad4m://flow/proposer", "did:key:someone-else"),
+        ("ad4m://flow/evidence_hashes", evidence_lit.as_str()),
+    ] {
+        f.link(forged, pred, target, LinkStatus::Local).await;
+    }
+
+    let err = accept_flow_proposal(&mut f.perspective, forged, &f.ctx)
+        .await
+        .expect_err("accept on an unverified proposal must error, not no-op");
+    assert!(
+        format!("{err:#}").contains("not engine-visible"),
+        "error must name the visibility gate: {err:#}"
+    );
+    assert!(
+        !f.links_by_predicate(forged)
+            .await
+            .contains_key(ACCEPTED_BY_PREDICATE),
+        "no vote link may be written on an unverified proposal"
+    );
+}
+
 /// Reject hard-deletes a live proposal, errors on a second attempt (nothing
 /// left to reject), and never moves the instance.
 #[tokio::test(flavor = "multi_thread")]
