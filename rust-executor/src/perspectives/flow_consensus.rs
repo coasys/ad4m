@@ -48,13 +48,18 @@ use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::{
     advance_flow_instance_state, FLOW_TRANSITION_PROPOSAL_CLASS,
 };
-use crate::perspectives::flow_context::FlowInstanceRecord;
-use crate::perspectives::flow_evaluator::{
-    cardinality_satisfied, requires_query_input, run_query, RequiresQueryable,
+use crate::perspectives::flow_context::{
+    load_all_flow_instances, load_flow_instances, load_shacl_flows, retain_selected_flows,
+    scope_subject, FlowInstanceRecord,
 };
+use crate::perspectives::flow_evaluator::{
+    cardinality_satisfied, recompute_evidence_hash, requires_query_input, run_query,
+    RequiresQueryable,
+};
+use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery};
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery, SHACLFlow};
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 use std::collections::{BTreeMap, HashSet};
 
 /// Predicate marking a proposal as consumed by a firing. Absence = live.
@@ -486,6 +491,254 @@ fn earliest_proposed_at(bucket: &[FlowTransitionProposalRecord]) -> String {
         }
     }
     earliest
+}
+
+/// Hard-delete a proposal: every link the proposal authors hangs off its
+/// URI as source (model properties, the `flowInstance` pointer, `acceptedBy`
+/// edges, `resolved_as` marks), so removing the source-links removes the
+/// instance. Shared by rejection and auto-invalidation — both are noise,
+/// not Synergy atoms (§4.2); only FIRED proposals are kept-and-marked.
+pub async fn delete_flow_proposal(
+    perspective: &mut PerspectiveInstance,
+    proposal_uri: &str,
+) -> anyhow::Result<()> {
+    let links = perspective
+        .get_links(&LinkQuery {
+            source: Some(proposal_uri.to_string()),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("delete_flow_proposal: get_links({proposal_uri}): {e:#}"))?;
+    if links.is_empty() {
+        return Ok(());
+    }
+    let exprs: Vec<LinkExpression> = links.into_iter().map(LinkExpression::from).collect();
+    perspective.remove_links(exprs, None).await.map_err(|e| {
+        anyhow::anyhow!("delete_flow_proposal: remove_links({proposal_uri}): {e:#}")
+    })?;
+    Ok(())
+}
+
+/// The rule governing a transition INTO `to_state`: the target state's own
+/// `consensusRule` wins, else the flow-level one, else `None` (which
+/// [`aggregate_flow_votes`] defaults to `{ n: 1 }`, §7.1).
+fn effective_consensus_rule<'a>(flow: &'a SHACLFlow, to_state: &str) -> Option<&'a ConsensusRule> {
+    flow.states
+        .iter()
+        .find(|s| s.name == to_state)
+        .and_then(|s| s.consensus_rule.as_ref())
+        .or(flow.consensus_rule.as_ref())
+}
+
+/// One consensus sweep over the `FlowInstance`s in scope — firing-engine
+/// design §2, the pass that CONSUMES proposals. Called from the
+/// auto-processor after the proposal pass and from the accept/reject API
+/// (so a human click resolves immediately).
+///
+/// Per instance (processed in sorted-URI order, at most ONE firing each —
+/// a fire changes `currentState`, so sibling groups re-validate next pass
+/// instead of firing on stale state):
+///
+/// 1. superseded proposals (`fromState` ≠ live `currentState`) are deleted
+///    (auto-invalidation trigger a);
+/// 2. each sealed proposal's evidence is re-verified via
+///    [`recompute_evidence_hash`] with the PROPOSER's DID — hash mismatch or
+///    nothing-verifiable deletes it (trigger b), a transient store error
+///    skips the whole instance this pass WITHOUT invalidating (fail
+///    closed); an unsealed proposal (empty hash — e.g. a future manual
+///    proposal) passes through unverified;
+/// 3. survivors are grouped by `toState` — each target may carry its own
+///    `consensusRule` override — `fromRole` gates resolve via
+///    [`resolve_role_dids`] over that group's qualifying DIDs (role
+///    resolution errors also skip the instance, fail closed);
+/// 4. among groups whose threshold is met, the earliest-proposed fires:
+///    [`fire_flow_consensus`] advances `currentState`, then
+///    [`resolve_proposals_fired`] keep-and-marks the contributing
+///    proposals.
+///
+/// Never fails: any error is logged and skips the narrowest safe unit
+/// (target group < instance < pass). Client `flow-state-changed`
+/// subscriptions are a later slice (§7) — [`FireOutcome`]s are returned so
+/// the wiring can emit once the topic plumbing exists. Explicit per-state
+/// history entries are deliberately absent: kept-and-marked proposals
+/// (proposer set, evidence, timestamps) reconstruct the full transition
+/// history already.
+pub async fn run_flow_consensus_pass(
+    perspective: &mut PerspectiveInstance,
+    scope: Option<&Scope>,
+    context: &AgentContext,
+    flow_filter: Option<&[String]>,
+) -> Vec<FireOutcome> {
+    let loaded = async {
+        let mut flows_by_uri = load_shacl_flows(perspective).await?;
+        retain_selected_flows(&mut flows_by_uri, flow_filter);
+        let records = match scope {
+            Some(s) => load_flow_instances(perspective, &[scope_subject(s).to_string()]).await?,
+            None => load_all_flow_instances(perspective).await?,
+        };
+        anyhow::Ok((flows_by_uri, records))
+    }
+    .await;
+    let (flows_by_uri, mut records) = match loaded {
+        Ok(l) => l,
+        Err(e) => {
+            log::warn!("run_flow_consensus_pass: load failed: {e:#}");
+            return Vec::new();
+        }
+    };
+    records.sort_by(|a, b| a.instance_uri.cmp(&b.instance_uri));
+
+    let mut outcomes = Vec::new();
+    'instances: for record in &records {
+        let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
+            continue;
+        };
+        let proposals = match load_flow_transition_proposals(perspective, &record.instance_uri)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!(
+                    "run_flow_consensus_pass: proposal load for {} failed; skipping instance: {e:#}",
+                    record.instance_uri
+                );
+                continue;
+            }
+        };
+        if proposals.is_empty() {
+            continue;
+        }
+
+        // Trigger (a): superseded — the flow moved on under these proposals.
+        let (live, superseded): (Vec<_>, Vec<_>) = proposals
+            .into_iter()
+            .partition(|p| p.from_state == record.current_state);
+        for p in &superseded {
+            log::debug!(
+                "run_flow_consensus_pass: invalidating superseded proposal {} ({} → {}, instance now at {})",
+                p.uri, p.from_state, p.to_state, record.current_state
+            );
+            if let Err(e) = delete_flow_proposal(perspective, &p.uri).await {
+                log::warn!("run_flow_consensus_pass: {e:#}");
+            }
+        }
+
+        // Trigger (b): stale seals.
+        let mut verified: Vec<FlowTransitionProposalRecord> = Vec::with_capacity(live.len());
+        for p in live {
+            if p.evidence_hash.is_empty() {
+                log::debug!(
+                    "run_flow_consensus_pass: proposal {} carries no evidence seal; counting unverified",
+                    p.uri
+                );
+                verified.push(p);
+                continue;
+            }
+            match recompute_evidence_hash(perspective, flow, record, &p.to_state, &p.proposer).await
+            {
+                Ok(Some(h)) if h == p.evidence_hash => verified.push(p),
+                Ok(_) => {
+                    log::warn!(
+                        "run_flow_consensus_pass: evidence for proposal {} no longer verifies against the live graph; invalidating",
+                        p.uri
+                    );
+                    if let Err(e) = delete_flow_proposal(perspective, &p.uri).await {
+                        log::warn!("run_flow_consensus_pass: {e:#}");
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "run_flow_consensus_pass: evidence re-verify for {} failed transiently; skipping instance this pass: {e:#}",
+                        record.instance_uri
+                    );
+                    continue 'instances;
+                }
+            }
+        }
+        if verified.is_empty() {
+            continue;
+        }
+
+        // Group by target state — each may carry its own rule — and pick
+        // the earliest-proposed fire candidate across groups.
+        let mut groups: BTreeMap<String, Vec<FlowTransitionProposalRecord>> = BTreeMap::new();
+        for p in verified {
+            groups.entry(p.to_state.clone()).or_default().push(p);
+        }
+        let mut fire: Option<(String, FlowVoteTally)> = None;
+        for (to_state, bucket) in &groups {
+            let rule = effective_consensus_rule(flow, to_state);
+            let eligible = match rule.and_then(|r| r.from_role.as_ref()) {
+                Some(role) => {
+                    let mut candidates: Vec<String> = bucket
+                        .iter()
+                        .flat_map(|p| p.qualifying_dids().cloned())
+                        .collect();
+                    candidates.sort();
+                    candidates.dedup();
+                    match resolve_role_dids(&*perspective, role, record, &candidates).await {
+                        Ok(set) => Some(set),
+                        Err(e) => {
+                            log::warn!(
+                                "run_flow_consensus_pass: fromRole resolution for {} → {to_state} failed; skipping instance this pass: {e:#}",
+                                record.instance_uri
+                            );
+                            continue 'instances;
+                        }
+                    }
+                }
+                None => None,
+            };
+            let agg = match aggregate_flow_votes(bucket, rule, eligible.as_ref()) {
+                Ok(a) => a,
+                Err(e) => {
+                    log::warn!(
+                        "run_flow_consensus_pass: misconfigured consensus rule on {} → {to_state}; skipping target: {e:#}",
+                        record.flow_uri
+                    );
+                    continue;
+                }
+            };
+            if let Some(tally) = select_fire_candidate(&record.current_state, &agg) {
+                let key = earliest_proposed_at(&tally.contributing);
+                let earlier = match &fire {
+                    None => true,
+                    Some((best, _)) => key < *best,
+                };
+                if earlier {
+                    fire = Some((key, tally.clone()));
+                }
+            }
+        }
+
+        let Some((_, tally)) = fire else {
+            continue;
+        };
+        match fire_flow_consensus(perspective, record, &tally, None, context).await {
+            Ok(outcome) => {
+                if let Err(e) = resolve_proposals_fired(
+                    perspective,
+                    &outcome.contributing_proposal_uris,
+                    context,
+                )
+                .await
+                {
+                    log::warn!(
+                        "run_flow_consensus_pass: fired {} → {} but keep-and-mark failed (proposals stay live; superseded cleanup catches them next pass): {e:#}",
+                        outcome.from_state, outcome.to_state
+                    );
+                }
+                outcomes.push(outcome);
+            }
+            Err(e) => {
+                log::warn!(
+                    "run_flow_consensus_pass: firing {} failed: {e:#}",
+                    record.instance_uri
+                );
+            }
+        }
+    }
+    outcomes
 }
 
 // ---------------------------------------------------------------------------

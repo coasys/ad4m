@@ -609,3 +609,114 @@ async fn harness_propose_transition_tool_call_routes_rationale_to_graph_e2e() {
     assert_eq!(minted.len(), 1, "got {minted:?}");
     assert_eq!(f.rationale(&minted[0]).await.as_deref(), Some(reason));
 }
+
+// ---------------------------------------------------------------------------
+// run_flow_consensus_pass — the firing half, against the live store.
+// ---------------------------------------------------------------------------
+
+/// Happy path with the default `{ n: 1 }` rule: the pass verifies the
+/// minted proposal's evidence against the live graph, fires the
+/// transition, keep-and-marks the proposal, and a re-run is a no-op.
+#[tokio::test(flavor = "multi_thread")]
+async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
+    use super::flow_consensus::{load_flow_transition_proposals, run_flow_consensus_pass};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let minted = f.run_pass(&[], None).await;
+    assert_eq!(minted.len(), 1, "got {minted:?}");
+
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    assert_eq!(outcomes.len(), 1, "n=1 default rule fires immediately");
+    assert_eq!(
+        (
+            outcomes[0].from_state.as_str(),
+            outcomes[0].to_state.as_str()
+        ),
+        ("identified", "scoped")
+    );
+    assert_eq!(outcomes[0].contributing_proposal_uris, minted);
+
+    // `currentState` advanced on-graph.
+    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
+        .await
+        .expect("load instances");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(recs[0].current_state, "scoped");
+
+    // The fired proposal is KEPT (its links survive, marked `fired`) but no
+    // longer loads as live — the Synergy flow-atom record.
+    let live = load_flow_transition_proposals(&f.perspective, &f.instance_uri)
+        .await
+        .expect("load proposals");
+    assert!(live.is_empty(), "fired proposal must be resolved: {live:?}");
+    let by_pred = f.links_by_predicate(&minted[0]).await;
+    assert_has_target(&by_pred, "ad4m://flow/resolved_as", &literal("fired"));
+    assert_has_target(&by_pred, "ad4m://flow/instance", &f.instance_uri);
+
+    // Idempotency: nothing live → nothing fires, state stays.
+    let rerun = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    assert!(rerun.is_empty(), "re-run fired again: {rerun:?}");
+}
+
+/// Both auto-invalidation triggers, against the live store: a proposal
+/// sealed with a hash the current graph cannot reproduce is deleted
+/// (trigger b), a proposal whose `fromState` the instance already left is
+/// deleted (trigger a), and neither fires the transition.
+#[tokio::test(flavor = "multi_thread")]
+async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
+    use super::flow_consensus::run_flow_consensus_pass;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let acting_did = crate::agent::did_for_context(&f.ctx).expect("did_for_context");
+
+    let stale_seal = write_flow_transition_proposal(
+        &mut f.perspective,
+        "stale-seal",
+        &acting_did,
+        &f.instance_uri.clone(),
+        "identified",
+        "scoped",
+        &["ad4m://task/1".to_string()],
+        "deadbeef-not-the-live-hash",
+        None,
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("write stale-seal proposal");
+
+    let superseded = write_flow_transition_proposal(
+        &mut f.perspective,
+        "superseded",
+        &acting_did,
+        &f.instance_uri.clone(),
+        "scoped",
+        "identified",
+        &[],
+        "",
+        None,
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("write superseded proposal");
+
+    let outcomes = run_flow_consensus_pass(&mut f.perspective, None, &f.ctx, None).await;
+    assert!(outcomes.is_empty(), "nothing may fire: {outcomes:?}");
+
+    // Hard-deleted, not marked: every source-link gone.
+    assert!(
+        f.links_by_predicate(&stale_seal).await.is_empty(),
+        "stale-sealed proposal must be deleted"
+    );
+    assert!(
+        f.links_by_predicate(&superseded).await.is_empty(),
+        "superseded proposal must be deleted"
+    );
+
+    // The instance did not move.
+    let recs = load_flow_instances(&f.perspective, &[BASE_URI.to_string()])
+        .await
+        .expect("load instances");
+    assert_eq!(recs[0].current_state, "identified");
+}
