@@ -128,8 +128,9 @@ where something lives *today*, use §1 and the module `AGENTS.md` files. The
 `agentic/` subtree below is superseded: item 7's cycle-break analysis stands,
 but the directory move is replaced by the aspect design in
 `planning/aspect-holons-refactor-2026-09-04.md` (phase 2), which makes `flow/`,
-`interpretation/` and `auto_processor/` sibling aspects hosted by
-`perspectives/` instead of grouping them by "uses an LLM".
+`interpretation/`, `auto_processor/` — and equally `model/`, `subscriptions/`,
+`notifications/` — sibling aspects hosted by the `perspectives/` kernel
+instead of grouping them by "uses an LLM".
 
 ```
 rust-executor/src
@@ -549,9 +550,9 @@ not freelance the other option.
   `0.13.0-test-interpretation-2`. Proposal: `env!("CARGO_PKG_VERSION")`, and
   `setVersion.js` writes Cargo.toml only. **Default: do not touch version
   strings in a refactor PR.**
-- **D6–D10 — aspect-phase decisions** (parent directory naming, types-only
+- **D6–D12 — aspect-phase decisions** (parent directory naming, types-only
   import edges, notifications-as-aspect, client subpath exports): tracked in
-  `planning/aspect-holons-refactor-2026-09-04.md` §8, with defaults there.
+  `planning/aspect-holons-refactor-2026-09-04.md` §9, with defaults there.
 - **D5 — Snapshot artifacts in git.** `CUSTOM_DENO_SNAPSHOT.bin` (2.1 MB) and
   generated `residual_*.rs` (4 MB) are committed though `residual_lazy.rs:15`
   says they are ignored. Ignore + build, or keep committed for CI speed.
