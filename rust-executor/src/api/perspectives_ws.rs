@@ -1674,6 +1674,10 @@ async fn run_interpretation_with_harness_handler(
             // the caller that passes `true`.
             false,
             credit_gate,
+            // Direct WS runs default to all flows on the perspective; a
+            // `flows` request field can narrow this later (per-run flow
+            // targeting, Nico 2026-09-04 — processor configs already have it).
+            None,
         ),
     )
     .await
@@ -1871,6 +1875,7 @@ async fn add_auto_processor_handler(
         source_scope_query: body.source_scope_query,
         base_prefix: body.base_prefix,
         interpretation_classes: body.interpretation_classes,
+        flows: body.flows.unwrap_or_default(),
         debounce_ms: body.debounce_ms,
         batch_min: body.batch_min.unwrap_or(1),
         batch_max: body.batch_max,
