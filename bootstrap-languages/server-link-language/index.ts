@@ -21,7 +21,13 @@ import * as auth from "./src/auth.js";
 import * as syncModule from "./src/sync.js";
 import * as telepresenceModule from "./src/telepresence.js";
 import { WsClient } from "./src/ws-client.js";
-import { buildKeyRing, deriveX25519KeyPair, type KeyRing } from "./src/encryption.js";
+import {
+    buildKeyRing,
+    deriveX25519KeyPair,
+    hexToBytes,
+    sealRoomKeyForRecipient,
+    type KeyRing,
+} from "./src/encryption.js";
 
 import {
     initAdapters,
@@ -63,11 +69,18 @@ let wsClient: WsClient | null = null;
 /** The room's versioned key ring (version → decrypted AES-256-GCM key).
  * Null for a plaintext room OR while E2E setup is still in flight. */
 let keyRing: KeyRing | null = null;
-type KeyRingStatus = "none" | "ready" | "error";
-/** "error" means E2E keys almost certainly exist but we could not get/open
- * them — commit() refuses to send plaintext in that state rather than risk a
- * confidentiality leak. See setupKeyRing(). */
+type KeyRingStatus = "none" | "ready" | "pending" | "error";
+/**
+ * - "none": room has no E2E — plaintext commits are fine.
+ * - "ready": key ring acquired and decrypted — encrypted commits ready.
+ * - "pending": room HAS E2E but this agent has no keys yet (freshly
+ *   added member awaiting grant). commit() refuses to send plaintext.
+ * - "error": E2E keys almost certainly exist but we could not get/open
+ *   them. commit() refuses to send plaintext.
+ */
 let keyRingStatus: KeyRingStatus = "none";
+/** True when this agent has been identified as the room admin. */
+let isRoomAdmin = false;
 
 function isPlaceholder(value: string): boolean {
     return !value || value === "<to-be-filled>";
@@ -83,6 +96,24 @@ async function setupKeyRing(): Promise<void> {
         const token = await auth.getValidToken();
         const keysRes = await api.fetchRoomKeys(config, token);
         if (!keysRes) {
+            // 404 — room has no E2E at all.
+            keyRingStatus = "none";
+            keyRing = null;
+            return;
+        }
+        if (keysRes.keys.length === 0 && keysRes.e2e_enabled) {
+            // Room HAS E2E but this agent has no keys yet — a freshly
+            // added member awaiting grant from the admin. Refuse to
+            // commit plaintext into an encrypted room.
+            keyRingStatus = "pending";
+            keyRing = null;
+            console.log(
+                "[server-link-language] room has E2E enabled but this agent has no keys yet — " +
+                "commits blocked until the room admin grants keys",
+            );
+            return;
+        }
+        if (keysRes.keys.length === 0) {
             keyRingStatus = "none";
             keyRing = null;
             return;
@@ -117,6 +148,49 @@ async function refreshKeyRingIfNeeded(): Promise<boolean> {
         return true;
     }
     return false;
+}
+
+/**
+ * If this agent holds admin rights and the key ring has decrypted keys,
+ * detect members missing historical key versions and re-seal those
+ * versions for them. Runs after setupKeyRing and on peer-joined events.
+ *
+ * This closes the "late-member history" gap: when a member joins an
+ * encrypted room, the admin's language instance automatically grants
+ * them every historical key version the admin holds, so the new member
+ * can decrypt the room's full link history.
+ */
+async function performAdminKeyGrants(): Promise<void> {
+    if (!isRoomAdmin || !keyRing || keyRing.size === 0) return;
+    const config = getConfig();
+    try {
+        const token = await auth.getValidToken();
+        const gapsRes = await api.fetchKeyGaps(config, token);
+        const gaps = gapsRes.membersNeedingHistoricalKeys;
+        if (gaps.length === 0) return;
+
+        for (const gap of gaps) {
+            const recipientPub = hexToBytes(gap.x25519PublicKey);
+            const sealedKeys: Array<{ version: number; encryptedKey: ReturnType<typeof sealRoomKeyForRecipient> }> = [];
+            for (const version of gap.missingVersions) {
+                const roomKey = keyRing.get(version);
+                if (!roomKey) continue; // admin also lacks this version — skip
+                sealedKeys.push({
+                    version,
+                    encryptedKey: sealRoomKeyForRecipient(roomKey, recipientPub),
+                });
+            }
+            if (sealedKeys.length === 0) continue;
+            const granted = await api.grantKeys(config, token, gap.did, sealedKeys);
+            if (granted.length > 0) {
+                console.log(
+                    `[server-link-language] admin auto-granted key versions [${granted.join(", ")}] to ${gap.did}`,
+                );
+            }
+        }
+    } catch (err) {
+        console.error("[server-link-language] admin auto-grant failed (non-fatal):", err);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +267,12 @@ const language = defineLanguage({
                 },
                 onPeerJoined(msg) {
                     telepresenceModule.handlePeerJoined(msg);
+                    // When a new peer joins, if we hold admin rights and
+                    // the key ring has keys, check for and fill key gaps
+                    // so the new member can decrypt the room's history.
+                    void performAdminKeyGrants().catch((err) => {
+                        console.error("[server-link-language] peer-joined admin grant failed:", err);
+                    });
                 },
                 onPeerLeft(msg) {
                     telepresenceModule.handlePeerLeft(msg);
@@ -232,8 +312,23 @@ const language = defineLanguage({
 
         try {
             await auth.authenticate();
+
+            // Determine admin status — used by performAdminKeyGrants.
+            try {
+                const aclInfo = await api.fetchAclInfo(config, await auth.getValidToken());
+                isRoomAdmin = aclInfo.admin === myDid;
+            } catch {
+                isRoomAdmin = false;
+            }
+
             await setupKeyRing();
             await syncModule.bootstrap();
+
+            // If admin and key ring ready, grant historical keys to any
+            // members who joined while we were offline.
+            void performAdminKeyGrants().catch((err) => {
+                console.error("[server-link-language] initial admin grant check failed:", err);
+            });
         } catch (err) {
             console.error(
                 "[server-link-language] initial startup sequence failed — will keep retrying via " +
@@ -274,6 +369,7 @@ const language = defineLanguage({
         localAgents = [];
         keyRing = null;
         keyRingStatus = "none";
+        isRoomAdmin = false;
         auth.resetAuth();
         resetAdapters();
         console.log("[server-link-language] teardown");
@@ -293,8 +389,10 @@ const language = defineLanguage({
                     "server-link-language: not configured (SERVER_URL/ROOM_ID template variables unfilled)",
                 );
             }
-            if (keyRingStatus === "error") {
-                console.log("[server-link-language] retrying E2E key ring acquisition before commit...");
+            if (keyRingStatus === "error" || keyRingStatus === "pending") {
+                console.log(
+                    `[server-link-language] retrying E2E key ring acquisition before commit (status: ${keyRingStatus})...`,
+                );
                 await setupKeyRing();
             }
             if (keyRingStatus === "error") {
@@ -302,6 +400,13 @@ const language = defineLanguage({
                     "server-link-language: refusing to commit — this room's E2E key ring could not be " +
                     "acquired/decrypted, and sending plaintext to a possibly-encrypted room would be unsafe. " +
                     "Retry once connectivity/auth recovers.",
+                );
+            }
+            if (keyRingStatus === "pending") {
+                throw new Error(
+                    "server-link-language: refusing to commit — this room has E2E encryption enabled " +
+                    "but this agent has not received room keys yet. The room admin must grant keys " +
+                    "before this agent can write.",
                 );
             }
 

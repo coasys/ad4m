@@ -13,6 +13,15 @@ import type { LinkServerDB } from "./db.js";
  * sealed copies (room_keys table) are stored. From that point on the
  * server only ever handles ciphertext for that room's link data.
  *
+ * HONEST LIMIT: the server generates the plaintext room key in memory at
+ * every rotation. An honest operator cannot read room data after the key
+ * leaves memory — but a malicious operator could retain every key it
+ * generates. The client-side sealing primitives exist (see
+ * `sealRoomKeyForRecipient` in server-link-language), so moving key
+ * generation to the admin client would close this gap. Until then, the
+ * guarantee covers at-rest compromise and honest-but-curious operators,
+ * not a malicious operator. See README "Known limitations" for detail.
+ *
  * Key wrapping uses a one-shot ECIES-style construction: an ephemeral
  * X25519 keypair does ECDH with the recipient's X25519 public key, the
  * shared secret runs through HKDF-SHA256 (salt = ephPub || recipPub,

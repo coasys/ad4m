@@ -108,8 +108,14 @@ test("member added after a rotation has no key until the next rotation", async (
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: lateMember.did }, adminToken);
     const lateToken = await authenticateAgent(server.url, roomId, lateMember);
 
-    const before = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/keys`, lateToken);
-    assert.equal(before.status, 404);
+    // Room has E2E enabled, so GET /keys returns 200 with e2e_enabled: true
+    // and an empty keys array (not 404).
+    const before = await getJson<{ keys: Array<unknown>; e2e_enabled: boolean }>(
+      `${server.url}/rooms/${roomId}/keys`, lateToken
+    );
+    assert.equal(before.status, 200);
+    assert.equal(before.body.keys.length, 0, "late member has no keys before next rotation");
+    assert.equal(before.body.e2e_enabled, true);
 
     await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
     const after = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
@@ -471,6 +477,172 @@ test("grant is idempotent — already-stored versions are skipped", async () => 
     );
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.granted, [], "already-stored version must not be re-inserted");
+  });
+});
+
+// ---- E2E enforcement: reject plaintext in encrypted rooms ----
+
+test("commit rejects plaintext links in an E2E-enabled room", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    // Enable E2E
+    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, token);
+
+    // Attempt a plaintext commit — must fail
+    const link = await createSignedLink(agent, { source: "s", predicate: "p", target: "t" });
+    const res = await postJson<{ error: string }>(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [link], removals: [] },
+      token
+    );
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /end-to-end encryption/i);
+  });
+});
+
+test("commit accepts encrypted links in an E2E-enabled room", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    // Enable E2E
+    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, token);
+
+    // Encrypted commit — must succeed
+    const wireLink = {
+      data: { ciphertext: "encrypted-data", nonce: "encrypted-nonce" },
+      link_hash: "e2e-enforcement-hash",
+    };
+    const res = await postJson<{ sequence: number; revision: string }>(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [wireLink], removals: [] },
+      token
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.body.sequence, 1);
+  });
+});
+
+test("commit still accepts plaintext links in a non-E2E room", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    // No rotation — room stays non-E2E
+    const link = await createSignedLink(agent, { source: "s", predicate: "p", target: "t" });
+    const res = await postJson<{ sequence: number }>(
+      `${server.url}/rooms/${roomId}/commit`,
+      { additions: [link], removals: [] },
+      token
+    );
+    assert.equal(res.status, 200);
+  });
+});
+
+// ---- GET /keys: e2e_enabled field ----
+
+test("GET /keys returns e2e_enabled: true with empty keys for late member", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+
+    // Enable E2E (only admin gets key version 1)
+    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+
+    // Add member after rotation
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    const memberToken = await authenticateAgent(server.url, roomId, member);
+
+    const res = await getJson<{ keys: unknown[]; e2e_enabled: boolean }>(
+      `${server.url}/rooms/${roomId}/keys`,
+      memberToken
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.body.e2e_enabled, true);
+    assert.equal(res.body.keys.length, 0);
+  });
+});
+
+test("GET /keys returns 404 for non-E2E room", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const res = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/keys`, token);
+    assert.equal(res.status, 404);
+  });
+});
+
+// ---- GET /keys/gaps ----
+
+test("GET /keys/gaps returns members missing historical key versions", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+
+    // Version 1 — admin only
+    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+
+    // Add late member
+    const lateMember = await createTestAgent();
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: lateMember.did }, adminToken);
+    await authenticateAgent(server.url, roomId, lateMember);
+
+    // Version 2 — late member gets version 2 but lacks version 1
+    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+
+    const res = await getJson<{
+      membersNeedingHistoricalKeys: Array<{ did: string; missingVersions: number[] }>;
+    }>(`${server.url}/rooms/${roomId}/keys/gaps`, adminToken);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.membersNeedingHistoricalKeys.length, 1);
+    assert.equal(res.body.membersNeedingHistoricalKeys[0].did, lateMember.did);
+    assert.deepEqual(res.body.membersNeedingHistoricalKeys[0].missingVersions, [1]);
+  });
+});
+
+test("GET /keys/gaps requires admin", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    const memberToken = await authenticateAgent(server.url, roomId, member);
+
+    const res = await getJson<{ error: string }>(`${server.url}/rooms/${roomId}/keys/gaps`, memberToken);
+    assert.equal(res.status, 403);
+  });
+});
+
+test("GET /keys/gaps returns empty when no members have gaps", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    await authenticateAgent(server.url, roomId, member);
+
+    // Both present before rotation — both get version 1
+    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+
+    const res = await getJson<{
+      membersNeedingHistoricalKeys: unknown[];
+    }>(`${server.url}/rooms/${roomId}/keys/gaps`, adminToken);
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.membersNeedingHistoricalKeys.length, 0);
   });
 });
 

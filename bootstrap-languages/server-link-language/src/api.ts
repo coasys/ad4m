@@ -11,6 +11,7 @@ import type {
     AclResponse,
     AuthChallengeResponse,
     AuthTokenResponse,
+    KeyGapsResponse,
     KeysResponse,
     PeersResponse,
     RenderResponse,
@@ -144,16 +145,24 @@ export async function fetchAcl(config: RoomConfig, token: string): Promise<AclRe
     return { admin: res.admin ?? "", members: res.members ?? [] };
 }
 
-/** Returns null when the room has no E2E keys configured (server responds
- * 404/204, or returns an empty keys array). */
+/**
+ * Fetches the room's E2E keys for this agent.
+ *
+ * Returns null when the room has no E2E at all (server responds 404).
+ * Returns `{ keys: [], e2e_enabled: true }` when the room HAS E2E but
+ * this agent has no keys yet (freshly added member awaiting grant).
+ */
 export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse | null> {
     try {
         const res = await request<Partial<KeysResponse>>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
-        if (!res || !res.keys || res.keys.length === 0) return null;
-        return { keys: res.keys };
+        if (!res) return null;
+        return {
+            keys: res.keys ?? [],
+            e2e_enabled: res.e2e_enabled ?? (!!res.keys && res.keys.length > 0),
+        };
     } catch (err) {
         if (err instanceof ApiError && (err.status === 404 || err.status === 204)) {
-            return null;
+            return null; // Room has no E2E — 404
         }
         throw err;
     }
@@ -181,6 +190,24 @@ export async function grantKeys(
         JSON.stringify({ targetDid, keys }),
     );
     return res.granted ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// E2E admin: key gaps + ACL query
+// ---------------------------------------------------------------------------
+
+/** Admin only. Returns members missing historical key versions. */
+export async function fetchKeyGaps(config: RoomConfig, token: string): Promise<KeyGapsResponse> {
+    const res = await request<Partial<KeyGapsResponse>>(
+        roomUrl(config, "/keys/gaps"), "GET", jsonHeaders(token),
+    );
+    return { membersNeedingHistoricalKeys: res.membersNeedingHistoricalKeys ?? [] };
+}
+
+/** Returns the room's admin DID and full member list. */
+export async function fetchAclInfo(config: RoomConfig, token: string): Promise<AclResponse> {
+    const res = await request<Partial<AclResponse>>(roomUrl(config, "/acl"), "GET", jsonHeaders(token));
+    return { admin: res.admin ?? "", members: res.members ?? [] };
 }
 
 // ---------------------------------------------------------------------------

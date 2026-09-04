@@ -113,7 +113,7 @@ Both servers forward committed diffs to each other automatically. Agents connect
 
 ### End-to-end encryption (optional)
 
-Encrypt link data so the server operator cannot read it:
+Encrypt link data so it cannot be read at rest or during transit:
 
 ```bash
 # Enable or rotate the room key (admin only)
@@ -121,7 +121,9 @@ curl -X POST https://your-server:3456/rooms/YOUR_ROOM/keys/rotate \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-Each member automatically receives a sealed copy of the room key during authentication. After adding a new member to an encrypted room, run `keys/rotate` again so they receive their copy.
+After rotation, each member receives a sealed copy of the new room key the next time they connect or refresh their key ring. Once a room has E2E enabled, the server rejects plaintext commits — a client without keys cannot write until it receives them.
+
+After adding a new member to an encrypted room, run `keys/rotate` again so they receive the new version. The admin's language instance then automatically detects members missing historical key versions and re-seals those versions for them (see `performAdminKeyGrants` in server-link-language).
 
 ## How it works
 
@@ -131,7 +133,7 @@ Each member automatically receives a sealed copy of the room key during authenti
 - **Links** are stored as an append-only diff log (`PerspectiveDiff` = additions/removals of signed `LinkExpression`s) plus a derived active-set table, so the room's state is always `replay(diffs)`. The **revision** is a content hash of the active set's link hashes — order-independent, so two servers with the same active links converge to the same revision regardless of how they got there.
 - **WebSocket** push delivers committed diffs and telepresence events in real time.
 - **Federation** forwards committed diffs to peer servers (server-to-server, authenticated by the sending server's own ed25519 signature) and offers pull-based reconciliation to catch up on anything missed.
-- **E2E encryption** is opt-in per room: link `data` becomes an opaque ciphertext blob the server cannot read, while `author`/`timestamp`/`proof` stay visible so the server can still enforce ACL and OR-Set merge.
+- **E2E encryption** is opt-in per room: the entire `LinkExpression` (author, timestamp, proof, and data) becomes an opaque ciphertext blob. The server sees only `{ciphertext, nonce}` plus a client-computed `link_hash` for OR-Set dedup. Once enabled, the server rejects plaintext commits.
 
 See [`AGENTS.md`](./AGENTS.md) for architecture, file layout, and implementation decisions made where the spec was ambiguous.
 
@@ -153,8 +155,9 @@ POST /rooms/:roomId/federation { action: "add"|"remove", peerUrl } (admin only)
 GET  /rooms/:roomId/federation -> { peers: string[] }
 POST /rooms/:roomId/federate   (peer servers only, signature-authenticated)
 POST /rooms/:roomId/reconcile  (peer servers only, signature-authenticated)
-GET  /rooms/:roomId/keys       -> { encryptedKey, version } | 404
-POST /rooms/:roomId/keys/rotate (admin only) -> { version, recipients }
+GET  /rooms/:roomId/keys       -> { keys: [...], e2e_enabled } | 404 (no E2E)
+GET  /rooms/:roomId/keys/gaps  (admin only) -> { membersNeedingHistoricalKeys }
+POST /rooms/:roomId/keys/rotate (admin only) -> { version, recipients, membersNeedingHistoricalKeys }
 GET  /server/identity          -> { publicKey }
 GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be {type:"auth",token:"<jwt>"})
 ```
@@ -181,10 +184,34 @@ Tests boot a real server per test (random port, temp SQLite file) and drive it o
 
 ## Known limitations
 
-### E2E encryption — future requirements
+### E2E encryption — trust model and future requirements
 
-The current E2E implementation protects link data at rest and in transit, but
-does not yet cover:
+The current E2E implementation protects link data against **at-rest compromise
+and passive observation** (an honest server operator cannot read room data after
+the plaintext key leaves memory). It does **not** protect against a
+**malicious server operator**:
+
+- **Server-side key generation.** The server generates each room key and seals
+  it to members in one pass. An honest server discards the plaintext key
+  immediately — but a malicious operator could retain every key it generates.
+  The client-side sealing primitives already exist (see `sealRoomKeyForRecipient`
+  in server-link-language), so moving key generation to the admin client (admin
+  generates, seals to each member, uploads sealed copies; server only stores)
+  would close this gap without new primitives.
+- **Unsigned X25519 public key.** The DID challenge signature covers only the
+  nonce, not the `x25519PublicKey` field sent alongside it. A malicious server
+  could substitute its own X25519 key for a member's during the rotate response
+  (`membersNeedingHistoricalKeys`), causing the admin to seal historical keys
+  to the server instead. Fix: require the client to send
+  `signature = sign(x25519PublicKey)` at registration, store it, return it in
+  rotate/gaps responses, and have the admin verify the DID signature before
+  sealing. The signing capability already exists.
+
+Until these are addressed, the E2E guarantee should be understood as
+"protection against later compromise and honest-but-curious operators," not
+"protection against the operator."
+
+### E2E encryption — other future requirements
 
 - **Admin succession / key revocation:** if the room admin's key gets
   compromised, no mechanism exists to rotate admin authority or revoke a

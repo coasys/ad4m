@@ -202,6 +202,22 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         return reply.code(400).send({ error: "commit must contain at least one addition or removal" });
       }
 
+      // Enforce E2E: once a room has been rotated to E2E, reject plaintext
+      // links. A single unencrypted link in an otherwise-encrypted room
+      // leaks its full content (author, timestamp, data) to the server and
+      // any federation peers — exactly the confidentiality hole E2E exists
+      // to close.
+      const room = ctx.db.getRoom(claims.roomId);
+      if (room && room.e2e_enabled) {
+        for (const link of [...additions, ...removals]) {
+          if (link && typeof link === "object" && link.data && !isEncryptedLinkData(link.data)) {
+            return reply.code(400).send({
+              error: "this room requires end-to-end encryption; plaintext links are not accepted",
+            });
+          }
+        }
+      }
+
       for (const link of [...additions, ...removals]) {
         if (!link || typeof link !== "object") {
           return reply.code(400).send({ error: "each link must be an object" });
@@ -417,12 +433,19 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
+      const room = ctx.db.getRoom(claims.roomId);
+      const e2eEnabled = !!(room && room.e2e_enabled);
       const rows = ctx.db.getAllRoomKeys(claims.roomId, claims.did);
-      if (rows.length === 0) {
+      if (rows.length === 0 && !e2eEnabled) {
+        // Room has never had E2E enabled — genuinely no keys.
         return reply.code(404).send({ error: "no room key available for this agent yet" });
       }
+      // Room has E2E (agent may or may not have keys yet). Return the
+      // e2e_enabled flag so the client can distinguish "no E2E" (404)
+      // from "E2E but keys pending" (200, empty keys array).
       return reply.send({
         keys: rows.map((r) => ({ encryptedKey: JSON.parse(r.encrypted_key), version: r.version })),
+        e2e_enabled: e2eEnabled,
       });
     }
   );
@@ -438,6 +461,33 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         recipients: result.recipients,
         membersNeedingHistoricalKeys: result.membersNeedingHistoricalKeys,
       });
+    }
+  );
+
+  // ---- E2E key gaps (admin query — who needs historical keys?) ----
+
+  app.get(
+    "/rooms/:roomId/keys/gaps",
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    async (request, reply) => {
+      const claims = request.authClaims!;
+      const latestVersion = ctx.db.getLatestKeyVersion(claims.roomId);
+      if (latestVersion === 0) {
+        return reply.send({ membersNeedingHistoricalKeys: [] });
+      }
+      const aclRows = ctx.db.getAcl(claims.roomId);
+      const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
+      const expectedVersions = Array.from({ length: latestVersion }, (_, i) => i + 1);
+      const gaps: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string }> = [];
+      for (const row of aclRows) {
+        if (!row.x25519_public_key) continue;
+        const memberVersions = new Set(allVersions.get(row.did) ?? []);
+        const missing = expectedVersions.filter((v) => !memberVersions.has(v));
+        if (missing.length > 0) {
+          gaps.push({ did: row.did, missingVersions: missing, x25519PublicKey: row.x25519_public_key });
+        }
+      }
+      return reply.send({ membersNeedingHistoricalKeys: gaps });
     }
   );
 
