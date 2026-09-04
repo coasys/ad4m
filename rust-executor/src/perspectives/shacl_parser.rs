@@ -596,7 +596,7 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
 // Mirrors the canonical TS `SHACLFlow.fromLinks` in core/src/shacl/SHACLFlow.ts
 // including every declared predicate. Consumed by Model C (`load_shacl_flows`
 // → `build_flow_contexts` → prompt block) so the extraction pass can see what
-// flows are declared on the perspective without a JS/GraphQL round-trip.
+// flows are declared on the perspective without a JS/RPC round-trip.
 // ---------------------------------------------------------------------------
 
 /// Strip a `literal:string:` / `literal://string:` prefix and url-decode
