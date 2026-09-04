@@ -493,7 +493,13 @@ mod tests {
         proposer: &str,
         proposed_at: &str,
     ) -> FlowTransitionProposalRecord {
-        proposal_with_uri("ad4m://flow/proposal/p", from_state, to_state, proposer, proposed_at)
+        proposal_with_uri(
+            "ad4m://flow/proposal/p",
+            from_state,
+            to_state,
+            proposer,
+            proposed_at,
+        )
     }
 
     fn proposal_with_uri(
@@ -515,10 +521,7 @@ mod tests {
     }
 
     fn rule(n: u32) -> ConsensusRule {
-        ConsensusRule {
-            n,
-            from_role: None,
-        }
+        ConsensusRule { n, from_role: None }
     }
 
     fn from_role_rule(n: u32) -> ConsensusRule {
@@ -555,8 +558,7 @@ mod tests {
     #[test]
     fn accepts_from_role_plus_empty_eligible_set_no_fire() {
         let props = vec![proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z")];
-        let out =
-            aggregate_flow_votes(&props, Some(&from_role_rule(1)), Some(&dids(&[]))).unwrap();
+        let out = aggregate_flow_votes(&props, Some(&from_role_rule(1)), Some(&dids(&[]))).unwrap();
         assert_eq!(out.tallies.len(), 1);
         assert!(!out.tallies[0].consensus_reached);
         assert!(out.fires.is_none());
@@ -634,9 +636,8 @@ mod tests {
         // counts, so n=1-with-role fires on the acceptor alone.
         let mut p = proposal("a", "b", "did:alice", "2026-01-01T00:00:00Z");
         p.acceptors = vec!["did:bob".to_string()];
-        let out =
-            aggregate_flow_votes(&[p], Some(&from_role_rule(1)), Some(&dids(&["did:bob"])))
-                .unwrap();
+        let out = aggregate_flow_votes(&[p], Some(&from_role_rule(1)), Some(&dids(&["did:bob"])))
+            .unwrap();
         assert_eq!(out.tallies[0].eligible_proposers, vec!["did:bob"]);
         assert!(out.tallies[0].consensus_reached);
     }
@@ -735,7 +736,10 @@ mod tests {
         ];
         let out = aggregate_flow_votes(&props, Some(&rule(1)), None).unwrap();
         let fired = out.fires.expect("one tally fires");
-        assert_eq!((fired.from_state.as_str(), fired.to_state.as_str()), ("a", "b"));
+        assert_eq!(
+            (fired.from_state.as_str(), fired.to_state.as_str()),
+            ("a", "b")
+        );
     }
 
     #[test]
@@ -746,7 +750,10 @@ mod tests {
         ];
         let out = aggregate_flow_votes(&props, Some(&rule(1)), None).unwrap();
         let fired = out.fires.expect("one tally fires");
-        assert_eq!((fired.from_state.as_str(), fired.to_state.as_str()), ("a", "b"));
+        assert_eq!(
+            (fired.from_state.as_str(), fired.to_state.as_str()),
+            ("a", "b")
+        );
     }
 
     #[test]
@@ -840,7 +847,10 @@ mod tests {
         let r = parse_flow_transition_proposal_from_hydrated(&v).expect("parses");
         assert_eq!(r.proposed_at, "2026-09-04T00:00:00Z");
         assert_eq!(r.evidence_hash, "abc123");
-        assert!(r.acceptors.is_empty(), "acceptors come from links, not hydration");
+        assert!(
+            r.acceptors.is_empty(),
+            "acceptors come from links, not hydration"
+        );
     }
 
     #[test]
