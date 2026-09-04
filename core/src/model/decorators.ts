@@ -968,7 +968,7 @@ export interface RelationOptions {
      *
      * Ordering is declared in the type system, rather than passed per query, so
      * that *every* writer gets it once it is wired: the ORM, MCP agents, raw
-     * GraphQL callers, another app sharing the neighbourhood. Implemented
+     * WS-RPC callers, another app sharing the neighbourhood. Implemented
      * client-side it would order only what this client wrote.
      *
      * @example

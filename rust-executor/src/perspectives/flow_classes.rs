@@ -37,9 +37,6 @@ pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
 /// No `required_path` guard yet — the shapes are stable at this point; add one
 /// when a future property forces a re-register.
 ///
-/// Only called from [`mint_flow_instance`] today, which is itself only test-
-/// called; the annotation follows.
-#[allow(dead_code)]
 pub(crate) async fn ensure_flow_model_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -75,6 +72,15 @@ pub(crate) fn flow_instance_uri(instance_id: &str) -> String {
     format!("ad4m://flow/instance/{instance_id}")
 }
 
+/// URI scheme for a freshly-minted `FlowTransitionProposal` node:
+/// `ad4m://flow/proposal/{id}`. Sibling of [`flow_instance_uri`] — the two
+/// hard-wired flow-runtime records live in parallel URI spaces so a caller
+/// can tell instance-URIs and proposal-URIs apart without reading the
+/// shape graph.
+pub(crate) fn flow_transition_proposal_uri(proposal_id: &str) -> String {
+    format!("ad4m://flow/proposal/{proposal_id}")
+}
+
 /// Register the flow-runtime classes if needed, then mint a fresh `FlowInstance`
 /// bound to `base_expression`, seeded at `initial_state`.
 ///
@@ -93,9 +99,8 @@ pub(crate) fn flow_instance_uri(instance_id: &str) -> String {
 ///
 /// `batch_id` groups this instance write with any consumer's follow-on writes
 /// (e.g. the auto-processor bundling instance mint + first proposal in one
-/// atomic commit). Pass `None` for standalone mints — the current shape has
-/// only scalar constructor properties, so a single `create_subject` writes the
-/// whole record; there is no update-loop for follow-on collection members.
+/// atomic commit). Pass `None` for standalone mints — a single
+/// `create_subject` writes the whole record.
 ///
 /// Returns the freshly-minted `FlowInstance` URI (`ad4m://flow/instance/{id}`).
 ///
@@ -139,6 +144,74 @@ pub(crate) async fn mint_flow_instance(
         )
         .await
         .map_err(|e| anyhow::anyhow!("mint_flow_instance: create_subject failed: {e:#}"))?;
+    Ok(uri)
+}
+
+/// Mint one `FlowTransitionProposal` at `ad4m://flow/proposal/{proposal_id}`.
+///
+/// `proposal_id` and `batch_id` are caller-supplied, as in
+/// [`mint_flow_instance`], so the caller controls id generation and atomic
+/// commit. Propose-time comes from `Ad4mModel`'s built-in `createdAt`.
+///
+/// `evidence` is a collection: it is passed as a JSON array and
+/// `create_subject` expands it into one `addLink` per element.
+/// `rationale` is written only when `Some` and non-empty. `runUri` is not
+/// written; engine-emitted proposals do not track back to a run today.
+///
+/// Property names must match the SDNA `name` fields exactly. A mismatched
+/// key is silently dropped by `create_subject`; the alignment test below
+/// locks the mapping.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_flow_transition_proposal(
+    perspective: &mut PerspectiveInstance,
+    proposal_id: &str,
+    proposer_did: &str,
+    flow_instance_uri: &str,
+    from_state: &str,
+    to_state: &str,
+    evidence_ids: &[String],
+    evidence_hash: &str,
+    rationale: Option<&str>,
+    batch_id: Option<String>,
+    context: &AgentContext,
+) -> anyhow::Result<String> {
+    ensure_flow_model_classes(perspective, context).await?;
+
+    let uri = flow_transition_proposal_uri(proposal_id);
+
+    let mut values = serde_json::json!({
+        "flowInstance": flow_instance_uri,
+        "fromState": from_state,
+        "toState": to_state,
+        "proposer": proposer_did,
+        "evidenceHashes": evidence_hash,
+    });
+    if let Some(text) = rationale {
+        if !text.is_empty() {
+            values["rationale"] = text.to_string().into();
+        }
+    }
+
+    if !evidence_ids.is_empty() {
+        values["evidence"] = serde_json::json!(evidence_ids);
+    }
+
+    perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some(FLOW_TRANSITION_PROPOSAL_CLASS.to_string()),
+                query: None,
+            },
+            uri.clone(),
+            Some(values),
+            batch_id,
+            context,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("write_flow_transition_proposal: create_subject failed: {e:#}")
+        })?;
+
     Ok(uri)
 }
 
@@ -241,6 +314,97 @@ mod tests {
                 "mint_flow_instance writes `{key}` but SDNA does not declare it (found {props:?})",
             );
         }
+    }
+
+    #[test]
+    fn flow_transition_proposal_uri_scheme() {
+        assert_eq!(
+            flow_transition_proposal_uri("p-42"),
+            "ad4m://flow/proposal/p-42",
+            "URI must be `ad4m://flow/proposal/{{id}}` — sibling of flow_instance_uri",
+        );
+        let uuid = "8f0e1a44-3d3c-4e0a-9c9c-3f5a1b2c3d4e";
+        let uri = flow_transition_proposal_uri(uuid);
+        assert!(
+            uri.ends_with(uuid),
+            "proposal_id must be preserved verbatim in the URI tail",
+        );
+        // Instance-URIs and proposal-URIs must live in disjoint spaces so a
+        // caller can tell them apart without walking the shape graph.
+        assert_ne!(
+            flow_transition_proposal_uri("x"),
+            flow_instance_uri("x"),
+            "proposal + instance URIs must be distinguishable at the prefix",
+        );
+    }
+
+    #[test]
+    fn write_flow_transition_proposal_values_align_with_sdna_property_names() {
+        // Same 2026-08-20-bug guard as `mint_flow_instance_values_align_with_sdna_property_names`
+        // but for the writer's payload: every JSON key the writer sends
+        // to `create_subject` MUST be a declared SDNA property name.
+        // A silent mismatch would return Ok while never writing.
+        let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
+        let props: Vec<&str> = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["name"].as_str())
+            .collect();
+        for key in [
+            "flowInstance",
+            "fromState",
+            "toState",
+            "proposer",
+            "evidence",
+            "evidenceHashes",
+            // Optional LLM-attribution field. Same alignment guard as
+            // the required scalars — a rename in the SDNA that did not
+            // land here would silently drop the rationale from the
+            // on-graph proposal without erroring.
+            "rationale",
+        ] {
+            assert!(
+                props.contains(&key),
+                "write_flow_transition_proposal writes `{key}` but SDNA does not declare it \
+                 (found {props:?})",
+            );
+        }
+    }
+
+    #[test]
+    fn evidence_property_is_a_collection_with_add_link_setter() {
+        // The writer passes `evidence` as a JSON array, and
+        // `create_subject` only expands an array into per-element
+        // `addLink`s when every setter action is `addLink` — on a
+        // `setSingleTarget` setter the array would be stored as one
+        // `literal:json:` blob instead. Locking the shape here so a
+        // well-meaning SDNA edit that switches to `setSingleTarget`
+        // (which would type-check) breaks this test instead of silently
+        // changing the on-graph representation of evidence at runtime.
+        let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
+        let evidence = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"].as_str() == Some("evidence"))
+            .expect("evidence property must exist");
+        assert_eq!(
+            evidence["collection"].as_bool(),
+            Some(true),
+            "evidence must be declared `collection: true`",
+        );
+        let setter_actions: Vec<&str> = evidence["setter"]
+            .as_array()
+            .expect("evidence must declare a setter array")
+            .iter()
+            .filter_map(|s| s["action"].as_str())
+            .collect();
+        assert_eq!(
+            setter_actions,
+            vec!["addLink"],
+            "evidence collection setter must be `addLink` — `setSingleTarget` would clobber",
+        );
     }
 
     #[test]

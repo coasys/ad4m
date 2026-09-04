@@ -621,7 +621,7 @@
             "npm:cross-fetch@^3.1.4",
             "npm:honkit@4",
             "npm:jest@29",
-            "npm:pako@*",
+            "npm:pako@^2.1.0",
             "npm:patch-package@8",
             "npm:react-dom@*",
             "npm:react@*",

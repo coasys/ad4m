@@ -42,7 +42,17 @@ fn clean_llm_json(raw: &str) -> String {
     //    comma inside a genuine string value could be dropped. Extracting the
     //    bracketed block first confines the string-scanner to actual JSON.
     let candidate = s.trim();
-    let extracted = extract_bracketed(candidate, '[', ']')
+    // Prefer a strict parse from the first `[` so prose after the JSON is
+    // dropped; fall back to the greedy bracket span when the JSON is not
+    // valid on its own (trailing commas are repaired below).
+    //
+    // Trying the array FIRST is what makes the greedy fallbacks safe: a
+    // bracket that only occurs in prose can no longer short-circuit the
+    // chain ahead of the real payload, because the real payload's `[` is
+    // always consulted before any `{`-span. See the
+    // `prose_braces_before_the_real_array_*` regression test.
+    let extracted = extract_first_json_value(candidate, '[')
+        .or_else(|| extract_bracketed(candidate, '[', ']'))
         .or_else(|| extract_bracketed(candidate, '{', '}'))
         .unwrap_or_else(|| candidate.to_string());
 
@@ -50,6 +60,16 @@ fn clean_llm_json(raw: &str) -> String {
     //    now scoped to the extracted JSON. Skips commas inside string literals
     //    so values like "a, }" survive.
     strip_trailing_commas(&extracted)
+}
+
+/// Strictly parse one JSON value starting at the first `open` and return
+/// exactly its span, so trailing prose is not swallowed into the payload.
+fn extract_first_json_value(s: &str, open: char) -> Option<String> {
+    let start = s.find(open)?;
+    let mut stream =
+        serde_json::Deserializer::from_str(&s[start..]).into_iter::<serde_json::Value>();
+    stream.next()?.ok()?;
+    Some(s[start..start + stream.byte_offset()].to_string())
 }
 
 /// Return the substring from the first `open` to the matching last `close`,
@@ -158,6 +178,19 @@ mod tests {
         let out = parse_interpretation_response(raw).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn prose_braces_before_the_real_array_dont_swallow_the_payload() {
+        // Brace-prose before the array: the array-first chain must not let the
+        // `{a couple of things}` span become the payload. Under an
+        // object-first ordering the greedy `{`-matcher would short-circuit
+        // here and the real payload would never be tried.
+        let raw = r#"OK, I'll extract {a couple of things}: [{"class":"Task","title":"A"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class, "Task");
+        assert_eq!(prop_values(&out, "title"), vec!["A"]);
     }
 
     #[test]

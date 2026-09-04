@@ -1,10 +1,6 @@
-//! End-to-end integration test — the onion-shell test-cut Nico called
-//! out on 2026-08-26 ("cut based on what we can test really, stack it
-//! like onions").
-//!
-//! Extracted into its own file on 2026-08-27 as part of PR #929 review
-//! R4 — the tests below cover the pure halves of the module against
-//! hand-built inputs; this file covers the composition against a real
+//! End-to-end integration test — the onion-shell test cut. The unit tests
+//! in `render.rs` cover the pure halves of the module against hand-built
+//! inputs; this file covers the composition against a real
 //! [`PerspectiveInstance`].
 //!
 //! # What it exercises
@@ -15,24 +11,24 @@
 //! - SHACLFlow definition seeded as actual links (writer half of the
 //!   parser round-trip: `parse_flow_to_links` → `add_link`)
 //! - FlowInstance minted via the runtime primitive (`mint_flow_instance`
-//!   — the same call the auto-processor will make)
+//!   — the same call the auto-processor makes)
 //! - `gather_active_flow_contexts` walking the perspective through the
 //!   model_query layer
 //! - resulting `FlowContext[]` fed to `build_interpretation_input` —
-//!   what `run.rs` does after slice 10.3c wired both call sites.
+//!   what `run.rs` does now that both call sites are wired.
 //!
-//! If this test stays green, slice 10.3c's `run.rs` wiring is by
-//! construction correct: the two lines it replaced (previously passing
-//! `&[]` to `build_interpretation_input`) now receive the exact
-//! `Vec<FlowContext>` this test builds, and slice 10.2's unit tests
-//! (in `render.rs` / `interpretation::input_builder`) already cover
-//! what happens on that value inside the prompt builder.
+//! If this test stays green, the `run.rs` wiring is by construction
+//! correct: the two lines that previously passed `&[]` to
+//! `build_interpretation_input` now receive the exact
+//! `Vec<FlowContext>` this test builds, and the unit tests in
+//! `render.rs` + `interpretation::input_builder` already cover what
+//! happens on that value inside the prompt builder.
 //!
 //! No LLM is spun up — `setup_perspective_no_llm` gives a real
 //! `PerspectiveInstance`. The only piece that would need Ollama is the
 //! AIService, which none of the code paths under test touch.
 
-use super::loader::gather_active_flow_contexts;
+use super::loader::{gather_active_flow_contexts, load_all_flow_instances, load_flow_instances};
 use crate::perspectives::flow_classes::mint_flow_instance;
 use crate::perspectives::interpretation::{
     build_interpretation_input, ExistingInstances, TranscriptTurn,
@@ -204,7 +200,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
 
     // 7) The real payoff: feed the gathered context into the
     //    interpretation prompt builder — the same call `run.rs`
-    //    makes after slice 10.3c substituted this vector for `&[]`.
+    //    makes now that this vector replaces the earlier `&[]`.
     //    The prompt must carry an `active_flows` array whose only
     //    element identifies our Delivery instance by name.
     let existing = ExistingInstances::new();
@@ -227,4 +223,22 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
             .expect("active_flows[0].flow is a string"),
         "Delivery"
     );
+}
+
+/// On a perspective where `FlowInstance` has never been registered,
+/// `load_flow_instances` and `load_all_flow_instances` must return
+/// `Ok(vec![])` — not propagate the "No SHACL shape stored" error.
+#[tokio::test(flavor = "multi_thread")]
+async fn load_flow_instances_absent_class_returns_empty() {
+    let (perspective, _, _) = setup_perspective_no_llm(&[]).await;
+
+    let scoped = load_flow_instances(&perspective, &["ad4m://task/x".to_string()])
+        .await
+        .expect("absent class must not error");
+    assert!(scoped.is_empty());
+
+    let all = load_all_flow_instances(&perspective)
+        .await
+        .expect("absent class must not error");
+    assert!(all.is_empty());
 }
