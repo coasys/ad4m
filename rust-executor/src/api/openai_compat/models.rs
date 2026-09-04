@@ -8,13 +8,13 @@ use super::errors::{OpenAIError, OpenAIResult};
 use super::types::{ModelExtensions, ModelInfo, ModelListResponse};
 use crate::agent::capabilities::{check_capability, AI_READ_CAPABILITY};
 use crate::api::auth::AuthContext;
-use crate::db::Ad4mDb;
 use crate::types::Model;
 
 pub async fn list_models(auth: AuthContext) -> OpenAIResult<Json<ModelListResponse>> {
     check_capability(&auth.capabilities, &AI_READ_CAPABILITY).map_err(OpenAIError::forbidden)?;
 
-    let models = Ad4mDb::with_global_instance(|db| db.get_models())
+    let models = crate::db_backend::db_backend()
+        .get_models()
         .map_err(|e| OpenAIError::internal(format!("Database error listing models: {e}")))?;
 
     let data = models.into_iter().map(model_to_info).collect();

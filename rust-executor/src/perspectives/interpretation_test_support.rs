@@ -34,6 +34,7 @@ static INIT_DB: Once = Once::new();
 pub(crate) fn ensure_db_init() {
     INIT_DB.call_once(|| {
         Ad4mDb::init_global_instance(":memory:").unwrap();
+        crate::db_backend::init_db_backend(std::sync::Arc::new(crate::db_backend::LocalDb));
     });
 }
 

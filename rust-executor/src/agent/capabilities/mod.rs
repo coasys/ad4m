@@ -107,9 +107,9 @@ pub fn user_email_from_token(token: String) -> Option<String> {
     }
 
     // Check if multi-user mode is enabled - if not, never return a user context
-    use crate::db::Ad4mDb;
-    let multi_user_enabled =
-        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+    let multi_user_enabled = crate::db_backend::db_backend()
+        .get_multi_user_enabled()
+        .unwrap_or(false);
 
     if !multi_user_enabled {
         return None;
@@ -127,8 +127,6 @@ pub fn user_email_from_token(token: String) -> Option<String> {
 /// This is throttled to only update once every 5 minutes to reduce database writes
 /// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
 pub async fn track_last_seen_from_token(token: String) {
-    use crate::db::Ad4mDb;
-
     if let Some(user_email) = user_email_from_token(token) {
         let now = chrono::Utc::now().timestamp();
 
@@ -156,8 +154,7 @@ pub async fn track_last_seen_from_token(token: String) {
         // Use spawn_blocking to avoid blocking the async runtime
         let user_email_clone = user_email.clone();
         let should_update = tokio::task::spawn_blocking(move || {
-            Ad4mDb::with_global_instance(|db| {
-                if let Ok(user) = db.get_user(&user_email_clone) {
+            if let Ok(user) = crate::db_backend::db_backend().get_user(&user_email_clone) {
                     if let Some(last_seen) = user.last_seen {
                         let five_min_ago = now.saturating_sub(300);
 
@@ -190,7 +187,6 @@ pub async fn track_last_seen_from_token(token: String) {
                     );
                     (false, None) // User not found
                 }
-            })
         })
         .await;
 
@@ -223,7 +219,7 @@ pub async fn track_last_seen_from_token(token: String) {
             // Perform the update in spawn_blocking
             let user_email_for_update = user_email.clone();
             let update_result = tokio::task::spawn_blocking(move || {
-                Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email_for_update))
+                crate::db_backend::db_backend().update_user_last_seen(&user_email_for_update)
             })
             .await;
 
@@ -280,9 +276,9 @@ pub fn capabilities_from_token(
         // For empty tokens, check if multi-user mode is enabled
         // If so, allow user creation (registration), login, and checking enabled status
         // READ capability is intentionally excluded to prevent unauthenticated user enumeration
-        use crate::db::Ad4mDb;
-        let multi_user_enabled =
-            Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+        let multi_user_enabled = crate::db_backend::db_backend()
+            .get_multi_user_enabled()
+            .unwrap_or(false);
 
         if multi_user_enabled {
             return Ok(vec![

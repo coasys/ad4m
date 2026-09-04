@@ -1159,7 +1159,6 @@ pub async fn run_interpretation_with_harness_and_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Ad4mDb;
     use crate::perspectives::interpretation::*;
     use crate::perspectives::interpretation_test_support::*;
     use crate::types::{AITask, Link};
@@ -1257,13 +1256,16 @@ mod tests {
         // Guard: some other test may have inserted the row already; wipe just
         // our name so the first call below is a real insert. (Global DB is
         // shared across the single-threaded test run.)
-        let existing: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        let existing: Vec<AITask> = crate::db_backend::db_backend()
+            .get_tasks()
             .unwrap()
             .into_iter()
             .filter(|t| t.name == INTERPRETATION_TASK_NAME)
             .collect();
         for t in existing {
-            Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
+            crate::db_backend::db_backend()
+                .remove_task(t.task_id.clone())
+                .unwrap();
         }
 
         // Target the DB-only primitive: it registers the row without touching the
@@ -1281,7 +1283,8 @@ mod tests {
         assert!(!created_again, "second call must find the existing row");
         assert_eq!(first.task_id, second.task_id);
 
-        let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        let rows: Vec<AITask> = crate::db_backend::db_backend()
+            .get_tasks()
             .unwrap()
             .into_iter()
             .filter(|t| t.name == INTERPRETATION_TASK_NAME)
@@ -1457,13 +1460,16 @@ mod tests {
             interpretation_task_name_for_model(Some("gemma3:12b")),
             interpretation_task_name_for_model(Some("qwen3.5-27b")),
         ];
-        let leftover: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+        let leftover: Vec<AITask> = crate::db_backend::db_backend()
+            .get_tasks()
             .unwrap()
             .into_iter()
             .filter(|t| target_names.contains(&t.name))
             .collect();
         for t in leftover {
-            Ad4mDb::with_global_instance(|db| db.remove_task(t.task_id.clone())).unwrap();
+            crate::db_backend::db_backend()
+                .remove_task(t.task_id.clone())
+                .unwrap();
         }
 
         // DB-only primitive (no model/GPU): registers the per-model row and
@@ -1501,7 +1507,8 @@ mod tests {
 
         // Exactly one row per (target_name), no accidental duplicates left behind.
         for name in &target_names {
-            let rows: Vec<AITask> = Ad4mDb::with_global_instance(|db| db.get_tasks())
+            let rows: Vec<AITask> = crate::db_backend::db_backend()
+                .get_tasks()
                 .unwrap()
                 .into_iter()
                 .filter(|t| &t.name == name)

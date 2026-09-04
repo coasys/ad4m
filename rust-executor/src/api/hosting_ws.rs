@@ -4,7 +4,6 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
-use crate::db::Ad4mDb;
 use crate::types::RequestContext;
 
 use super::types::*;
@@ -14,18 +13,23 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
     check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .unwrap_or(true);
     let user_info = if let Some(user_email) = ctx.user_email.clone() {
-        let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email)).ok();
-        let hot_wallet_address =
-            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
-                .ok()
-                .flatten();
+        let credits = crate::db_backend::db_backend()
+            .get_user_credits(&user_email)
+            .ok();
+        let hot_wallet_address = crate::db_backend::db_backend()
+            .get_user_hot_wallet(&user_email)
+            .ok()
+            .flatten();
         let free_access = if global_free {
             true
         } else {
-            Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email)).unwrap_or(false)
+            crate::db_backend::db_backend()
+                .get_user_free_access(&user_email)
+                .unwrap_or(false)
         };
         Some(serde_json::json!({
             "email": user_email,
@@ -37,7 +41,8 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
         None
     };
 
-    let rates = Ad4mDb::with_global_instance(|db| db.get_host_rates())
+    let rates = crate::db_backend::db_backend()
+        .get_host_rates()
         .ok()
         .and_then(|v| serde_json::to_value(v).ok());
 
@@ -113,7 +118,8 @@ async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .clone()
         .ok_or_else(|| WsRpcError::forbidden("User email required"))?;
 
-    Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(&email, &body.address))
+    crate::db_backend::db_backend()
+        .set_user_hot_wallet(&email, &body.address)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(true))

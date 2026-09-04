@@ -1,4 +1,3 @@
-use crate::db::Ad4mDb;
 use crate::pubsub::mark_credits_dirty;
 
 #[derive(Debug, thiserror::Error)]
@@ -102,7 +101,8 @@ const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // credits per link write
 
 /// Look up the link write rate from the host_rates DB table, falling back to the default.
 pub fn get_link_write_rate() -> f64 {
-    Ad4mDb::with_global_instance(|db| db.get_host_rate("link write"))
+    crate::db_backend::db_backend()
+        .get_host_rate("link write")
         .ok()
         .flatten()
         .unwrap_or(DEFAULT_LINK_WRITE_RATE)
@@ -141,13 +141,15 @@ pub fn bill_ai_operation(
         return Ok(());
     }
 
-    let rate_key = Ad4mDb::with_global_instance(|db| db.get_model(model_id.to_string()))
+    let rate_key = crate::db_backend::db_backend()
+        .get_model(model_id.to_string())
         .ok()
         .flatten()
         .map(|m| m.name)
         .unwrap_or_else(|| model_id.to_string());
 
-    let rate = Ad4mDb::with_global_instance(|db| db.get_host_rate(&rate_key))
+    let rate = crate::db_backend::db_backend()
+        .get_host_rate(&rate_key)
         .ok()
         .flatten()
         .unwrap_or(0.0);
@@ -196,16 +198,17 @@ pub fn bill_ai_operation(
 /// after the operation via bill_compute with the exact cost.
 /// No-ops (allows) if free hosting is enabled or user has free access.
 pub fn check_compute_credits(email: &str) -> Result<(), anyhow::Error> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .unwrap_or(true);
     if global_free {
         return Ok(());
     }
-    let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))?;
+    let free = crate::db_backend::db_backend().get_user_free_access(email)?;
     if free {
         return Ok(());
     }
-    let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))?;
+    let credits = crate::db_backend::db_backend().get_user_credits(email)?;
     if credits <= 0.0 {
         return Err(anyhow::anyhow!("Insufficient compute credits"));
     }
@@ -235,17 +238,16 @@ pub fn bill_compute(
         }
     }
 
-    let global_free = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())?;
+    let global_free = crate::db_backend::db_backend().get_free_hosting_enabled()?;
     if global_free {
         return Ok(());
     }
-    let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))?;
+    let free = crate::db_backend::db_backend().get_user_free_access(email)?;
     if free {
         return Ok(());
     }
-    let result = Ad4mDb::with_global_instance(|db| {
-        db.deduct_credits_and_log(email, amount, operation, summary)
-    });
+    let result =
+        crate::db_backend::db_backend().deduct_credits_and_log(email, amount, operation, summary);
 
     match result {
         Ok((row_id, credits_after)) => {
