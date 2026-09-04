@@ -814,6 +814,7 @@ describe("FlowInstance.acceptProposal / rejectProposal — consensus write API",
   let ad4m: Ad4mClient;
   let stopAgent: (() => Promise<void>) | null = null;
   let p: PerspectiveProxy;
+  let myDid: string;
 
   before(async () => {
     const shared = getSharedAgent();
@@ -824,6 +825,7 @@ describe("FlowInstance.acceptProposal / rejectProposal — consensus write API",
       ad4m = agent.client;
       stopAgent = agent.stop;
     }
+    myDid = (await ad4m.agent.me()).did;
   });
 
   after(async () => {
@@ -853,13 +855,20 @@ describe("FlowInstance.acceptProposal / rejectProposal — consensus write API",
    *  identity link, literal-wrapped scalars — but with an EMPTY evidence
    *  seal, which the consensus pass treats as unverifiable and
    *  auto-invalidates (client-side writes cannot produce a valid seal;
-   *  only the engine's evidence-collection path can). */
+   *  only the engine's evidence-collection path can). The proposer must be
+   *  OUR OWN DID: since the #967 forgery fix, the loader drops proposals
+   *  whose `proposer` link is not authored by the claimed proposer, and a
+   *  dropped proposal never reaches the pass's invalidation (it stays on
+   *  the graph, deliberately — its proposer link may still arrive by
+   *  sync). This test targets the empty-seal invalidation path, so it
+   *  seeds an identity-honest proposal; proposer forgery is covered by
+   *  the Rust loader unit tests. */
   async function seedProposal(instanceUri: string, fromState: string, toState: string): Promise<string> {
     const proposal = `ad4m://flow/proposal/js-test-${Math.random().toString(36).slice(2)}`;
     await p.add(new Link({ source: proposal, predicate: "ad4m://flow/instance", target: instanceUri }));
     await p.add(new Link({ source: proposal, predicate: "ad4m://flow/from_state", target: `literal:string:${fromState}` }));
     await p.add(new Link({ source: proposal, predicate: "ad4m://flow/to_state", target: `literal:string:${toState}` }));
-    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/proposer", target: "did:example:proposer" }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/proposer", target: myDid }));
     await p.add(new Link({ source: proposal, predicate: "ad4m://flow/evidence_hashes", target: "literal:string:" }));
     return proposal;
   }
