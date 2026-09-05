@@ -93,6 +93,25 @@ pub struct Ad4mConfig {
     pub mcp_port: Option<u16>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,
+    /// Local DID for this SFU node in a cascade cluster.  Required if
+    /// any cascade options are set; otherwise the SFU runs single-node.
+    pub sfu_local_did: Option<String>,
+    /// Capacity hint published by this SFU node in every cascade
+    /// announce.  Defaults to `8` if cascade is configured without
+    /// an explicit value.
+    pub sfu_max_participants_per_node: Option<u32>,
+    /// TCP address where this node binds its cascade gossip listener,
+    /// formatted as `host:port`.  When unset, cascade is disabled.
+    pub sfu_cascade_listen: Option<String>,
+    /// Peer SFU nodes in the cascade cluster, each `did=host:port`.
+    /// Empty list = standalone SFU.
+    pub sfu_cascade_peers: Option<Vec<String>>,
+    /// IP address the SFU media server binds to (e.g. `203.0.113.5`).
+    /// str0m rejects `0.0.0.0` as a candidate, so this must be a real
+    /// interface IP.  When unset, the executor auto-detects the
+    /// machine's outbound IP — on a public server this resolves to
+    /// the correct address automatically.
+    pub sfu_bind_addr: Option<String>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -324,6 +343,11 @@ impl Default for Ad4mConfig {
             enable_mcp: None,
             mcp_port: None,
             pid_file: None,
+            sfu_local_did: None,
+            sfu_max_participants_per_node: None,
+            sfu_cascade_listen: None,
+            sfu_cascade_peers: None,
+            sfu_bind_addr: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,

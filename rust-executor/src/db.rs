@@ -1256,6 +1256,41 @@ impl Ad4mDb {
         Ok(())
     }
 
+    /// Register `user_did` as a member of the neighbourhood at
+    /// `neighbourhood_url`.  Creates a synthetic perspective_handle if
+    /// none with that `shared_url` exists yet (needed by test harnesses
+    /// that use synthetic neighbourhood URLs).
+    pub fn ensure_neighbourhood_member(
+        &self,
+        neighbourhood_url: &str,
+        user_did: &str,
+    ) -> Ad4mDbResult<()> {
+        let perspective_exists: bool = self
+            .conn
+            .prepare("SELECT EXISTS(SELECT 1 FROM perspective_handle WHERE shared_url = ?1)")?
+            .query_row([neighbourhood_url], |row| row.get(0))
+            .map_err(|e| anyhow!("Failed to check if perspective exists: {}", e))?;
+
+        if !perspective_exists {
+            let uuid = uuid::Uuid::new_v4().to_string();
+            let owners_json = serde_json::to_string(&vec![user_did])?;
+            self.conn.execute(
+                "INSERT INTO perspective_handle (name, uuid, neighbourhood, shared_url, state, owners)
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
+                params![
+                    format!("sfu-membership-{}", neighbourhood_url),
+                    uuid,
+                    neighbourhood_url,
+                    "\"Synced\"",
+                    owners_json,
+                ],
+            )?;
+            return Ok(());
+        }
+
+        self.add_owner_to_neighbourhood(neighbourhood_url, user_did)
+    }
+
     pub fn get_neighbourhood_owners(&self, neighbourhood_url: &str) -> Ad4mDbResult<Vec<String>> {
         let owners: Vec<String> = self
             .conn

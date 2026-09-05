@@ -99,6 +99,7 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
     PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+    SFU_CALL_RENEGOTIATION_OFFER_TOPIC, SFU_DATA_CHANNEL_TOPIC, SFU_MIGRATE_TOPIC,
 };
 
 use super::auth::{AppState, AuthContext};
@@ -448,6 +449,37 @@ pub(crate) async fn build_event_stream(
             })
     };
 
+    // ── SFU server-initiated renegotiation offers ──
+    // Targeted at one specific participant via the `targetDid` field on
+    // the published `SfuCallRenegotiationOffer` JSON.  Clients subscribe
+    // to this single topic and apply the offer as a fresh remote
+    // description, then post the answer via `sfu.callAnswerServerOffer`.
+    let s_sfu_reneg = {
+        let rx = pubsub.subscribe(&SFU_CALL_RENEGOTIATION_OFFER_TOPIC).await;
+        let token = auth_token.clone();
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let token = token.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) => {
+                            let did = {
+                                let ctx = AgentContext::from_auth_token(token.clone());
+                                did_for_context(&ctx).ok()
+                            };
+                            if matches_sfu_target(msg, did.as_deref()) {
+                                Some(wrap_event("sfu-call-renegotiation-offer", msg))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
+
     // ── Auto-processor neighbourhood-state (Nico 2026-08-19 follow-up) ──
     // Perspective-scoped observability: anyone with perspective read access
     // sees "someone is auto-processing this" without seeing the batch
@@ -483,6 +515,52 @@ pub(crate) async fn build_event_stream(
             })
     };
 
+    // ── SFU cascade rebalance migration events ──
+    // Same pattern as renegotiation offers — targeted at one specific
+    // participant via `targetDid`.  The client should leave and rejoin
+    // on the indicated node (same flow as cascade failover).
+    let s_sfu_migrate = {
+        let rx = pubsub.subscribe(&SFU_MIGRATE_TOPIC).await;
+        let token = auth_token.clone();
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let token = token.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) => {
+                            let did = {
+                                let ctx = AgentContext::from_auth_token(token.clone());
+                                did_for_context(&ctx).ok()
+                            };
+                            if matches_sfu_target(msg, did.as_deref()) {
+                                Some(wrap_event("sfu-migrate", msg))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+            })
+    };
+
+    // SFU data channel relay — fan out to connected clients.
+    // No DID filtering: every participant in the room receives
+    // every data message (same as media relay).  The `senderDid`
+    // field lets clients ignore their own messages.
+    let s_sfu_data = {
+        let rx = pubsub.subscribe(&SFU_DATA_CHANNEL_TOPIC).await;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| async move {
+                match result {
+                    Ok(ref msg) => Some(wrap_event("sfu-data", msg)),
+                    _ => None,
+                }
+            })
+    };
+
     // ── Merge all streams ──
     let agent = stream::select(
         stream::select(s_status, s_apps),
@@ -504,10 +582,14 @@ pub(crate) async fn build_event_stream(
             ),
         ),
     );
+    let sfu = stream::select(stream::select(s_sfu_reneg, s_sfu_migrate), s_sfu_data);
 
     let top = stream::select(
         stream::select(agent, persp),
-        stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
+        stream::select(
+            stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
+            sfu,
+        ),
     );
 
     Box::pin(top)
@@ -605,6 +687,21 @@ pub(crate) fn matches_owner(msg: &str, current_did: Option<&str>) -> bool {
             true
         }
     }
+}
+
+/// SFU renegotiation offers carry the addressee in `targetDid`.
+/// Filter so only the named participant's WS receives the event.
+pub(crate) fn matches_sfu_target(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        // No resolved DID — drop, this is a per-user event.
+        return false;
+    };
+    if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+        if let Some(serde_json::Value::String(target)) = map.get("targetDid") {
+            return target == did;
+        }
+    }
+    false
 }
 
 pub(crate) fn matches_signal_recipient(msg: &str, current_did: Option<&str>) -> bool {

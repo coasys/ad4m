@@ -14,6 +14,7 @@ pub mod perspective_snapshot;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
+pub mod sfu;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
@@ -511,6 +512,37 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         init_prolog_service().await;
     }
 
+    {
+        info!("Initializing SFU service...");
+        let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
+        let mut sfu_config = crate::sfu::server::SfuServerConfig::default();
+        if let Some(ref addr) = config.sfu_bind_addr {
+            match format!("{}:0", addr).parse() {
+                Ok(sa) => {
+                    info!("SFU bind address override: {}", addr);
+                    sfu_config.bind_addr = sa;
+                }
+                Err(e) => warn!(
+                    "SFU bind address `{}` parse error: {} — using auto-detected default",
+                    addr, e
+                ),
+            }
+        } else {
+            info!(
+                "SFU bind address auto-detected: {}",
+                sfu_config.bind_addr.ip()
+            );
+        }
+        match crate::sfu::SfuService::start(sfu_config, gossip).await {
+            Ok(svc) => info!(
+                "SFU service ready on UDP {} (reachability: {})",
+                svc.local_addr(),
+                svc.reachability()
+            ),
+            Err(e) => warn!("SFU service failed to start: {}", e),
+        }
+    }
+
     find_and_set_port(&mut config.port, 4000, "REST API");
     find_and_set_port(&mut config.hc_admin_port, 2000, "Holochain admin");
     find_and_set_port(&mut config.hc_app_port, 1337, "Holochain app");
@@ -741,4 +773,62 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .unwrap();
         runtime.block_on(api::start_server(config)).unwrap();
     })
+}
+
+/// Build the cascade-gossip transport based on the SFU-related fields
+/// of [`Ad4mConfig`].  Returns a [`NoopGossip`] when cascade is
+/// unconfigured, a [`TcpGossip`] when `sfu_cascade_listen` is set, or
+/// falls back to no-op (with a warning) if the requested transport
+/// fails to bind.
+async fn build_sfu_gossip(config: &Ad4mConfig) -> std::sync::Arc<dyn crate::sfu::CascadeGossip> {
+    let max = config.sfu_max_participants_per_node.unwrap_or(8);
+    let local_did = match config.sfu_local_did.clone() {
+        Some(did) => did,
+        None => {
+            return std::sync::Arc::new(crate::sfu::NoopGossip::new("self".to_string(), max));
+        }
+    };
+    let Some(listen) = config.sfu_cascade_listen.as_ref() else {
+        return std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max));
+    };
+    let bind_addr: std::net::SocketAddr = match listen.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            warn!(
+                "SFU cascade listen `{}` parse error: {} — running standalone",
+                listen, e
+            );
+            return std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max));
+        }
+    };
+    let peers: Vec<crate::sfu::GossipPeer> = config
+        .sfu_cascade_peers
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|entry| {
+            let (did, addr) = entry.split_once('=')?;
+            let addr: std::net::SocketAddr = addr.parse().ok()?;
+            Some(crate::sfu::GossipPeer {
+                did: did.to_string(),
+                addr,
+            })
+        })
+        .collect();
+    info!(
+        "SFU cascade: local_did={}, listen={}, {} peer(s)",
+        local_did,
+        bind_addr,
+        peers.len()
+    );
+    match crate::sfu::TcpGossip::start(local_did.clone(), max, bind_addr, peers).await {
+        Ok(g) => g as std::sync::Arc<dyn crate::sfu::CascadeGossip>,
+        Err(e) => {
+            warn!(
+                "SFU cascade gossip failed to start: {} — running standalone",
+                e
+            );
+            std::sync::Arc::new(crate::sfu::NoopGossip::new(local_did, max))
+        }
+    }
 }
