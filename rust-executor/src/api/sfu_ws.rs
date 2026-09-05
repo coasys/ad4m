@@ -14,7 +14,6 @@
 //! When `get_sfu_service()` returns None it means the service hasn't
 //! finished booting yet, which surfaces as a 503.
 
-use base64::Engine;
 use serde_json::Value;
 use std::sync::Arc;
 

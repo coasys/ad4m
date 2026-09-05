@@ -1,7 +1,6 @@
 //! SFU server — manages the shared UDP socket, str0m Rtc instances,
 //! and the Sans I/O event loop driven by tokio.
 
-use base64::Engine;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Mutex as StdMutex;
