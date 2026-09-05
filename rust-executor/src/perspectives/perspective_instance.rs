@@ -6877,6 +6877,30 @@ mod tests {
         );
     }
 
+    /// `[A] → [B] → [A]` in one batch nets to nothing staged at all.
+    ///
+    /// The end state matches the start state, so the batch should carry no
+    /// operations for the relation. Getting there needs both reconciliations to
+    /// compose: B's addition pruned because it is no longer desired, and A's
+    /// removal cancelled because it is desired again. Either one alone leaves
+    /// the batch writing a change that undoes itself.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_nets_a_round_trip_to_nothing() {
+        let (additions, removals) = staged_after_batched_sets(
+            "we://col/6",
+            "we://children",
+            &["we://a"],
+            &[&["we://b"], &["we://a"]],
+        )
+        .await;
+
+        assert!(
+            additions.is_empty() && removals.is_empty(),
+            "the collection ends where it started, so nothing is staged — \
+             additions {additions:?}, removals {removals:?}"
+        );
+    }
+
     /// A member the batch has already removed is not reported as still present.
     #[tokio::test]
     async fn test_collection_setter_in_batch_drops_a_removed_member() {
