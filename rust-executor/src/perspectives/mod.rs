@@ -1,15 +1,27 @@
 pub mod auto_processor;
+pub(crate) mod flow_classes;
+pub(crate) mod flow_context;
+pub(crate) mod flow_evaluator;
+#[cfg(test)]
+mod flow_evaluator_e2e;
+pub(crate) mod flow_semantic_check;
+pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
 #[cfg(test)]
 mod interpretation_harness_e2e;
+// `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
+// tools, which read flow state through the same loaders) can seed a real
+// `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
+// so it never reaches a release build.
 #[cfg(test)]
-mod interpretation_test_support;
+pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
+pub mod ordering;
 pub mod perspective_instance;
 pub mod sdna;
 pub mod shacl_parser;
@@ -221,6 +233,25 @@ pub async fn add_perspective(
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
+    // Sync perspective metadata to shared DB for cross-executor rehydration.
+    // Store the creating executor's DID so other executors can fetch links
+    // from the correct path (links are keyed by DID + perspective UUID).
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() == Some("shared") {
+        let backend = crate::db_backend::db_backend();
+        let creator_did = crate::agent::did();
+        let meta = serde_json::json!({
+            "uuid": &handle.uuid,
+            "name": &handle.name,
+            "owners": &handle.owners,
+            "state": format!("{:?}", handle.state),
+            "creator_did": &creator_did,
+        });
+        if let Err(e) = backend.upsert("shared:platform", "perspectives", &handle.uuid, meta) {
+            log::warn!("Failed to sync perspective metadata to shared DB: {}", e);
+        }
+    }
+
     let p = PerspectiveInstance::new(handle.clone(), created_from_join);
     tokio::spawn(p.clone().start_background_tasks());
 
@@ -274,6 +305,13 @@ pub fn all_perspectives() -> Vec<PerspectiveInstance> {
                 .clone()
         })
         .collect()
+}
+
+/// Register a fully-constructed PerspectiveInstance in the global map.
+/// Used by the rehydration path (shared backend → local) to avoid exposing the PERSPECTIVES static.
+pub(crate) fn register_perspective(uuid: String, instance: PerspectiveInstance) {
+    let mut perspectives = PERSPECTIVES.write().unwrap();
+    perspectives.insert(uuid, RwLock::new(instance));
 }
 
 pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {

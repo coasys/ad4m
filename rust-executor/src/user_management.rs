@@ -92,20 +92,48 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
         }
     });
 
-    // Check if user already exists
+    // Check if user already exists (local DB or shared DB)
     let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
     if user_exists {
         return Err("User already exists".to_string());
     }
 
-    // Add user to DB
+    // Also check shared DB to prevent duplicates across executors.
+    // Use a fixed namespace ("shared:platform") so all executors share one user table,
+    // regardless of each executor's individual agent DID.
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() == Some("shared") {
+        let backend = crate::db_backend::db_backend();
+        if let Ok(Some(_)) = backend.get("shared:platform", "users", email) {
+            return Err("User already exists".to_string());
+        }
+    }
+
+    // Hash password once — use the same hash for both local and shared DB
+    let password_hash =
+        Ad4mDb::hash_password(password).map_err(|e| format!("Failed to hash password: {}", e))?;
+
+    // Add user to local DB
     {
         let db = Ad4mDb::global_instance();
         let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
         let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
         db_ref
-            .add_user(email, &did, password)
+            .add_user_prehashed(email, &did, &password_hash)
             .map_err(|e| format!("Failed to add user: {}", e))?;
+    }
+
+    // Also store in shared DB for cross-executor access
+    if config.db_backend.as_deref() == Some("shared") {
+        let backend = crate::db_backend::db_backend();
+        let user_data = serde_json::json!({
+            "username": email,
+            "did": &did,
+            "password_hash": &password_hash,
+        });
+        if let Err(e) = backend.upsert("shared:platform", "users", email, user_data) {
+            log::warn!("Failed to sync user to shared DB: {}", e);
+        }
     }
 
     Ok(did)
@@ -132,16 +160,69 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
 }
 
 /// Verify user credentials (email + password). Returns Ok(()) on success.
+/// Falls back to shared DB when the user record only exists on another executor.
 pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
-    let password_valid = Ad4mDb::with_global_instance(|db| {
-        db.verify_user_password(email, password).unwrap_or(false)
-    });
-    if !password_valid {
+    // Try local DB first
+    let local_result = Ad4mDb::with_global_instance(|db| db.verify_user_password(email, password));
+
+    match local_result {
+        Ok(true) => {
+            // Local verification succeeded
+            if !AgentService::user_exists(email) {
+                return Err("User key not found on executor".to_string());
+            }
+            return Ok(());
+        }
+        Ok(false) => {
+            // Password wrong (user found locally but password doesn't match)
+            return Err("Invalid credentials".to_string());
+        }
+        Err(_) => {
+            // User not found in local DB — try shared DB fallback
+        }
+    }
+
+    // Shared DB fallback: user was created on another executor
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() != Some("shared") {
         return Err("Invalid credentials".to_string());
     }
-    if !AgentService::user_exists(email) {
-        return Err("User key not found on executor".to_string());
+
+    let backend = crate::db_backend::db_backend();
+    let user_data = backend
+        .get("shared:platform", "users", email)
+        .map_err(|e| format!("Shared DB lookup failed: {}", e))?
+        .ok_or_else(|| "Invalid credentials".to_string())?;
+
+    // Extract password_hash from shared record and verify
+    let stored_hash = user_data
+        .get("password_hash")
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| "Invalid credentials".to_string())?;
+
+    let pw_ok = Ad4mDb::verify_password(password, stored_hash)
+        .map_err(|e| format!("Password verification failed: {}", e))?;
+    if !pw_ok {
+        return Err("Invalid credentials".to_string());
     }
+
+    // Ensure the user key exists in the shared wallet
+    if !AgentService::user_exists(email) {
+        AgentService::ensure_user_key_exists(email)
+            .map_err(|e| format!("Failed to create user key: {}", e))?;
+    }
+
+    // Import user to local DB for future logins
+    let user_did = user_data.get("did").and_then(|d| d.as_str()).unwrap_or("");
+    {
+        let db = Ad4mDb::global_instance();
+        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
+        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
+        if let Err(e) = db_ref.add_user_prehashed(email, user_did, stored_hash) {
+            log::warn!("Failed to import user to local DB: {}", e);
+        }
+    }
+
     Ok(())
 }
 

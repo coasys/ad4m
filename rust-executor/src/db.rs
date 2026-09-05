@@ -2974,7 +2974,7 @@ impl Ad4mDb {
     }
 
     // Password hashing and verification helpers
-    fn hash_password(password: &str) -> Ad4mDbResult<String> {
+    pub(crate) fn hash_password(password: &str) -> Ad4mDbResult<String> {
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
         let password_hash = argon2
@@ -2984,7 +2984,7 @@ impl Ad4mDb {
         Ok(password_hash)
     }
 
-    fn verify_password(password: &str, password_hash: &str) -> Ad4mDbResult<bool> {
+    pub(crate) fn verify_password(password: &str, password_hash: &str) -> Ad4mDbResult<bool> {
         let parsed_hash = PasswordHash::new(password_hash)
             .map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
         let argon2 = Argon2::default();
@@ -2998,6 +2998,20 @@ impl Ad4mDb {
         let password_hash = Self::hash_password(password)?;
         self.conn.execute(
             "INSERT INTO users (username, did, password_hash) VALUES (?1, ?2, ?3)",
+            params![username, did, password_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Add a user with a pre-computed password hash (for shared DB sync).
+    pub fn add_user_prehashed(
+        &self,
+        username: &str,
+        did: &str,
+        password_hash: &str,
+    ) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO users (username, did, password_hash) VALUES (?1, ?2, ?3)",
             params![username, did, password_hash],
         )?;
         Ok(())

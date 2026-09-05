@@ -294,6 +294,7 @@ async fn main() -> Result<()> {
                 sfu_cascade_listen,
                 sfu_cascade_peers,
                 sfu_bind_addr,
+                ..Default::default()
             })
             .await;
         })

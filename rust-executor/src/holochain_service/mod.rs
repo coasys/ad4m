@@ -13,8 +13,8 @@ use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
 use holochain::prelude::{
-    AppManifest, DnaHash, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest,
-    Signal, Signature, Timestamp, ZomeCallParams, ZomeCallResponse,
+    AppManifest, ExternIO, HoloHash, InstallAppPayload, Kitsune2NetworkMetricsRequest, Signal,
+    Signature, Timestamp, ZomeCallParams, ZomeCallResponse,
 };
 use holochain::test_utils::itertools::Either;
 
@@ -343,7 +343,14 @@ impl HolochainService {
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
                                         },
                                         Err(err) => {
-                                            error!("GetNetworkMetrics timed out after 30s");
+                                            // KEEP AT warn (Nico + CodeRabbit, PR #942 round 2):
+                                            // this path is reachable from `runtime.networkMetrics`
+                                            // via WS-RPC, so a real user request just failed. Do not
+                                            // downgrade in future cleanups; if there's a caller-
+                                            // specific periodic path that wants debug, gate the
+                                            // downgrade behind that path only.
+                                            // See rust-executor/LOGGING.md.
+                                            log::warn!("⚠️ 🐝 GetNetworkMetrics timed out after 30s");
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
                                         },
                                     }
@@ -1090,10 +1097,10 @@ impl HolochainService {
                 include_dht_summary: true,
             })
             .await?;
-        info!("Network metrics: {:?}", metrics);
+        log::debug!("🐝 network metrics: {:?}", metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
-        info!("Network stats: {:?}", stats);
+        log::debug!("🐝 network stats: {:?}", stats);
 
         Ok(())
     }

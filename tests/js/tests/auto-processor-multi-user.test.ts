@@ -58,7 +58,15 @@ const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
 }
 ORDER BY ?timestamp`;
 
-describe("AutoProcessor runs for managed users on a hosted node", function () {
+// LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
+// default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
+// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// `./scripts/run-llm-e2e.sh` at the repo root.
+const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
+  ? describe
+  : (describe.skip as unknown as Mocha.SuiteFunction));
+
+describeIfLLM("AutoProcessor runs for managed users on a hosted node", function () {
   this.timeout(600_000);
 
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);

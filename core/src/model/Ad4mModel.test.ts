@@ -2624,6 +2624,38 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     });
   });
 
+  // The failure this closes: every `save()` of a new instance logged one
+  // Rust-side "declares no setter" warning per ORM-internal field, per flag,
+  // and per empty HasMany relation — none of which are real model data, so
+  // none of them should ever have been offered to `createSubject` at all.
+  describe("initialValues sent to createSubject", () => {
+    @Model({ name: "TestNoisyPost" })
+    class TestNoisyPost extends Ad4mModel {
+      @Flag({ through: "test://post_type", value: "test://post" })
+      type: string = "test://post";
+
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+    }
+
+    it("excludes ORM bookkeeping fields, flags, and empty relations", async () => {
+      const perspective = makePerspective();
+
+      await TestNoisyPost.create(perspective, { title: "hello" }, { batchId: "batch-1" });
+
+      expect(perspective.createSubject).toHaveBeenCalled();
+      const initialValues = perspective.createSubject.mock.calls[0][2];
+      expect(initialValues).toEqual({ title: "hello" });
+      expect(initialValues).not.toHaveProperty("_baseExpression");
+      expect(initialValues).not.toHaveProperty("_perspective");
+      expect(initialValues).not.toHaveProperty("type");
+      expect(initialValues).not.toHaveProperty("tags");
+    });
+  });
+
   describe("generated @HasOne accessors", () => {
     it("forward batchId, so a to-one link can join a write group", async () => {
       // Without this the link commits on its own, so every subscriber sees the
@@ -2646,5 +2678,387 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
       expect(batchIds(perspective)).toEqual([undefined]);
     });
+  });
+});
+
+describe("Polymorphic relations", () => {
+  @Model({ name: "PolyTextBlock" })
+  class PolyTextBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://text_block" })
+    flag: string = "";
+    @Property({ through: "we://text" })
+    text: string = "";
+  }
+
+  @Model({ name: "PolyImageBlock" })
+  class PolyImageBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://image_block" })
+    flag: string = "";
+    @Property({ through: "we://src" })
+    src: string = "";
+  }
+
+  @Model({ name: "PolyCollection" })
+  class PolyCollection extends Ad4mModel {
+    // No target class — the members are of genuinely different types, which is
+    // the situation `polymorphic` exists for.
+    @HasMany({
+      through: "we://children",
+      polymorphic: true,
+      instantiateAs: () => [PolyTextBlock, PolyImageBlock],
+    })
+    children: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("constructs each child as the class the executor says it is", () => {
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://i/1", __subjectClass: "PolyImageBlock", src: "cat.png" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1]).toBeInstanceOf(PolyImageBlock);
+    // The property that only exists on the concrete class — what a base-class
+    // hydration would have dropped before the value ever reached here.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[1].src).toBe("cat.png");
+  });
+
+  it("maps a child to its class by the name the class itself declares", () => {
+    // The mapping is derived from `@Model({ name })`, not restated beside the
+    // class list — the two cannot drift apart because there is only one of them.
+    expect((PolyTextBlock as any).className).toBe("PolyTextBlock");
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+  });
+
+  it("carries the readings a child was chosen over onto the typed instance", () => {
+    // A base expression can conform to two unrelated classes at once, and the
+    // executor has to pick one to hydrate against. The set it picked from rides
+    // back with the child, so a caller can see there was a choice — and fetch
+    // the other reading by asking that class for this id.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            {
+              id: "we://b/1",
+              __subjectClass: "PolyTextBlock",
+              __subjectClasses: ["PolyTextBlock", "PolyBookmark"],
+              text: "hello",
+            },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const child = collection.children[0];
+    expect(child).toBeInstanceOf(PolyTextBlock);
+    expect(child.__subjectClasses).toEqual(["PolyTextBlock", "PolyBookmark"]);
+  });
+
+  it("leaves children as data when no instantiateAs is given", () => {
+    @Model({ name: "PolyCollectionNoClasses" })
+    class PolyCollectionNoClasses extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollectionNoClasses.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    // Still correct data, just untyped — the concrete class name is present for
+    // a caller that wants to do its own dispatch.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[0].__subjectClass).toBe("PolyTextBlock");
+  });
+
+  it("keeps a child whose class is not listed, rather than dropping it", () => {
+    // `instantiateAs` says what this call site can construct, not what the
+    // relation may contain. A heterogeneous relation is open by definition, so
+    // an unlisted class must arrive as data — narrowing a read to particular
+    // classes is a thing to ask for in the query, never a side effect of
+    // declaring which constructors happen to be in scope.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children).toHaveLength(2);
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1].done).toBe(true);
+    expect(collection.children[1].__subjectClass).toBe("PolyTaskBlock");
+  });
+
+  it("does not construct an unlisted child as the relation's declared target", () => {
+    // A relation may declare a target *and* read polymorphically — the target
+    // says what the members usually are, not what they must be. A child of some
+    // third class was hydrated against its own shape, so building the declared
+    // class over that JSON would answer `instanceof` for a class it is not,
+    // carrying fields that class never declares.
+    @Model({ name: "PolyBaseBlock" })
+    class PolyBaseBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedCollection" })
+    class PolyTypedCollection extends Ad4mModel {
+      @HasMany(() => PolyBaseBlock, {
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => [PolyTextBlock],
+      })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).toBeDefined();
+    expect(unlisted).not.toBeInstanceOf(PolyBaseBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    // The declared target is still right when it is the class the executor named.
+    expect(declared).toBeInstanceOf(PolyBaseBlock);
+    expect(declared.base).toBe("declared");
+  });
+
+  it("does not use the declared target for another class when no classes are named", () => {
+    // Naming no classes to build is not the same as authorising the declared
+    // target to stand in for all of them. Without `instantiateAs` there is
+    // simply nothing this side can construct for a class it was not told about.
+    @Model({ name: "PolyBaseOnlyBlock" })
+    class PolyBaseOnlyBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedNoClasses" })
+    class PolyTypedNoClasses extends Ad4mModel {
+      @HasMany(() => PolyBaseOnlyBlock, { through: "we://children", polymorphic: true })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseOnlyBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedNoClasses.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).not.toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(declared).toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(declared.base).toBe("declared");
+  });
+
+  it("calls instantiateAs late, so a circular import can still resolve", () => {
+    let defined = false;
+    @Model({ name: "PolyLateCollection" })
+    class PolyLateCollection extends Ad4mModel {
+      // Evaluated at decoration time this would throw, the way an array literal
+      // naming a class from further round an import cycle would.
+      @HasMany({
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => {
+          if (!defined) throw new ReferenceError("class not defined yet");
+          return [PolyTextBlock];
+        },
+      })
+      children: string[] = [];
+    }
+
+    defined = true;
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyLateCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+  });
+
+  it("asks the executor for polymorphic hydration without the caller repeating it", () => {
+    // The relation being heterogeneous is a fact about the data, so declaring it
+    // on the model should be enough — `include: { children: true }` must still
+    // arrive at the executor as a polymorphic read.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    expect(JSON.parse(queryJson).include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
+  });
+
+  it("sends the classes it can build as the classes it wants, in declaration order", () => {
+    // The two questions have one answer: what this call site can construct is
+    // what it wants its targets read as. Sent with the query rather than applied
+    // to the results, so the same request gives the same reading to anyone.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Declaration order is the preference order — a target conforming to two of
+    // them is read as whichever was named first.
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual([
+      "PolyTextBlock",
+      "PolyImageBlock",
+    ]);
+  });
+
+  it("lets an explicit preference at the call site win over the declaration", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { preferClasses: ["PolyBookmark"] } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["PolyBookmark"]);
+  });
+
+  it("sends no preference for a polymorphic relation that names no classes", () => {
+    @Model({ name: "PolyCollectionUndeclared" })
+    class PolyCollectionUndeclared extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const { queryJson } = (PolyCollectionUndeclared as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Nothing to prefer, so nothing is sent and the executor ranks by
+    // specificity exactly as it did before any of this existed.
+    expect(JSON.parse(queryJson).include.children).toEqual({ polymorphic: true });
+  });
+
+  it("lets an explicit false at the call site win", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { polymorphic: false } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.polymorphic).toBe(false);
+  });
+
+  it("applies the default at every depth of a nested include", () => {
+    // `sections` is a plain typed relation, so the nested `children` is read off
+    // PolyCollection rather than off the class being queried. Left to the top
+    // level, the default would never reach it and the include would arrive at
+    // the executor with no shape to resolve — the query fails outright.
+    @Model({ name: "PolyPage" })
+    class PolyPage extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPage as any).prepareModelQueryParams({
+      include: { sections: { include: { children: true } } },
+    });
+
+    const include = JSON.parse(queryJson).include;
+    expect(include.sections.include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
+  });
+
+  it("lets an explicit false win at depth too", () => {
+    @Model({ name: "PolyPageExplicit" })
+    class PolyPageExplicit extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPageExplicit as any).prepareModelQueryParams({
+      include: { sections: { include: { children: { polymorphic: false } } } },
+    });
+
+    expect(JSON.parse(queryJson).include.sections.include.children.polymorphic).toBe(false);
   });
 });
