@@ -309,6 +309,7 @@ async fn main() -> Result<()> {
                 log_holochain_metrics: None,
                 hc_relay_url: None,
                 smtp_config: None,
+                ..Default::default()
             }).await
         }).await;
         

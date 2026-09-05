@@ -1,0 +1,60 @@
+//! Flow-aware extraction — data shape, rendering, and perspective
+//! loading for the "Active flows on this scope" prompt block that the
+//! extraction pass appends when the perspective has live `FlowInstance`s.
+//!
+//! Split into three cohesive layers so each can be read + tested in
+//! isolation:
+//!
+//! - [`types`] — the pure data shapes ([`FlowContext`],
+//!   [`NextStateSummary`], [`FlowInstanceRecord`]). No I/O, no rendering.
+//! - [`render`] — pure prompt-builder helpers: `ModelQuery` → English
+//!   sentences, `FlowState` → [`NextStateSummary`], `SHACLFlow` +
+//!   scalars → [`FlowContext`]. Isolated because rendering `ModelQuery`
+//!   to English is the hottest correctness surface in the LLM prompt;
+//!   pure-functional shape lets it grow fixture-driven tests without
+//!   touching graph I/O.
+//! - [`loader`] — perspective-side reading: hydrated JSON → records,
+//!   catalogue discovery ([`load_shacl_flows`]), and the composed
+//!   [`gather_active_flow_contexts`] entry point the extraction pass
+//!   calls.
+//!
+//! End-to-end integration coverage lives in the sibling `e2e_tests`
+//! submodule (test-only). It seeds a real [`PerspectiveInstance`] with
+//! writer-emitted flow links, mints a
+//! [`FlowInstance`](crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS)
+//! runtime record, and walks the whole `gather_active_flow_contexts →
+//! build_interpretation_input` chain without an LLM.
+
+// Individual `#[allow(dead_code)]` on items whose only call-site is a
+// test module — the module-level attribute masked drift on live items
+// too (James PR #929 R6).
+
+mod loader;
+mod render;
+mod types;
+
+#[cfg(test)]
+mod e2e_tests;
+
+#[cfg(test)]
+mod real_llm_e2e;
+
+// Public re-exports — callers outside this module (`interpretation::run`,
+// `PerspectiveInstance::…`) import from `flow_context::` as before. Some
+// re-exports have no internal consumer today; they're the public surface
+// (tests, forward-staging for slice 10.6). `#[allow(unused_imports)]` on
+// the pub-use blocks silences the internal-unused warning without
+// masking dead code inside the module.
+#[allow(unused_imports)]
+pub use loader::{
+    build_flow_contexts, gather_active_flow_contexts, load_all_flow_instances, load_flow_instances,
+    load_shacl_flows, parse_flow_instance_from_hydrated, parse_flows_from_bag, scope_subject,
+};
+#[allow(unused_imports)]
+pub use render::{
+    reachable_next_states, render_consensus_rule, render_model_query,
+    render_requires_human_readable, summarize_flow_instance, summarize_next_state, FlowTokens,
+    DID_TOKEN, FLOW_BASE_TOKEN, FLOW_INSTANCE_TOKEN, FLOW_URI_TOKEN,
+};
+#[allow(unused_imports)]
+pub use types::{FlowContext, FlowInstanceRecord, NextStateSummary};

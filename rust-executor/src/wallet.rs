@@ -7,10 +7,12 @@ use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use did_key::{CoreSign, DIDCore, Ed25519KeyPair, KeyMaterial, PatchedKeyPair};
 use lazy_static::lazy_static;
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::convert::TryInto;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 fn slice_to_u8_array(slice: &[u8]) -> [u8; 32] {
     //If length of slice is not 32 then take the first 32 bytes
@@ -279,6 +281,468 @@ impl Wallet {
     }
 }
 
+// ── Key name constants ─────────────────────────────────────────────────────
+
+/// Key name for the main agent keypair (local mode default).
+pub const KEY_NAME_MAIN: &str = "main";
+/// Key name for the platform JWT signing keypair (shared mode default).
+pub const KEY_NAME_PLATFORM: &str = "platform";
+
+// ── WalletBackend trait ─────────────────────────────────────────────────────
+
+/// Abstracts key operations so different wallet implementations can coexist.
+/// `Send + Sync` required — accessed from multiple Deno worker threads.
+pub trait WalletBackend: Send + Sync {
+    /// Generate a new Ed25519 keypair and store under `name`.
+    fn generate_keypair(&self, name: &str) -> Result<(), AnyError>;
+
+    /// Retrieve the secret key bytes for `name`. None if not found.
+    fn get_secret_key(&self, name: &str) -> Option<Vec<u8>>;
+
+    /// Retrieve the public key bytes for `name`. None if not found.
+    fn get_public_key(&self, name: &str) -> Option<Vec<u8>>;
+
+    /// Retrieve the DID document for `name`. None if not found.
+    fn get_did_document(&self, name: &str) -> Option<did_key::Document>;
+
+    /// Sign `message` with the key named `name`. None if key not found.
+    fn sign(&self, name: &str, message: &[u8]) -> Option<Vec<u8>>;
+
+    /// List all key names in the backend.
+    fn list_key_names(&self) -> Vec<String>;
+
+    /// Check if a key with `name` exists.
+    fn key_exists(&self, name: &str) -> bool;
+
+    /// Atomically get or create a keypair — if a key with `name` already exists,
+    /// return without modification. Otherwise generate a new one.
+    /// Default uses `key_exists` + `generate_keypair` (non-atomic fallback).
+    fn get_or_create_keypair(&self, name: &str) -> Result<(), AnyError> {
+        if !self.key_exists(name) {
+            self.generate_keypair(name)?;
+        }
+        Ok(())
+    }
+
+    /// Downcast support for local-only operations (export, unlock, etc.).
+    fn as_any(&self) -> &dyn Any;
+
+    // ── Local-only operations with defaults for shared mode ──────────
+
+    /// Check whether the keystore has been decrypted.
+    /// Shared mode: always true (keys live server-side, no local encryption).
+    fn is_unlocked(&self) -> bool {
+        true
+    }
+
+    /// Decrypt the keystore with `passphrase`, making keys available.
+    /// Shared mode: returns an error. In platform-hosted deployments the
+    /// unlock operation belongs to the platform Worker, not the executor.
+    /// Callers should check the backend type before calling unlock.
+    fn unlock(&self, _passphrase: &str) -> Result<(), AnyError> {
+        Err(anyhow!(
+            "unlock() not supported on shared wallet backend. \
+             Key management belongs to the platform Worker in shared mode."
+        ))
+    }
+
+    /// Encrypt and clear keys from memory.
+    /// Shared mode: no-op (keys persist server-side).
+    fn lock(&self, _passphrase: &str) {}
+
+    /// Export the keystore encrypted with `passphrase`.
+    /// Shared mode: returns empty string (export not supported remotely).
+    fn export(&self, _passphrase: &str) -> String {
+        String::new()
+    }
+
+    /// Load an encrypted keystore blob (decrypt later with `unlock`).
+    /// Shared mode: no-op (keys managed server-side).
+    fn load(&self, _data: &str) {}
+
+    /// Import a DID's keys by resolving the DID string.
+    /// Default: returns None (shared backends cannot import local key material).
+    /// LocalWallet overrides this to resolve the DID and import its keys.
+    fn initialize_keys(&self, _name: &str, _did: &str) -> Option<did_key::Document> {
+        None
+    }
+}
+
+// ── Global accessor ─────────────────────────────────────────────────────────
+
+static WALLET_BACKEND: OnceCell<Arc<dyn WalletBackend>> = OnceCell::new();
+
+/// Get the global wallet backend. Panics if not initialised.
+pub fn wallet_backend() -> &'static Arc<dyn WalletBackend> {
+    WALLET_BACKEND
+        .get()
+        .expect("wallet backend not initialised")
+}
+
+/// Initialise the global wallet backend. Panics if called twice.
+pub fn init_wallet_backend(backend: Arc<dyn WalletBackend>) {
+    if WALLET_BACKEND.set(backend).is_err() {
+        panic!("wallet backend already initialised");
+    }
+}
+
+/// Try to initialise the global wallet backend. Returns false if already set.
+pub fn try_init_wallet_backend(backend: Arc<dyn WalletBackend>) -> bool {
+    WALLET_BACKEND.set(backend).is_ok()
+}
+
+// ── LocalWallet ─────────────────────────────────────────────────────────────
+
+/// In-process wallet that wraps the existing `Wallet` with interior mutability.
+/// Default backend for standalone / self-hosted executors. Behaviour matches
+/// the original `Wallet::instance()` singleton exactly.
+pub struct LocalWallet {
+    inner: Mutex<Wallet>,
+}
+
+impl Default for LocalWallet {
+    fn default() -> Self {
+        LocalWallet {
+            inner: Mutex::new(Wallet::new()),
+        }
+    }
+}
+
+impl LocalWallet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // ── Local-only operations (not on the trait) ────────────────────────
+
+    /// Export the keystore encrypted with `passphrase`.
+    pub fn export(&self, passphrase: &str) -> String {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.export(passphrase.to_string())
+    }
+
+    /// Load an encrypted keystore blob (decrypt later with `unlock`).
+    pub fn load(&self, data: &str) {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.load(data.to_string());
+    }
+
+    /// Decrypt the keystore with `passphrase`, making keys available.
+    pub fn unlock(&self, passphrase: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.unlock(passphrase.to_string())
+    }
+
+    /// Encrypt and clear keys from memory.
+    pub fn lock(&self, passphrase: &str) {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.lock(passphrase.to_string());
+    }
+
+    /// Check whether the keystore has been decrypted.
+    pub fn is_unlocked(&self) -> bool {
+        let wallet = self.inner.lock().expect("wallet lock");
+        wallet.is_unlocked()
+    }
+
+    /// Import a DID's keys by resolving the DID string. Only succeeds if
+    /// no keys have been loaded yet (same semantics as `Wallet::initialize_keys`).
+    pub fn initialize_keys(&self, name: &str, did: &str) -> Option<did_key::Document> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.initialize_keys(name.to_string(), did.to_string())
+    }
+}
+
+impl WalletBackend for LocalWallet {
+    fn generate_keypair(&self, name: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.generate_keypair(name.to_string());
+        Ok(())
+    }
+
+    fn get_secret_key(&self, name: &str) -> Option<Vec<u8>> {
+        let wallet = self.inner.lock().expect("wallet lock");
+        wallet.get_secret_key(&name.to_string())
+    }
+
+    fn get_public_key(&self, name: &str) -> Option<Vec<u8>> {
+        let wallet = self.inner.lock().expect("wallet lock");
+        wallet.get_public_key(&name.to_string())
+    }
+
+    fn get_did_document(&self, name: &str) -> Option<did_key::Document> {
+        let wallet = self.inner.lock().expect("wallet lock");
+        wallet.get_did_document(&name.to_string())
+    }
+
+    fn sign(&self, name: &str, message: &[u8]) -> Option<Vec<u8>> {
+        let wallet = self.inner.lock().expect("wallet lock");
+        wallet.sign(&name.to_string(), message)
+    }
+
+    fn list_key_names(&self) -> Vec<String> {
+        let wallet = self.inner.lock().expect("wallet lock");
+        wallet.list_key_names()
+    }
+
+    fn key_exists(&self, name: &str) -> bool {
+        let wallet = self.inner.lock().expect("wallet lock");
+        wallet.get_did_document(&name.to_string()).is_some()
+    }
+
+    fn get_or_create_keypair(&self, name: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        if wallet.get_did_document(&name.to_string()).is_none() {
+            wallet.generate_keypair(name.to_string());
+        }
+        Ok(())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn is_unlocked(&self) -> bool {
+        let wallet = self.inner.lock().expect("wallet lock");
+        wallet.is_unlocked()
+    }
+
+    fn unlock(&self, passphrase: &str) -> Result<(), AnyError> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.unlock(passphrase.to_string())
+    }
+
+    fn lock(&self, passphrase: &str) {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.lock(passphrase.to_string());
+    }
+
+    fn export(&self, passphrase: &str) -> String {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.export(passphrase.to_string())
+    }
+
+    fn load(&self, data: &str) {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.load(data.to_string());
+    }
+
+    fn initialize_keys(&self, name: &str, did: &str) -> Option<did_key::Document> {
+        let mut wallet = self.inner.lock().expect("wallet lock");
+        wallet.initialize_keys(name.to_string(), did.to_string())
+    }
+}
+
+// ── SharedWallet ────────────────────────────────────────────────────────────
+
+/// Cached key material fetched from the external wallet service.
+struct CachedKey {
+    secret: Vec<u8>,
+    public: Vec<u8>,
+    fetched_at: std::time::Instant,
+}
+
+/// TTL for cached key material (30 seconds).
+/// Kept short to limit JWT-verification asymmetry during key rotation.
+const SHARED_WALLET_CACHE_TTL_SECS: u64 = 30;
+
+/// Wallet backend that delegates key operations to an external HTTP service.
+/// Used in the hosted platform where multiple executor instances share one
+/// identity store.
+///
+/// Key material fetched over HTTP gets cached in-process with a 30-second TTL.
+/// Signing always happens locally — the secret key bytes come over the wire
+/// but the actual Ed25519 sign operation runs in this process.
+pub struct SharedWallet {
+    base_url: String,
+    token: String,
+    client: reqwest::blocking::Client,
+    cache: RwLock<std::collections::HashMap<String, CachedKey>>,
+}
+
+impl SharedWallet {
+    pub fn new(base_url: String, token: String) -> Self {
+        SharedWallet {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            token,
+            client: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .expect("Failed to build SharedWallet HTTP client"),
+            cache: RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn auth_header(&self) -> String {
+        format!("Bearer {}", self.token)
+    }
+
+    /// Fetch key material from the backend, populating the cache on success.
+    fn fetch_and_cache(&self, name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+        let url = format!("{}/keys/{}", self.base_url, urlencoding::encode(name));
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body: serde_json::Value = resp.json().ok()?;
+        let secret_b64 = body.get("secret")?.as_str()?;
+        let public_b64 = body.get("public")?.as_str()?;
+        let secret = base64::engine::general_purpose::STANDARD
+            .decode(secret_b64.as_bytes())
+            .ok()?;
+        let public = base64::engine::general_purpose::STANDARD
+            .decode(public_b64.as_bytes())
+            .ok()?;
+
+        // Write-through to cache
+        if let Ok(mut cache) = self.cache.write() {
+            cache.insert(
+                name.to_string(),
+                CachedKey {
+                    secret: secret.clone(),
+                    public: public.clone(),
+                    fetched_at: std::time::Instant::now(),
+                },
+            );
+        }
+        Some((secret, public))
+    }
+
+    /// Get key material from cache (if fresh) or fetch from the backend.
+    fn get_key_material(&self, name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+        // Check cache first
+        if let Ok(cache) = self.cache.read() {
+            if let Some(entry) = cache.get(name) {
+                let age = entry.fetched_at.elapsed().as_secs();
+                if age < SHARED_WALLET_CACHE_TTL_SECS {
+                    return Some((entry.secret.clone(), entry.public.clone()));
+                }
+            }
+        }
+        // Cache miss or expired — fetch from backend
+        self.fetch_and_cache(name)
+    }
+}
+
+impl WalletBackend for SharedWallet {
+    fn generate_keypair(&self, name: &str) -> Result<(), AnyError> {
+        let url = format!("{}/keys/{}", self.base_url, urlencoding::encode(name));
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .map_err(|e| anyhow!("shared wallet: generate_keypair failed: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(anyhow!(
+                "shared wallet: generate_keypair returned {}",
+                resp.status()
+            ));
+        }
+        // Write-through: fetch the newly generated key into cache so subsequent
+        // reads in this process hit the local cache instead of an extra round-trip.
+        if self.fetch_and_cache(name).is_none() {
+            log::warn!(
+                "SharedWallet::generate_keypair: write-through cache miss for '{}' \
+                 — key was created but could not be fetched back immediately",
+                name
+            );
+        }
+        Ok(())
+    }
+
+    fn get_secret_key(&self, name: &str) -> Option<Vec<u8>> {
+        self.get_key_material(name).map(|(secret, _)| secret)
+    }
+
+    fn get_public_key(&self, name: &str) -> Option<Vec<u8>> {
+        self.get_key_material(name).map(|(_, public)| public)
+    }
+
+    fn get_did_document(&self, name: &str) -> Option<did_key::Document> {
+        let (secret, public) = self.get_key_material(name)?;
+        let key_pair = did_key::from_existing_key::<Ed25519KeyPair>(&public, Some(&secret));
+        Some(key_pair.get_did_document(did_key::Config::default()))
+    }
+
+    fn sign(&self, name: &str, message: &[u8]) -> Option<Vec<u8>> {
+        let (secret, public) = self.get_key_material(name)?;
+        let key_pair = did_key::from_existing_key::<Ed25519KeyPair>(&public, Some(&secret));
+        Some(key_pair.sign(message))
+    }
+
+    fn list_key_names(&self) -> Vec<String> {
+        let url = format!("{}/keys", self.base_url);
+        let resp = match self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+        {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                log::warn!(
+                    "SharedWallet::list_key_names: HTTP {} from {}",
+                    r.status(),
+                    url
+                );
+                return vec![];
+            }
+            Err(e) => {
+                log::warn!("SharedWallet::list_key_names: request failed: {}", e);
+                return vec![];
+            }
+        };
+        // Worker returns {"keys": ["name1", "name2", ...]}
+        #[derive(serde::Deserialize)]
+        struct KeysResp {
+            keys: Vec<String>,
+        }
+        resp.json::<KeysResp>().map(|r| r.keys).unwrap_or_default()
+    }
+
+    fn key_exists(&self, name: &str) -> bool {
+        // Check cache first
+        if let Ok(cache) = self.cache.read() {
+            if let Some(entry) = cache.get(name) {
+                if entry.fetched_at.elapsed().as_secs() < SHARED_WALLET_CACHE_TTL_SECS {
+                    return true;
+                }
+            }
+        }
+        // Fall back to HTTP — parse the JSON body, not just the status code.
+        // The endpoint returns 200 {"exists": false} for missing keys.
+        let url = format!(
+            "{}/keys/{}/exists",
+            self.base_url,
+            urlencoding::encode(name)
+        );
+        let resp = match self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => return false,
+        };
+        #[derive(serde::Deserialize)]
+        struct ExistsResp {
+            exists: bool,
+        }
+        resp.json::<ExistsResp>().map(|r| r.exists).unwrap_or(false)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //Test the encryption and decryption of a string
@@ -445,5 +909,364 @@ mod tests {
             let result = key_pair.verify(message, sig_bytes);
             assert!(result.is_err());
         }
+    }
+
+    // ── WalletBackend trait tests ───────────────────────────────────────
+
+    #[test]
+    fn test_local_wallet_generate_and_retrieve() {
+        let local = LocalWallet::new();
+        local
+            .generate_keypair("alice")
+            .expect("generate_keypair should succeed");
+
+        assert!(local.key_exists("alice"));
+        assert!(!local.key_exists("bob"));
+        assert!(local.get_secret_key("alice").is_some());
+        assert!(local.get_public_key("alice").is_some());
+        assert!(local.get_secret_key("bob").is_none());
+    }
+
+    #[test]
+    fn test_local_wallet_did_document() {
+        let local = LocalWallet::new();
+        local.generate_keypair("test").expect("generate");
+
+        let doc = local.get_did_document("test");
+        assert!(doc.is_some());
+        let doc = doc.unwrap();
+        assert!(doc.id.starts_with("did:key:"));
+    }
+
+    #[test]
+    fn test_local_wallet_sign_verify_roundtrip() {
+        let local = LocalWallet::new();
+        local.generate_keypair("signer").expect("generate");
+
+        let message = b"hello wallet backend";
+        let sig = local.sign("signer", message);
+        assert!(sig.is_some());
+
+        let sig = sig.unwrap();
+        let doc = local.get_did_document("signer").unwrap();
+        let key_pair =
+            PatchedKeyPair::try_from(doc.id.as_str()).expect("Failed to resolve key pair");
+        assert!(key_pair.verify(message, &sig).is_ok());
+    }
+
+    #[test]
+    fn test_local_wallet_list_key_names() {
+        let local = LocalWallet::new();
+        assert!(local.list_key_names().is_empty());
+
+        local.generate_keypair("a").expect("generate");
+        local.generate_keypair("b").expect("generate");
+
+        let mut names = local.list_key_names();
+        names.sort();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_local_wallet_lock_unlock() {
+        let local = LocalWallet::new();
+        local.generate_keypair("main").expect("generate");
+        assert!(local.is_unlocked());
+
+        local.lock("passphrase");
+        assert!(!local.is_unlocked());
+        assert!(local.get_secret_key("main").is_none());
+
+        local.unlock("passphrase").expect("unlock");
+        assert!(local.is_unlocked());
+        assert!(local.get_secret_key("main").is_some());
+    }
+
+    #[test]
+    fn test_local_wallet_export_load() {
+        let local = LocalWallet::new();
+        local.generate_keypair("test").expect("generate");
+        let exported = local.export("pass");
+        assert!(!exported.is_empty());
+
+        let local2 = LocalWallet::new();
+        local2.load(&exported);
+        local2.unlock("pass").expect("unlock");
+        assert!(local2.key_exists("test"));
+    }
+
+    #[test]
+    fn test_local_wallet_downcast() {
+        let backend: Arc<dyn WalletBackend> = Arc::new(LocalWallet::new());
+        let local = backend.as_any().downcast_ref::<LocalWallet>();
+        assert!(local.is_some());
+    }
+
+    // ── SharedWallet tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_shared_wallet_generate_keypair() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        // POST /keys/test_key → 201 Created
+        let mock_post = server
+            .mock("POST", "/keys/test_key")
+            .match_header("Authorization", "Bearer test-token")
+            .with_status(201)
+            .with_body("{}")
+            .create();
+
+        // GET /keys/test_key → key material (for write-through cache)
+        let secret = base64::engine::general_purpose::STANDARD.encode(&[1u8; 32]);
+        let public = base64::engine::general_purpose::STANDARD.encode(&[2u8; 32]);
+        let mock_get = server
+            .mock("GET", "/keys/test_key")
+            .match_header("Authorization", "Bearer test-token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"secret":"{}","public":"{}"}}"#,
+                secret, public
+            ))
+            .create();
+
+        let wallet = SharedWallet::new(url, "test-token".to_string());
+        wallet
+            .generate_keypair("test_key")
+            .expect("generate should succeed");
+
+        mock_post.assert();
+        mock_get.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_get_key_material_cache() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let secret = base64::engine::general_purpose::STANDARD.encode(&[1u8; 32]);
+        let public = base64::engine::general_purpose::STANDARD.encode(&[2u8; 32]);
+        let mock = server
+            .mock("GET", "/keys/cached_key")
+            .match_header("Authorization", "Bearer tok")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"secret":"{}","public":"{}"}}"#,
+                secret, public
+            ))
+            .expect(1) // Should only be called once — second call uses cache
+            .create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+
+        // First call → network
+        let sk1 = wallet.get_secret_key("cached_key");
+        assert!(sk1.is_some());
+
+        // Second call → cache (within 30s TTL)
+        let sk2 = wallet.get_secret_key("cached_key");
+        assert_eq!(sk1, sk2);
+
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_list_key_names() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("GET", "/keys")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"keys":["main","platform","user@test.com"]}"#)
+            .create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        let names = wallet.list_key_names();
+
+        assert_eq!(names, vec!["main", "platform", "user@test.com"]);
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_list_key_names_error() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server.mock("GET", "/keys").with_status(500).create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        let names = wallet.list_key_names();
+
+        assert!(names.is_empty());
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_key_exists() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock_yes = server
+            .mock("GET", "/keys/main/exists")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"exists":true}"#)
+            .create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        assert!(wallet.key_exists("main"));
+        mock_yes.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_key_not_exists() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock_no = server
+            .mock("GET", "/keys/missing/exists")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"exists":false}"#)
+            .create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        assert!(!wallet.key_exists("missing"));
+        mock_no.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_sign() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        // Generate a real Ed25519 keypair for test
+        let kp = did_key::generate::<Ed25519KeyPair>(None);
+        let public = kp.public_key_bytes();
+        let secret = kp.private_key_bytes();
+
+        let secret_b64 = base64::engine::general_purpose::STANDARD.encode(&secret);
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(&public);
+
+        let mock = server
+            .mock("GET", "/keys/sign_test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"secret":"{}","public":"{}"}}"#,
+                secret_b64, public_b64
+            ))
+            .create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        let sig = wallet.sign("sign_test", b"hello world");
+
+        assert!(sig.is_some());
+        assert!(!sig.unwrap().is_empty());
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_get_did_document() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let kp = did_key::generate::<Ed25519KeyPair>(None);
+        let public = kp.public_key_bytes();
+        let secret = kp.private_key_bytes();
+
+        let secret_b64 = base64::engine::general_purpose::STANDARD.encode(&secret);
+        let public_b64 = base64::engine::general_purpose::STANDARD.encode(&public);
+
+        let mock = server
+            .mock("GET", "/keys/did_test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"secret":"{}","public":"{}"}}"#,
+                secret_b64, public_b64
+            ))
+            .create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        let doc = wallet.get_did_document("did_test");
+
+        assert!(doc.is_some());
+        assert!(doc.unwrap().id.starts_with("did:key:"));
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_generate_keypair_server_error() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("POST", "/keys/fail_key")
+            .with_status(500)
+            .create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        let result = wallet.generate_keypair("fail_key");
+
+        assert!(result.is_err());
+        mock.assert();
+    }
+
+    #[test]
+    fn test_local_wallet_sign_nonexistent_key() {
+        let local = LocalWallet::new();
+        assert!(local.sign("missing", b"data").is_none());
+    }
+
+    #[test]
+    fn test_shared_wallet_list_key_names_server_error() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server.mock("GET", "/keys").with_status(500).create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        let names = wallet.list_key_names();
+        assert!(names.is_empty());
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_key_exists_true() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("GET", "/keys/main/exists")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"exists":true}"#)
+            .create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        assert!(wallet.key_exists("main"));
+        mock.assert();
+    }
+
+    #[test]
+    fn test_shared_wallet_key_exists_false() {
+        let mut server = mockito::Server::new();
+        let url = server.url();
+
+        let mock = server
+            .mock("GET", "/keys/missing/exists")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"exists":false}"#)
+            .create();
+
+        let wallet = SharedWallet::new(url, "tok".to_string());
+        assert!(!wallet.key_exists("missing"));
+        mock.assert();
     }
 }

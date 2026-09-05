@@ -10,6 +10,7 @@ pub mod helpers;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
+pub mod perspective_snapshot;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
@@ -17,13 +18,14 @@ pub mod sfu;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
-mod wallet;
+pub mod wallet;
 
 pub mod agent;
 pub mod ai_service;
 pub mod billing;
 mod dapp_server;
 pub mod db;
+pub mod db_backend;
 pub mod init;
 pub mod languages;
 pub mod logging;
@@ -188,18 +190,15 @@ async fn holochain_signal_receiver() {
                     // languages that want direct-signal support can wire it
                     // in later via a dedicated handler.
                     //
-                    // Matched explicitly rather than falling through the
-                    // wildcard so any *future* Signal variant surfaces as a
-                    // real unhandled-variant log line instead of being silently
-                    // rebranded as an AppDirect. (Data's PR #907 review MED-4.)
+                    // Matched explicitly so any *future* Signal variant
+                    // surfaces as an unhandled-variant compile error instead
+                    // of being silently rebranded as an AppDirect.
+                    // (Data's PR #907 review MED-4.)
                     Signal::AppDirect { .. } => {
                         log::debug!(
                             "Received Signal::AppDirect (HC 0.7 direct peer signal; \
                              not routed to per-language handlers)"
                         );
-                    }
-                    _ => {
-                        log::debug!("Received unhandled Holochain signal variant: {:?}", signal);
                     }
                 }
             } else {
@@ -222,11 +221,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     unsafe {
         let mut action: sigaction = std::mem::zeroed();
         action.sa_flags = SA_ONSTACK;
-        action.sa_sigaction = handle_sigurg as sighandler_t;
+        action.sa_sigaction = handle_sigurg as *const () as sighandler_t;
         sigemptyset(&mut action.sa_mask);
 
         if libc::sigaction(SIGURG, &action, ptr::null_mut()) != 0 {
-            eprintln!("Failed to set up SIGURG signal handler");
+            error!("Failed to set up SIGURG signal handler");
         }
     }
 
@@ -306,6 +305,87 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it
     crate::config::set_global_config(config.clone());
+
+    // Initialise the wallet backend based on config.
+    // "shared" mode connects to an external HTTP wallet service;
+    // everything else (including unset) uses the in-process LocalWallet.
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::wallet::WalletBackend> = match config.wallet_backend.as_deref()
+        {
+            Some("shared") => {
+                let url = config
+                    .wallet_backend_url
+                    .as_ref()
+                    .expect("WALLET_BACKEND_URL required when wallet_backend = shared");
+                let token = config
+                    .internal_api_token
+                    .as_ref()
+                    .expect("INTERNAL_API_TOKEN required for shared backends");
+                info!("Initialising shared wallet backend at {}", url);
+                Arc::new(crate::wallet::SharedWallet::new(url.clone(), token.clone()))
+            }
+            _ => {
+                info!("Initialising local wallet backend");
+                Arc::new(crate::wallet::LocalWallet::new())
+            }
+        };
+        crate::wallet::init_wallet_backend(backend);
+    }
+
+    // Initialise the database backend.
+    // "shared" mode delegates to the platform Worker's internal DB API;
+    // everything else uses the in-process Ad4mDb (LocalDb).
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::db_backend::DbBackend> = match config.db_backend.as_deref() {
+            Some("shared") => {
+                let url = config
+                    .db_backend_url
+                    .as_ref()
+                    .expect("DB_BACKEND_URL required when db_backend = shared");
+                let token = config
+                    .internal_api_token
+                    .as_ref()
+                    .expect("INTERNAL_API_TOKEN required for shared backends");
+                info!("Initialising shared database backend at {}", url);
+                Arc::new(crate::db_backend::SharedDb::new(url.clone(), token.clone()))
+            }
+            _ => {
+                info!("Initialising local database backend");
+                Arc::new(crate::db_backend::LocalDb::new())
+            }
+        };
+        crate::db_backend::init_db_backend(backend);
+    }
+
+    // Restore perspective data from the platform backend if running in shared mode.
+    // Downloads the tar.gz snapshot and extracts to the data directory
+    // before perspectives initialise (so OxiGraph opens with restored data).
+    if config.wallet_backend.as_deref() == Some("shared") {
+        match crate::perspective_snapshot::restore_perspectives(&config) {
+            Ok(true) => info!("Restored perspectives from remote snapshot"),
+            Ok(false) => info!("No remote snapshot found — starting with fresh perspectives"),
+            Err(e) => log::warn!("Perspective restore failed (continuing without): {}", e),
+        }
+    }
+
+    // ── Token separation assertion ──────────────────────────────────────
+    // internal_api_token (executor → Worker) must differ from admin_credential
+    // (client → executor) to maintain trust boundary separation. Same value
+    // means compromise of any admin-capable client leaks platform-internal auth.
+    if config.wallet_backend.as_deref() == Some("shared") {
+        if let (Some(internal), Some(admin)) =
+            (&config.internal_api_token, &config.admin_credential)
+        {
+            if internal == admin {
+                panic!(
+                    "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
+                     Using the same value collapses two trust boundaries."
+                );
+            }
+        }
+    }
 
     // Create data directories that were previously created by the JS executor's Config.init().
     // These must exist before any service tries to write to them.
@@ -492,6 +572,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();
+
+    // Start periodic perspective snapshots in shared mode.
+    if config.wallet_backend.as_deref() == Some("shared") {
+        crate::perspective_snapshot::spawn_periodic_backup(config.clone());
+    }
 
     // Start periodic memory diagnostics (logs RSS, jemalloc stats,
     // per-perspective data structure sizes every 30s).

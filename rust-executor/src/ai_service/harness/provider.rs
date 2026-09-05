@@ -312,6 +312,75 @@ pub fn is_read_only(t: &ToolSchema) -> bool {
     t.side_effect == SideEffect::Read
 }
 
+// ── hint buffer ───────────────────────────────────────────────────────────
+
+/// Per-pass accumulator for hints emitted by `_propose_*` tool calls.
+/// Cloneable `Arc` so the ToolProvider decorator (which the harness owns
+/// for the duration of the loop) and the engine (which drains at pass end)
+/// hold independent references. Instantiated as
+/// [`super::propose::ProposalBuffer`] (SHACL-instance writes) and
+/// [`super::flow_propose::FlowProposalBuffer`] (flow-transition hints).
+///
+/// The mutex is only held during a single push/drain — tool calls are
+/// serialised through the harness loop anyway, so contention is nil.
+#[derive(Debug)]
+pub struct HintBuffer<T> {
+    inner: Arc<std::sync::Mutex<Vec<T>>>,
+}
+
+// Manual impls: derives would put `T: Clone` / `T: Default` bounds on the
+// generic that the `Arc<Mutex<Vec<T>>>` field doesn't need.
+impl<T> Clone for HintBuffer<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T> Default for HintBuffer<T> {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+        }
+    }
+}
+
+impl<T> HintBuffer<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Recover-on-poison lock: if the mutex was poisoned by an earlier panic
+    /// during dispatch, take the guard anyway. The inner `Vec<T>` holds plain
+    /// data records — a panic mid-`push` can't have left it in a torn state,
+    /// only in whatever state it was in when the panic fired. Continuing the
+    /// pass on that data is strictly better than escalating to a hard abort
+    /// of every subsequent tool call in the same run (Lal's PR #911 review).
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<T>> {
+        self.inner.lock().unwrap_or_else(|poisoned| {
+            log::warn!(
+                "harness: hint-buffer mutex was poisoned by an earlier panic; \
+                 continuing with the recovered inner data ({} item(s) so far)",
+                poisoned.get_ref().len()
+            );
+            poisoned.into_inner()
+        })
+    }
+
+    pub fn push(&self, item: T) {
+        self.lock().push(item);
+    }
+
+    pub fn drain(&self) -> Vec<T> {
+        std::mem::take(&mut *self.lock())
+    }
+
+    pub fn len(&self) -> usize {
+        self.lock().len()
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -685,5 +754,35 @@ mod tests {
             .expect("call succeeds");
         let calls = inner.recorded_calls();
         assert_eq!(calls[0].1["perspective_id"], "uuid-under-test");
+    }
+
+    #[test]
+    fn hint_buffer_recovers_from_poisoned_mutex() {
+        // Poison the mutex by triggering a panic inside a lock scope, then
+        // confirm subsequent operations still work with the original data
+        // intact. Regression against Lal's PR #911 review (propose.rs:56):
+        // the earlier `.expect("poisoned")` cascaded a single flaky tool
+        // panic into a hard abort of every subsequent tool call and the
+        // drain-then-apply block. Recovering the guard on poison keeps the
+        // pass alive.
+        let buf: HintBuffer<String> = HintBuffer::new();
+        buf.push("pre-poison".to_string());
+        // Poison it: acquire the lock in a scope that panics.
+        let inner_arc = buf.inner.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = inner_arc.lock().unwrap();
+            panic!("simulated flaky tool");
+        });
+        assert!(
+            buf.inner.is_poisoned(),
+            "test setup: mutex should be poisoned"
+        );
+        // These would have panicked before the recovery fix.
+        assert_eq!(buf.len(), 1, "recovered data must still be visible");
+        buf.push("post-poison".to_string());
+        assert_eq!(buf.len(), 2);
+        let drained = buf.drain();
+        assert_eq!(drained, vec!["pre-poison", "post-poison"]);
+        assert_eq!(buf.len(), 0, "drain must have consumed the items");
     }
 }

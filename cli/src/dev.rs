@@ -61,11 +61,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
-                    sfu_local_did: None,
-                    sfu_max_participants_per_node: None,
-                    sfu_cascade_listen: None,
-                    sfu_cascade_peers: None,
-                    sfu_bind_addr: None,
+                    ..Default::default()
                 })
                 .await
                 .join()
@@ -221,11 +217,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
-                    sfu_local_did: None,
-                    sfu_max_participants_per_node: None,
-                    sfu_cascade_listen: None,
-                    sfu_cascade_peers: None,
-                    sfu_bind_addr: None,
+                    ..Default::default()
                 })
                 .await
                 .join()

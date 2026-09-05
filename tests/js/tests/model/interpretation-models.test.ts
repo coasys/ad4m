@@ -30,7 +30,15 @@ import { startAgent } from "../../helpers/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @Model", function () {
+// LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
+// default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
+// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// `./scripts/run-llm-e2e.sh` at the repo root.
+const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
+  ? describe
+  : (describe.skip as unknown as Mocha.SuiteFunction));
+
+describeIfLLM("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @Model", function () {
   this.timeout(120_000);
 
   let ad4m: Ad4mClient;

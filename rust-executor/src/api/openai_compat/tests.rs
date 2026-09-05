@@ -1,8 +1,5 @@
 use super::audio::{audio_decode, decode_pcm_wav};
-use super::billing_amounts::{
-    chat_or_completion_amount, embedding_amount, speech_amount, stream_prompt_amount,
-    MIN_PROMPT_BILL,
-};
+use super::billing_amounts::speech_amount;
 use super::errors::OpenAIError;
 use super::realtime::pcm16_to_f32;
 use super::types::*;
@@ -428,61 +425,11 @@ fn estimate_token_count_counts_unicode_scalars_not_bytes() {
 // Billing: per-endpoint amount formulas
 // ---------------------------------------------------------------------------
 //
-// Every /v1 endpoint that debits credits routes its amount through
-// `billing_amounts` — the handlers no longer inline formulas. Tests below
-// pin the exact formula per endpoint so a silent change to billing math
-// is caught before it hits production.
+// Handler-level formulas in `billing_amounts` are pinned here so a silent
+// change to billing math is caught before it hits production.
+// (Chat — streaming and non-streaming — and embeddings are billed by
+// `AIService` via host_rates; see `stream_completion_bills_once_on_success`.)
 // ---------------------------------------------------------------------------
-
-#[test]
-fn chat_amount_zero_tokens_floors_to_minimum() {
-    // An "empty" prompt still bills a floor amount so the request shows
-    // up in the compute log at all (invariant: MIN_PROMPT_BILL).
-    assert!((chat_or_completion_amount(0, 0) - MIN_PROMPT_BILL).abs() < f64::EPSILON);
-}
-
-#[test]
-fn chat_amount_proportional_above_floor() {
-    // Below the 1000-token bucket → still floored.
-    let a = chat_or_completion_amount(100, 100);
-    assert!(a >= MIN_PROMPT_BILL);
-    assert!(a > 0.199 && a < 0.201, "200 tokens → 0.2 credits, got {a}");
-
-    // Exactly at the bucket boundary.
-    assert!((chat_or_completion_amount(500, 500) - 1.0).abs() < 1e-12);
-
-    // Above the bucket → scales linearly.
-    assert!((chat_or_completion_amount(1500, 2500) - 4.0).abs() < 1e-12);
-}
-
-#[test]
-fn chat_amount_scaling_is_linear() {
-    // 10× the tokens → 10× the amount (once above the floor).
-    let ten_k = chat_or_completion_amount(5_000, 5_000);
-    let hundred_k = chat_or_completion_amount(50_000, 50_000);
-    assert!((hundred_k - 10.0 * ten_k).abs() < 1e-9);
-}
-
-#[test]
-fn stream_prompt_amount_is_flat_one() {
-    // Streaming path bills a flat 1.0 today because Kalosm's stream API
-    // doesn't yield per-token counts. Locked in so any switch to
-    // proportional streaming billing is a deliberate, tested change.
-    assert!((stream_prompt_amount() - 1.0).abs() < f64::EPSILON);
-}
-
-#[test]
-fn embedding_amount_per_vector() {
-    // Batch of N inputs bills N credits — fair scaling for callers who
-    // batch to reduce round-trips.
-    assert!(
-        (embedding_amount(0) - 1.0).abs() < f64::EPSILON,
-        "min-one floor"
-    );
-    assert!((embedding_amount(1) - 1.0).abs() < f64::EPSILON);
-    assert!((embedding_amount(5) - 5.0).abs() < f64::EPSILON);
-    assert!((embedding_amount(100) - 100.0).abs() < f64::EPSILON);
-}
 
 #[test]
 fn speech_amount_per_thousand_chars() {
@@ -617,7 +564,7 @@ fn init_test_db() {
         // If a prior init attempt panicked, the mutex may be poisoned.
         // Recover by taking the poisoned inner value.
         let arc = crate::db::Ad4mDb::global_instance();
-        let mut guard = match arc.lock() {
+        let guard = match arc.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -1018,6 +965,201 @@ async fn chat_completions_stream_does_not_bill_at_setup() {
     assert!(
         calls.is_empty(),
         "streaming chat setup should defer billing to end-of-stream; got calls: {calls:?}"
+    );
+    test_seam::reset();
+}
+
+// ---------------------------------------------------------------------------
+// Streaming billing forwarder: the missing charge is the whole point of
+// this section. On success the stream must bill exactly once (same shape
+// as the non-stream path: ai_prompt, prompt+completion tokens, host-rate
+// priced); on error it must not bill at all. The forwarder is exercised
+// directly (no live LLM channel needed in unit tests).
+// ---------------------------------------------------------------------------
+
+use crate::ai_service::{AIService, PromptResult};
+
+/// Ensure the global wallet has a "main" keypair (decode_jwt signs and
+/// verifies with it) and return a user JWT whose `sub` is `email`.
+///
+/// Mints against the *current* global "main" key. Safe under the project's
+/// single-threaded test convention (`--test-threads=1`, see package.json);
+/// a parallel test rotating the key via `test_utils::setup_wallet()`
+/// between mint and decode would break verification.
+fn user_jwt_token(email: &str) -> String {
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    // Use the trait-based wallet_backend (same path as decode_jwt) so the
+    // signing and verification keys match.
+    let local = std::sync::Arc::new(crate::wallet::LocalWallet::new());
+    let _ = crate::wallet::try_init_wallet_backend(
+        local as std::sync::Arc<dyn crate::wallet::WalletBackend>,
+    );
+    crate::config::set_global_config(crate::config::Ad4mConfig::default());
+
+    let backend = crate::wallet::wallet_backend();
+    let key_name = crate::agent::capabilities::token::signing_key_name();
+    if !backend.key_exists(&key_name) {
+        backend
+            .generate_keypair(&key_name)
+            .expect("generate signing key");
+    }
+    let secret = backend
+        .get_secret_key(&key_name)
+        .expect("signing key must exist");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    encode(
+        &Header::default(),
+        &serde_json::json!({
+            "iss": "ad4m-test",
+            "sub": email,
+            "aud": "ad4m-test",
+            "exp": now + 3600,
+            "iat": now,
+            "nonce": "test-nonce",
+            "capabilities": { "appName": "test", "appDesc": "test" },
+        }),
+        &EncodingKey::from_secret(secret.as_slice()),
+    )
+    .unwrap()
+}
+
+fn sample_prompt_result() -> PromptResult {
+    PromptResult {
+        text: "hello world".to_string(),
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        model_id: "gpt-4".to_string(),
+    }
+}
+
+/// Restores multi-user mode + host rates on drop, so a panicking
+/// assertion can't leak settings into the rest of the test binary (the
+/// global in-memory DB is shared across all tests).
+struct DbSettingsGuard {
+    prev_multi_user: bool,
+    prev_rates: Vec<(String, f64)>,
+}
+
+impl DbSettingsGuard {
+    fn set(multi_user: bool, rates: &[(String, f64)]) -> Self {
+        let prev_multi_user = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled().unwrap_or(false)
+        });
+        let prev_rates =
+            crate::db::Ad4mDb::with_global_instance(|db| db.get_host_rates().unwrap_or_default());
+        let _ = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(multi_user)?;
+            db.set_host_rates(rates)
+        });
+        Self {
+            prev_multi_user,
+            prev_rates,
+        }
+    }
+}
+
+impl Drop for DbSettingsGuard {
+    fn drop(&mut self) {
+        let _ = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(self.prev_multi_user)?;
+            db.set_host_rates(&self.prev_rates)
+        });
+    }
+}
+
+#[tokio::test]
+async fn stream_completion_bills_once_on_success() {
+    init_test_db();
+    test_seam::reset();
+    test_seam::force_result(test_seam::ForcedResult::Success);
+
+    // bill_prompt_if_authed needs multi-user mode on + a user JWT, and
+    // bill_ai_operation needs a priced model. The guard restores both even
+    // if an assertion below panics.
+    let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
+
+    let token = user_jwt_token("billing-user@ex.test");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    AIService::bill_and_forward_stream_result(Some(token), "gpt-4", Ok(sample_prompt_result()), tx)
+        .await;
+    let forwarded = rx.await.unwrap().unwrap();
+    assert_eq!(forwarded.text, "hello world");
+    assert_eq!(forwarded.prompt_tokens, 10);
+    assert_eq!(forwarded.completion_tokens, 5);
+
+    let calls = test_seam::calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "stream completion must bill exactly once; got calls: {calls:?}"
+    );
+    assert_eq!(calls[0].email, "billing-user@ex.test");
+    assert!(
+        (calls[0].amount - 7.5).abs() < f64::EPSILON,
+        "15 tokens @ 0.5"
+    );
+    assert_eq!(calls[0].operation, "ai_prompt");
+    assert_eq!(
+        calls[0].summary.as_deref(),
+        Some("15 tokens (model: gpt-4)")
+    );
+
+    test_seam::reset();
+}
+
+#[tokio::test]
+async fn stream_error_does_not_bill() {
+    init_test_db();
+    test_seam::reset();
+    test_seam::force_result(test_seam::ForcedResult::Success);
+
+    // Multi-user mode + a priced model are enabled on purpose: the only
+    // thing that must stop billing here is the Err gate. Without this, the
+    // skip would come from the missing user email and the test would pass
+    // even if error streams did bill.
+    let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
+
+    // A valid user token is passed on purpose: the skip must come from
+    // the Err gate, not from token absence (matches prompt_messages, which
+    // bills only after a successful prompt).
+    let result: Result<PromptResult, anyhow::Error> = Err(anyhow::anyhow!("inference failed"));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    AIService::bill_and_forward_stream_result(
+        Some(user_jwt_token("billing-user@ex.test")),
+        "gpt-4",
+        result,
+        tx,
+    )
+    .await;
+    let err = rx.await.unwrap().unwrap_err();
+    assert_eq!(err.to_string(), "inference failed");
+
+    assert!(
+        test_seam::calls().is_empty(),
+        "failed streams must not bill; got calls: {:?}",
+        test_seam::calls()
+    );
+    test_seam::reset();
+}
+
+#[tokio::test]
+async fn stream_without_token_does_not_bill() {
+    init_test_db();
+    test_seam::reset();
+    test_seam::force_result(test_seam::ForcedResult::Success);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    AIService::bill_and_forward_stream_result(None, "gpt-4", Ok(sample_prompt_result()), tx).await;
+    let forwarded = rx.await.unwrap().unwrap();
+    assert_eq!(forwarded.text, "hello world");
+
+    assert!(
+        test_seam::calls().is_empty(),
+        "unauthenticated streams must not bill; got calls: {:?}",
+        test_seam::calls()
     );
     test_seam::reset();
 }

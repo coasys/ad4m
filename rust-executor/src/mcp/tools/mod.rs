@@ -271,8 +271,6 @@ impl Ad4mMcpHandler {
             .with_route((Self::get_flows_tool_attr(), Self::get_flows))
             .with_route((Self::flow_state_tool_attr(), Self::flow_state))
             .with_route((Self::flow_actions_tool_attr(), Self::flow_actions))
-            .with_route((Self::flow_start_tool_attr(), Self::flow_start))
-            .with_route((Self::flow_run_action_tool_attr(), Self::flow_run_action))
             // auth.rs
             .with_route((Self::login_email_tool_attr(), Self::login_email))
             .with_route((
@@ -451,8 +449,9 @@ impl Ad4mMcpHandler {
     /// perspective ownership. This prevents unauthenticated clients from reading main-agent
     /// perspectives by exploiting the "no JWT → main agent context" fallback.
     ///
-    /// In single-user mode (no admin_credential), behaviour mirrors REST: local trust model,
-    /// unauthenticated access is allowed (same as GQL localhost behaviour).
+    /// In single-user mode (no admin_credential), behaviour mirrors the rest of the executor's
+    /// public API: local trust model, unauthenticated access is allowed (same as the WS-RPC
+    /// localhost behaviour).
     pub(crate) async fn get_readable_perspective(
         &self,
         perspective_id: &str,

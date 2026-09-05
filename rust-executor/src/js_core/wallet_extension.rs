@@ -3,7 +3,7 @@ use deno_core::{anyhow::anyhow, op2};
 use serde::{Deserialize, Serialize};
 
 use crate::js_core::error::AnyhowWrapperError;
-use crate::wallet::Wallet;
+use crate::wallet::wallet_backend;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -16,15 +16,13 @@ pub struct Key {
 #[op2]
 #[serde]
 fn wallet_get_main_key() -> Result<Key, AnyhowWrapperError> {
-    let wallet_instance = Wallet::instance();
-    let wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_ref().expect("wallet instance");
-    let name = "main".to_string();
-    let public_key = wallet_ref
-        .get_public_key(&name)
+    let backend = wallet_backend();
+    let name = "main";
+    let public_key = backend
+        .get_public_key(name)
         .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
-    let private_key = wallet_ref
-        .get_secret_key(&name)
+    let private_key = backend
+        .get_secret_key(name)
         .ok_or(anyhow!("main key not found. call createMainKey() first"))?;
     Ok(Key {
         public_key: base64engine::STANDARD.encode(public_key),
@@ -36,12 +34,9 @@ fn wallet_get_main_key() -> Result<Key, AnyhowWrapperError> {
 #[op2]
 #[serde]
 fn wallet_get_main_key_document() -> Result<did_key::Document, AnyhowWrapperError> {
-    let wallet_instance = Wallet::instance();
-    let wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_ref().expect("wallet instance");
-    let name = "main".to_string();
-    wallet_ref
-        .get_did_document(&name)
+    let backend = wallet_backend();
+    backend
+        .get_did_document("main")
         .ok_or(AnyhowWrapperError::from(anyhow!(
             "main key not found. call createMainKey() first"
         )))
@@ -50,58 +45,47 @@ fn wallet_get_main_key_document() -> Result<did_key::Document, AnyhowWrapperErro
 #[op2]
 #[serde]
 fn wallet_create_main_key() -> Result<(), AnyhowWrapperError> {
-    let wallet_instance = Wallet::instance();
-    let mut wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_mut().expect("wallet instance");
-    wallet_ref.generate_keypair("main".to_string());
-    Ok(())
+    let backend = wallet_backend();
+    backend
+        .generate_keypair("main")
+        .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(fast)]
 fn wallet_is_unlocked() -> Result<bool, AnyhowWrapperError> {
-    let wallet_instance = Wallet::instance();
-    let wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_ref().expect("wallet instance");
-    Ok(wallet_ref.is_unlocked())
+    let backend = wallet_backend();
+    Ok(backend.is_unlocked())
 }
 
 #[op2]
 #[serde]
 fn wallet_unlock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
-    let wallet_instance = Wallet::instance();
-    let mut wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_mut().expect("wallet instance");
-    wallet_ref
-        .unlock(passphrase)
+    let backend = wallet_backend();
+    backend
+        .unlock(&passphrase)
         .map_err(AnyhowWrapperError::from)
 }
 
 #[op2]
 #[serde]
 fn wallet_lock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
-    let wallet_instance = Wallet::instance();
-    let mut wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_mut().expect("wallet instance");
-    wallet_ref.lock(passphrase);
+    let backend = wallet_backend();
+    backend.lock(&passphrase);
     Ok(())
 }
 
 #[op2]
 #[string]
 fn wallet_export(#[string] passphrase: String) -> Result<String, AnyhowWrapperError> {
-    let wallet_instance = Wallet::instance();
-    let mut wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_mut().expect("wallet instance");
-    Ok(wallet_ref.export(passphrase))
+    let backend = wallet_backend();
+    Ok(backend.export(&passphrase))
 }
 
 #[op2]
 #[serde]
 fn wallet_load(#[string] data: String) -> Result<(), AnyhowWrapperError> {
-    let wallet_instance = Wallet::instance();
-    let mut wallet = wallet_instance.lock().expect("wallet lock");
-    let wallet_ref = wallet.as_mut().expect("wallet instance");
-    wallet_ref.load(data);
+    let backend = wallet_backend();
+    backend.load(&data);
     Ok(())
 }
 

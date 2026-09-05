@@ -37,8 +37,33 @@ describe("Authentication integration tests", () => {
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
                 apiPort, hcAdminPort, hcAppPort);
 
-            ad4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
-            await ad4mClient.agent.generate("passphrase")
+            // Retry the very first RPC call on a fresh connection.
+            //
+            // Observed flake (2026-09-02): the executor's readiness marker
+            // (which startExecutor already waited for above) can fire
+            // slightly before the WS upgrade path is actually stable under
+            // CI resource pressure (multiple parallel ci-workdir executors
+            // competing for CPU) — the socket opens, this first call goes
+            // out, then the connection drops before a reply arrives,
+            // surfacing as `RpcError 503: WebSocket connection closed`.
+            // mocha's `this.retries()` doesn't retry `before()` hooks, so
+            // retry manually here instead. A fresh Ad4mClient per attempt
+            // avoids relying on the previous instance's half-torn-down
+            // socket/reconnect state.
+            let lastErr: unknown
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                ad4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
+                try {
+                    await ad4mClient.agent.generate("passphrase")
+                    lastErr = null
+                    break
+                } catch (e) {
+                    lastErr = e
+                    console.log(`agent.generate attempt ${attempt}/3 failed, retrying:`, e)
+                    await sleep(1000)
+                }
+            }
+            if (lastErr) throw lastErr
         })
 
         after(async () => {

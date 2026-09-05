@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod errors;
 pub mod events_ws;
+pub mod internal;
 pub mod openai_compat;
 pub mod types;
 pub mod ws_rpc;
@@ -83,7 +84,9 @@ pub fn api_router(state: AppState) -> Router {
                 }))
             }),
         )
-        .route("/health", get(|| async { Json(json!({"status": "ok"})) }));
+        .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
+        // Internal platform → executor endpoint (INTERNAL_API_TOKEN auth)
+        .route("/internal/shutdown", post(internal::internal_shutdown));
 
     // Build the WS handler map once at startup
     let handler_map = Arc::new(ws_handler::build_handler_map());

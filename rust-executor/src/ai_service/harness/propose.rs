@@ -28,58 +28,15 @@ use crate::types::Link;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use uuid::Uuid;
 
 // ── buffer ────────────────────────────────────────────────────────────────
 
-/// Per-pass accumulator for InterpretationOps emitted by `_propose_*` tool
-/// calls. Cloneable Arc so the ToolProvider (which the harness owns for
-/// the duration of the loop) and the engine (which drains at pass end)
-/// hold independent references.
-///
-/// The mutex is only held during a single push/drain — tool calls are
-/// serialised through the harness loop anyway, so contention is nil.
-#[derive(Debug, Clone, Default)]
-pub struct ProposalBuffer {
-    inner: Arc<Mutex<Vec<InterpretationOp>>>,
-}
-
-impl ProposalBuffer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Recover-on-poison lock: if the mutex was poisoned by an earlier panic
-    /// during dispatch, take the guard anyway. The inner `Vec<InterpretationOp>`
-    /// is a plain data structure — a panic mid-`push` can't have left it in a
-    /// torn state, only in whatever state it was in when the panic fired.
-    /// Continuing the pass on that data is strictly better than escalating to
-    /// a hard abort of every subsequent tool call in the same run (Lal's
-    /// PR #911 review, propose.rs:56).
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<InterpretationOp>> {
-        self.inner.lock().unwrap_or_else(|poisoned| {
-            log::warn!(
-                "harness: ProposalBuffer mutex was poisoned by an earlier panic; \
-                 continuing with the recovered inner data ({} op(s) so far)",
-                poisoned.get_ref().len()
-            );
-            poisoned.into_inner()
-        })
-    }
-
-    pub fn push(&self, op: InterpretationOp) {
-        self.lock().push(op);
-    }
-
-    pub fn drain(&self) -> Vec<InterpretationOp> {
-        std::mem::take(&mut *self.lock())
-    }
-
-    pub fn len(&self) -> usize {
-        self.lock().len()
-    }
-}
+/// Per-pass accumulator for [`InterpretationOp`]s emitted by `_propose_*`
+/// tool calls. The engine drains it at pass end and hands the ops to
+/// `apply_with_overlay`.
+pub type ProposalBuffer = super::provider::HintBuffer<InterpretationOp>;
 
 // ── per-class shape ───────────────────────────────────────────────────────
 
@@ -1557,43 +1514,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn proposal_buffer_recovers_from_poisoned_mutex() {
-        // Poison the mutex by triggering a panic inside a lock scope, then
-        // confirm subsequent operations still work with the original data
-        // intact. Regression against Lal's PR #911 review (propose.rs:56):
-        // the earlier `.expect("poisoned")` cascaded a single flaky tool
-        // panic into a hard abort of every subsequent tool call and the
-        // drain-then-apply block. Recovering the guard on poison keeps the
-        // pass alive.
-        let buf = ProposalBuffer::new();
-        buf.push(InterpretationOp::Create {
-            base: "ns://test/task/pre-poison".into(),
-            class: "Task".into(),
-            values: serde_json::Map::new(),
-        });
-        // Poison it: acquire the lock in a scope that panics.
-        let inner_arc = buf.inner.clone();
-        let _ = std::panic::catch_unwind(move || {
-            let _guard = inner_arc.lock().unwrap();
-            panic!("simulated flaky tool");
-        });
-        assert!(
-            buf.inner.is_poisoned(),
-            "test setup: mutex should be poisoned"
-        );
-        // These would have panicked before the recovery fix.
-        assert_eq!(buf.len(), 1, "recovered data must still be visible");
-        buf.push(InterpretationOp::Create {
-            base: "ns://test/task/post-poison".into(),
-            class: "Task".into(),
-            values: serde_json::Map::new(),
-        });
-        assert_eq!(buf.len(), 2);
-        let drained = buf.drain();
-        assert_eq!(drained.len(), 2, "drain must succeed post-poison");
-        assert_eq!(buf.len(), 0, "drain must have consumed the ops");
-    }
+    // NOTE: the buffer's poison-recovery regression test (Lal's PR #911
+    // review) lives with the generic implementation:
+    // `provider::tests::hint_buffer_recovers_from_poisoned_mutex`.
 
     #[tokio::test]
     async fn propose_link_child_schema_carries_relation_interpretation_hint() {

@@ -17,6 +17,7 @@ import {
   BelongsToOne,
   BelongsToMany,
 } from "./decorators";
+import { SHACLShape } from "../shacl/SHACLShape";
 
 function flatten(
   shape: any,
@@ -324,5 +325,41 @@ describe("Decorators → SHACL writer round-trip", () => {
     expect(rebuiltTitle.interpretationHint).toBe(
       "Imperative summary of the work.",
     );
+  });
+
+  it("round-trips ordering through toLinks/fromLinks", () => {
+    @Model({ name: "OrderedItem" })
+    class OrderedItem extends Ad4mModel {}
+
+    @Model({ name: "OrderedHolder" })
+    class OrderedHolder extends Ad4mModel {
+      @HasMany({
+        through: "ns://ordered",
+        target: () => OrderedItem,
+        ordering: { strategy: "linkedList" },
+      })
+      ordered: string[] = [];
+    }
+
+    const { shape } = OrderedHolder.generateSHACL();
+    const links = shape.toLinks();
+
+    // Pin the wire format itself.  `ordering` is the one relation field the
+    // read path recovers by stripping a prefix off the target rather than by
+    // parsing a typed literal, so a change to how the writer spells it would
+    // otherwise surface as the executor silently seeing no strategy.
+    expect(
+      findLinkTarget(
+        flatten(shape),
+        "ns://OrderedHolder.ordered",
+        "ad4m://ordering",
+      ),
+    ).toBe("literal:string:linkedList");
+
+    const rebuilt = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+    const rebuiltProp = rebuilt.properties.find(
+      (p: any) => p.name === "ordered",
+    );
+    expect(rebuiltProp?.ordering).toBe("linkedList");
   });
 });

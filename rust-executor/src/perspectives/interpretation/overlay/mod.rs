@@ -44,9 +44,7 @@ mod classes;
 mod gate;
 mod write;
 
-pub(crate) use accept::{
-    accept_interpretation, list_overlays, overlay_of, reject_interpretation, OverlayView,
-};
+pub(crate) use accept::{accept_interpretation, list_overlays, reject_interpretation};
 pub use classes::InterpretationRunCursor;
 pub(crate) use classes::{
     ensure_interpretation_overlay_classes, mint_interpretation_run, InterpretationRunMeta,

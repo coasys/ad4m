@@ -863,15 +863,22 @@ impl PrologEnginePool {
                                 entry.reference_count.fetch_sub(1, Ordering::Relaxed);
                                 return result;
                             } else {
-                                log::warn!("🚀 QUERY ROUTING: Filtered pool not found after creation attempt, using complete pool");
+                                // Benign fallback — filtered pool was
+                                // evicted or the raced creator finished
+                                // ahead of us. Falling back to the complete
+                                // pool is safe and correct.
+                                log::debug!("📚 🚀 QUERY ROUTING: filtered pool not found after creation attempt, using complete pool");
                             }
                         }
                         Err(e) => {
-                            // Check if this is a race condition error - these are expected and should not be logged as errors
+                            // Race-condition path is explicitly expected;
+                            // don't log as a warn/error. Anything else is
+                            // still a benign fallback — we always drop back
+                            // to the complete pool, which is correct.
                             if e.to_string().contains("RACE CONDITION PREVENTED") {
-                                log::warn!("🚀 QUERY ROUTING: Race condition prevented filtered pool creation for source '{}', safely falling back to complete pool: {}", source_filter, e);
+                                log::debug!("📚 🚀 QUERY ROUTING: race condition prevented filtered pool creation for source '{}', safely falling back to complete pool: {}", source_filter, e);
                             } else {
-                                log::warn!("🚀 QUERY ROUTING: Failed to create filtered pool for source '{}', falling back to complete pool: {}", source_filter, e);
+                                log::debug!("📚 🚀 QUERY ROUTING: failed to create filtered pool for source '{}', falling back to complete pool: {}", source_filter, e);
                             }
                             // Always fall back to complete pool - this is safe and correct
                             return self.run_query(query).await;
