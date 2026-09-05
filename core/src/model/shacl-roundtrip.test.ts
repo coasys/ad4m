@@ -362,4 +362,44 @@ describe("Decorators → SHACL writer round-trip", () => {
     );
     expect(rebuiltProp?.ordering).toBe("linkedList");
   });
+
+  it("round-trips ordering through toJSON/fromJSON", () => {
+    @Model({ name: "JsonOrderedItem" })
+    class JsonOrderedItem extends Ad4mModel {}
+
+    @Model({ name: "JsonOrderedHolder" })
+    class JsonOrderedHolder extends Ad4mModel {
+      @HasMany({
+        through: "ns://ordered",
+        target: () => JsonOrderedItem,
+        ordering: { strategy: "linkedList" },
+      })
+      ordered: string[] = [];
+
+      @HasMany({ through: "ns://plain", target: () => JsonOrderedItem })
+      plain: string[] = [];
+    }
+
+    const { shape } = JsonOrderedHolder.generateSHACL();
+
+    // `toJSON` — not `toLinks` — is what `ensureSubjectClass` ships to the
+    // backend, which turns it into the `ad4m://ordering` link the executor
+    // reads the strategy back from. A declaration dropped here is inert
+    // end to end however faithfully `toLinks` spells it: the setter writes
+    // no ordering entries and hydration never reorders.
+    const json: any = shape.toJSON();
+    const orderedProp = json.properties.find((p: any) => p.name === "ordered");
+    expect(orderedProp?.ordering).toBe("linkedList");
+
+    const plainProp = json.properties.find((p: any) => p.name === "plain");
+    expect(plainProp?.ordering).toBeUndefined();
+
+    const rebuilt = SHACLShape.fromJSON(json);
+    expect(
+      rebuilt.properties.find((p: any) => p.name === "ordered")?.ordering,
+    ).toBe("linkedList");
+    expect(
+      rebuilt.properties.find((p: any) => p.name === "plain")?.ordering,
+    ).toBeUndefined();
+  });
 });

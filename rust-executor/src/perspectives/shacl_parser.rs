@@ -60,6 +60,14 @@ pub struct PropertyShape {
     /// property node when `Some(true)`. No identity declared ⇒ no dedup.
     #[serde(default)]
     pub identity: Option<bool>,
+    /// CRDT ordering strategy for a collection relation, from
+    /// `@HasMany({ ordering: { strategy } })`. Emitted as an `ad4m://ordering`
+    /// link on the property node, which is the only place
+    /// [`load_shape`](super::model_query::shape) reads it back from — so
+    /// dropping it here leaves the declaration inert: the setter writes no
+    /// ordering entries and hydration never reorders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordering: Option<String>,
     pub datatype: Option<String>,
     pub min_count: Option<u32>,
     pub max_count: Option<u32>,
@@ -978,6 +986,18 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://identity".to_string()),
                 target: "literal:string:true".to_string(),
+            });
+        }
+
+        // CRDT ordering strategy for a collection relation. `load_shape` reads
+        // the declaration back from this link and nowhere else, so both the
+        // setter's entry writing and hydration's reconstruction depend on it
+        // being emitted here.
+        if let Some(ordering) = &prop.ordering {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://ordering".to_string()),
+                target: format!("literal:string:{}", ordering),
             });
         }
 

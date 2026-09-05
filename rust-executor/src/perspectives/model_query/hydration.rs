@@ -19,6 +19,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::types::{InstanceLinks, ModelShape, ShapeProperty};
 use super::utils::parse_literal_value;
+use crate::perspectives::ordering::{
+    create_strategy, parse_ordering_entries, COLLECTION_ORDER_PREDICATE,
+};
 
 /// Group raw SPARQL result rows by `?source` IRI.
 ///
@@ -57,6 +60,43 @@ pub(super) fn hydrate_instances(shape: &ModelShape, grouped: &[InstanceLinks]) -
         .collect()
 }
 
+/// Reorder one collection's targets from the parent's ordering entries.
+///
+/// `None` when there is nothing to apply — an unknown strategy, or no entries
+/// for this relation — leaving the caller's by-timestamp order in place. A
+/// collection whose ordering links have not arrived yet, or whose strategy this
+/// executor does not know, reads as an ordinary unordered relation rather than
+/// failing.
+fn reorder_collection(
+    strategy_name: &str,
+    values: &[(&str, &str)],
+    ordering_targets: &[String],
+    relation_predicate: &str,
+) -> Option<Vec<String>> {
+    let entries = parse_ordering_entries(ordering_targets, relation_predicate);
+    if entries.is_empty() {
+        return None;
+    }
+    let strategy = match create_strategy(strategy_name) {
+        Ok(s) => s,
+        Err(e) => {
+            // `debug`, not `warn`: this fires once per instance per ordered
+            // collection per query, so a `findAll` over 200 rows whose shape
+            // names an unknown strategy would log 200 times for one stable
+            // fact — the shape does not change between rows. The write side
+            // warns once per save in `apply_collection_ordering`, which is the
+            // actionable place.
+            log::debug!("ordering: {e}");
+            return None;
+        }
+    };
+    let members: Vec<(String, String)> = values
+        .iter()
+        .map(|&(t, ts)| (t.to_string(), ts.to_string()))
+        .collect();
+    Some(strategy.reconstruct(&members, &entries))
+}
+
 /// Hydrate a single instance from its collected links.
 ///
 /// For each link `(predicate, target, author, timestamp)`:
@@ -89,6 +129,11 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
 
     let mut prop_timestamps: HashMap<&str, &str> = HashMap::new();
     let mut collection_values: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+    // Ordering entries are sourced on the parent under one shared predicate, so
+    // they arrive with the instance's own links and reconstruction costs no
+    // extra query. That is the whole reason they live here rather than on the
+    // child.
+    let mut ordering_targets: Vec<String> = Vec::new();
     let mut earliest_timestamp: Option<&str> = None;
     let mut earliest_author: Option<&str> = None;
     let mut latest_timestamp: Option<&str> = None;
@@ -114,6 +159,11 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
                 latest_timestamp = Some(ts);
             }
             _ => {}
+        }
+
+        if predicate.as_str() == COLLECTION_ORDER_PREDICATE {
+            ordering_targets.push(target.clone());
+            continue;
         }
 
         if let Some(props) = pred_to_props.get(predicate.as_str()) {
@@ -217,7 +267,23 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
             let mut seen = std::collections::HashSet::new();
             values.retain(|&(target, _)| seen.insert(target));
 
-            let arr: Vec<Value> = values.iter().map(|&(target, _)| decode(target)).collect();
+            // A collection the shape declares ordered is reordered here, on the
+            // ORM's own read path. Doing it only in `get_links` — as an earlier
+            // draft had it — would leave `$query`, `include` and every `findAll`
+            // unordered, which is everything the ORM actually reads through.
+            let ordered = shape
+                .properties
+                .iter()
+                .find(|p| p.name == name)
+                .and_then(|p| {
+                    let strategy = p.ordering.as_deref()?;
+                    reorder_collection(strategy, &values, &ordering_targets, &p.predicate)
+                });
+
+            let arr: Vec<Value> = match ordered {
+                Some(items) => items.iter().map(|t| decode(t)).collect(),
+                None => values.iter().map(|&(target, _)| decode(target)).collect(),
+            };
             obj.insert(name.to_string(), Value::Array(arr));
         }
     }

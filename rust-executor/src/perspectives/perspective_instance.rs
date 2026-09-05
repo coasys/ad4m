@@ -3367,6 +3367,271 @@ impl PerspectiveInstance {
         self.sparql_store.query_cancellable(&query, cancel).await
     }
 
+    /// The ordering strategy declared for `(source, predicate)`, if any.
+    ///
+    /// Resolved by asking which classes this source is an instance of and
+    /// reading their shapes. Membership is not exclusive, so every conforming
+    /// class is scanned, most specific first, and the first declaration for this
+    /// predicate wins. Specificity still decides when several classes declare a
+    /// strategy — including the case where they disagree, which at least makes
+    /// the answer deterministic.
+    ///
+    /// Asking only the most specific class would make a declaration on a less
+    /// specific one invisible to the writer while the reader still honoured it:
+    /// [`hydration`](super::model_query::hydration) resolves ordering from
+    /// whatever shape the query came through. The setter would then write no
+    /// entries for a read that expects them, and the collection would fall back
+    /// to link timestamps — which, now that the diff deliberately preserves
+    /// them, no longer follow the assigned array. Overlapping classes over
+    /// shared links is ordinary social-DNA reuse, so that is a reachable way to
+    /// reintroduce exactly the scramble this feature exists to prevent.
+    ///
+    /// Classification counts the batch's staged links as well as the store's,
+    /// because a subject is *created* inside a batch: the constructor actions
+    /// that write its class flags and the setter that populates its collection
+    /// are staged together, and the store sees neither until commit. Asking the
+    /// store alone would answer "no class" for every ordered collection created
+    /// and populated in one save — which is the ordinary create path, and would
+    /// leave it with no ordering entries at all.
+    ///
+    /// Answering `None` — because the source is not a subject instance, or no
+    /// conforming class declares anything — is the ordinary case.
+    async fn ordering_strategy_for(
+        &self,
+        source: &str,
+        predicate: &str,
+        batch_id: Option<&str>,
+    ) -> Option<String> {
+        let pending = self.staged_triples_for(source, batch_id).await;
+        let resolver = self.shape_resolver();
+        let classes = super::subject_classes_of::subject_classes_of_with_pending(
+            &self.sparql_store,
+            &resolver,
+            &[source.to_string()],
+            &pending,
+        )
+        .ok()?;
+        for class_name in classes.get(source)? {
+            let Ok(shape) = self.get_shape(class_name) else {
+                continue;
+            };
+            let declared = shape
+                .properties
+                .iter()
+                .find(|p| p.predicate == predicate && p.ordering.is_some())
+                .and_then(|p| p.ordering.clone());
+            if declared.is_some() {
+                return declared;
+            }
+        }
+        None
+    }
+
+    /// The `(source, predicate, target)` triples an open batch has staged for
+    /// `source`, for classifying a subject that does not exist in the store yet.
+    ///
+    /// Empty without a batch, which is every caller outside a transaction.
+    async fn staged_triples_for(
+        &self,
+        source: &str,
+        batch_id: Option<&str>,
+    ) -> Vec<(String, String, String)> {
+        let Some(bid) = batch_id else {
+            return Vec::new();
+        };
+        let batches = self.batch_store.read().await;
+        let Some(batch) = batches.get(bid) else {
+            return Vec::new();
+        };
+        batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| l.data.source == source)
+            .filter_map(|l| {
+                l.data
+                    .predicate
+                    .as_ref()
+                    .map(|p| (l.data.source.clone(), p.clone(), l.data.target.clone()))
+            })
+            .collect()
+    }
+
+    /// Fold a batch's own pending work into a set of persisted links.
+    ///
+    /// [`Self::get_links`] reads the store, while a batched [`Self::add_links`]
+    /// or [`Self::remove_link`] writes only into the batch — so inside an
+    /// uncommitted batch the store still shows a collection as it stood before
+    /// the batch began. Anything that *diffs* a collection has to see the
+    /// batch's staged work too, or a second `save()` on the same relation in the
+    /// same batch computes its delta against stale membership and re-stages what
+    /// the first one already added. The ORM supports exactly that sequence: it
+    /// re-snapshots after a batched save so later saves diff against it.
+    ///
+    /// Returns `persisted` untouched when there is no batch, which is every
+    /// caller outside a transaction.
+    async fn links_including_batch(
+        &self,
+        persisted: Vec<DecoratedLinkExpression>,
+        source: &str,
+        predicate: Option<&str>,
+        batch_id: Option<&str>,
+    ) -> Vec<DecoratedLinkExpression> {
+        let Some(bid) = batch_id else {
+            return persisted;
+        };
+        let batches = self.batch_store.read().await;
+        let Some(batch) = batches.get(bid) else {
+            return persisted;
+        };
+
+        let relevant = |l: &Link| {
+            l.source == source
+                && match predicate {
+                    Some(p) => l.predicate.as_deref() == Some(p),
+                    None => true,
+                }
+        };
+
+        // A target this batch has already removed is gone as far as the batch is
+        // concerned, even though the store still has it.
+        let removed: std::collections::HashSet<&str> = batch
+            .diff
+            .removals
+            .iter()
+            .filter(|e| relevant(&e.data))
+            .map(|e| e.data.target.as_str())
+            .collect();
+
+        let mut out: Vec<DecoratedLinkExpression> = persisted
+            .into_iter()
+            .filter(|l| !removed.contains(l.data.target.as_str()))
+            .collect();
+        let mut seen: std::collections::HashSet<String> =
+            out.iter().map(|l| l.data.target.clone()).collect();
+
+        for expr in batch.diff.additions.iter().filter(|e| relevant(&e.data)) {
+            if removed.contains(expr.data.target.as_str()) || !seen.insert(expr.data.target.clone())
+            {
+                continue;
+            }
+            let status = expr.status.clone().unwrap_or_default();
+            out.push(DecoratedLinkExpression::from((expr.clone(), status)));
+        }
+        out
+    }
+
+    /// Write the ordering entries that turn the collection's current order into
+    /// the desired one.
+    ///
+    /// Additive only: entries are never removed, and a removal writes nothing at
+    /// all — dropping the data link is the whole deletion, because the ordering
+    /// entries are position hints over a membership set the data links define.
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_collection_ordering(
+        &mut self,
+        source: &str,
+        predicate: &str,
+        current_members: &[(String, String)],
+        desired: &[String],
+        status: LinkStatus,
+        batch_id: Option<String>,
+        context: &AgentContext,
+    ) -> Result<(), AnyError> {
+        let strategy_name = match self
+            .ordering_strategy_for(source, predicate, batch_id.as_deref())
+            .await
+        {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let strategy = match crate::perspectives::ordering::create_strategy(&strategy_name) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("ordering: {e}");
+                return Ok(());
+            }
+        };
+
+        let persisted_order_links = self
+            .get_links(&LinkQuery {
+                source: Some(source.to_string()),
+                predicate: Some(
+                    crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                ),
+                target: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            })
+            .await?;
+        // Entries this batch has already staged count as prior ordering: without
+        // them a second save in the batch sees no entries at all and takes the
+        // `generate_full` branch, restating the whole chain.
+        let existing_order_links = self
+            .links_including_batch(
+                persisted_order_links,
+                source,
+                Some(crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE),
+                batch_id.as_deref(),
+            )
+            .await;
+        let targets: Vec<String> = existing_order_links
+            .iter()
+            .map(|l| l.data.target.clone())
+            .collect();
+        let current_entries =
+            crate::perspectives::ordering::parse_ordering_entries(&targets, predicate);
+
+        let agent_did = crate::agent::did();
+        let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+
+        let entries = if current_entries.is_empty() {
+            // No prior ordering: the first save on an ordered collection, or one
+            // that was unordered until its SHACL said otherwise.
+            strategy.generate_full(desired, predicate, &agent_did, now_ms)
+        } else {
+            strategy
+                .diff(
+                    &current_entries,
+                    current_members,
+                    desired,
+                    predicate,
+                    &agent_did,
+                    now_ms,
+                )
+                .add
+        };
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let links: Vec<Link> = entries
+            .iter()
+            .filter_map(
+                |entry| match crate::perspectives::ordering::encode_ordering_entry(entry) {
+                    Ok(target) => Some(Link {
+                        source: source.to_string(),
+                        predicate: Some(
+                            crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE.to_string(),
+                        ),
+                        target,
+                    }),
+                    Err(e) => {
+                        log::warn!("ordering: could not encode entry: {e}");
+                        None
+                    }
+                },
+            )
+            .collect();
+
+        if !links.is_empty() {
+            self.add_links(links, status, batch_id, context).await?;
+        }
+        Ok(())
+    }
+
     /// Execute a model query — the executor-side replacement for
     /// SPARQL-build → hydrate → JS-filter → JS-sort → JS-paginate.
     ///
@@ -4395,8 +4660,16 @@ impl PerspectiveInstance {
                     .await?;
                 }
                 Action::CollectionSetter => {
-                    // Remove matching persisted links
-                    let link_expressions = self
+                    // Diff, rather than delete-everything-then-re-add.
+                    //
+                    // The old pattern made a one-item change to a 100-item
+                    // collection cost 100 removals and 101 additions, every one
+                    // of them signed and synced. It also restamped every link,
+                    // which is what today's ordering silently depends on — so
+                    // the diff and the ordering below have to arrive together or
+                    // every existing ordered collection scrambles on its next
+                    // save.
+                    let persisted = self
                         .get_links(&LinkQuery {
                             source: Some(source.clone()),
                             predicate: predicate.clone(),
@@ -4406,34 +4679,117 @@ impl PerspectiveInstance {
                             limit: None,
                         })
                         .await?;
-                    for link_expression in link_expressions {
-                        self.remove_link(link_expression.into(), batch_id.clone())
-                            .await?;
-                    }
-                    // Also prune matching links from pending batch additions
+
+                    let desired: Vec<String> = parameters
+                        .iter()
+                        .map(|p| jsvalue_to_string(&p.value))
+                        .collect();
+                    let desired_set: std::collections::HashSet<&str> =
+                        desired.iter().map(|s| s.as_str()).collect();
+
+                    // Reconcile with what this batch has already staged for the
+                    // relation, before staging anything more.
+                    //
+                    //   - an addition for a member now going away is dropped, so
+                    //     a save+update in one transaction cannot leave a
+                    //     duplicate behind;
+                    //   - a removal for a member that is wanted again is
+                    //     cancelled. `[A] → [B] → [A, B]` in one batch should
+                    //     leave A's original link alone, not remove it and
+                    //     re-add it under a fresh signature and timestamp —
+                    //     restamping is exactly what this diff exists to stop.
+                    //
+                    // `already_removed` is read after that cancellation so the
+                    // loop below does not stage a second removal for a member
+                    // this batch has already let go: the store still lists it
+                    // until commit.
+                    let mut already_removed: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
                     if let Some(ref bid) = batch_id {
                         let mut batches = self.batch_store.write().await;
                         if let Some(batch) = batches.get_mut(bid) {
+                            let mine = |l: &Link| l.source == source && l.predicate == predicate;
                             batch.diff.additions.retain(|link_expr| {
-                                !(link_expr.data.source == source
-                                    && link_expr.data.predicate == predicate)
+                                !(mine(&link_expr.data)
+                                    && !desired_set.contains(link_expr.data.target.as_str()))
                             });
+                            batch.diff.removals.retain(|link_expr| {
+                                !(mine(&link_expr.data)
+                                    && desired_set.contains(link_expr.data.target.as_str()))
+                            });
+                            already_removed = batch
+                                .diff
+                                .removals
+                                .iter()
+                                .filter(|l| mine(&l.data))
+                                .map(|l| l.data.target.clone())
+                                .collect();
                         }
                     }
-                    self.add_links(
-                        parameters
-                            .iter()
-                            .map(|p| Link {
-                                source: source.clone(),
-                                predicate: predicate.clone(),
-                                target: jsvalue_to_string(&p.value),
-                            })
-                            .collect(),
-                        status,
-                        batch_id.clone(),
-                        context,
-                    )
-                    .await?;
+
+                    // Only a persisted link can be removed. A member that exists
+                    // solely as a pending addition leaves by being pruned above,
+                    // not by a removal of something the store has never seen.
+                    for link in &persisted {
+                        if !desired_set.contains(link.data.target.as_str())
+                            && !already_removed.contains(&link.data.target)
+                        {
+                            self.remove_link(link.clone().into(), batch_id.clone())
+                                .await?;
+                        }
+                    }
+
+                    // Membership as this batch would leave it. A second save on
+                    // the same relation in one batch has to see the first one's
+                    // staged additions, or it re-adds every one of them — the
+                    // store will not show them until commit.
+                    let existing = self
+                        .links_including_batch(
+                            persisted,
+                            &source,
+                            predicate.as_deref(),
+                            batch_id.as_deref(),
+                        )
+                        .await;
+
+                    // What the collection holds now, with each member's earliest
+                    // link timestamp — the ordering module's membership input.
+                    let mut current_members: Vec<(String, String)> = Vec::new();
+                    let mut existing_targets: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for link in &existing {
+                        if existing_targets.insert(link.data.target.clone()) {
+                            current_members
+                                .push((link.data.target.clone(), link.timestamp.clone()));
+                        }
+                    }
+
+                    let new_links: Vec<Link> = desired
+                        .iter()
+                        .filter(|t| !existing_targets.contains(*t))
+                        .map(|t| Link {
+                            source: source.clone(),
+                            predicate: predicate.clone(),
+                            target: t.clone(),
+                        })
+                        .collect();
+                    if !new_links.is_empty() {
+                        self.add_links(new_links, status.clone(), batch_id.clone(), context)
+                            .await?;
+                    }
+
+                    if let Some(ref pred) = predicate {
+                        self.apply_collection_ordering(
+                            &source,
+                            pred,
+                            &current_members,
+                            &desired,
+                            status,
+                            batch_id.clone(),
+                            context,
+                        )
+                        .await?;
+                    }
                 }
             }
 
@@ -6163,6 +6519,460 @@ mod tests {
             target: format!("https://{}.org", Faker.fake::<String>()),
             predicate: Some(format!("https://{}.net", Faker.fake::<String>())),
         }
+    }
+
+    /// Two `collectionSetter` runs in one uncommitted batch stage each member once.
+    ///
+    /// The store does not show a batch's own additions until it commits, so the
+    /// second run used to diff against pre-batch membership and re-stage
+    /// everything the first had already added. This is an ordinary sequence, not
+    /// an exotic one: the ORM re-snapshots after a batched save precisely so a
+    /// later save in the same batch diffs correctly.
+    #[tokio::test]
+    async fn test_collection_setter_twice_in_one_batch_stages_each_member_once() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/1";
+        let predicate = "we://children";
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+
+        let params = |targets: &[&str]| -> Vec<Parameter> {
+            serde_json::from_value(serde_json::json!(targets
+                .iter()
+                .map(|t| serde_json::json!({ "name": "value", "value": t }))
+                .collect::<Vec<_>>()))
+            .unwrap()
+        };
+
+        let batch_id = perspective.create_batch().await;
+
+        perspective
+            .execute_commands(
+                commands.clone(),
+                source.to_string(),
+                params(&["we://a", "we://b"]),
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        perspective
+            .execute_commands(
+                commands.clone(),
+                source.to_string(),
+                params(&["we://a", "we://b", "we://c"]),
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let mut staged: Vec<&str> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| l.data.source == source && l.data.predicate.as_deref() == Some(predicate))
+            .map(|l| l.data.target.as_str())
+            .collect();
+        staged.sort();
+
+        assert_eq!(
+            staged,
+            vec!["we://a", "we://b", "we://c"],
+            "each member staged exactly once — before the batch-aware read the \
+             second run re-added a and b, which the store could not yet see"
+        );
+    }
+
+    /// A collection set in the same batch that creates its instance still gets
+    /// ordering entries.
+    ///
+    /// This is the create path: `save()` on a new instance opens one batch,
+    /// runs the constructor actions that write the class's flag links, sets the
+    /// relations, and commits. The strategy lookup classifies the source, and
+    /// classification reads the store — where those flag links do not exist
+    /// yet.
+    #[tokio::test]
+    async fn test_ordered_collection_created_in_one_batch_gets_entries() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/5";
+        let predicate = "we://children";
+
+        let shacl = r#"{
+            "target_class": "we://Collection",
+            "properties": [
+                { "path": "we://flag", "name": "flag", "has_value": "we://collection",
+                  "min_count": 1, "max_count": 1 },
+                { "path": "we://children", "name": "children", "ordering": "linkedList" }
+            ]
+        }"#;
+        perspective
+            .add_sdna(
+                "Collection".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &context,
+            )
+            .await
+            .expect("add_sdna");
+
+        // One batch: write the flag link that makes this URI an instance, then
+        // set the ordered collection — exactly what `save()` does on create.
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([
+            { "source": "this", "predicate": "we://flag", "target": "we://collection",
+              "action": "addLink" },
+        ]))
+        .unwrap();
+        let setter: Vec<Command> = serde_json::from_value(serde_json::json!([
+            { "source": "this", "predicate": predicate, "target": "value",
+              "action": "collectionSetter" },
+        ]))
+        .unwrap();
+
+        let batch_id = perspective.create_batch().await;
+        perspective
+            .execute_commands(
+                commands,
+                source.to_string(),
+                vec![],
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let params: Vec<Parameter> = serde_json::from_value(serde_json::json!([
+            { "name": "value", "value": "we://x/a" },
+            { "name": "value", "value": "we://x/b" },
+        ]))
+        .unwrap();
+        perspective
+            .execute_commands(
+                setter,
+                source.to_string(),
+                params,
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let order_links: Vec<&str> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| {
+                l.data.source == source
+                    && l.data.predicate.as_deref()
+                        == Some(crate::perspectives::ordering::COLLECTION_ORDER_PREDICATE)
+            })
+            .map(|l| l.data.target.as_str())
+            .collect();
+
+        assert!(
+            !order_links.is_empty(),
+            "an ordered collection created in one batch gets its entries — the \
+             flag link that classifies the source is staged in the same batch, \
+             not yet in the store"
+        );
+    }
+
+    /// An ordering declaration survives registration and comes back off the
+    /// stored shape.
+    ///
+    /// This is the boundary the ordering feature actually crosses in
+    /// production: `@Model` classes register through `ensureSubjectClass`,
+    /// which ships `SHACLShape.toJSON()` to `add_sdna`, which turns it into
+    /// links via `parse_shacl_to_links` — and `load_shape` reads the strategy
+    /// back only from the `ad4m://ordering` link that produces. Both halves of
+    /// the feature hang off `ShapeProperty::ordering`: the setter writes no
+    /// entries without it, and hydration never reorders. Every other test for
+    /// this feature builds its shape from JSON directly, so none of them touch
+    /// this path.
+    #[tokio::test]
+    async fn test_ordering_declaration_survives_sdna_registration() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "we://Collection",
+            "properties": [
+                { "path": "we://name", "name": "name", "datatype": "xsd://string",
+                  "min_count": 1, "max_count": 1, "resolve_language": "literal" },
+                { "path": "we://children", "name": "children", "ordering": "linkedList" },
+                { "path": "we://tags", "name": "tags" }
+            ]
+        }"#;
+
+        perspective
+            .add_sdna(
+                "Collection".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+
+        let shape = perspective.get_shape("Collection").expect("shape");
+        let children = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "children")
+            .expect("children property is in the stored shape");
+
+        assert_eq!(
+            children.ordering.as_deref(),
+            Some("linkedList"),
+            "the ordering declaration reached the store and came back — without \
+             it both the setter and hydration silently do nothing"
+        );
+
+        let tags = shape
+            .properties
+            .iter()
+            .find(|p| p.name == "tags")
+            .expect("tags property is in the stored shape");
+        assert_eq!(
+            tags.ordering, None,
+            "a relation that declares no ordering stays unordered"
+        );
+    }
+
+    /// Drive `collectionSetter` once per desired set, all in one batch, and
+    /// report what the batch holds for `(source, predicate)` at the end.
+    ///
+    /// `persist` is seeded outside any batch, so the store really holds it.
+    async fn staged_after_batched_sets(
+        source: &str,
+        predicate: &str,
+        persist: &[&str],
+        sets: &[&[&str]],
+    ) -> (Vec<String>, Vec<String>) {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+
+        for target in persist {
+            perspective
+                .add_link(
+                    Link {
+                        source: source.to_string(),
+                        predicate: Some(predicate.to_string()),
+                        target: target.to_string(),
+                    },
+                    LinkStatus::Shared,
+                    None,
+                    &context,
+                )
+                .await
+                .unwrap();
+        }
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+
+        let batch_id = perspective.create_batch().await;
+        for targets in sets {
+            let params: Vec<Parameter> = serde_json::from_value(serde_json::json!(targets
+                .iter()
+                .map(|t| serde_json::json!({ "name": "value", "value": t }))
+                .collect::<Vec<_>>()))
+            .unwrap();
+            perspective
+                .execute_commands(
+                    commands.clone(),
+                    source.to_string(),
+                    params,
+                    Some(batch_id.clone()),
+                    &context,
+                )
+                .await
+                .unwrap();
+        }
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let mine = |l: &LinkExpression| {
+            l.data.source == source && l.data.predicate.as_deref() == Some(predicate)
+        };
+        let mut additions: Vec<String> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| mine(l))
+            .map(|l| l.data.target.clone())
+            .collect();
+        let mut removals: Vec<String> = batch
+            .diff
+            .removals
+            .iter()
+            .filter(|l| mine(l))
+            .map(|l| l.data.target.clone())
+            .collect();
+        additions.sort();
+        removals.sort();
+        (additions, removals)
+    }
+
+    /// `[A] → [B] → [B, C]` in one batch stages A's removal once, not twice.
+    ///
+    /// The store still lists A until the batch commits, so the second setter
+    /// sees it as present-and-unwanted and would stage the same removal again.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_stages_a_removal_once() {
+        let (additions, removals) = staged_after_batched_sets(
+            "we://col/3",
+            "we://children",
+            &["we://a"],
+            &[&["we://b"], &["we://b", "we://c"]],
+        )
+        .await;
+
+        assert_eq!(removals, vec!["we://a"], "A is staged for removal once");
+        assert_eq!(additions, vec!["we://b", "we://c"]);
+    }
+
+    /// `[A] → [B] → [A, B]` in one batch leaves A's original link alone.
+    ///
+    /// A is dropped and then wanted back before the batch commits. Cancelling
+    /// the staged removal keeps the link that is already there; without that it
+    /// is removed and re-added under a fresh signature and timestamp, which is
+    /// the restamping this diff exists to stop.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_cancels_a_reinstated_removal() {
+        let (additions, removals) = staged_after_batched_sets(
+            "we://col/4",
+            "we://children",
+            &["we://a"],
+            &[&["we://b"], &["we://a", "we://b"]],
+        )
+        .await;
+
+        assert!(
+            removals.is_empty(),
+            "A is wanted again, so its staged removal is cancelled: {removals:?}"
+        );
+        assert_eq!(
+            additions,
+            vec!["we://b"],
+            "only B is staged — A's existing link is untouched, not re-added"
+        );
+    }
+
+    /// `[A] → [B] → [A]` in one batch nets to nothing staged at all.
+    ///
+    /// The end state matches the start state, so the batch should carry no
+    /// operations for the relation. Getting there needs both reconciliations to
+    /// compose: B's addition pruned because it is no longer desired, and A's
+    /// removal cancelled because it is desired again. Either one alone leaves
+    /// the batch writing a change that undoes itself.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_nets_a_round_trip_to_nothing() {
+        let (additions, removals) = staged_after_batched_sets(
+            "we://col/6",
+            "we://children",
+            &["we://a"],
+            &[&["we://b"], &["we://a"]],
+        )
+        .await;
+
+        assert!(
+            additions.is_empty() && removals.is_empty(),
+            "the collection ends where it started, so nothing is staged — \
+             additions {additions:?}, removals {removals:?}"
+        );
+    }
+
+    /// A member the batch has already removed is not reported as still present.
+    #[tokio::test]
+    async fn test_collection_setter_in_batch_drops_a_removed_member() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let source = "we://col/2";
+        let predicate = "we://children";
+
+        // Persist a member outside any batch, so the store really holds it.
+        perspective
+            .add_link(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: "we://a".to_string(),
+                },
+                LinkStatus::Shared,
+                None,
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+            "source": "this",
+            "predicate": predicate,
+            "target": "value",
+            "action": "collectionSetter"
+        }]))
+        .unwrap();
+
+        let batch_id = perspective.create_batch().await;
+
+        // Set the collection to just `b`: `a` is persisted and unwanted, so it
+        // is removed within the batch.
+        let params: Vec<Parameter> =
+            serde_json::from_value(serde_json::json!([{ "name": "value", "value": "we://b" }]))
+                .unwrap();
+        perspective
+            .execute_commands(
+                commands.clone(),
+                source.to_string(),
+                params,
+                Some(batch_id.clone()),
+                &context,
+            )
+            .await
+            .unwrap();
+
+        let batches = perspective.batch_store.read().await;
+        let batch = batches.get(&batch_id).expect("batch is still open");
+        let removed: Vec<&str> = batch
+            .diff
+            .removals
+            .iter()
+            .filter(|l| l.data.source == source && l.data.predicate.as_deref() == Some(predicate))
+            .map(|l| l.data.target.as_str())
+            .collect();
+        assert_eq!(
+            removed,
+            vec!["we://a"],
+            "the persisted member is removed once"
+        );
+
+        let staged: Vec<&str> = batch
+            .diff
+            .additions
+            .iter()
+            .filter(|l| l.data.source == source && l.data.predicate.as_deref() == Some(predicate))
+            .map(|l| l.data.target.as_str())
+            .collect();
+        assert_eq!(staged, vec!["we://b"], "only the new member is staged");
     }
 
     #[tokio::test]
