@@ -53,6 +53,7 @@ import {
   type McpResponse,
   type ExecutorStartResult,
   type AgentResult,
+  withTimeout,
 } from "./index";
 
 import ad4mPlugin, { _resetModuleState } from "./index";
@@ -1645,6 +1646,54 @@ describe("ad4mPlugin", () => {
     _resetModuleState();
     mockSpawn.mockClear();
     mockExecFileSync.mockClear();
+  });
+
+  it("waker start() returns even when the executor never answers", async () => {
+    // The executor accepts the socket but never replies (locked wallet,
+    // mid-restart). Before this was detached, start() awaited agent.status()
+    // forever and stalled plugin startup — and the gateway control channel
+    // with it, so the box could not even be woken.
+    const registeredServices: Array<{ id: string; [k: string]: any }> = [];
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
+
+    const neverResolves = vi.fn(() => new Promise(() => {}));
+    vi.doMock("@coasys/ad4m", () => ({
+      Ad4mClient: vi.fn(() => makeMockAd4mClient({ status: neverResolves })),
+      QuerySubscriptionProxy: vi.fn(),
+    }));
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        token: "eyJhbGciOiJIUzI1NiJ9.test.token",
+        wakeToken: "wake-token",
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
+    };
+
+    await ad4mPlugin(mockApi);
+    const waker = registeredServices.find((s) => s.id === "ad4m-waker");
+    expect(waker).toBeDefined();
+
+    const started = Date.now();
+    await waker!.start({ stateDir: undefined });
+    expect(Date.now() - started).toBeLessThan(2000);
+
+    waker!.stop();
+    vi.doUnmock("@coasys/ad4m");
+  });
+
+  it("withTimeout rejects a promise that never settles, and passes one that does", async () => {
+    await expect(
+      withTimeout(new Promise(() => {}), 20, "[test] hang"),
+    ).rejects.toThrow(/timed out after 20ms/);
+    await expect(withTimeout(Promise.resolve("ok"), 1000, "[test] fast")).resolves.toBe(
+      "ok",
+    );
   });
 
   it("registers expected tools and services", async () => {

@@ -103,6 +103,40 @@ let _subscriptionManager: WakerSubscriptionManager | null = null;
 let _sessionId = "";
 let _registeredTools = new Set<string>();
 let _refreshTimer: ReturnType<typeof setInterval> | null = null;
+let _wakerStopped = false;
+let _wakerRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** How long to wait for the executor to answer before giving up on one attempt. */
+const WAKER_CONNECT_TIMEOUT_MS = 10_000;
+/** How long to wait before retrying a failed waker connect. */
+const WAKER_RETRY_MS = 30_000;
+
+/**
+ * Reject after `ms` instead of waiting forever.
+ * The executor accepts the socket even when it cannot answer (locked wallet,
+ * mid-restart), so an unbounded await here blocks plugin service startup —
+ * and with it the gateway's control channel.
+ */
+export async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} timed out after ${ms}ms`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /** @internal Reset module-level state between tests. */
 export function _resetModuleState(): void {
@@ -115,6 +149,9 @@ export function _resetModuleState(): void {
   _registeredTools = new Set<string>();
   if (_refreshTimer) clearInterval(_refreshTimer);
   _refreshTimer = null;
+  _wakerStopped = false;
+  if (_wakerRetryTimer) clearTimeout(_wakerRetryTimer);
+  _wakerRetryTimer = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,6 +1151,127 @@ Notes:
   // By the time this starts, _authToken and _pluginAgentDid are set by
   // the mcp service above (OpenClaw starts services sequentially).
 
+  /**
+   * One waker connect attempt: build the client, verify the agent is ready,
+   * restore persisted subscriptions.
+   * @returns true when connected, false when the executor answered but the
+   *   agent is not usable yet (uninitialized or locked wallet).
+   * @throws when the executor could not be reached or did not answer in time.
+   */
+  async function connectWakerOnce(httpUrl: string): Promise<boolean> {
+    // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
+    logger.info("[ad4m-waker] Loading dependencies...");
+    const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
+    logger.info("[ad4m-waker] Dependencies loaded OK");
+
+    logger.info(`[ad4m-waker] Connecting to ${httpUrl}...`);
+
+    _wakerClient = new Ad4mClient(httpUrl, _authToken, true);
+    logger.info("[ad4m-waker] Ad4mClient created, calling agent.status()...");
+
+    // Load persisted state (subscriptions + seen messages) before creating manager
+    const savedState = _stateDir
+      ? loadWakerState(_stateDir)
+      : { subscriptions: [], seenMessages: {} };
+    logger.info(
+      `[ad4m-waker] Loaded persisted state: ${savedState.subscriptions.length} subscription(s), ${Object.keys(savedState.seenMessages).length} seen-message set(s)`,
+    );
+
+    // Create subscription manager wired to the Ad4mClient and wake callback
+    _subscriptionManager = new WakerSubscriptionManager({
+      perspectiveClient: _wakerClient.perspective,
+      logger,
+      QuerySubscriptionProxy,
+      debounceMs: config.debounceMs,
+      previousSeenMessages: savedState.seenMessages,
+      onWake: (sub, _result, mentions) => {
+        postWake(config, sub, _pluginAgentDid, logger, mentions);
+      },
+      onPersist: (subs, seenMessages) => {
+        if (_stateDir) saveWakerState(_stateDir, subs, seenMessages);
+      },
+    });
+
+    // Verify connection and get agent DID (agent should already be
+    // initialized/unlocked by ensureAgentReady during mcp service start)
+    let status: any;
+    try {
+      status = await withTimeout(
+        _wakerClient.agent.status(),
+        WAKER_CONNECT_TIMEOUT_MS,
+        "[ad4m-waker] agent.status()",
+      );
+      logger.info(
+        `[ad4m-waker] agent.status() returned: initialized=${status.isInitialized}, unlocked=${status.isUnlocked}, did=${status.did?.substring(0, 30) ?? "N/A"}`,
+      );
+    } catch (statusErr: any) {
+      logger.error(`[ad4m-waker] agent.status() FAILED: ${statusErr.message}`);
+      if (statusErr.stack) logger.error(`[ad4m-waker] Stack: ${statusErr.stack}`);
+      throw statusErr;
+    }
+
+    if (!status.isInitialized || status.isUnlocked === false) {
+      logger.error(
+        `[ad4m-waker] Agent is not ready (initialized=${status.isInitialized}, unlocked=${status.isUnlocked}). Agent management should have run during mcp service start.`,
+      );
+      _wakerClient = null;
+      return false;
+    }
+    _pluginAgentDid = status.did;
+    logger.info(
+      `[ad4m-waker] Connected — agent: ${status.did.substring(0, 40)}...`,
+    );
+
+    // Restore persisted subscriptions
+    const saved = savedState.subscriptions;
+    if (saved.length > 0) {
+      logger.info(
+        `[ad4m-waker] Restoring ${saved.length} persisted subscription(s)...`,
+      );
+      for (const sub of saved) {
+        try {
+          await createLiveSubscription(sub);
+          logger.info(
+            `[ad4m-waker] Restored: ${sub.id} (${sub.type}, perspective=${sub.perspective})`,
+          );
+        } catch (err: any) {
+          logger.error(
+            `[ad4m-waker] Failed to restore ${sub.id}: ${err.message}`,
+          );
+        }
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Keep trying to connect the waker until it succeeds or the service stops.
+   * Runs detached from start() so an executor that is down, mid-restart, or
+   * holding a locked wallet delays only the waker, never plugin startup.
+   */
+  async function connectWakerWithRetry(httpUrl: string): Promise<void> {
+    while (!_wakerStopped) {
+      try {
+        if (await connectWakerOnce(httpUrl)) return;
+      } catch (err: any) {
+        logger.error(`[ad4m-waker] Failed to connect: ${err.message}`);
+        if (err.stack) logger.error(`[ad4m-waker] Stack: ${err.stack}`);
+        logger.error(
+          `[ad4m-waker] Make sure @coasys/ad4m and dependencies are installed (npm install in the plugin directory).`,
+        );
+        _wakerClient = null;
+      }
+      if (_wakerStopped) return;
+      logger.info(
+        `[ad4m-waker] Retrying connection in ${WAKER_RETRY_MS / 1000}s`,
+      );
+      await new Promise<void>((resolve) => {
+        _wakerRetryTimer = setTimeout(resolve, WAKER_RETRY_MS);
+        if (typeof _wakerRetryTimer.unref === "function") _wakerRetryTimer.unref();
+      });
+    }
+  }
+
   api.registerService({
     id: "ad4m-waker",
     async start(ctx: any) {
@@ -1157,89 +1315,18 @@ Notes:
 
       const httpUrl = config.executorUrl ?? "http://localhost:12000";
 
-      try {
-        // Dynamic imports to avoid load-time issues with @holochain/client transitive deps
-        logger.info("[ad4m-waker] Loading dependencies...");
-        const { Ad4mClient, QuerySubscriptionProxy } = require("@coasys/ad4m");
-        logger.info("[ad4m-waker] Dependencies loaded OK");
-
-        logger.info(`[ad4m-waker] Connecting to ${httpUrl}...`);
-
-        _wakerClient = new Ad4mClient(httpUrl, _authToken, true);
-        logger.info("[ad4m-waker] Ad4mClient created, calling agent.status()...");
-
-        // Load persisted state (subscriptions + seen messages) before creating manager
-        const savedState = _stateDir ? loadWakerState(_stateDir) : { subscriptions: [], seenMessages: {} };
-        logger.info(`[ad4m-waker] Loaded persisted state: ${savedState.subscriptions.length} subscription(s), ${Object.keys(savedState.seenMessages).length} seen-message set(s)`);
-
-        // Create subscription manager wired to the Ad4mClient and wake callback
-        _subscriptionManager = new WakerSubscriptionManager({
-          perspectiveClient: _wakerClient.perspective,
-          logger,
-          QuerySubscriptionProxy,
-          debounceMs: config.debounceMs,
-          previousSeenMessages: savedState.seenMessages,
-          onWake: (sub, _result, mentions) => {
-            postWake(config, sub, _pluginAgentDid, logger, mentions);
-          },
-          onPersist: (subs, seenMessages) => {
-            if (_stateDir) saveWakerState(_stateDir, subs, seenMessages);
-          },
-        });
-
-        // Verify connection and get agent DID (agent should already be
-        // initialized/unlocked by ensureAgentReady during mcp service start)
-        let status: any;
-        try {
-          status = await _wakerClient.agent.status();
-          logger.info(`[ad4m-waker] agent.status() returned: initialized=${status.isInitialized}, unlocked=${status.isUnlocked}, did=${status.did?.substring(0, 30) ?? "N/A"}`);
-        } catch (statusErr: any) {
-          logger.error(`[ad4m-waker] agent.status() FAILED: ${statusErr.message}`);
-          if (statusErr.stack) logger.error(`[ad4m-waker] Stack: ${statusErr.stack}`);
-          throw statusErr;
-        }
-
-        if (!status.isInitialized || status.isUnlocked === false) {
-          logger.error(
-            `[ad4m-waker] Agent is not ready (initialized=${status.isInitialized}, unlocked=${status.isUnlocked}). Agent management should have run during mcp service start.`,
-          );
-          _wakerClient = null;
-          return;
-        }
-        _pluginAgentDid = status.did;
-        logger.info(
-          `[ad4m-waker] Connected — agent: ${status.did.substring(0, 40)}...`,
-        );
-
-        // Restore persisted subscriptions
-        const saved = savedState.subscriptions;
-        if (saved.length > 0) {
-          logger.info(
-            `[ad4m-waker] Restoring ${saved.length} persisted subscription(s)...`,
-          );
-          for (const sub of saved) {
-            try {
-              await createLiveSubscription(sub);
-              logger.info(
-                `[ad4m-waker] Restored: ${sub.id} (${sub.type}, perspective=${sub.perspective})`,
-              );
-            } catch (err: any) {
-              logger.error(
-                `[ad4m-waker] Failed to restore ${sub.id}: ${err.message}`,
-              );
-            }
-          }
-        }
-      } catch (err: any) {
-        logger.error(`[ad4m-waker] Failed to connect: ${err.message}`);
-        if (err.stack) logger.error(`[ad4m-waker] Stack: ${err.stack}`);
-        logger.error(
-          `[ad4m-waker] Make sure @coasys/ad4m and dependencies are installed (npm install in the plugin directory).`,
-        );
-        _wakerClient = null;
-      }
+      _wakerStopped = false;
+      // Detached on purpose: the executor accepts the socket even when it
+      // cannot answer, so awaiting the connect here would hold up plugin
+      // service startup and the gateway control channel with it.
+      void connectWakerWithRetry(httpUrl);
     },
     stop() {
+      _wakerStopped = true;
+      if (_wakerRetryTimer) {
+        clearTimeout(_wakerRetryTimer);
+        _wakerRetryTimer = null;
+      }
       if (_subscriptionManager) {
         _subscriptionManager.disposeAll();
         _subscriptionManager = null;
