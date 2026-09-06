@@ -892,29 +892,30 @@ Notes:
 
   api.registerTool({
     name: "ad4m_list_waker_subscriptions",
-    description: "List all active waker subscriptions.",
+    description:
+      "List waker subscriptions: the active ones, plus any the executor " +
+      "rejected that are still being re-attempted. Use this to confirm that a " +
+      "subscribe call actually enrolled.",
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
       const subs = _subscriptionManager?.getActive() ?? [];
-      if (subs.length === 0) {
-        return {
-          content: [{ type: "text", text: "No active waker subscriptions." }],
-        };
+      const pending = _subscriptionManager?.getPending() ?? [];
+      const describe = (s: WakerSubscription) =>
+        `- ${s.id} (${s.type}) perspective=${s.perspective}${s.channel ? ` channel=${s.channel}` : ""}`;
+
+      const sections: string[] = [
+        subs.length === 0
+          ? "No active waker subscriptions."
+          : `Active subscriptions (${subs.length}):\n${subs.map(describe).join("\n")}`,
+      ];
+      if (pending.length > 0) {
+        sections.push(
+          `Pending — rejected by the executor, being re-attempted (${pending.length}):\n` +
+            pending.map(describe).join("\n") +
+            "\nThese are NOT listening yet.",
+        );
       }
-      const summary = subs
-        .map(
-          (s) =>
-            `- ${s.id} (${s.type}) perspective=${s.perspective}${s.channel ? ` channel=${s.channel}` : ""}`,
-        )
-        .join("\n");
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Active subscriptions (${subs.length}):\n${summary}`,
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: sections.join("\n\n") }] };
     },
   });
 
