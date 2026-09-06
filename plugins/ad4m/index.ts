@@ -279,7 +279,6 @@ export default function ad4mPlugin(api: any) {
     "instance_update",
     "instance_add_to_collection",
     "instance_remove",
-    "instance_ids",
   ]);
 
   /**
