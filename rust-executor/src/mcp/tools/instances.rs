@@ -42,6 +42,9 @@ use std::time::Duration;
 /// Bounded so a class with thousands of instances doesn't flood the LLM
 /// context; `total_count` in the response tells the caller there is more.
 pub(crate) const DEFAULT_QUERY_LIMIT: usize = 100;
+/// Hard ceiling on explicit `instance_query` limits — the LLM-context
+/// protection holds even when a caller asks for more.
+pub(crate) const MAX_QUERY_LIMIT: usize = 500;
 
 /// How long class resolution waits for a class's SHACL to arrive over
 /// p-diff-sync on a freshly joined neighbourhood before reporting it as
@@ -1045,8 +1048,12 @@ impl Ad4mMcpHandler {
             return validation_failure(&class_name, &setter_errors);
         }
 
+        // Normalize once: a bare caller-supplied id ("my-channel") becomes a
+        // literal URI here, and this single value is used for the subject,
+        // the collection links AND the parent link — otherwise they would
+        // target different nodes.
         let base_uri = match p.base_uri.as_deref() {
-            Some(uri) if !uri.trim().is_empty() => uri.trim().to_string(),
+            Some(uri) if !uri.trim().is_empty() => link_target(uri.trim()),
             _ => generate_instance_uri(),
         };
         if let Ok(Some(_)) = fetch_instance(&perspective, &class_name, &base_uri).await {
@@ -1080,22 +1087,28 @@ impl Ad4mMcpHandler {
         } else {
             Some(Value::Object(validated.scalars.clone()))
         };
+
+        // One batch for the whole create — subject, collection links, and the
+        // parent link land atomically or not at all (same reasoning as
+        // instance_update: no partially-constructed instance is ever
+        // observable, by peers or by a failed call's aftermath).
+        let batch_id = perspective.create_batch().await;
         if let Err(e) = perspective
             .create_subject(
                 subject_class(&class_name),
                 base_uri.clone(),
                 initial_values,
-                None,
+                Some(batch_id.clone()),
                 &agent_context,
             )
             .await
         {
-            return error_json(format!("Error creating {class_name} instance: {e:#}"));
+            return error_json(format!(
+                "Error creating {class_name} instance (nothing was created): {e:#}"
+            ));
         }
 
         // Collections: one link per item, same path as instance_add_to_collection.
-        // A store-level add_link failure mid-loop is disclosed (with what was
-        // and wasn't linked) rather than rolled back.
         let mut collections_set: Map<String, Value> = Map::new();
         for (collection, items) in &validated.collections {
             let predicate = collection_predicates[collection].clone();
@@ -1119,17 +1132,49 @@ impl Ad4mMcpHandler {
                     target,
                 };
                 if let Err(e) = perspective
-                    .add_link(link, LinkStatus::Shared, None, &agent_context)
+                    .add_link(
+                        link,
+                        LinkStatus::Shared,
+                        Some(batch_id.clone()),
+                        &agent_context,
+                    )
                     .await
                 {
                     return error_json(format!(
-                        "Created {class_name} at '{base_uri}' but failed to add '{item_str}' to \
-                         collection '{collection}': {e:#}"
+                        "Failed to add '{item_str}' to collection '{collection}' — nothing was \
+                         created (batch abandoned): {e:#}"
                     ));
                 }
                 added.push(Value::String(item_str));
             }
             collections_set.insert(collection.clone(), Value::Array(added));
+        }
+
+        let parent = p.parent.as_deref().filter(|s| !s.trim().is_empty());
+        if let Some(parent) = parent {
+            let link = Link {
+                source: link_target(parent.trim()),
+                predicate: Some(HAS_CHILD.to_string()),
+                target: base_uri.clone(),
+            };
+            if let Err(e) = perspective
+                .add_link(
+                    link,
+                    LinkStatus::Shared,
+                    Some(batch_id.clone()),
+                    &agent_context,
+                )
+                .await
+            {
+                return error_json(format!(
+                    "Failed to link to parent '{parent}' — nothing was created (batch \
+                     abandoned): {e:#}"
+                ));
+            }
+        }
+
+        if let Err(e) = perspective.commit_batch(batch_id, &agent_context).await {
+            return error_json(format!("Error committing create: {e:#}"));
         }
 
         let mut result = json!({
@@ -1142,29 +1187,9 @@ impl Ad4mMcpHandler {
         if !collections_set.is_empty() {
             result["collections_set"] = Value::Object(collections_set);
         }
-
-        if let Some(parent) = p.parent.as_deref().filter(|s| !s.trim().is_empty()) {
-            let link = Link {
-                source: link_target(parent.trim()),
-                predicate: Some(HAS_CHILD.to_string()),
-                target: link_target(&base_uri),
-            };
-            match perspective
-                .add_link(link, LinkStatus::Shared, None, &agent_context)
-                .await
-            {
-                Ok(_) => {
-                    result["parent"] = json!(parent);
-                    result["added_to_parent"] = json!(true);
-                }
-                Err(e) => {
-                    result["parent"] = json!(parent);
-                    result["added_to_parent"] = json!(false);
-                    result["parent_error"] = json!(format!(
-                        "Created instance but failed to link to parent: {e:#}"
-                    ));
-                }
-            }
+        if let Some(parent) = parent {
+            result["parent"] = json!(parent);
+            result["added_to_parent"] = json!(true);
         }
 
         pretty(&result)
@@ -1185,7 +1210,9 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let mut query = json!({ "limit": p.limit.unwrap_or(DEFAULT_QUERY_LIMIT) });
+        let mut query = json!({
+            "limit": p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(MAX_QUERY_LIMIT)
+        });
         if let Some(offset) = p.offset {
             query["offset"] = json!(offset);
         }

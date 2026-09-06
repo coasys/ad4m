@@ -165,7 +165,7 @@ enum Domain {
         mcp_port: Option<u16>,
         /// Expose dynamic per-class SHACL tools over MCP in addition to the
         /// static instance_* tools. Default: false.
-        #[arg(long, action)]
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         dynamic_class_tools: Option<bool>,
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         #[arg(long)]
