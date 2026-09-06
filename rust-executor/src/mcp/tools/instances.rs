@@ -1498,7 +1498,16 @@ mod tests {
     /// A perspective with both classes registered in the global registry, and
     /// an MCP handler authenticated as admin against it — the same path an
     /// external client takes minus the HTTP transport.
-    async fn setup(dynamic_class_tools: bool) -> (Ad4mMcpHandler, String) {
+    /// Unregisters the fixture perspective when the test ends (also on
+    /// panic), so tests that assert on empty global state stay honest.
+    struct PerspectiveGuard(String);
+    impl Drop for PerspectiveGuard {
+        fn drop(&mut self) {
+            crate::perspectives::unregister_perspective(&self.0);
+        }
+    }
+
+    async fn setup(dynamic_class_tools: bool) -> (Ad4mMcpHandler, String, PerspectiveGuard) {
         let (perspective, _shapes, _ctx) =
             setup_perspective_no_llm(&[("Channel", CHANNEL_SDNA), ("Message", MESSAGE_SDNA)]).await;
         let uuid = perspective.persisted.lock().await.uuid.clone();
@@ -1508,7 +1517,8 @@ mod tests {
             auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
             dynamic_class_tools,
         });
-        (handler, uuid)
+        let guard = PerspectiveGuard(uuid.clone());
+        (handler, uuid, guard)
     }
 
     fn parse(s: &str) -> Value {
@@ -1548,7 +1558,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn describe_perspective_reports_schema_as_data() {
-        let (handler, uuid) = setup(false).await;
+        let (handler, uuid, _guard) = setup(false).await;
         let out = handler
             .describe_perspective(Parameters(DescribePerspectiveParams {
                 perspective_id: uuid.clone(),
@@ -1600,7 +1610,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn validation_names_property_type_and_cardinality() {
-        let (_handler, uuid) = setup(false).await;
+        let (_handler, uuid, _guard) = setup(false).await;
         let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
         let shape = perspective.get_shape("Channel").expect("Channel shape");
 
@@ -1703,7 +1713,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn instance_tools_round_trip_typed_data() {
-        let (handler, uuid) = setup(false).await;
+        let (handler, uuid, _guard) = setup(false).await;
 
         // Create a channel with typed values.
         let out = handler
@@ -2013,7 +2023,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn dynamic_tools_are_hidden_unless_flag_is_set() {
-        let (hidden, uuid) = setup(false).await;
+        let (hidden, uuid, _guard) = setup(false).await;
         let names: Vec<String> = hidden
             .exposed_tools()
             .await
