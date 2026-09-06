@@ -258,6 +258,29 @@ export default function ad4mPlugin(api: any) {
     "neighbourhood_publish_from_perspective",
   ]);
 
+  // PR B: only these MCP tools become native OpenClaw tools. Dynamic
+  // per-class tools stay off this surface (see mcp-tool-surface-redesign).
+  const STATIC_MCP_TOOLS = new Set([
+    "get_my_did",
+    "agent_status",
+    "auth_status",
+    "login_email",
+    "list_perspectives",
+    "add_perspective",
+    "neighbourhood_join_from_url",
+    "neighbourhood_publish_from_perspective",
+    "add_link",
+    "query_links",
+    "remove_link",
+    "describe_perspective",
+    "instance_create",
+    "instance_query",
+    "instance_get",
+    "instance_update",
+    "instance_add_to_collection",
+    "instance_remove",
+  ]);
+
   /**
    * Extract the perspective UUID from a successful neighbourhood tool result.
    * Returns null if the result doesn't look like a success or has no UUID.
@@ -283,6 +306,7 @@ export default function ad4mPlugin(api: any) {
   }
 
   function registerMcpTool(tool: McpTool) {
+    if (!STATIC_MCP_TOOLS.has(tool.name)) return;
     if (_registeredTools.has(tool.name)) return;
 
     const isNeighbourhoodTool = NEIGHBOURHOOD_TOOLS.has(tool.name);
@@ -545,25 +569,6 @@ Notes:
           },
         ],
       };
-    },
-  });
-
-  // -- Manual refresh tool --
-
-  api.registerTool({
-    name: "ad4m_refresh_ad4m_tools",
-    description:
-      "Re-fetch the AD4M MCP tool list and register any new tools. " +
-      "Call this after add_model, adding SHACL subject classes, or joining a neighbourhood " +
-      "to immediately discover new dynamic tools without waiting for the next poll cycle.",
-    parameters: { type: "object", properties: {}, required: [] },
-    async execute() {
-      const newCount = await refreshTools();
-      const msg =
-        newCount > 0
-          ? `Discovered and registered ${newCount} new tool(s). Total tools: ${_registeredTools.size}.`
-          : `No new tools found. Total tools: ${_registeredTools.size}.`;
-      return { content: [{ type: "text", text: msg }] };
     },
   });
 
@@ -1064,18 +1069,11 @@ Notes:
       try {
         await ensureSession();
 
-        // Initial tool discovery
+        // One-shot allowlisted MCP tools only (no dynamic class-tool polling).
         await refreshTools();
         logger.info(
-          `[ad4m] Registered ${_registeredTools.size} initial tool(s)`,
+          `[ad4m] Registered ${_registeredTools.size} static tool(s)`,
         );
-
-        // Start periodic polling for dynamic SHACL tools
-        const refreshInterval = config.toolRefreshIntervalMs ?? 30000;
-        _refreshTimer = setInterval(() => {
-          refreshTools();
-        }, refreshInterval);
-        logger.info(`[ad4m] Dynamic tool polling every ${refreshInterval}ms`);
       } catch (err: any) {
         logger.error(`[ad4m] Failed to connect to AD4M MCP: ${err.message}`);
         logger.error(

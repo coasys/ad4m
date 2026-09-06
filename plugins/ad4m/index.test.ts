@@ -1671,12 +1671,18 @@ describe("ad4mPlugin", () => {
     // Check that base tools are registered
     const toolNames = registeredTools.map((t) => t.name);
     expect(toolNames).toContain("ad4m_get_sample_config");
-    expect(toolNames).toContain("ad4m_refresh_ad4m_tools");
+    expect(toolNames).not.toContain("ad4m_refresh_ad4m_tools");
     expect(toolNames).toContain("ad4m_subscribe_to_mentions");
     expect(toolNames).toContain("ad4m_unsubscribe_from_mentions");
     expect(toolNames).toContain("ad4m_subscribe_to_children");
     expect(toolNames).toContain("ad4m_unsubscribe_from_children");
     expect(toolNames).toContain("ad4m_list_waker_subscriptions");
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "openclaw.plugin.json"), "utf8"),
+    ).contracts.tools as string[];
+    const missing = toolNames.filter((n) => !manifest.includes(n));
+    expect(missing).toEqual([]);
 
     // Check services
     const serviceIds = registeredServices.map((s) => s.id);
@@ -1739,35 +1745,6 @@ describe("ad4mPlugin", () => {
 
     const result = await listTool!.execute();
     expect(result.content[0].text).toContain("No active waker subscriptions");
-  });
-
-  it("refresh_ad4m_tools returns count when MCP is unavailable", async () => {
-    const registeredTools: Array<{ name: string; execute: Function }> = [];
-
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
-
-    const mockApi = {
-      pluginConfig: {
-        mode: "external",
-        mcpEndpoint: "http://localhost:3001/mcp",
-        token: "test-cred",
-      },
-      logger: makeMockLogger(),
-      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
-      registerService: vi.fn(),
-      registerCli: vi.fn(),
-    };
-
-    await ad4mPlugin(mockApi);
-
-    const refreshTool = registeredTools.find(
-      (t) => t.name === "ad4m_refresh_ad4m_tools",
-    );
-    expect(refreshTool).toBeDefined();
-
-    const result = await refreshTool!.execute();
-    // MCP unavailable, so "No new tools found"
-    expect(result.content[0].text).toContain("No new tools found");
   });
 
   it("ad4m_subscribe_to_mentions reports 'Waker service not connected' when the waker isn't running", async () => {
@@ -2056,7 +2033,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "recovered_tool",
+                name: "get_my_did",
                 description: "A tool discovered after session recovery",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2093,7 +2070,7 @@ describe("ad4mPlugin", () => {
 
     // The recovered tool should be registered
     const toolNames = registeredTools.map((t) => t.name);
-    expect(toolNames).toContain("ad4m_recovered_tool");
+    expect(toolNames).toContain("ad4m_get_my_did");
 
     // Logger should show re-initialization
     const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
@@ -2144,7 +2121,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "test_tool",
+                name: "instance_query",
                 description: "A test tool",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2192,7 +2169,7 @@ describe("ad4mPlugin", () => {
     await mcpService!.start(makeServiceCtx());
 
     // Find the dynamically registered MCP tool
-    const testTool = registeredTools.find((t) => t.name === "ad4m_test_tool");
+    const testTool = registeredTools.find((t) => t.name === "ad4m_instance_query");
     expect(testTool).toBeDefined();
 
     // Reset counters to track just the tool call
@@ -2251,7 +2228,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "failing_tool",
+                name: "add_link",
                 description: "Tool that fails with 500",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2287,7 +2264,7 @@ describe("ad4mPlugin", () => {
     await mcpService!.start(makeServiceCtx());
 
     const failingTool = registeredTools.find(
-      (t) => t.name === "ad4m_failing_tool",
+      (t) => t.name === "ad4m_add_link",
     );
     expect(failingTool).toBeDefined();
 
