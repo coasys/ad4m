@@ -1671,7 +1671,7 @@ describe("ad4mPlugin", () => {
     // Check that base tools are registered
     const toolNames = registeredTools.map((t) => t.name);
     expect(toolNames).toContain("ad4m_get_sample_config");
-    expect(toolNames).toContain("ad4m_refresh_ad4m_tools");
+    expect(toolNames).not.toContain("ad4m_refresh_ad4m_tools");
     expect(toolNames).toContain("ad4m_subscribe_to_mentions");
     expect(toolNames).toContain("ad4m_unsubscribe_from_mentions");
     expect(toolNames).toContain("ad4m_subscribe_to_children");
@@ -1739,35 +1739,6 @@ describe("ad4mPlugin", () => {
 
     const result = await listTool!.execute();
     expect(result.content[0].text).toContain("No active waker subscriptions");
-  });
-
-  it("refresh_ad4m_tools returns count when MCP is unavailable", async () => {
-    const registeredTools: Array<{ name: string; execute: Function }> = [];
-
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
-
-    const mockApi = {
-      pluginConfig: {
-        mode: "external",
-        mcpEndpoint: "http://localhost:3001/mcp",
-        token: "test-cred",
-      },
-      logger: makeMockLogger(),
-      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
-      registerService: vi.fn(),
-      registerCli: vi.fn(),
-    };
-
-    await ad4mPlugin(mockApi);
-
-    const refreshTool = registeredTools.find(
-      (t) => t.name === "ad4m_refresh_ad4m_tools",
-    );
-    expect(refreshTool).toBeDefined();
-
-    const result = await refreshTool!.execute();
-    // MCP unavailable, so "No new tools found"
-    expect(result.content[0].text).toContain("No new tools found");
   });
 
   it("ad4m_subscribe_to_mentions reports 'Waker service not connected' when the waker isn't running", async () => {
