@@ -1056,6 +1056,25 @@ impl Ad4mMcpHandler {
             ));
         }
 
+        // Resolve every collection predicate BEFORE creating the subject, so
+        // a bad collection name fails the whole call cleanly instead of
+        // leaving a live instance with partial collection membership.
+        let mut collection_predicates: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (collection, _) in &validated.collections {
+            match shacl::resolve_property_predicate(&perspective, &class_name, collection).await {
+                Ok(pred) => {
+                    collection_predicates.insert(collection.clone(), pred);
+                }
+                Err(e) => {
+                    return error_json(format!(
+                        "Could not resolve collection '{collection}' on {class_name}: {e} — \
+                         nothing was created"
+                    ))
+                }
+            }
+        }
+
         let initial_values = if validated.scalars.is_empty() {
             None
         } else {
@@ -1075,23 +1094,11 @@ impl Ad4mMcpHandler {
         }
 
         // Collections: one link per item, same path as instance_add_to_collection.
+        // A store-level add_link failure mid-loop is disclosed (with what was
+        // and wasn't linked) rather than rolled back.
         let mut collections_set: Map<String, Value> = Map::new();
         for (collection, items) in &validated.collections {
-            let predicate = match shacl::resolve_property_predicate(
-                &perspective,
-                &class_name,
-                collection,
-            )
-            .await
-            {
-                Ok(pred) => pred,
-                Err(e) => {
-                    return error_json(format!(
-                        "Created {class_name} at '{base_uri}' but could not resolve collection \
-                         '{collection}': {e}"
-                    ))
-                }
-            };
+            let predicate = collection_predicates[collection].clone();
             let mut added = Vec::with_capacity(items.len());
             for item in items {
                 let item_str = match item {
@@ -1498,6 +1505,46 @@ mod tests {
     /// A perspective with both classes registered in the global registry, and
     /// an MCP handler authenticated as admin against it — the same path an
     /// external client takes minus the HTTP transport.
+    /// Relation-typed fixtures: Post --hasOne--> User (forward, writable),
+    /// Comment --belongsToOne--> Post (reverse, read-only on this side).
+    const USER_SDNA: &str = r#"{
+      "target_class": "ns://User",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://User"}
+      ],
+      "properties": [
+        {"path":"ns://user_name","name":"name","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://user_name","target":"value"}]}
+      ]
+    }"#;
+
+    const POST_SDNA: &str = r#"{
+      "target_class": "ns://Post",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Post"}
+      ],
+      "properties": [
+        {"path":"ns://post_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://post_title","target":"value"}]},
+        {"path":"ns://post_author","name":"writer","node_kind":"IRI","relation_kind":"hasOne","max_count":1,
+         "target_class_name":"User","writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://post_author","target":"value"}]}
+      ]
+    }"#;
+
+    const COMMENT_SDNA: &str = r#"{
+      "target_class": "ns://Comment",
+      "constructor_actions": [
+        {"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://Comment"}
+      ],
+      "properties": [
+        {"path":"ns://comment_text","name":"text","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+         "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://comment_text","target":"value"}]},
+        {"path":"ns://post_comments","name":"post","node_kind":"IRI","relation_kind":"belongsToOne",
+         "target_class_name":"Post"}
+      ]
+    }"#;
+
     /// Unregisters the fixture perspective when the test ends (also on
     /// panic), so tests that assert on empty global state stay honest.
     struct PerspectiveGuard(String);
@@ -1508,8 +1555,18 @@ mod tests {
     }
 
     async fn setup(dynamic_class_tools: bool) -> (Ad4mMcpHandler, String, PerspectiveGuard) {
-        let (perspective, _shapes, _ctx) =
-            setup_perspective_no_llm(&[("Channel", CHANNEL_SDNA), ("Message", MESSAGE_SDNA)]).await;
+        setup_with(
+            &[("Channel", CHANNEL_SDNA), ("Message", MESSAGE_SDNA)],
+            dynamic_class_tools,
+        )
+        .await
+    }
+
+    async fn setup_with(
+        classes: &[(&str, &str)],
+        dynamic_class_tools: bool,
+    ) -> (Ad4mMcpHandler, String, PerspectiveGuard) {
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(classes).await;
         let uuid = perspective.persisted.lock().await.uuid.clone();
         register_perspective(uuid.clone(), perspective);
         let handler = Ad4mMcpHandler::new(McpContext {
@@ -1709,6 +1766,162 @@ mod tests {
         let payload = parse(&validation_failure("Channel", &errs));
         assert!(payload["error"].as_str().unwrap().contains("messages"));
         assert_eq!(payload["validation_errors"][0]["property"], "messages");
+    }
+
+    /// Relation-typed properties through the generic tools: schema exposure,
+    /// URI-gated writes on a forward hasOne, rejection of non-URI values, and
+    /// read-only enforcement on a belongsTo (reverse) relation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn instance_tools_relation_typed_properties() {
+        let (handler, uuid, _guard) = setup_with(
+            &[
+                ("User", USER_SDNA),
+                ("Post", POST_SDNA),
+                ("Comment", COMMENT_SDNA),
+            ],
+            false,
+        )
+        .await;
+
+        // describe_perspective exposes the relation with kind + target class,
+        // and marks the reverse side read-only.
+        let desc = parse(
+            &handler
+                .describe_perspective(Parameters(DescribePerspectiveParams {
+                    perspective_id: uuid.clone(),
+                }))
+                .await,
+        );
+        let classes = desc["classes"].as_array().expect("classes array");
+        let post = find(classes, "Post");
+        let writer = find(post["properties"].as_array().expect("post props"), "writer");
+        assert_eq!(writer["type"], "reference");
+        assert_eq!(writer["relation_kind"], "hasOne");
+        assert_eq!(writer["target_class"], "User");
+        let comment = find(classes, "Comment");
+        let post_rel = find(
+            comment["properties"].as_array().expect("comment props"),
+            "post",
+        );
+        assert_eq!(post_rel["relation_kind"], "belongsToOne");
+        assert_eq!(post_rel["read_only"], true, "{post_rel}");
+
+        // Create a User, then a Post pointing at it through the relation.
+        let user = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "User".into(),
+                    properties: Some(props(&[("name", json!("Geordi"))])),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        );
+        assert_eq!(user["created"], true, "{user}");
+        let user_uri = user["base_uri"].as_str().unwrap().to_string();
+
+        let post = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Post".into(),
+                    properties: Some(props(&[
+                        ("title", json!("Warp field notes")),
+                        ("writer", json!(user_uri.clone())),
+                    ])),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        );
+        assert_eq!(post["created"], true, "{post}");
+        let post_uri = post["base_uri"].as_str().unwrap().to_string();
+
+        // Read back: the hasOne relation resolves to the linked User's URI.
+        let got = parse(
+            &handler
+                .instance_get(Parameters(InstanceGetParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Post".into(),
+                    base_uri: post_uri.clone(),
+                }))
+                .await,
+        );
+        assert_eq!(got["title"], "Warp field notes", "{got}");
+        let writer_val = &got["writer"];
+        let writer_str = writer_val
+            .as_str()
+            .map(|s| s.to_string())
+            .or_else(|| {
+                writer_val
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| writer_val.to_string());
+        assert!(
+            writer_str.contains(&user_uri),
+            "writer should resolve to the linked user, got: {got}"
+        );
+
+        // A non-URI value for a relation property is rejected before any write
+        // (the is_safe_iri_target gate).
+        let bad = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Post".into(),
+                    properties: Some(props(&[
+                        ("title", json!("Bad author")),
+                        ("writer", json!("Geordi La Forge")),
+                    ])),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        );
+        assert!(bad["error"].is_string(), "{bad}");
+        assert_eq!(bad["validation_errors"][0]["property"], "writer", "{bad}");
+        assert!(
+            bad["validation_errors"][0]["problem"]
+                .as_str()
+                .unwrap()
+                .contains("existing User instance"),
+            "{bad}"
+        );
+
+        // Writing the reverse side of a belongsTo relation is rejected: the
+        // link lives on the target instance.
+        let comment = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Comment".into(),
+                    properties: Some(props(&[("text", json!("Fascinating."))])),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        );
+        assert_eq!(comment["created"], true, "{comment}");
+        let comment_uri = comment["base_uri"].as_str().unwrap().to_string();
+
+        let reverse_write = parse(
+            &handler
+                .instance_update(Parameters(InstanceUpdateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Comment".into(),
+                    base_uri: comment_uri,
+                    properties: props(&[("post", json!(post_uri))]),
+                }))
+                .await,
+        );
+        assert!(reverse_write["error"].is_string(), "{reverse_write}");
+        assert_eq!(
+            reverse_write["validation_errors"][0]["property"], "post",
+            "{reverse_write}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

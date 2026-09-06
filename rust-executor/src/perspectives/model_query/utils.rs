@@ -135,9 +135,11 @@ pub(super) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
             .join(" ");
         format!("VALUES ?{var} {{ {iris} }}")
     } else {
+        // Escape every id rather than dropping the odd ones — matches the
+        // where-clause fallback in `sparql_builder`, and a dropped id would
+        // silently exclude that instance from the result.
         let strs = ids
             .iter()
-            .filter(|id| validate_iri(id).is_ok())
             .map(|id| format!("\"{}\"", escape_sparql_string(id)))
             .collect::<Vec<_>>()
             .join(", ");
