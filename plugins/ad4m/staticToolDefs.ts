@@ -109,6 +109,35 @@ export const STATIC_TOOL_DEFS: McpTool[] =
     }
   },
   {
+    "name": "verify_email_code",
+    "description": "Verify an email code to complete signup or login. Returns a JWT token on success. The verification_type must be 'signup' or 'login'.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "VerifyEmailCodeParams",
+      "description": "Parameters for verifying an email code (multi-user mode)",
+      "type": "object",
+      "properties": {
+        "email": {
+          "description": "User email address",
+          "type": "string"
+        },
+        "code": {
+          "description": "6-digit verification code",
+          "type": "string"
+        },
+        "verification_type": {
+          "description": "Type: \"signup\" or \"login\"",
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "code",
+        "verification_type"
+      ]
+    }
+  },
+  {
     "name": "list_perspectives",
     "description": "List all AD4M perspectives. A perspective is a subjective graph database \u2014 a personal collection of links (RDF-like triples: source \u2192 predicate \u2192 target) that can be queried, modified, and optionally shared as a 'neighbourhood' for real-time P2P collaboration. Each has a UUID and a human-readable name.",
     "inputSchema": {
