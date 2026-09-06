@@ -49,6 +49,18 @@ export interface WakerSubscriptionManagerOptions {
   QuerySubscriptionProxy?: any;
 }
 
+/**
+ * Add a short cause hint to known subscription failures.
+ * The executor needs its main key to register a live query; on a restarted
+ * executor whose wallet was never unlocked this surfaces as a bare 403.
+ */
+export function hintFor(msg: string): string {
+  if (/main key not found/i.test(msg)) {
+    return " — the executor's wallet is locked (keys are held in memory only); unlock the agent and subscribe again";
+  }
+  return "";
+}
+
 export class WakerSubscriptionManager {
   private perspectiveClient: any;
   private logger: WakerLogger;
@@ -118,7 +130,10 @@ export class WakerSubscriptionManager {
       this.activeSubscriptions.delete(sub.id);
       this.seenMessages.delete(sub.id);
       this.persist();
-      return; // Don't throw — caller should not crash
+      // Throw so callers can report the real outcome. Background callers
+      // (auto-subscribe, restore-on-start) catch and log; the subscribe tools
+      // turn this into an error result instead of a false "Subscribed" reply.
+      throw new Error(`Waker subscription ${sub.id} failed: ${msg}${hintFor(msg)}`);
     }
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
 
