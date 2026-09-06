@@ -343,6 +343,7 @@ mod tests {
         let handler = Ad4mMcpHandler::new(McpContext {
             admin_credential: None,
             auth_token: Arc::new(RwLock::new(None)),
+            dynamic_class_tools: false,
         });
 
         let table_names: std::collections::BTreeSet<&str> =
@@ -376,6 +377,7 @@ mod tests {
         let handler = Ad4mMcpHandler::new(McpContext {
             admin_credential: None,
             auth_token: Arc::new(RwLock::new(None)),
+            dynamic_class_tools: false,
         });
 
         let registered: std::collections::BTreeSet<String> = handler

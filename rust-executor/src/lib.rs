@@ -719,6 +719,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 .unwrap();
             let mcp_config = mcp::server::McpServerConfig {
                 port: config.mcp_port.unwrap_or(3001),
+                dynamic_class_tools: config.dynamic_class_tools.unwrap_or(false),
                 ..Default::default()
             };
             if let Err(e) = runtime.block_on(mcp::start_mcp_server(

@@ -169,6 +169,10 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Expose dynamic per-class SHACL tools ({class}_create, {class}_set_{prop}, …)
+        /// over MCP in addition to the static instance_* tools. Default: false.
+        #[arg(long, action)]
+        dynamic_class_tools: Option<bool>,
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         /// Useful for test harnesses that need targeted process cleanup.
         #[arg(long)]
@@ -225,6 +229,7 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        dynamic_class_tools,
         pid_file,
     } = args.domain
     {
@@ -266,6 +271,7 @@ async fn main() -> Result<()> {
                 smtp_config: None,
                 enable_mcp,
                 mcp_port,
+                dynamic_class_tools,
                 pid_file,
                 ..Default::default()
             })

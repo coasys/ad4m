@@ -109,10 +109,8 @@ impl ServerHandler for Ad4mMcpHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let mut tools = self.tool_router.list_all();
-        tools.extend(self.generate_dynamic_tools().await);
         Ok(ListToolsResult {
-            tools,
+            tools: self.exposed_tools().await,
             meta: None,
             next_cursor: None,
         })
@@ -347,10 +345,57 @@ impl Ad4mMcpHandler {
             let result = self.tool_router.call(tcc).await?;
             Ok(result)
         } else {
-            // Try dynamic SHACL tools
-            self.handle_dynamic_tool(&tool_name, request.arguments)
+            self.dispatch_non_router_tool(&tool_name, request.arguments)
                 .await
         }
+    }
+
+    /// The tool list this MCP transport advertises: every static `#[tool]`
+    /// on the router, plus the dynamic per-class SHACL tools **only when**
+    /// `dynamicClassTools` is enabled. With the flag off (the default) the
+    /// list is constant regardless of which social DNA is loaded — that is
+    /// what lets plugin manifests and agent configs declare the AD4M tools
+    /// statically. The generic `instance_*` tools cover per-class operations
+    /// in that mode.
+    ///
+    /// Note this is deliberately NOT what the in-process harness sees:
+    /// `harness_bridge::list_tool_schemas` always merges the dynamic tools.
+    pub(crate) async fn exposed_tools(&self) -> Vec<rmcp::model::Tool> {
+        let mut tools = self.tool_router.list_all();
+        if self.context.dynamic_class_tools {
+            tools.extend(self.generate_dynamic_tools().await);
+        }
+        tools
+    }
+
+    /// Handle a call to a tool that is not on the static router. That is
+    /// either a dynamic per-class SHACL tool (when exposed) or an unknown
+    /// name. When dynamic tools are hidden, calling one by name is refused
+    /// with a pointer to the static equivalent — hidden tools must not be
+    /// silently callable, or the "stable surface" guarantee would only hold
+    /// for `tools/list` and not for `tools/call`.
+    pub(crate) async fn dispatch_non_router_tool(
+        &self,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if self.context.dynamic_class_tools {
+            return self.handle_dynamic_tool(tool_name, arguments).await;
+        }
+        Ok(CallToolResult::error(vec![Content::text(
+            json!({
+                "error": format!(
+                    "Unknown tool: {}. Dynamic per-class tools are not exposed on this MCP \
+                     server (config `dynamicClassTools` is false). Use the generic instance \
+                     tools instead: describe_perspective, instance_create, instance_query, \
+                     instance_get, instance_update, instance_add_to_collection, \
+                     instance_remove — pass the class name as `class_name`. To re-enable \
+                     per-class tools start the executor with `--dynamic-class-tools true`.",
+                    tool_name
+                ),
+            })
+            .to_string(),
+        )]))
     }
 
     // ========================================================================

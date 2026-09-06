@@ -91,6 +91,13 @@ pub struct Ad4mConfig {
     pub enable_mcp: Option<bool>,
     /// Port for MCP HTTP server (default: 3001)
     pub mcp_port: Option<u16>,
+    /// Expose the dynamic per-class MCP tools (`{class}_create`,
+    /// `{class}_set_{property}`, `{class}_add_{collection}`, …) over the MCP
+    /// transport, alongside the static `instance_*` tools. Default `false`:
+    /// external MCP clients see only the fixed static tool surface, so the tool
+    /// list stays constant no matter which social DNA is loaded. The in-process
+    /// interpretation/flow harness is unaffected by this flag either way.
+    pub dynamic_class_tools: Option<bool>,
     /// Path to write PID file (for test harness cleanup)
     pub pid_file: Option<String>,
     /// Wallet backend type: "local" (default) or "shared".
@@ -323,6 +330,7 @@ impl Default for Ad4mConfig {
             smtp_config: None,
             enable_mcp: None,
             mcp_port: None,
+            dynamic_class_tools: None,
             pid_file: None,
             wallet_backend: None,
             wallet_backend_url: None,
