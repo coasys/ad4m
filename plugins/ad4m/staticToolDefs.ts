@@ -85,6 +85,30 @@ export const STATIC_TOOL_DEFS: McpTool[] =
     }
   },
   {
+    "name": "signup",
+    "description": "Create a new user account (multi-user mode). Sends a verification email with a code. Use verify_email_code to complete signup.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "SignupParams",
+      "description": "Parameters for user signup (multi-user mode)",
+      "type": "object",
+      "properties": {
+        "email": {
+          "description": "User email address",
+          "type": "string"
+        },
+        "password": {
+          "description": "User password",
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "password"
+      ]
+    }
+  },
+  {
     "name": "list_perspectives",
     "description": "List all AD4M perspectives. A perspective is a subjective graph database \u2014 a personal collection of links (RDF-like triples: source \u2192 predicate \u2192 target) that can be queried, modified, and optionally shared as a 'neighbourhood' for real-time P2P collaboration. Each has a UUID and a human-readable name.",
     "inputSchema": {
@@ -110,6 +134,35 @@ export const STATIC_TOOL_DEFS: McpTool[] =
       },
       "required": [
         "name"
+      ]
+    }
+  },
+  {
+    "name": "add_model",
+    "description": "Register a model (subject class) using a SHACL JSON definition. This defines the schema \u2014 properties, collections, types \u2014 for typed objects in the perspective. Once registered, the class appears in describe_perspective and can be used with the generic instance_* tools by class_name (instance_create, instance_query, \u2026). class_name must be the local class name (e.g. Task), not the target_class URI. If the executor runs with dynamicClassTools enabled, per-class tools are additionally generated.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "AddModelParams",
+      "description": "Parameters for adding SDNA (subject class definition) to a perspective",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "class_name": {
+          "description": "Subject class name (local name, e.g. Task \u2014 must match the local name of target_class, not the URI form)",
+          "type": "string"
+        },
+        "shacl_json": {
+          "description": "SHACL shape definition as JSON string",
+          "type": "string"
+        }
+      },
+      "required": [
+        "perspective_id",
+        "class_name",
+        "shacl_json"
       ]
     }
   },
@@ -159,6 +212,16 @@ export const STATIC_TOOL_DEFS: McpTool[] =
         "perspective_uuid",
         "link_language"
       ]
+    }
+  },
+  {
+    "name": "list_link_language_templates",
+    "description": "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language` when calling `neighbourhood_publish_from_perspective`.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ListLinkLanguageTemplatesParams",
+      "description": "No parameters",
+      "type": "object"
     }
   },
   {
