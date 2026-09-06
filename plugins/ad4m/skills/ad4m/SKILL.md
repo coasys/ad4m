@@ -26,15 +26,15 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 - `add_perspective` / `list_perspectives`
 - `subscribe_to_mentions` / `unsubscribe_from_mentions` / `subscribe_to_children` / `unsubscribe_from_children` / `list_waker_subscriptions`
 - `get_my_did` / `auth_status` / `get_sample_config`
-- `signup` / `login_email` (multi-user)
+- `signup` / `verify_email_code` / `login_email` (multi-user)
 - `set_agent_profile` (multi-user, required — see Rule 12)
 - `set_profile_picture_from_file`
 - `add_model` — register a subject class from SHACL JSON (see Rule 10)
 - `list_link_language_templates` — needed before publishing a neighbourhood
 
-**NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `verify_email_code`, `request_capability`, `generate_jwt`, `get_children_body_parsed`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). If you need one of these, use the direct-MCP fallback in Rule 3c.
+**NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, `get_children_body_parsed`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). If you need one of these, use the direct-MCP fallback in Rule 3c.
 
-**One asymmetry to know about:** `signup` is native but `verify_email_code` is not, and `signup`'s own description tells you to call it. On an executor that enforces email verification you will need the Rule 3c fallback to finish signing up — plenty of test/dev executors don't enforce it, so check the `signup` response rather than assuming either way.
+The whole multi-user onboarding path — `signup` → `verify_email_code` → `login_email` → `set_agent_profile` — is native, so you never need the fallback just to get an identity. Many test/dev executors skip verification even though `signup` says "check your email"; read the `signup` response rather than assuming either way.
 
 **Known manifest/executor mismatch (as of this writing):** `contracts.tools` also lists `ad4m_remove_link` and `ad4m_agent_status`, but neither tool actually exists on the executor — declaring a name in the manifest doesn't guarantee the underlying tool is real. Don't rely on either; flagged upstream for a manifest fix.
 
@@ -114,7 +114,7 @@ The MCP server uses Streamable HTTP transport and always responds with `text/eve
 
 **3b. Multi-user via `openclaw ad4m-setup`** — see Quick Setup above. This is the primary, recommended path. One command.
 
-**3c. Multi-user (or capability flow) via direct MCP calls** — use this ONLY when `ad4m-setup` can't run (e.g. you need to call `signup`/`verify_email_code`/`request_capability`/`generate_jwt` yourself because they're not in your native tool bridge):
+**3c. Multi-user (or capability flow) via direct MCP calls** — use this ONLY when `ad4m-setup` can't run, when you need `request_capability`/`generate_jwt` (still not bridged), or when your plugin build predates the static-surface additions:
 
 ```bash
 mcporter call <mcpEndpoint>.<tool_name> --allow-http key=value ...
@@ -375,8 +375,8 @@ This is about *authoring* classes via `ad4m_add_model` — native since the stat
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `tool not found` for `ad4m_verify_email_code`, any `{class}_*` tool, or `ad4m_get_children_body_parsed` | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Use the Rule 3c `mcporter` fallback, or check whether your node's plugin build has added it. |
-| `tool not found` for `ad4m_add_model`, `ad4m_signup` or `ad4m_list_link_language_templates` | Your plugin build predates the commit that added them to the static surface. | Update the plugin build; until then use the Rule 3c `mcporter` fallback. |
+| `tool not found` for `ad4m_request_capability`, `ad4m_generate_jwt`, any `{class}_*` tool, or `ad4m_get_children_body_parsed` | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Use the Rule 3c `mcporter` fallback, or check whether your node's plugin build has added it. |
+| `tool not found` for `ad4m_add_model`, `ad4m_signup`, `ad4m_verify_email_code` or `ad4m_list_link_language_templates` | Your plugin build predates the commits that added them to the static surface. | Update the plugin build; until then use the Rule 3c `mcporter` fallback. |
 | `tool not found` for something `contracts.tools` *does* list (e.g. `ad4m_remove_link`, `ad4m_agent_status`) | The manifest declares the name but the executor has no such tool — a manifest/executor mismatch, not a bridging gap. | Don't rely on it; the `mcporter` fallback won't help either since the tool genuinely doesn't exist. Report it upstream. |
 | `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is triggering a silent failed auto-relogin on every restart (Rule 3b's runtime re-auth). | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |
 | `User key not found on executor` on login, right after an executor restart | **This is expected behavior, not a bug.** The wallet keeps signing keys in memory only. Until the executor's operator runs `agent.unlock(passphrase)`, the node is unusable by design — the DB password check passes, then the key lookup fails, which is a misleading *message*, but the underlying lockout is intentional. Same root cause blocks the capability bootstrap (`request_capability`/`generate_jwt` fails with `main key not found`). | This is a "the executor needs its operator" blocker — you can't work around it from an agent session. If you *are* the operator, run `agent.unlock` (REST, CLI, or WS-RPC) with the agent passphrase. If you're a third party connecting to someone else's node, the real fix on the node side is failing your connection attempt earlier with a clear "not unlocked yet" message instead of this one — worth raising with whoever runs the node if you hit it often. |
