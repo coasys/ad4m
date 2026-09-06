@@ -2033,7 +2033,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "recovered_tool",
+                name: "get_my_did",
                 description: "A tool discovered after session recovery",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2070,7 +2070,7 @@ describe("ad4mPlugin", () => {
 
     // The recovered tool should be registered
     const toolNames = registeredTools.map((t) => t.name);
-    expect(toolNames).toContain("ad4m_recovered_tool");
+    expect(toolNames).toContain("ad4m_get_my_did");
 
     // Logger should show re-initialization
     const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
@@ -2121,7 +2121,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "test_tool",
+                name: "instance_query",
                 description: "A test tool",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2169,7 +2169,7 @@ describe("ad4mPlugin", () => {
     await mcpService!.start(makeServiceCtx());
 
     // Find the dynamically registered MCP tool
-    const testTool = registeredTools.find((t) => t.name === "ad4m_test_tool");
+    const testTool = registeredTools.find((t) => t.name === "ad4m_instance_query");
     expect(testTool).toBeDefined();
 
     // Reset counters to track just the tool call
@@ -2228,7 +2228,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "failing_tool",
+                name: "add_link",
                 description: "Tool that fails with 500",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2264,7 +2264,7 @@ describe("ad4mPlugin", () => {
     await mcpService!.start(makeServiceCtx());
 
     const failingTool = registeredTools.find(
-      (t) => t.name === "ad4m_failing_tool",
+      (t) => t.name === "ad4m_add_link",
     );
     expect(failingTool).toBeDefined();
 
