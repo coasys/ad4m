@@ -110,6 +110,41 @@ pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
     Ok(s)
 }
 
+/// True when `s` may be emitted as a `<…>` IRIREF in SPARQL text: it passes
+/// the injection guard AND parses as a real RFC-3987 IRI.  The store writes
+/// subjects with `NamedNode::new_unchecked`, so ids like Flux's
+/// `literal://string:xyz` (non-numeric port ⇒ invalid IRI) exist as terms and
+/// `STR()`-match fine — but emitting them inside `<…>` makes the whole query
+/// fail to parse.  Callers must fall back to a `FILTER(STR(…))` form for
+/// values that fail this check.
+pub(super) fn emittable_iri(s: &str) -> bool {
+    validate_iri(s).is_ok() && oxigraph::model::NamedNode::new(s).is_ok()
+}
+
+/// One SPARQL line constraining `?{var}` to exactly `ids`.  When every id is a
+/// parseable IRI this is a seekable `VALUES` binding; otherwise it is a
+/// `FILTER(STR(…) IN (…))` test (a scan, but the only correct form for
+/// `new_unchecked` store terms).  In the filter case `?{var}` must already be
+/// bound by a triple pattern in the surrounding group.
+pub(super) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
+    if ids.iter().all(|id| emittable_iri(id)) {
+        let iris = ids
+            .iter()
+            .map(|id| format!("<{id}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("VALUES ?{var} {{ {iris} }}")
+    } else {
+        let strs = ids
+            .iter()
+            .filter(|id| validate_iri(id).is_ok())
+            .map(|id| format!("\"{}\"", escape_sparql_string(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("FILTER(STR(?{var}) IN ({strs}))")
+    }
+}
+
 /// Maximum recursion depth for include resolution to prevent stack overflow.
 pub(super) const MAX_INCLUDE_DEPTH: u8 = 8;
 
@@ -309,6 +344,37 @@ mod tests {
         assert!(validate_iri("task://status").is_ok());
         assert!(validate_iri("literal:string:hello").is_ok());
         assert!(validate_iri("did:key:z6MkfR").is_ok());
+    }
+
+    #[test]
+    fn test_emittable_iri_accepts_real_iris() {
+        assert!(emittable_iri("task://status"));
+        assert!(emittable_iri("literal:string:hello"));
+        assert!(emittable_iri("did:key:z6MkfR"));
+        assert!(emittable_iri("ad4m://has_child"));
+    }
+
+    #[test]
+    fn test_emittable_iri_rejects_flux_double_slash_literals() {
+        // Stored via `NamedNode::new_unchecked`, but not parseable IRIs:
+        // `string:xyz` reads as host:port with a non-numeric port.
+        assert!(!emittable_iri("literal://string:abc123"));
+        assert!(!emittable_iri("<injected>"));
+        assert!(!emittable_iri("has spaces"));
+    }
+
+    #[test]
+    fn test_values_or_str_filter_forms() {
+        let clean = vec!["test://a".to_string(), "test://b".to_string()];
+        assert_eq!(
+            values_or_str_filter("source", &clean),
+            "VALUES ?source { <test://a> <test://b> }"
+        );
+        let mixed = vec!["test://a".to_string(), "literal://string:x".to_string()];
+        assert_eq!(
+            values_or_str_filter("source", &mixed),
+            "FILTER(STR(?source) IN (\"test://a\", \"literal://string:x\"))"
+        );
     }
 
     #[test]
