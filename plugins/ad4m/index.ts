@@ -39,6 +39,7 @@ import {
   mcpListTools,
 } from "./mcpClient";
 import { buildWakeMessage, postWake } from "./wakerHelpers";
+import { STATIC_TOOL_DEFS } from "./staticToolDefs";
 import { WakerSubscriptionManager } from "./wakerSubscriptionManager";
 import { runSetup } from "./setup";
 
@@ -339,6 +340,19 @@ export default function ad4mPlugin(api: any) {
 
     _registeredTools.add(tool.name);
   }
+
+  // Register the full static executor surface synchronously. OpenClaw builds
+  // the agent tool surface from a cold load of register() — tools registered
+  // later from the bridge service exist in the gateway but never reach agent
+  // sessions. Definitions are captured schemas (staticToolDefs.ts); execution
+  // still goes through the live MCP bridge via callToolWithRetry.
+  for (const staticDef of STATIC_TOOL_DEFS) {
+    _registeredTools.delete(staticDef.name); // survive hot-reload guard
+    registerMcpTool(staticDef);
+  }
+  logger.info(
+    `[ad4m] Registered ${STATIC_TOOL_DEFS.length} static executor tool(s) at register() time`,
+  );
 
   /**
    * Fetch tools from MCP and register any new ones.
