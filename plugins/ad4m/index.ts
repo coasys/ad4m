@@ -308,6 +308,7 @@ export default function ad4mPlugin(api: any) {
     "auth_status",
     "login_email",
     "signup",
+    "verify_email_code",
     "set_agent_profile",
     "list_perspectives",
     "add_perspective",
