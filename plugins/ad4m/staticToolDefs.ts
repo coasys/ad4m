@@ -1,0 +1,440 @@
+// Static tool definitions for the AD4M executor MCP surface.
+// Captured from ad4m-executor tools/list (integration/static-tools-mvp,
+// dynamicClassTools=false) so the plugin can register all agent tools
+// synchronously at register() time. OpenClaw builds the agent tool surface
+// from a cold load that only runs register(); tools registered later from
+// the bridge service never become visible to sessions.
+import type { McpTool } from "./types";
+
+export const STATIC_TOOL_DEFS: McpTool[] = 
+[
+  {
+    "name": "get_my_did",
+    "description": "Get the DID (Decentralized Identifier) of the current agent. Use this to identify your own messages when filtering \u2014 compare the 'author' field in message data against your DID.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "GetAgentProfileParams",
+      "description": "Parameters for getting the agent's public profile",
+      "type": "object"
+    }
+  },
+  {
+    "name": "auth_status",
+    "description": "Check the current authentication status of the MCP session.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "AuthStatusParams",
+      "description": "Parameters for checking authentication status (no params needed)",
+      "type": "object"
+    }
+  },
+  {
+    "name": "login_email",
+    "description": "Login to a multi-user AD4M executor using email and password. Returns a JWT token on success that will be used for subsequent operations.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "LoginEmailParams",
+      "description": "Parameters for email/password login (multi-user mode)",
+      "type": "object",
+      "properties": {
+        "email": {
+          "description": "User email address",
+          "type": "string"
+        },
+        "password": {
+          "description": "User password",
+          "type": "string"
+        }
+      },
+      "required": [
+        "email",
+        "password"
+      ]
+    }
+  },
+  {
+    "name": "list_perspectives",
+    "description": "List all AD4M perspectives. A perspective is a subjective graph database \u2014 a personal collection of links (RDF-like triples: source \u2192 predicate \u2192 target) that can be queried, modified, and optionally shared as a 'neighbourhood' for real-time P2P collaboration. Each has a UUID and a human-readable name.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "ListPerspectivesParams",
+      "description": "Parameters for listing perspectives",
+      "type": "object"
+    }
+  },
+  {
+    "name": "add_perspective",
+    "description": "Create a new perspective (local knowledge graph). Returns the UUID. You can then add links, register models (subject classes), and create typed instances within it. To share it for collaboration, convert it to a neighbourhood.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "AddPerspectiveParams",
+      "description": "Parameters for creating a new perspective",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Name for the new perspective",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "neighbourhood_join_from_url",
+    "description": "Join an existing neighbourhood by URL. Creates a local perspective that syncs with the shared neighbourhood. Returns the perspective UUID for interacting with the neighbourhood's data.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "NeighbourhoodJoinParams",
+      "description": "Parameters for joining a neighbourhood",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "Neighbourhood URL to join (e.g. neighbourhood://Qm...)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url"
+      ]
+    }
+  },
+  {
+    "name": "neighbourhood_publish_from_perspective",
+    "description": "Publish a local perspective as a shared neighbourhood. Automatically clones the given link language template to create a unique sync instance. Returns the neighbourhood URL that others can use to join via `neighbourhood_join_from_url`. Use `list_link_language_templates` first to find available templates.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "NeighbourhoodPublishParams",
+      "description": "Parameters for publishing a perspective as a neighbourhood",
+      "type": "object",
+      "properties": {
+        "perspective_uuid": {
+          "description": "UUID of the local perspective to publish as a shared neighbourhood",
+          "type": "string"
+        },
+        "link_language": {
+          "description": "Address of a link language to use for this neighbourhood.\nCan be a template address (will be cloned) or an already-cloned language.\nUse `list_link_language_templates` to see available templates.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Optional human-readable name for this neighbourhood (used as the cloned language name).\nIf not provided, a default name will be generated.",
+          "type": "string",
+          "default": "Neighbourhood"
+        }
+      },
+      "required": [
+        "perspective_uuid",
+        "link_language"
+      ]
+    }
+  },
+  {
+    "name": "add_link",
+    "description": "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit \u2014 all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "AddLinkParams",
+      "description": "Parameters for adding a link to a perspective",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "source": {
+          "description": "Link source URI",
+          "type": "string"
+        },
+        "predicate": {
+          "description": "Link predicate URI",
+          "type": "string"
+        },
+        "target": {
+          "description": "Link target URI",
+          "type": "string"
+        }
+      },
+      "required": [
+        "perspective_id",
+        "source",
+        "predicate",
+        "target"
+      ]
+    }
+  },
+  {
+    "name": "query_links",
+    "description": "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination \u2014 omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "QueryLinksParams",
+      "description": "Parameters for querying links in a perspective",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "source": {
+          "description": "Optional source URI filter",
+          "type": "string",
+          "nullable": true
+        },
+        "predicate": {
+          "description": "Optional predicate URI filter",
+          "type": "string",
+          "nullable": true
+        },
+        "target": {
+          "description": "Optional target URI filter",
+          "type": "string",
+          "nullable": true
+        }
+      },
+      "required": [
+        "perspective_id"
+      ]
+    }
+  },
+  {
+    "name": "describe_perspective",
+    "description": "Describe the data model of a perspective: every registered subject class (model) with its properties (name, type, required, cardinality, hints), its collections, and any flows (state machines). Call this right after list_perspectives / neighbourhood_join_from_url \u2014 it returns the schema as data so you can then use the generic instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove tools with class_name set to one of the returned class names. Property values passed to those tools are validated against this schema.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "DescribePerspectiveParams",
+      "description": "Parameters for describing a perspective's data model",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        }
+      },
+      "required": [
+        "perspective_id"
+      ]
+    }
+  },
+  {
+    "name": "instance_create",
+    "description": "Create a new instance of a subject class. class_name is one of the class names from describe_perspective; properties is a JSON object of property values (single JSON value per scalar property, array of item URIs per collection). Required properties must be present; every value is validated against the class schema (property, expected type, cardinality are named on rejection). Optionally pass parent to also link the instance as an ad4m://has_child child of another instance (e.g. a Message into a Channel). Returns the new instance's base_uri (its id). Example: instance_create(perspective_id, class_name='Message', properties={\"body\": \"Hello\"}, parent='<channel uri>').",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "InstanceCreateParams",
+      "description": "Parameters for creating a subject instance of any class",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "class_name": {
+          "description": "Subject class name exactly as listed by describe_perspective (e.g. \"Message\")",
+          "type": "string"
+        },
+        "properties": {
+          "description": "Property values keyed by property name. Scalar properties take one JSON\nvalue (string / number / boolean, matching the property's type);\ncollection properties take an array of item URIs. Required properties\nmust be present.",
+          "type": "object",
+          "additionalProperties": true,
+          "nullable": true
+        },
+        "base_uri": {
+          "description": "Optional URI for the new instance. A random one is generated when omitted.",
+          "type": "string",
+          "nullable": true
+        },
+        "parent": {
+          "description": "Optional parent URI. The new instance is additionally linked as an\n`ad4m://has_child` child of this node (e.g. a Message inside a Channel).",
+          "type": "string",
+          "nullable": true
+        }
+      },
+      "required": [
+        "perspective_id",
+        "class_name"
+      ]
+    }
+  },
+  {
+    "name": "instance_query",
+    "description": "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"\u2026\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to ad4m://has_child children of one instance (e.g. messages of a channel). Paginate with limit (default 100) and offset; total_count reports the full match count. Each instance has id (its base_uri), author, timestamp, and one key per property.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "InstanceQueryParams",
+      "description": "Parameters for querying instances of a class",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "class_name": {
+          "description": "Subject class name as listed by describe_perspective",
+          "type": "string"
+        },
+        "filter": {
+          "description": "Optional filter on property values (a model-query `where` clause).\nKeys are property names. Values: an exact match (`{\"status\": \"open\"}`),\nan array for IN (`{\"status\": [\"open\", \"doing\"]}`), or an operator object\n(`{\"count\": {\"gt\": 5}}`, `{\"title\": {\"contains\": \"mcp\"}}`,\n`{\"owner\": {\"not\": \"did:key:\u2026\"}}`). Combine with `\"OR\": [..]` /\n`\"AND\": [..]` / `\"NOT\": {..}`. `id` filters on the instance URI.",
+          "type": "object",
+          "additionalProperties": true,
+          "nullable": true
+        },
+        "parent": {
+          "description": "Optional parent URI: only return instances that are `ad4m://has_child`\nchildren of this node (e.g. the messages of one channel).",
+          "type": "string",
+          "nullable": true
+        },
+        "limit": {
+          "description": "Maximum number of instances to return (default 100).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "nullable": true
+        },
+        "offset": {
+          "description": "Number of instances to skip, for pagination.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "nullable": true
+        }
+      },
+      "required": [
+        "perspective_id",
+        "class_name"
+      ]
+    }
+  },
+  {
+    "name": "instance_get",
+    "description": "Get one instance of a subject class by its base_uri, with all property values and collections resolved. class_name is one of the class names from describe_perspective. Returns an error if no instance of that class exists at the URI.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "InstanceGetParams",
+      "description": "Parameters for reading one instance",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "class_name": {
+          "description": "Subject class name as listed by describe_perspective",
+          "type": "string"
+        },
+        "base_uri": {
+          "description": "URI of the instance (the `id` returned by instance_create / instance_query)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "perspective_id",
+        "class_name",
+        "base_uri"
+      ]
+    }
+  },
+  {
+    "name": "instance_update",
+    "description": "Set one or more single-valued properties on an existing instance. class_name is one of the class names from describe_perspective; properties is a JSON object of the values to change (unlisted properties are untouched). Values are validated against the class schema \u2014 the error names the property, expected type and cardinality. Collections cannot be set here: use instance_add_to_collection. Example: instance_update(perspective_id, class_name='Task', base_uri='<id>', properties={\"status\": \"done\"}).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "InstanceUpdateParams",
+      "description": "Parameters for updating scalar properties of an instance",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "class_name": {
+          "description": "Subject class name as listed by describe_perspective",
+          "type": "string"
+        },
+        "base_uri": {
+          "description": "URI of the instance to update",
+          "type": "string"
+        },
+        "properties": {
+          "description": "Property values to set, keyed by property name. Only the given\nproperties change; each must be a single-valued property of the class.",
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "perspective_id",
+        "class_name",
+        "base_uri",
+        "properties"
+      ]
+    }
+  },
+  {
+    "name": "instance_add_to_collection",
+    "description": "Add an item to a collection property of an instance (e.g. add a Message to a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the URI of the item (usually another instance's id). Adding the same item twice is a no-op.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "InstanceAddToCollectionParams",
+      "description": "Parameters for adding an item to a collection property",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "class_name": {
+          "description": "Subject class name of the instance that owns the collection",
+          "type": "string"
+        },
+        "base_uri": {
+          "description": "URI of the instance that owns the collection",
+          "type": "string"
+        },
+        "collection": {
+          "description": "Collection property name as listed under `collections` by describe_perspective",
+          "type": "string"
+        },
+        "item_uri": {
+          "description": "URI of the item to add (typically another instance's `id`)",
+          "type": "string"
+        }
+      },
+      "required": [
+        "perspective_id",
+        "class_name",
+        "base_uri",
+        "collection",
+        "item_uri"
+      ]
+    }
+  },
+  {
+    "name": "instance_remove",
+    "description": "Delete an instance of a subject class: removes all its property links, its type markers, and every inbound link from other instances (e.g. collection membership). Refuses if no instance of class_name exists at base_uri, so a wrong class or URI cannot delete something else. \u26a0\ufe0f Irreversible.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "InstanceRemoveParams",
+      "description": "Parameters for removing an instance",
+      "type": "object",
+      "properties": {
+        "perspective_id": {
+          "description": "Perspective UUID",
+          "type": "string"
+        },
+        "class_name": {
+          "description": "Subject class name of the instance",
+          "type": "string"
+        },
+        "base_uri": {
+          "description": "URI of the instance to remove",
+          "type": "string"
+        }
+      },
+      "required": [
+        "perspective_id",
+        "class_name",
+        "base_uri"
+      ]
+    }
+  }
+];
