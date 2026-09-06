@@ -134,9 +134,13 @@ export default function ad4mPlugin(api: any) {
   const executorUrl =
     providedConfig.executorUrl ?? "http://localhost:12000";
 
-  // On reload, pick up token from config if module-level state is empty
-  if (!_authToken && providedConfig.token) {
+  // On (re)load, a token explicitly set in config wins over module-level
+  // state. Module state survives hot-reloads, so only adopting the config
+  // token when _authToken is empty made config token updates (e.g. a fresh
+  // multi-user login JWT) silently ignored until a full gateway restart.
+  if (providedConfig.token && providedConfig.token !== _authToken) {
     _authToken = providedConfig.token;
+    _sessionId = ""; // force MCP session re-init under the new identity
   }
 
   // Resolve wakeToken: plugin config override > OpenClaw global hooks config
