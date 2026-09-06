@@ -53,6 +53,38 @@ export const STATIC_TOOL_DEFS: McpTool[] =
     }
   },
   {
+    "name": "set_agent_profile",
+    "description": "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and Flux users in neighbourhoods. Only provided fields are updated; omitted fields keep their current values.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "SetAgentProfileParams",
+      "description": "Parameters for setting the agent's profile",
+      "type": "object",
+      "properties": {
+        "username": {
+          "description": "Display username",
+          "type": "string"
+        },
+        "given_name": {
+          "description": "Given (first) name",
+          "type": "string"
+        },
+        "family_name": {
+          "description": "Family (last) name",
+          "type": "string"
+        },
+        "email": {
+          "description": "Email address",
+          "type": "string"
+        },
+        "bio": {
+          "description": "Bio/description text",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
     "name": "list_perspectives",
     "description": "List all AD4M perspectives. A perspective is a subjective graph database \u2014 a personal collection of links (RDF-like triples: source \u2192 predicate \u2192 target) that can be queried, modified, and optionally shared as a 'neighbourhood' for real-time P2P collaboration. Each has a UUID and a human-readable name.",
     "inputSchema": {

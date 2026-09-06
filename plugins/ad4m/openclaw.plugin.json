@@ -11,6 +11,7 @@
       "ad4m_agent_status",
       "ad4m_auth_status",
       "ad4m_login_email",
+      "ad4m_set_agent_profile",
       "ad4m_list_perspectives",
       "ad4m_add_perspective",
       "ad4m_neighbourhood_join_from_url",

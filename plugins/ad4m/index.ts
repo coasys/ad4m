@@ -270,6 +270,7 @@ export default function ad4mPlugin(api: any) {
     "agent_status",
     "auth_status",
     "login_email",
+    "set_agent_profile",
     "list_perspectives",
     "add_perspective",
     "neighbourhood_join_from_url",
