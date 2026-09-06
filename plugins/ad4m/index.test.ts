@@ -3040,6 +3040,79 @@ describe("WakerSubscriptionManager", () => {
     expect(manager.getActive()).toHaveLength(0);
     expect(persisted.subs).toHaveLength(0);
     expect(mock.proxy.dispose).toHaveBeenCalled();
+    // ...and it stays pending, because the caller asked to be enrolled
+    expect(manager.getPending().map((s) => s.id)).toEqual(["mention-fail"]);
+  });
+
+  it("re-attempts a rejected subscription until the executor accepts it", async () => {
+    const mock = makeMockProxy();
+    let attempt = 0;
+    mock.proxy.subscribe = vi.fn(() => {
+      attempt += 1;
+      // Fails while the wallet is locked, succeeds once it is unlocked.
+      return attempt === 1
+        ? Promise.reject(new Error("RPC error 403: main key not found"))
+        : Promise.resolve();
+    });
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      retryPendingMs: 20,
+      onWake: () => {},
+    });
+
+    const sub = {
+      id: "mention-retry",
+      type: "mention" as const,
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    };
+    await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting every/);
+    expect(manager.getPending()).toHaveLength(1);
+
+    // Wait for the scheduled re-attempt to run.
+    await vi.waitFor(() => {
+      expect(manager.has("mention-retry")).toBe(true);
+    });
+    expect(manager.getPending()).toHaveLength(0);
+    expect(attempt).toBe(2);
+    manager.disposeAll();
+  });
+
+  it("stops re-attempting a subscription that was disposed", async () => {
+    const mock = makeMockProxy();
+    mock.proxy.subscribe = vi.fn(() =>
+      Promise.reject(new Error("RPC error 403: main key not found")),
+    );
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      retryPendingMs: 20,
+      onWake: () => {},
+    });
+
+    await expect(manager.subscribe({
+      id: "mention-gone",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    })).rejects.toThrow();
+    expect(manager.getPending()).toHaveLength(1);
+
+    manager.dispose("mention-gone");
+    expect(manager.getPending()).toHaveLength(0);
+
+    const attemptsAfterDispose = mock.proxy.subscribe.mock.calls.length;
+    await manager.retryPending();
+    expect(mock.proxy.subscribe.mock.calls.length).toBe(attemptsAfterDispose);
   });
 
   it("should hint at a locked wallet on a main-key 403 only", () => {
