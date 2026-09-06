@@ -56,7 +56,7 @@ import {
 } from "./index";
 
 import ad4mPlugin, { _resetModuleState } from "./index";
-import { WakerSubscriptionManager } from "./wakerSubscriptionManager";
+import { WakerSubscriptionManager, hintFor } from "./wakerSubscriptionManager";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -2960,6 +2960,43 @@ describe("WakerSubscriptionManager", () => {
   const mockPerspectiveClientSimple = {
     querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] }})),
   };
+
+  it("should throw when the executor rejects the subscription, and not keep it active", async () => {
+    const mock = makeMockProxy();
+    mock.proxy.subscribe = vi.fn(() =>
+      Promise.reject(new Error("RPC error 403: main key not found")),
+    );
+    const persisted: { subs: any[] } = { subs: [{ placeholder: true }] };
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => {},
+      onPersist: (subs: any[]) => { persisted.subs = subs; },
+    });
+
+    // A failed subscription must surface to the caller — the subscribe tools
+    // replied "Subscribed..." on a 403 before this.
+    await expect(manager.subscribe({
+      id: "mention-fail",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    })).rejects.toThrow(/main key not found/);
+
+    expect(manager.has("mention-fail")).toBe(false);
+    expect(manager.getActive()).toHaveLength(0);
+    expect(persisted.subs).toHaveLength(0);
+    expect(mock.proxy.dispose).toHaveBeenCalled();
+  });
+
+  it("should hint at a locked wallet on a main-key 403 only", () => {
+    expect(hintFor("RPC error 403: main key not found")).toContain("wallet is locked");
+    expect(hintFor("connection refused")).toBe("");
+  });
 
   it("should ignore non-array results (e.g. false) and not store them as seen", async () => {
     const mock = makeMockProxy();
