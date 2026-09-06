@@ -1304,8 +1304,16 @@ Notes:
         return;
       }
 
-      const tokenType = _authToken.startsWith("eyJ") ? "JWT" : _authToken.length <= 32 ? "admin-credential" : "unknown";
-      logger.info(`[ad4m-waker] _authToken: ${_authToken ? `${_authToken.substring(0, 16)}...${_authToken.substring(_authToken.length - 8)} [${_authToken.length} chars, type=${tokenType}]` : "EMPTY"}`);
+      const tokenType = !_authToken
+        ? "EMPTY"
+        : _authToken.startsWith("eyJ")
+          ? "JWT"
+          : _authToken.length <= 32
+            ? "admin-credential"
+            : "unknown";
+      logger.info(
+        `[ad4m-waker] _authToken: ${tokenType} (length: ${_authToken.length})`,
+      );
 
       if (!_authToken) {
         logger.warn(
