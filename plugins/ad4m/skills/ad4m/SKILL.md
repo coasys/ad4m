@@ -168,6 +168,8 @@ ad4m_describe_perspective(perspective_id) → every class: properties (name, typ
 
 Call this right after joining a neighbourhood or adding a perspective. Pass a `name` from the returned `classes` array as `class_name` to any `instance_*` call. Every write is validated against this schema — a rejection names the property, expected type, and cardinality, so you don't need to memorize the shape, just fix what the error tells you.
 
+Property order in the returned `properties`/`collections` arrays is not declaration order and shouldn't be relied on — match by `name`, not position.
+
 ### 6. Creating and reading instances
 
 ```
@@ -369,6 +371,8 @@ Unchanged architecture: `AD4M Executor → Plugin (ad4m-waker) → OpenClaw /hoo
 
 This is about *authoring* classes via `ad4m_add_model` — native since the static surface added it — not consuming them. Full SHACL field reference in `references/architecture.md`; read the relation and setter sections there before your first schema, because a schema that registers successfully can still be unwritable.
 
+**Expect a few rounds, not one.** This isn't limited to relations: omitting `constructor_actions`, or a per-property `setter`/`adder`/`remover`, registers the class fine and only surfaces as a write-time rejection later, one property at a time — `add_model` doesn't validate that a schema is actually usable, only that it's well-formed. A first-draft schema commonly takes 2–3 register-then-test iterations before every property is writable. Verify with `describe_perspective` after registering, then try writing to every property you expect to be writable, before treating the schema as done.
+
 ---
 
 ## Troubleshooting (static-tools era)
@@ -377,6 +381,7 @@ This is about *authoring* classes via `ad4m_add_model` — native since the stat
 |---|---|---|
 | `tool not found` for `ad4m_verify_email_code`, any `{class}_*` tool, or `ad4m_get_children_body_parsed` | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Use the Rule 3c `mcporter` fallback, or check whether your node's plugin build has added it. |
 | `tool not found` for `ad4m_add_model`, `ad4m_signup` or `ad4m_list_link_language_templates` | Your plugin build predates the commit that added them to the static surface. | Update the plugin build; until then use the Rule 3c `mcporter` fallback. |
+| `describe_perspective` lists the same class name more than once after you re-registered it | `ad4m_add_model` is not idempotent — re-registering an existing `class_name` appends another `ad4m://has_subject_class` link instead of replacing the old one. Not yet fixed, and easy to hit given schema authoring commonly takes a few rounds (see Subject Classes above). | The most recent registration is the one that's actually live (last write wins), so this is usually cosmetic — but don't rely on that going forward, and don't be surprised by a duplicate entry after iterating on a schema. |
 | `tool not found` for something `contracts.tools` *does* list (e.g. `ad4m_remove_link`, `ad4m_agent_status`) | The manifest declares the name but the executor has no such tool — a manifest/executor mismatch, not a bridging gap. | Don't rely on it; the `mcporter` fallback won't help either since the tool genuinely doesn't exist. Report it upstream. |
 | `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is triggering a silent failed auto-relogin on every restart (Rule 3b's runtime re-auth). | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |
 | `User key not found on executor` on login, right after an executor restart | **This is expected behavior, not a bug.** The wallet keeps signing keys in memory only. Until the executor's operator runs `agent.unlock(passphrase)`, the node is unusable by design — the DB password check passes, then the key lookup fails, which is a misleading *message*, but the underlying lockout is intentional. Same root cause blocks the capability bootstrap (`request_capability`/`generate_jwt` fails with `main key not found`). | This is a "the executor needs its operator" blocker — you can't work around it from an agent session. If you *are* the operator, run `agent.unlock` (REST, CLI, or WS-RPC) with the agent passphrase. If you're a third party connecting to someone else's node, the real fix on the node side is failing your connection attempt earlier with a clear "not unlocked yet" message instead of this one — worth raising with whoever runs the node if you hit it often. |
