@@ -18,13 +18,17 @@
 //! - `auth` — authentication & JWT tools
 //! - `profiles` — agent profile management
 //! - `subscriptions` — waker query generation
-//! - `dynamic` — auto-generated SHACL-based tools
+//! - `instances` — static, class-agnostic `describe_perspective` + `instance_*`
+//!   tools (the default MCP surface for typed data)
+//! - `dynamic` — auto-generated per-class SHACL tools (exposed over MCP only
+//!   with `dynamicClassTools`; always fed to the in-process harness)
 
 pub mod auth;
 pub mod children;
 pub mod dynamic;
 pub mod flows;
 pub mod harness_bridge;
+pub mod instances;
 pub mod languages;
 pub mod neighbourhoods;
 pub mod perspectives;
@@ -264,6 +268,20 @@ impl Ad4mMcpHandler {
                 Self::get_subject_children,
             ))
             .with_route((Self::delete_subject_tool_attr(), Self::delete_subject))
+            // instances.rs
+            .with_route((
+                Self::describe_perspective_tool_attr(),
+                Self::describe_perspective,
+            ))
+            .with_route((Self::instance_create_tool_attr(), Self::instance_create))
+            .with_route((Self::instance_query_tool_attr(), Self::instance_query))
+            .with_route((Self::instance_get_tool_attr(), Self::instance_get))
+            .with_route((Self::instance_update_tool_attr(), Self::instance_update))
+            .with_route((
+                Self::instance_add_to_collection_tool_attr(),
+                Self::instance_add_to_collection,
+            ))
+            .with_route((Self::instance_remove_tool_attr(), Self::instance_remove))
             // flows.rs
             .with_route((Self::add_flow_tool_attr(), Self::add_flow))
             .with_route((Self::get_flows_tool_attr(), Self::get_flows))

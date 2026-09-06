@@ -60,8 +60,8 @@ use crate::ai_service::harness::provider::SideEffect;
 /// that fallback in practice.
 ///
 /// Ordering matches the tool-file layout (perspectives → subjects →
-/// profiles → flows → children → subscriptions → neighbourhoods → auth
-/// → languages) for readability.
+/// instances → profiles → flows → children → subscriptions →
+/// neighbourhoods → auth → languages) for readability.
 pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // ── perspectives.rs ─────────────────────────────────────────────
     ("list_perspectives", SideEffect::Read),
@@ -88,6 +88,17 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     ("remove_from_collection", SideEffect::Write),
     ("get_subject_children", SideEffect::Read),
     ("delete_subject", SideEffect::Write),
+    // ── instances.rs ────────────────────────────────────────────────
+    // The static, class-agnostic surface. Same read/write split as the
+    // per-class tools they replace: describe/query/get inspect, the
+    // rest mutate.
+    ("describe_perspective", SideEffect::Read),
+    ("instance_create", SideEffect::Write),
+    ("instance_query", SideEffect::Read),
+    ("instance_get", SideEffect::Read),
+    ("instance_update", SideEffect::Write),
+    ("instance_add_to_collection", SideEffect::Write),
+    ("instance_remove", SideEffect::Write),
     // ── profiles.rs ─────────────────────────────────────────────────
     ("get_my_did", SideEffect::Read),
     ("get_agent_profile", SideEffect::Read),

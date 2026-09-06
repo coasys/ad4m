@@ -119,7 +119,7 @@ impl Ad4mMcpHandler {
 
     /// Get all models (subject classes) defined in a perspective
     #[tool(
-        description = "Get all models (SHACL subject classes) defined in a perspective. Models are schemas that give structure to the raw link graph — like database table definitions. Each model defines typed properties and collections. Use query_subjects to find instances, get_subject_data to read them, or use the dynamic per-class tools (e.g. channel_create, message_get)."
+        description = "Get the names of all models (SHACL subject classes) defined in a perspective. Models are schemas that give structure to the raw link graph — like database table definitions. For the full schema (properties, types, cardinality, collections, flows) call describe_perspective, then work with instances via instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove."
     )]
     pub async fn get_models(&self, params: Parameters<ListSubjectClassesParams>) -> String {
         let uuid = &params.0.perspective_id;
@@ -286,7 +286,7 @@ impl Ad4mMcpHandler {
 
     /// Add a model (subject class definition) to a perspective
     #[tool(
-        description = "Register a model (subject class) using a SHACL JSON definition. This defines the schema — properties, collections, types — for typed objects in the perspective. Once registered, dynamic MCP tools are auto-generated for the class: {class}_create, {class}_get, {class}_set_{property}, {class}_add_{collection}, etc. The tool list updates after registration."
+        description = "Register a model (subject class) using a SHACL JSON definition. This defines the schema — properties, collections, types — for typed objects in the perspective. Once registered, the class appears in describe_perspective and can be used with the generic instance_* tools by class_name (instance_create, instance_query, …). If the executor runs with dynamicClassTools enabled, per-class tools ({class}_create, {class}_set_{property}, …) are additionally generated and the tool list updates after registration."
     )]
     pub async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;

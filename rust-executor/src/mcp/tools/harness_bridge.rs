@@ -112,6 +112,18 @@ impl Ad4mMcpHandler {
             "query_subjects" => dispatch_static_tool!(query_subjects),
             "get_subject_data" => dispatch_static_tool!(get_subject_data),
             "get_subject_children" => dispatch_static_tool!(get_subject_children),
+            // ── instances.rs ────────────────────────────────────────────
+            // The static class-agnostic surface is on the router, so
+            // `list_tool_schemas` advertises it to the harness LLM; these
+            // arms make it callable there too (otherwise a call would fall
+            // through to the dynamic parser and fail on class "instance").
+            "describe_perspective" => dispatch_static_tool!(describe_perspective),
+            "instance_create" => dispatch_static_tool!(instance_create),
+            "instance_query" => dispatch_static_tool!(instance_query),
+            "instance_get" => dispatch_static_tool!(instance_get),
+            "instance_update" => dispatch_static_tool!(instance_update),
+            "instance_add_to_collection" => dispatch_static_tool!(instance_add_to_collection),
+            "instance_remove" => dispatch_static_tool!(instance_remove),
             // ── fallback: per-class dynamic tools ───────────────────────
             _ => {
                 // `handle_dynamic_tool` expects the args as a
