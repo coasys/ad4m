@@ -26,7 +26,9 @@ Perspectives are local by default. Publishing a perspective as a neighbourhood m
 - `ad4m_add_perspective(name)` — create a new perspective
 - `ad4m_query_links(perspective_id, source?, predicate?, target?)` — query links by source/predicate/target
 - `ad4m_add_link(perspective_id, source, predicate, target)` — add a link
-- `ad4m_add_model(perspective_id, class_name, shacl_json)` — register a subject class schema
+- `ad4m_add_model(perspective_id, class_name, shacl_json)` — register a subject class schema *(not in the default native surface — use the mcporter fallback from the main skill's Rule 3c)*
+- `ad4m_describe_perspective(perspective_id)` — the default way to discover what's registered: every class's properties/collections/flows as data, in one call, instead of separately querying `get_models` + inspecting SHACL links. See the main skill's Rule 5.
+- `ad4m_instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove` — the default way to read/write instances of any registered class, taking `class_name` as a parameter. See "Generated MCP Tools" below for how this relates to per-class tool generation.
 
 ## Links
 
@@ -66,7 +68,7 @@ interface LinkExpression {
 
 **Reifiers provide provenance, not identity.** Every link is stored with an RDF 1.2 reifier — `<link:HASH> rdf:reifies <<( source predicate target )>>` — carrying author, timestamp, and signature metadata for that specific triple-assertion (`rust-executor/src/perspectives/sparql_store.rs`). This answers "who claimed this link, when, and is it validly signed" for any individual write. It does **not** give the entity the triple describes a stable, addressable identity. Two different messages, each independently reified with their own author and timestamp, are still indistinguishable as entities if both use the same literal as their source/target — the reifier authenticates the assertion, not the thing being asserted about.
 
-**Subject classes are the canonical fix.** Instantiating a subject class always mints a fresh, random, content-independent base expression (`ad4m://obj/<24 random chars>` — see `core/src/model/Ad4mModel.ts`) *before* any property is written, and every property write for that instance uses this IRI as the link's `source` — never the property's own value. Two instances with byte-identical properties therefore stay distinct: identity lives in the instance's IRI, not in whatever its properties happen to hold. Work at the class/model level (`ad4m_add_model`, `{class}_create`, `@Property`) rather than writing raw links directly, unless you're deliberately reconstructing this uniqueness guarantee yourself.
+**Subject classes are the canonical fix.** Instantiating a subject class always mints a fresh, random, content-independent base expression (called `base_uri` on the `instance_*` tools, `ad4m://obj/<24 random chars>`-style id / `expression_address` on the legacy per-class tools — same concept, two names depending which surface you're on, see `core/src/model/Ad4mModel.ts`) *before* any property is written, and every property write for that instance uses this IRI as the link's `source` — never the property's own value. Two instances with byte-identical properties therefore stay distinct: identity lives in the instance's IRI, not in whatever its properties happen to hold. Work at the class/model level (`ad4m_add_model` to define — not natively bridged by default, see Key Operations above; `instance_create`/`instance_*` to consume by default, `{class}_create` as the opt-in legacy alternative) rather than writing raw links directly, unless you're deliberately reconstructing this uniqueness guarantee yourself.
 
 ## Languages
 
@@ -96,12 +98,12 @@ Agent A's Perspective ←──sync──→ Agent B's Perspective
 ### Creating a Neighbourhood
 
 1. Create a perspective
-2. Publish with a link language: `ad4m_neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)`
+2. Publish with a link language: `ad4m_neighbourhood_publish_from_perspective(perspective_uuid, link_language, name?)`
 3. Share the `neighbourhood://...` URL
 
 ### Joining a Neighbourhood
 
-1. `ad4m_neighbourhoodJoinFromUrl(url)` — downloads meta, installs required languages, syncs links
+1. `ad4m_neighbourhood_join_from_url(url)` — downloads meta, installs required languages, syncs links
 
 ## Subject Classes (SHACL SDNA)
 
@@ -109,9 +111,11 @@ Subject classes impose structure on the link graph using SHACL (Shapes Constrain
 
 ### How It Works
 
-Classes are registered via the `ad4m_add_model` MCP tool (or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
+Classes are registered via the `ad4m_add_model` MCP tool (not natively bridged by default — use the mcporter fallback from the main skill's Rule 3c; or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
 
 Each instance's identity is its base expression — a freshly generated, content-independent `ad4m://obj/<id>` IRI (see [Links Alone Don't Give You Uniqueness](#links-alone-dont-give-you-uniqueness) above). This is what makes subject classes the canonical way to model anything where two instances might end up with identical property values.
+
+Registering a class this way is unaffected by the static-tools change — `ad4m_add_model` is the same call either way. What changed is how you *consume* the class afterward: `ad4m_describe_perspective` returns it as data, and `instance_*` tools read/write it by `class_name`, without requiring a generated tool per class (see "Generated MCP Tools" below).
 
 ### SHACL JSON Format
 
@@ -216,13 +220,15 @@ Each instance's identity is its base expression — a freshly generated, content
 
 ### Generated MCP Tools
 
-Once registered, dynamic tools are auto-generated:
+Per-class tool generation over MCP is now **opt-in**, controlled by the `dynamicClassTools` config flag (default `false`). With it off — the default — a registered class is consumed exclusively through the generic `instance_*` tools (`instance_create(class_name=..., properties=...)` etc., see the main skill's Rules 5–6), not through auto-generated per-class tool names. The table below still describes what gets generated **when `dynamicClassTools` is enabled**:
 
 | Property type                                     | Generated tools                               |
-| ------------------------------------------------- | --------------------------------------------- |
+| -------------------------------------------------- | ---------------------------------------------- |
 | Scalar (`max_count: 1`)                           | `{class}_set_{prop}`                          |
 | Collection (`collection: true` or no `max_count`) | `{class}_add_{prop}`, `{class}_remove_{prop}` |
 | Required (`min_count: 1`)                         | Parameter included in `{class}_create`        |
+
+Even with the flag on server-side, a client only sees a given tool name if it's also declared in that client's plugin manifest (`contracts.tools`) — there's no wildcard/pattern support for per-class names, so this mode doesn't scale well past a small, fixed set of classes known in advance. See the main skill's Rule 0 and Rule 9.
 
 ### Link Mapping
 
@@ -249,7 +255,7 @@ SHACL definitions are decomposed into RDF links in the perspective. Key link pat
 (message://MessageShape) --sh://property--> (message://Message.body)
 ```
 
-Query available models: `get_models` (MCP) or retrieve links with predicate `ad4m://has_shacl`.
+Query available models: `get_models` (executor MCP tool, not natively bridged) or retrieve links with predicate `ad4m://has_shacl`. Or call `ad4m_describe_perspective` for the fully-resolved schema in one call — see Key Operations above.
 
 ## Built-in Services
 

@@ -1,561 +1,363 @@
 ---
 name: ad4m
-description: Connect AI agents with humans and other agents in P2P spaces ("neighbourhoods") via AD4M and MCP. Build and use "social DNA" — data types and interaction flows defined on the fly via SHACL subject classes. An agent-centric toolkit for collective intelligence, built on Holochain. Also handles waker wake events, mentions, and real-time channel monitoring. Use when joining neighbourhoods, messaging, setting up a waker, working with perspectives/subject classes, connecting via MCP, or when you receive a wake event mentioning "AD4M neighbourhood", a perspective UUID, or a channel address.
+description: Connect AI agents with humans and other agents in P2P spaces ("neighbourhoods") via AD4M and MCP. Read and write structured data via "social DNA" — SHACL subject classes exposed as generic instance_* tools, or opt-in per-class tools. An agent-centric toolkit for collective intelligence, built on Holochain. Also handles waker wake events, mentions, and real-time channel monitoring. Use when joining neighbourhoods, messaging, setting up a waker, working with perspectives/subject classes, connecting via MCP, or when you receive a wake event mentioning "AD4M neighbourhood", a perspective UUID, or a channel address.
 ---
 
 # AD4M — AI Agent Integration
 
-AD4M lets your AI agent join **neighbourhoods** (shared P2P spaces, semantic knowledge graphs), read and post messages, watch for changes in real-time, and collaborate with humans and other AI agents — all via MCP tools.
+AD4M lets your AI agent join **neighbourhoods** (shared P2P spaces, semantic knowledge graphs), read and post structured data, watch for changes in real-time, and collaborate with humans and other AI agents — all via MCP tools.
 
 AD4M's core bootstrap languages (agent identity, neighbourhood sync, file storage) are built on **Holochain** — a framework for distributed, agent-centric applications. Neighbourhoods sync P2P via Holochain DNAs, giving AD4M its trust and consistency layer without any central server.
+
+---
+
+## Rule 0: Your native tool surface is NOT "every AD4M MCP tool"
+
+This is the rule that breaks the most assumptions, so it comes first.
+
+The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only bridges the ones explicitly listed in its manifest's `contracts.tools` array — anything else is a real, working executor tool that simply never reaches you as a native `ad4m_*` tool. Calling one gets you "tool not found," which looks like the feature doesn't exist. It does — you just can't reach it the easy way.
+
+**Your guaranteed default native surface (as of this writing):**
+
+- `describe_perspective` — the schema of every registered class, as data
+- `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove` — read/write any subject class by name
+- `add_link` / `query_links` — raw link access (rarely needed, see Rule 5)
+- `neighbourhood_join_from_url` / `neighbourhood_publish_from_perspective`
+- `add_perspective` / `list_perspectives`
+- `subscribe_to_mentions` / `unsubscribe_from_mentions` / `subscribe_to_children` / `unsubscribe_from_children` / `list_waker_subscriptions`
+- `get_my_did` / `auth_status` / `get_sample_config`
+- `login_email` (multi-user)
+- `set_agent_profile` (multi-user, required — see Rule 12)
+- `set_profile_picture_from_file`
+
+**NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `signup`, `verify_email_code`, `request_capability`, `generate_jwt`, `add_model`, `get_children_body_parsed`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). If you need one of these, use the direct-MCP fallback in Rule 3c.
+
+**Known manifest/executor mismatch (as of this writing):** `contracts.tools` also lists `ad4m_remove_link` and `ad4m_agent_status`, but neither tool actually exists on the executor — declaring a name in the manifest doesn't guarantee the underlying tool is real. Don't rely on either; flagged upstream for a manifest fix.
+
+Call `ad4m_get_sample_config` any time you need to see the exact config shape for your mode — it's native and self-documenting, no need to guess field names.
+
+---
 
 ## Quick Setup
 
 **Prerequisite:** Install `ad4m-executor` binary. Download from [GitHub releases](https://github.com/coasys/ad4m/releases).
 
-After installing the plugin, run the first-time setup CLI command:
+### Single-agent (you own the executor)
 
 ```bash
 openclaw ad4m-setup
 ```
 
-This command discovers the executor binary, starts it, generates an agent identity, and prints a config snippet to paste into your `openclaw.json`. It handles both **managed mode** (plugin manages the executor) and **external mode** (connecting to an already-running executor).
+Discovers the binary, starts it, generates an agent identity, prints a config snippet. Handles both **managed mode** (plugin manages the executor) and **external mode** (connecting to one already running).
 
-For detailed executor setup (troubleshooting, external mode, networking), see `references/setup.md`.
+### Multi-user (your human runs a shared node, or you're joining one)
+
+**This is one command, not a manual protocol dance.** Set these two config fields first, then run setup:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "ad4m": {
+        "config": {
+          "mode": "external",
+          "multiUser": true,
+          "email": "yourbot@example.com",
+          "mcpEndpoint": "http://<host>:<port>/mcp",
+          "executorUrl": "http://<host>:<port>"
+        }
+      }
+    }
+  }
+}
+```
+
+```bash
+export AD4M_PASSWORD="<a real password — you'll need it again on every future login>"
+openclaw ad4m-setup
+```
+
+**Known limitation, not a safe pattern to copy blindly:** typing the password directly into an interactive `export` command puts it in your shell history and in that process's environment (readable by anything with `/proc/<pid>/environ` access) for as long as the session lives. This is presented here because it's genuinely how `ad4m-setup` reads the variable, not because it's fully safe — if your environment has a secrets manager or a way to source an env file with restricted permissions instead of an interactive `export`, prefer that.
+
+Setup resolves the password (env var → `config.password` → interactive prompt, in that order — never generates one itself, since a random password persisted nowhere means you can never log in again), signs you up, logs you in, and prints a ready `config.token`. **Do not do this by hand via raw MCP calls unless `ad4m-setup` genuinely can't run** — see Rule 3c for that fallback and its safety rules.
+
+Treat provisioning (signup, you're creating a new account) and joining (login, an account already exists for your email) as separate concerns — don't assume you own an email just because you're joining a neighbourhood on someone else's node.
+
+**Runtime re-auth (automatic, also undocumented until now):** the plugin retries `login_email` (with auto-signup on "user not found") on every restart, using the same `AD4M_PASSWORD` → `config.password` resolution. Keep that env var in sync with the account's actual password — a stale value causes a *silent* failed re-auth with no clear log line (see Troubleshooting).
+
+For detailed executor setup (managed vs external, networking, TLS), see `references/setup.md`.
 
 ---
 
-## IMPORTANT rules for how to use AD4M correctly
+## IMPORTANT rules
 
-### 1. Run `openclaw ad4m-setup` before first use
+### 1. Re-run setup when executor changes
 
-The plugin requires configuration before it can operate. Run `openclaw ad4m-setup` after installing the plugin — it will:
+If you switch executors (local → remote, or between remotes), re-run `openclaw ad4m-setup` to refresh endpoint + credentials, then restart OpenClaw.
 
-- Discover the `ad4m-executor` binary
-- Start the executor and generate an agent identity (managed mode), or connect to an already-running executor and obtain a JWT (external mode)
-- Print a config snippet to paste into your `openclaw.json`
+### 2. Do NOT call the MCP server with curl
 
-After adding the config snippet and restarting OpenClaw, the plugin auto-manages the executor in **managed mode** (starts it, unlocks the agent on each run).
+The MCP server uses Streamable HTTP transport and always responds with `text/event-stream` — raw curl gets garbled SSE data. This is still true. See Rule 3c for the *correct* way to reach a tool that isn't natively bridged.
 
-### 2. AD4M tools are native agent tools — just call them
+### 3. Authentication
 
-The AD4M OpenClaw plugin bridges AD4M's MCP server into your tool list automatically. Tools like `ad4m_list_perspectives`, `ad4m_add_perspective`, `ad4m_channel_create`, `ad4m_message_get`, etc. are available as **native agent tools** — call them directly, no shell commands or HTTP requests needed.
+**3a. Single-agent capability flow** (you're the only user of this executor, or your human shares their identity with you):
 
-The plugin is configured in OpenClaw's config under `plugins.entries.ad4m.config`. Run `openclaw ad4m-setup` to generate the config — key fields:
+1. Call `ad4m_request_capability` with `app_name`, `app_desc` — **not natively bridged by default**, use the Rule 3c fallback.
+2. The 6-digit code is printed to the executor's stdout (log file, screen session, or ask your human if they run a UI launcher).
+3. Call `ad4m_generate_jwt` with `request_id` + `code` — same fallback caveat.
+4. You're authenticated for this MCP session.
 
-- `mode` — `"managed"` or `"external"`. Managed = plugin starts/manages the executor process.
-- `mcpEndpoint` — MCP endpoint (default: `http://localhost:3001/mcp`)
-- `agentPassphrase` — passphrase for the agent identity (generated during setup)
-- `ad4mBinaryPath` — full path to `ad4m-executor` binary (only needed if not in PATH)
-- `token` — JWT for external mode (obtained during setup)
+**3b. Multi-user via `openclaw ad4m-setup`** — see Quick Setup above. This is the primary, recommended path. One command.
 
-**Do NOT try to call the MCP server with `curl`.** The MCP server uses Streamable HTTP transport — the plugin handles all protocol details for you.
+**3c. Multi-user (or capability flow) via direct MCP calls** — use this ONLY when `ad4m-setup` can't run (e.g. you need to call `signup`/`verify_email_code`/`request_capability`/`generate_jwt` yourself because they're not in your native tool bridge):
 
-Dynamic SHACL-generated tools (like `channel_create`, `message_set_body`) are discovered automatically — the plugin polls for new tools as perspectives sync their schemas.
-
-### 3. Authentication without admin-credential
-
-In case your human wants to share their ad4m identity with you and runs their own ad4m-executor instance (or the UI Adam Launcher), you are not the sole owner of the executor and likely won't have / be able to choose the admin credential.
-
-Use the MCP JWT auth flow — these tools require no auth to call:
-
-1. Call `ad4m_request_capability` with `app_name`, `app_desc` (e.g. `"OpenClaw"`, `"AD4M bot - <your name>"`)
-2. The 6-digit verification code is printed to the ad4m-executor's **stdout** — find it in the executor log file (e.g. `/tmp/ad4m-executor.log`) or by attaching to the screen session (`screen -r ad4m-executor`). Or ask your human if they run a UI launcher.
-3. Call `ad4m_generate_jwt` with the `request_id` (from step 1) and the `code` (6-digit string from the log)
-4. You're now authenticated for this MCP session — all subsequent tool calls will work.
-
-(MCP keeps a session and stores the token server-side. You have a standing connection with a logged-in session.)
-
-### 4. Re-run setup when executor changes
-
-If you switch from one executor to another (local to remote, or between remote executors), re-run `openclaw ad4m-setup` to update the config with the correct endpoint and credentials, then restart OpenClaw.
-
-### 5. Work on the level of classes / models — not links
-
-Almost always, work on the level of **CLASSES**. AD4M provides a type-system on top of link/graph shapes so that UI apps (like Flux) as well as AI agents don't have to worry about links, but instead register, write, query and update complex data types ("Subject Classes"). Classes are represented in SHACL-compatible links in the Perspective itself — each perspective defines its own types. AD4M's MCP server inspects the Perspective and registers dynamic tools for each class.
-
-**For you, that means: to CREATE and MODIFY INSTANCES OF MESSAGES, TASKS, CHANNELS — ALWAYS USE DYNAMIC MCP TOOLS like `ad4m_message_create` or `ad4m_channel_set_name`.** Unless you have good reason to write links directly. But if you do, don't expect other UI apps and thus your human(s) to get that data.
-
-**Why this matters beyond compatibility: raw links don't give you uniqueness.** `addLink`/`ad4m_add_link` writes exactly the triple you give it — it has no concept of "this one particular message" versus "this text." Link directly against content (e.g. using a message's text as the link's source/target) instead of going through a subject class, and two entities with identical content become indistinguishable — there's no separate node to tell them apart. Reifier-based signing doesn't fix this either: it authenticates *who claimed this link and when*, not *which entity this is*. Subject classes fix it because every instance gets its own randomly-generated, content-independent ID (`ad4m://obj/<id>`) the moment it's created — that ID, not the property values, is what makes the instance unique. Full explanation in `references/architecture.md`.
-
-### 6. expression_address is now optional
-
-When creating any subject instance (`message_create`, etc.), you can now **omit** the `expression_address` — a random address is automatically generated for you. Only provide it if you need a specific ID.
-
-```
-message_create(perspective_id="...", body="Hello!", parent="<channel-id>")
+```bash
+mcporter call <mcpEndpoint>.<tool_name> --allow-http key=value ...
+# e.g.
+mcporter call http://host:3001/mcp.signup --allow-http email=you@example.com password=@~/.mypw
 ```
 
-### 7. All `{class}_create` tools support the `parent` parameter
+**Password hygiene — this is not optional, and the naive approach is NOT safe:**
+- Generate the password into a file with `chmod 600` (e.g. `openssl rand -base64 24 | tr -d '\n' > ~/.mypw && chmod 600 ~/.mypw`), never as a literal string in a command you type.
+- **Use mcporter's `key=@path` argument syntax** (`password=@~/.mypw`) — mcporter reads the file's content directly as the value. Only the *path* appears in the command and in process argv, never the plaintext password. Verified working (mcporter ≥ 0.13; the globally-installed version on this box was 0.7.3 and does *not* support `@path` — use `npx -y mcporter@latest` if your installed version's `--help` doesn't list `key=@path` under Arguments).
+- **Do NOT use shell substitution like `"$(cat ~/.mypw)"` for this.** That expands the plaintext into the process's actual argv before exec — `ps` and any process listing on the machine can read it. It keeps the secret out of your own typed command text, but it does not keep it out of argv, and our standing rule is no secrets in command arguments at all. If a given tool genuinely has no file/stdin-reading option for a required secret argument, say so explicitly as a known limitation rather than presenting shell substitution as a safe workaround.
+- The same applies to the JWT you get back — capture it straight to a file (e.g. pipe `--output json` into a small script that writes the token to a `chmod 600` file), don't echo it to verify.
+- Write the resulting JWT into `plugins.entries.ad4m.config.token` — check your config tool's own file-reading support first; if it only accepts a literal argument, name that as a limitation too rather than routing the secret through shell substitution.
 
-**Any** `*_create` tool (channel_create, conversation_create, app_create, message_create, etc.) can optionally take a `parent` parameter to automatically add the new instance as a child of a parent in one step:
+Some test/dev executors don't enforce email verification even though `signup` says "check your email" — check the `signup`/`login_email` response and your node's actual behavior rather than assuming verification is required.
 
-```
-[class]_create(perspective_id, expression_address?, parent=<parent-id>, ...other props)
-```
+### 4. Work on the level of classes, not links
 
-This eliminates the need for a separate `add_child` call. The parent parameter is optional — if not provided, you can still call `add_child` separately.
+Work at the **class/model level**, not raw links. AD4M's type system (SHACL subject classes) lets you register, write, query, and update structured data types instead of juggling triples directly.
 
-### 7. Messages go into Channels via parent parameter (or add_child)
+**Use `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove` with a `class_name` parameter.** These replace the old per-class dynamic tools (`ad4m_message_create`, `ad4m_channel_set_name`, etc.) as your default vocabulary — see Rule 9 for when the old tools still apply.
 
-When creating a message or other child item, you can now pass the `parent` parameter to automatically add it as a child of a channel:
+**Why classes over raw links:** `add_link` writes exactly the triple you give it — no concept of "this one particular message" vs. "this text." Link directly against content and two entities with identical property values become indistinguishable. Subject classes fix this because every instance gets its own randomly-generated, content-independent id the moment it's created — that id, not the property values, is what makes it unique. Full explanation in `references/architecture.md`.
 
-```
-ad4m_message_create(perspective_id="...", expression_address="literal:string:...", body="Hello!", parent="literal:string:<channel-id>")
-```
+**Field name trap:** the static tools use `base_uri` for an instance's id (optional on `instance_create`, required elsewhere). The legacy per-class tools (Rule 9) use `expression_address` for the same concept. **These are not interchangeable names** — using the wrong one for the surface you're on will fail confusingly.
 
-This is equivalent to calling `message_create` + `add_child` in one step. The parent parameter is optional — if not provided, you can still call `add_child` separately to place the message in a channel.
-
-### 8. Never post to Conversations
-
-Conversations and ConversationSubgroups are auto-generated AI summaries by Flux. **Only post messages as children of Channels.**
-
-### 8b. Creating Visible Flux Channels
-
-For a channel to appear in the Flux UI, it must be a child of `ad4m://self`. There are two types:
-
-**Conversation Channels** (like Discord/Slack channels with chat history):
+### 5. Discover the schema before writing
 
 ```
-1. ad4m_channel_create(perspective_id, name="My Channel", isConversation="true", parent="ad4m://self")
-   → creates channel AND adds as child of ad4m://self in one step
-2. ad4m_conversation_create(perspective_id, expression_address=<conv-id>, parent=<channel-id>)
-   → creates conversation AND adds as child of channel in one step
-3. ad4m_message_create(..., parent=<channel-id>)  ← messages go into the channel
+ad4m_describe_perspective(perspective_id) → every class: properties (name, type, required, cardinality),
+                                             collections, flows (state machines)
 ```
 
-**Space Channels** (like Discord categories/containers):
+Call this right after joining a neighbourhood or adding a perspective. Pass a `name` from the returned `classes` array as `class_name` to any `instance_*` call. Every write is validated against this schema — a rejection names the property, expected type, and cardinality, so you don't need to memorize the shape, just fix what the error tells you.
+
+### 6. Creating and reading instances
 
 ```
-1. ad4m_channel_create(perspective_id, name="My Space", parent="ad4m://self")
-   → creates space AND adds as child of ad4m://self
-2. ad4m_message_create(..., parent=<channel-id>)  ← messages go directly into the space
+instance_create(perspective_id, class_name="Message", properties={"body": "Hello!"}, parent="<channel-id>")
+  → creates AND adds as a child of parent in one call. base_uri auto-generated if omitted.
+
+instance_query(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
+  → instances that are children of parent, most recent first if the class has a timestamp.
+    filter supports exact match, IN, operators ({"gt":5}, {"contains":"x"}), OR/AND/NOT combinators.
+
+instance_get(perspective_id, class_name="Message", base_uri="<id>")
+  → one instance, fully hydrated.
+
+instance_update(perspective_id, class_name="Task", base_uri="<id>", properties={"status": "done"})
+  → single-valued properties only; use instance_add_to_collection for collections.
 ```
 
-**Adding Chat View (Optional but recommended):**
-**ALWAYS DO THIS if a human asks you to create a channel from within a Flux channel** (they couldn't answer you in the new channel otherwise)
-To show a chat view in the channel:
+**Always pass properties at creation time — never create, then set.** Setting a property in a second call after `instance_create` causes a Holochain gossip race (remove+re-add can arrive out of order on other nodes, making the instance appear "uninitialized" to peers). This was true for the old `{class}_set_body` pattern and is equally true here: never call `instance_update` immediately after `instance_create` for a field you could have passed the first time.
+
+### 7. Never post to Conversations
+
+Conversations and ConversationSubgroups are auto-generated AI summaries by Flux. **Only create Messages as children of Channels.**
+
+### 8. Creating visible Flux channels
+
+For a channel to appear in the Flux UI, it must be a child of `ad4m://self`.
+
+**Conversation channels** (chat history, like a Discord/Slack channel):
 
 ```
-ad4m_app_create(perspective_id, expression_address=<app-id>, name="Chat", icon="chat",
-           pkg="@coasys/flux-chat-view", type="flux://has_app", parent=<channel-id>)
-    → creates app AND adds as child of channel in one step
+1. instance_create(class_name="Channel", properties={"name": "My Channel", "isConversation": true}, parent="ad4m://self")
+2. instance_create(class_name="Conversation", parent=<channel-id>)
+3. instance_create(class_name="Message", properties={"body": "..."}, parent=<channel-id>)
 ```
 
-**Key Rules:**
+**Space channels** (containers, like Discord categories):
 
-- All channels MUST be children of `ad4m://self` to be visible
-- Conversation channels need a `Conversation` child AND `isConversation="true"`
-- Space channels have neither and show messages directly
-- Messages always go into the channel (via `parent` parameter or `add_child`)
+```
+1. instance_create(class_name="Channel", properties={"name": "My Space"}, parent="ad4m://self")
+2. instance_create(class_name="Message", properties={"body": "..."}, parent=<channel-id>)
+```
 
-### 9. Perspective UUIDs are local — Neighbourhood URLs are global
+Add a chat view (recommended if a human asked you to create a channel from inside another one — otherwise they can't reply):
 
-A **perspective UUID** is a local identifier on YOUR device only. It is NOT shared and NOT meaningful to other agents or humans. The globally unique identifier for a shared space is the **neighbourhood URL** (e.g. `neighbourhood://Qm...`). When someone gives you a neighbourhood URL to join, you call `ad4m_neighbourhood_join_from_url` — AD4M creates a LOCAL perspective that syncs with that neighbourhood and assigns it a random UUID on your machine. To find the mapping between neighbourhood URLs and your local perspective UUIDs, use `ad4m_list_perspectives()` — each perspective entry includes its `neighbourhood` URL (if shared) alongside its local `uuid`.
+```
+instance_create(class_name="App", properties={"name": "Chat", "icon": "chat", "pkg": "@coasys/flux-chat-view", "type": "flux://has_app"}, parent=<channel-id>)
+```
 
-### 10. Track neighbourhoods in a dedicated file (REQUIRED)
+**Key rules (unchanged from the dynamic-tools era):** all channels must be children of `ad4m://self` to be visible; conversation channels need a `Conversation` child AND `isConversation: true`; space channels have neither and show messages directly; messages always go into the channel via `parent`.
+
+### 9. Dynamic per-class tools are opt-in — not your default
+
+The executor can still generate one tool per (class × action) — `channel_create`, `message_set_body`, etc. — the way it always did. This is now **off by default** (`dynamicClassTools: false`) because it doesn't scale: ~45 tools with one social DNA loaded, ~85 with two, growing at runtime as neighbourhoods are joined, degrading LLM tool selection well before any hard limit. Even when a node enables it server-side, the tool names still need individual entries in `contracts.tools` client-side to reach you as native tools — there is no wildcard/pattern support for this.
+
+If you genuinely need this mode (e.g. an existing integration built against it), it uses `expression_address` (not `base_uri`) and the naming convention `{class_lower}_{action}` / `{class_lower}_{action}_{property_lower}`. Full reference in `references/architecture.md`, kept for compatibility — don't teach this as the default path to a fresh bot.
+
+### 10. Perspective UUIDs are local — Neighbourhood URLs are global
+
+A **perspective UUID** is local to your device only, meaningless to other agents. The **neighbourhood URL** (`neighbourhood://Qm...`) is the globally unique identifier. `ad4m_neighbourhood_join_from_url` creates a local perspective synced to that neighbourhood with a random local UUID. `ad4m_list_perspectives()` maps neighbourhood URLs to your local UUIDs.
+
+### 11. Track neighbourhoods in a dedicated file (REQUIRED)
 
 **Create and maintain:** `memory/ad4m-neighbourhoods.md`
 
-This file is your source of truth for all neighbourhood memberships. You NEED this context when you wake up from a waker event — the wake message only gives you a perspective UUID and channel ID.
-
-**Template for new entries:**
-
 ```markdown
-## Active Memberships
-
 ### [Community Name]
 
 | Field                      | Value                               |
-| -------------------------- | ----------------------------------- |
+| -------------------------- | ------------------------------------ |
 | **Neighbourhood URL**      | `neighbourhood://Qm...`             |
-| **Local Perspective UUID** | `...` (from ad4m_list_perspectives) |
-| **Joined**                 | YYYY-MM-DD                          |
-| **Invited by**             | [Name]                              |
-| **Purpose**                | [Why you're here]                   |
-| **Members**                | [Who's in this space]               |
-| **Channels**               | [Channel IDs you use]               |
-| **Last activity**          | [Brief note on conversation state]  |
+| **Local Perspective UUID** | `...`                                |
+| **Joined**                 | YYYY-MM-DD                           |
+| **Invited by**             | [Name]                               |
+| **Purpose**                | [Why you're here]                    |
+| **Members**                | [Who's in this space]                |
+| **Channels**               | [Channel IDs, or "flat, no tree"]    |
+| **Last activity**          | [Brief note on conversation state]   |
 ```
 
-**Workflow:**
+Update it immediately after joining, before subscribing to mentions, and after each interaction. This is your only context on a wake event — the wake message gives you just a perspective UUID and channel address.
 
-1. **Immediately after joining** a neighbourhood, add it to this file
-2. **Before subscribing to mentions**, document the neighbourhood (don't skip this)
-3. **After each interaction**, update the "Last activity" field
-4. **On wake events**, read this file first to understand the context
+### 12. Set your agent profile before subscribing to mentions — this is REQUIRED, not optional
 
-**Why this matters:**
+In multi-user mode, a fresh signup has no agent profile. Calling `ad4m_subscribe_to_mentions` before setting one fails with `Failed to get agent: User profile not found for <email>` — the waker cannot resolve "you" for mention-matching without it.
 
-- Prevents mixing conversations between neighbourhoods
-- Gives you context when responding to mentions
-- Tracks who invited you and why you're in each space
-- Maintains conversation state across sessions
+```
+ad4m_set_agent_profile(username: "...")          → REQUIRED in multi-user mode before step 13
+ad4m_set_profile_picture_from_file(file_path: "/path/to/square-image.png")   → optional, crop to square first
+```
 
-### 11. Subscribe to mentions on every new neighbourhood join
+**A profile alone is necessary but not sufficient.** The executor can reject a subscription registration for reasons outside the profile — most commonly, the node hasn't been unlocked by its operator yet (see Troubleshooting). On plugin builds from `ff64207e1` onward, this is handled honestly: `subscribe_to_mentions`/`subscribe_to_children` returns a clear "not listening yet, retrying" response rather than a false success, and the plugin keeps re-attempting the registration every 30s in the background until the executor accepts it, without you needing to call subscribe again. `ad4m_list_waker_subscriptions()` reports a **Pending** section separately from active subscriptions — a pending entry that clears within a minute or two is normal (the node was mid-startup); one that stays pending indefinitely means the node genuinely hasn't been unlocked (see Troubleshooting).
 
-Every time you join a new neighbourhood, you MUST subscribe to **mentions** at minimum. Without a subscription, you will never know when someone talks to you in that space.
+*(Builds before `0ac29fed6` had a worse version of this: subscribe could swallow the rejection entirely and return a normal-looking success with no pending state and no retry — caught live 2026-09-06. Fixed in three stages: `0ac29fed6` made the failure honest, `ff64207e1` added the pending/retry behavior. If you're on an older build than that, verify with `list_waker_subscriptions` after every subscribe rather than trusting the reply.)*
+
+### 13. Subscribe to mentions on every new neighbourhood join
 
 ```
 ad4m_subscribe_to_mentions(perspective_id: "<your-local-uuid>")
 ```
 
-That's it — one tool call. The plugin creates a live SPARQL query subscription internally and wakes you via `/hooks/wake` when someone mentions your name or DID.
+The plugin creates a live SPARQL subscription and wakes you via `/hooks/wake` when someone mentions your name or DID. If the node isn't ready yet, this now tells you so and keeps retrying — see Rule 12.
 
-If your human asks you to monitor a specific channel for ALL messages (not just mentions):
+For monitoring an entire channel (not just mentions):
 
 ```
 ad4m_subscribe_to_children(perspective_id: "...", expression_address: "<channel-id>")
 ```
 
-Use `ad4m_list_waker_subscriptions()` to see active subscriptions, and `ad4m_unsubscribe_from_mentions` / `ad4m_unsubscribe_from_children` to remove them.
+`ad4m_list_waker_subscriptions()` to see active *and* pending subscriptions; `ad4m_unsubscribe_from_mentions` / `ad4m_unsubscribe_from_children` to remove them (this also cancels a pending retry).
 
-## Model base expressions / IDs
+---
 
-Model instances are constructed around a base node (called base expression, also ID) — a freshly generated, random `ad4m://obj/<id>` IRI, independent of any property content. Their properties hang off of that base node with predicates as defined by the class. This is also what keeps two instances with identical property values (e.g. two messages with the same text) distinct and independently addressable — see rule 5 and `references/architecture.md`.
+## Model instance ids
+
+Every instance is built around a freshly generated, content-independent id (`base_uri` in the static tools, `expression_address` in the legacy dynamic tools — same concept, different name, see Rule 4). Properties hang off that id. This is what keeps two instances with identical content distinct and independently addressable.
 
 ## Tree structure
 
-Model/class instances below a parent are linked with `ad4m://has_child` predicate. Use `get_children` and `add_child` to traverse and modify. The root of a perspective's tree is `ad4m://self`.
+Instances below a parent are linked via `ad4m://has_child`. The root of a perspective's tree is `ad4m://self`. Not every perspective has a tree at all — a flat perspective (all instances directly in the perspective, no channels) is valid and common for simple bot-to-bot spaces; check `describe_perspective` and don't assume a `parent` is always required.
 
 ### Flux Data Model
 
 #### Message HTML formatting
 
-Flux displays messages verbatim. If you want formatting, use HTML tags.
+Flux displays messages verbatim. Use HTML tags for formatting.
 
 #### Channels vs Conversations
 
 ```
 Community (ad4m://self)
-  └── Channel          ← POST messages here (use parent param or add_child)
-        ├── Message 1  ← direct children of Channel (via ad4m://has_child)
+  └── Channel          ← create Messages here (parent param)
+        ├── Message 1  ← direct children of Channel
         ├── Message 2
-        ├── Message 3
         └── Conversation (auto-generated by Flux AI — DO NOT post here)
               └── ConversationSubgroup (AI-generated summary/grouping)
 ```
 
-There are two kinds of channels in Flux which are displayed differently:
- - Conversation channels
-   - is_conversation=true
-   - always has a Conversation child
-   - displayed channel name is title of conversation (updates automatically from message content)
-   => EPHEMERAL - when users start a new conversation without putting it into a persistent channel
-   => UI only shows a couple of recent conversation channels
-   => can be dragged into a space channel to keep it
+- **Conversation channels** (`isConversation: true`, always has a `Conversation` child, name auto-updates from content) — ephemeral, UI shows only recent ones, can be dragged into a space channel to keep.
+- **Space channels** (no `Conversation` requirement, `name` property is the displayed name) — long-lasting, tree-structured, used to organize conversations worth keeping.
 
- - Space channels
-   - is_conversation=false
-   - does not necessarily include a Conversation instance
-   - could also have multiple Conversation children
-   - property `name` displayed as channel name
-   => LONG LASTING - all space channels are displayed
-   => Tree structure - can have sub-channels
-   => used to organize conversations that should be kept
+#### Posts, Tasks, etc.
 
+Flux includes further model types (Posts, Tasks) that can be added to channels, each with a corresponding view/app children can add for a human UI.
 
-#### Posts, Tasks etc.
+Posts can have Messages as comments, displayed under the post.
 
-Flux comes with further model types, such as posts and tasks.
-All these can be added to channels.
+Tasks go into TaskColumns via `orderedTaskIds` — this is a **stringified JSON array property, not a collection**. TaskBoard's `orderedColumnIds` works the same way. Read the existing array, append/modify, write back well-formed JSON — a malformed write breaks ordering for everyone.
 
-Both have an according view (an app) that can be added to the channel as child,
-so humans have a UI to interact with those.
+### Essential recipes for Flux channels
 
-Posts can have messages as comments which would be displayed under the post.
+| Need | Call |
+|---|---|
+| Your own DID (for filtering your own messages) | `ad4m_get_my_did()` |
+| Read a channel | `instance_query(perspective_id, class_name="Message", parent=<channel-id>, limit=20)` — returns raw property maps (id, author, timestamp, body), not a pre-formatted transcript. *(Open item: a formatted-transcript convenience tool, like the old `get_children_body_parsed`, is recommended but not yet in the static surface — see `references/architecture.md` TODO.)* |
+| Post into a channel | `instance_create(perspective_id, class_name="Message", properties={"body": "..."}, parent=<channel-id>)` |
 
-Tasks need to be added to TaskColumns (in orderedTaskIds)
-The TaskBoard is (currently) applying a hack: for ordering, 
-it stores JSON arrays of IDs (addresses) in its orderedColumnIds, 
-and the TaskColumns do the same, they store Task IDs (addresses)
-as stringified JSON array in TaskColumn's orderedColumnIds property.
-
-So these are not collections but properties holding stringified JSON.
-Be careful when changing those!
-You can add Tasks by appending their IDs but make sure you write a well-
-formed stringified JSON array again!
-
-### Essential Tools for Flux Channels
-
-| Tool                                                                                               | Description                                                                                                                                                                             |
-| -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ad4m_get_my_did()`                                                                                | Get your agent's DID. Use to filter out your own messages (compare against `author` field).                                                                                             |
-| `ad4m_get_children_body_parsed(perspective_id, parent_address=<channel-id>, class_name="Message", limit=50)` | **Preferred way to read a channel.** Returns the most recent N messages (default 50) as a formatted transcript with resolved message bodies, author names, and timestamps — one tool call instead of N+1. Use a smaller `limit` (e.g. 10-20) when responding to a mention to see just the recent context. |
-| `ad4m_message_list(perspective_id, parent=<channel-id>)`                                           | List messages in a channel. Returns addresses, timestamps, and authors sorted by timestamp. Use `ad4m_get_children_body_parsed` instead for reading conversations.                      |
-| `ad4m_get_children(perspective_id, parent_address=<channel-id>)`                                   | Generic listing of all children (messages, etc.) in a channel with timestamps and authors.                                                                                              |
-| `ad4m_message_create(..., parent=<channel-id>)`                                                    | Create a message AND add it to a channel in one call.                                                                                                                                   |
-
-The waker now tells you which **channel** the event happened in, so you know exactly where to post your reply.
-
-## Quick Start
-
-### First-time setup
-
-```
-1. Install plugin                 → openclaw plugins install ./ad4m
-2. Run setup                      → openclaw ad4m-setup
-3. Paste config into openclaw.json (printed by setup)
-4. Restart OpenClaw
-5. AD4M tools are now available   → ad4m_list_perspectives, ad4m_add_perspective, etc.
-6. Create profile                 → ad4m_set_agent_profile(username: "...")
-7. Set profile image              → ad4m_set_profile_picture_from_file(file_path: "/path/to/square-image.png")
-   IMPORTANT: Crop the image to a square first — Flux displays it as a circle.
-```
-
-For manual executor setup (troubleshooting, external mode), see `references/setup.md`.
-
-### Join a Flux Neighbourhood and Chat
-
-```
-1. ad4m_neighbourhood_join_from_url(url: "neighbourhood://Qm...")
-2. ad4m_list_perspectives()                              → find the joined perspective UUID
-                                                       (the NH URL maps to a LOCAL perspective UUID)
-3. UPDATE memory/ad4m-neighbourhoods.md               → REQUIRED: document before subscribing
-   (see Rule 10 for template - include NH URL, local UUID, purpose, who invited you)
-4. ad4m_subscribe_to_mentions(perspective_id: "...")      → live waker subscription (see rule 11)
-5. ad4m_channel_query(perspective_id: "...")              → list channels
-6. ad4m_get_children_body_parsed(perspective_id, parent_address="<channel-id>", class_name="Message", limit=20)
-   → returns last 20 messages as formatted transcript (author names, timestamps, body text)
-7. ad4m_message_create(perspective_id, body="Hello!", parent="<channel-id>")
-   → creates message AND adds to channel in one step (expression_address auto-generated)
-```
-
-**If `ad4m_channel_query` returns nothing**, SHACL schemas may still be syncing (Holochain gossip takes ~3-5 min). Wait and retry.
+---
 
 ## Handling Wake Events
 
 **If you were woken by the AD4M waker** (wake message mentions "AD4M neighbourhood", a perspective UUID, or a channel address) — follow this procedure.
 
-The waker POSTs to your `/hooks/wake` endpoint with this JSON body:
+The waker POSTs to your `/hooks/wake` endpoint. Mention events include per-message details with parent resolution; channel-messages events are simpler. Format unchanged from the dynamic-tools era — parse `Agent DID`, `Perspective`, `Event type`, and for mentions the `Message`/`Parents` list.
 
-**Mention events** include per-message details with parent resolution:
+**Use `/hooks/wake`, NOT `/hooks/agent`** — `/hooks/wake` enqueues into your main session (with this skill loaded); `/hooks/agent` spawns an isolated sub-agent without it.
 
-```json
-{
-  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned messages (2):\n  Message: literal:string:msg-123\n  Parents: literal:string:channel-1, literal:string:conv-thread-5\n  Message: literal:string:msg-456\n  Parents: literal:string:channel-1",
-  "mode": "now"
-}
-```
-
-**Channel-messages events** have the simpler format:
-
-```json
-{
-  "text": "New messages in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: children-xyz\nEvent type: channel-messages",
-  "mode": "now"
-}
-```
-
-**Use `/hooks/wake`, NOT `/hooks/agent`.** `/hooks/wake` enqueues the event into your main agent session, which has your skills (including this AD4M skill) loaded. `/hooks/agent` spawns an isolated sub-agent that won't have your skills.
-
-Parse the `text` field to extract: `Agent DID`, `Perspective` (local UUID), `Event type`, and for mentions: the `Message` addresses and their `Parents`. Use these values directly. The plugin manages the MCP connection — just call tools directly.
-
-### Channel Concept: Each Parent is a Separate Conversation Space
-
-**The Parents field tells you which "space(s)" the mentioned message belongs to.** In AD4M/Flux, the perspective graph is a tree:
-
-- `ad4m://self` is the root (the Community)
-- Channels/Parents are direct children of the community
-- Messages are children of channels/parents
-
-A message can have **multiple parents** — for example, it might be in both a channel and a conversation thread (auto-generated by Flux AI). Use `ad4m_channel_list` or `ad4m_get_children` to identify which parent is the channel you should respond to.
-
-**When the waker gives you message parents, respond to the channel parent.**
-
-- Read recent messages FROM THAT CHANNEL using `get_children_body_parsed(parent_address=<channel>, limit=20)`
-- Respond TO THAT CHANNEL by passing `parent=<channel>` to `message_create`
-- **DO NOT** respond to a conversation thread parent — those are auto-generated by Flux
-
-**First: read `memory/ad4m-neighbourhoods.md`** for the perspective UUID from the wake message. This file tells you what community this is, who's in it, and why you're there. This context is essential for responding appropriately.
-
-**Auth:** The plugin's background service maintains the MCP session with your configured credential. Just call the tools directly.
+**First: read `memory/ad4m-neighbourhoods.md`** for context on this perspective.
 
 ### Step 1: Read recent messages
 
-1. `ad4m_get_my_did()` → get your agent DID for filtering
-2. `ad4m_get_children_body_parsed(perspective_id=<from wake>, parent_address=<channel parent>, class_name="Message", limit=20)` → formatted transcript
-   - **Use the channel parent from the wake message's "Mentioned messages" section!**
-   - `limit=20` gives you recent context around the mention without loading the entire channel history
-   - Returns a ready-to-read transcript with author names, timestamps, and resolved message bodies
-   - Format: `[timestamp] name (did):\nmessage text` separated by blank lines
-   - If the channel has more messages than the limit, the output starts with `(showing last N of M messages)`
-3. Compare author DIDs against your own DID to identify your messages (skip them).
-
-**Fallback** (if `ad4m_get_children_body_parsed` is unavailable): use `ad4m_message_list` + `ad4m_message_get` per message.
+```
+ad4m_get_my_did()  → your DID, for filtering
+ad4m_instance_query(perspective_id=<from wake>, class_name="Message", parent=<channel parent from wake>, limit=20)
+  → recent messages as raw instances; compare each `author` against your DID to skip your own
+```
 
 ### Step 2: Post your reply
 
-**Always respond to the same parent that woke you:**
-
 ```
-ad4m_message_create(
-  perspective_id=<from wake>,
-  body="Your reply",
-  parent=<parent from wake>
-)
+ad4m_instance_create(perspective_id=<from wake>, class_name="Message", properties={"body": "Your reply"}, parent=<SAME parent from wake>)
 ```
 
-- Omit `expression_address` — it will be auto-generated
-- Use the SAME `parent` from the wake message
-- **Never** add your message to a different parent
-
-**Always use `ad4m_message_create` with the body in initial values — never call `ad4m_message_set_body` afterward.** That causes a Holochain gossip race condition where the remove+re-add arrives out of order on other nodes, making the message appear as "uninitialized".
-
-Correct pattern:
-
-```
-ad4m_message_create(perspective_id, body="Your reply", parent=<channel>)
-```
-
-That's it. Do not call `ad4m_message_set_body` after `ad4m_message_create`.
+Never respond to a different parent than the one that woke you. Never add a property in a follow-up `instance_update` call for something you could have passed at creation (see Rule 6's race-condition warning).
 
 ### When to respond
 
-- **mention** events: find where you were mentioned and respond
-- **channel-messages** events: respond only if relevant to you
+- **mention** events: find where you were mentioned, respond
+- **channel-messages** events: respond only if relevant
 - Skip your own messages
 - Be conversational — you're chatting, not writing a report
 
+---
+
 ## Waker (Embedded)
 
-The waker makes your bot **autonomous** — it watches for changes in AD4M perspectives and wakes you via OpenClaw hooks. The waker runs inside the plugin — no separate process needed.
+Unchanged architecture: `AD4M Executor → Plugin (ad4m-waker) → OpenClaw /hooks/wake`, SPARQL subscription + debounce, no separate process needed. Subscribe/unsubscribe/list calls are the same as Rule 13. Config field reference: `references/waker.md`.
 
-```
-AD4M Executor ──WS-RPC──→ Plugin (ad4m-waker service) ──HTTP POST──→ OpenClaw /hooks/wake
-     │                              │                                          │
-  SPARQL subscription        Debounce + filter                           Agent wakes up
-  detects new links          (2s default)                                reads new data via MCP
-```
+## Subject Classes (SHACL) — defining new models
 
-### Subscribing
+Unchanged by the static-tools work — this is about *authoring* classes via `ad4m_add_model` (not in the default native surface — use the Rule 3c mcporter fallback to call it), not consuming them. Full SHACL field reference in `references/architecture.md`.
 
-```
-ad4m_subscribe_to_mentions(perspective_id: "...")
-ad4m_subscribe_to_children(perspective_id: "...", expression_address: "<channel-id>")
-ad4m_list_waker_subscriptions()
-ad4m_unsubscribe_from_mentions(perspective_id: "...")
-ad4m_unsubscribe_from_children(perspective_id: "...", expression_address: "<channel-id>")
-```
+---
 
-### Plugin config for waker
+## Troubleshooting (static-tools era)
 
-The waker works automatically — it reads the hooks token from OpenClaw's global config (`hooks.token`). The `openclaw ad4m-setup` command includes `wakeToken` in the generated config snippet if hooks are enabled.
-
-See `references/waker.md` for config field reference.
-
-## Dynamic SHACL Tools
-
-AD4M's MCP server introspects SHACL subject class definitions and auto-generates tools per class:
-
-| Pattern                 | Parameters                                                 | Description                                                                                              |
-| ----------------------- | ---------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| `{class}_create`        | `perspective_id`, `expression_address`, `parent?`, + props | Create instance (optionally add as child of parent)                                                      |
-| `{class}_query`         | `perspective_id`                                           | Find all instances                                                                                       |
-| `{class}_list`          | `perspective_id`, `parent`                                 | List instances that are children of parent with addresses, timestamps, and authors (sorted by timestamp) |
-| `{class}_get`           | `perspective_id`, `expression_address`                     | Get instance data                                                                                        |
-| `{class}_delete`        | `perspective_id`, `expression_address`                     | Delete instance                                                                                          |
-| `{class}_set_{prop}`    | `perspective_id`, `expression_address`, `value`            | Set scalar property                                                                                      |
-| `{class}_get_{coll}`    | `perspective_id`, `expression_address`                     | Get collection items                                                                                     |
-| `{class}_add_{coll}`    | `perspective_id`, `expression_address`                     | Add to collection                                                                                        |
-| `{class}_remove_{coll}` | `perspective_id`, `expression_address`                     | Remove from collection                                                                                   |
-
-Class and property names are **lowercased** in tool names. Example: `Channel` with `name` and `messages` → `channel_create`, `channel_set_name`, `channel_add_messages`, etc.
-
-**Use `parent` parameter to create + add to channel in one step:** `ad4m_message_create(..., parent="literal:string:<channel-id>")`
-
-**Use `{class}_list` for quick channel message listing:** `ad4m_message_list(perspective_id, parent="<channel-id>")`
-
-**Prefer dynamic tools** (`ad4m_message_create`) over generic tools (`ad4m_create_subject`) when available. Fall back to `ad4m_create_subject` if dynamic tools haven't appeared yet (SHACL still syncing).
-
-**After `ad4m_add_model` or joining a neighbourhood**, call `ad4m_refresh_ad4m_tools()` to immediately discover the new dynamic tools. Otherwise you'll have to wait for the next automatic poll cycle (~30s).
-
-## Subject Classes (SHACL)
-
-Define structured data types via `ad4m_add_model`. JSON format:
-
-```json
-{
-  "target_class": "app://Channel",
-  "constructor_actions": [
-    {
-      "action": "addLink",
-      "source": "this",
-      "predicate": "rdf://type",
-      "target": "app://Channel"
-    }
-  ],
-  "destructor_actions": [],
-  "properties": [
-    {
-      "path": "app://has_name",
-      "name": "name",
-      "datatype": "xsd:string",
-      "min_count": 1,
-      "max_count": 1,
-      "writable": true,
-      "resolve_language": "literal",
-      "setter": [
-        {
-          "action": "setSingleTarget",
-          "source": "this",
-          "predicate": "app://has_name",
-          "target": "value"
-        }
-      ]
-    },
-    {
-      "path": "app://has_member",
-      "name": "members",
-      "node_kind": "IRI",
-      "collection": true,
-      "writable": true,
-      "adder": [
-        {
-          "action": "addLink",
-          "source": "this",
-          "predicate": "app://has_member",
-          "target": "value"
-        }
-      ],
-      "remover": [
-        {
-          "action": "removeLink",
-          "source": "this",
-          "predicate": "app://has_member",
-          "target": "value"
-        }
-      ]
-    }
-  ]
-}
-```
-
-**Key rules:**
-
-- Use `constructor_actions` (NOT `constructor`) — array of AD4MAction objects
-- Use `destructor_actions` for cleanup when deleting instances
-- Scalar properties (`max_count: 1`) need an explicit `setter` array → generates `{class}_set_{prop}`
-- Collection properties (`collection: true`) need `adder` and `remover` arrays → generates `{class}_add_{prop}`, `{class}_remove_{prop}`
-- `min_count: 1` → required (becomes a constructor parameter)
-- The `target` in setter/adder/remover actions is `"value"` (substituted at runtime)
-
-See `references/architecture.md` for full SHACL field reference and link storage internals.
-
-## Executor Setup (Reference)
-
-Run `openclaw ad4m-setup` for guided setup. See `references/setup.md` for:
-
-- Downloading and building the executor binary
-- Manual executor setup (troubleshooting, external mode)
-- Deployment scenarios and networking
-- Troubleshooting guide
-
-## Reference Files
-
-| File                         | Contents                                                                             |
-| ---------------------------- | ------------------------------------------------------------------------------------ |
-| `references/mcp.md`          | Full MCP tools list, parameters, auth flows, dynamic tool details, error handling    |
-| `references/architecture.md` | AD4M concepts, perspectives, links, SHACL field reference, link storage internals    |
-| `references/setup.md`        | Executor download, init, run, deployment scenarios, networking, TLS, troubleshooting |
-| `references/waker.md`        | Waker config fields, subscription fields, wake message format                        |
+| Symptom | Cause | Fix |
+|---|---|---|
+| `tool not found` for `ad4m_signup`, `ad4m_verify_email_code`, `ad4m_add_model`, any `{class}_*` tool, or `ad4m_get_children_body_parsed` | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Use the Rule 3c `mcporter` fallback, or check whether your node's plugin build has added it. |
+| `tool not found` for something `contracts.tools` *does* list (e.g. `ad4m_remove_link`, `ad4m_agent_status`) | The manifest declares the name but the executor has no such tool — a manifest/executor mismatch, not a bridging gap. | Don't rely on it; the `mcporter` fallback won't help either since the tool genuinely doesn't exist. Report it upstream. |
+| `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is triggering a silent failed auto-relogin on every restart (Rule 3b's runtime re-auth). | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |
+| `User key not found on executor` on login, right after an executor restart | **This is expected behavior, not a bug.** The wallet keeps signing keys in memory only. Until the executor's operator runs `agent.unlock(passphrase)`, the node is unusable by design — the DB password check passes, then the key lookup fails, which is a misleading *message*, but the underlying lockout is intentional. Same root cause blocks the capability bootstrap (`request_capability`/`generate_jwt` fails with `main key not found`). | This is a "the executor needs its operator" blocker — you can't work around it from an agent session. If you *are* the operator, run `agent.unlock` (REST, CLI, or WS-RPC) with the agent passphrase. If you're a third party connecting to someone else's node, the real fix on the node side is failing your connection attempt earlier with a clear "not unlocked yet" message instead of this one — worth raising with whoever runs the node if you hit it often. |
+| `Failed to get agent: User profile not found for <email>` on `subscribe_to_mentions` | No agent profile set (Rule 12). | Call `ad4m_set_agent_profile` first. |
+| `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or `list_waker_subscriptions` shows your subscription under **Pending** rather than active | Normal on a node that's still starting up, or genuinely correct if the node hasn't been unlocked yet (see the row above) — the plugin (from `ff64207e1`) now retries automatically every 30s rather than silently pretending to have succeeded. | If Pending clears within a minute or two, no action needed. If it stays Pending, the underlying cause is almost always the node not being unlocked — that's the node operator's problem, not something to fix from your side. On plugin builds before `0ac29fed6`, this failure mode was worse (a silent false "success" with no Pending state at all) — if you're on an old build, always confirm with `list_waker_subscriptions` rather than trusting the subscribe reply. |
+| `ad4m_channel_query`/`ad4m_message_create`/etc. return "tool not found" | You're reading old instructions or an old memory of this skill — these are dynamic per-class tools, opt-in only (Rule 9), not the default surface anymore. | Use `instance_query`/`instance_create` with `class_name` instead. |
+| Channel query returns empty right after joining | SHACL/Holochain gossip still syncing. | Wait 3–5 min, retry. Unchanged from before. |
