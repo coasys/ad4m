@@ -244,10 +244,19 @@ Two traps around relations and setters:
   rejects it with a clear error, but `describe_perspective` shows it identically
   to a working relation — no read-only flag, no hint. `hasMany` needs no setter
   (the `adder` covers it), which makes the asymmetry easy to miss.
-- **`class_name` must be the local name of `target_class`.** Passing the URI form
-  (`board://Task`) or an unrelated name registers a class you cannot address or
-  cannot write to. Executors including the `add_model` validation reject this with
-  an explicit error; older ones return `success: true` and register something else.
+- **`class_name` must be the local name of `target_class`** (`"Task"`, never
+  `"board://Task"`). The two ways to get this wrong fail differently:
+  - *Unrelated name* (`class_name: "Mismatch"`, `target_class: "board://Task"`):
+    returns `{"success": true, "class_name": "Mismatch"}` but registers `Task`.
+    You notice immediately, because querying `Mismatch` fails.
+  - *URI form* (`class_name: "board://Task"` matching `target_class`): far nastier.
+    The class registers, `describe_perspective` lists it looking completely normal,
+    and **every property is silently read-only** — setters get stored under the SDNA
+    name while the schema is read via `target_class`. Nothing tells you until the
+    first write is rejected.
+
+  Executors carrying the `add_model` validation reject both with an explicit error
+  naming the expected local name; older ones return `success: true`.
 
 ### AD4MAction Fields
 
