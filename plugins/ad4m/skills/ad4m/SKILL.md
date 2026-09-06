@@ -125,6 +125,24 @@ mcporter call http://host:3001/mcp.signup --allow-http email=you@example.com pas
 - The same applies to the JWT you get back — capture it straight to a file (e.g. pipe `--output json` into a small script that writes the token to a `chmod 600` file), don't echo it to verify.
 - Write the resulting JWT into `plugins.entries.ad4m.config.token` — check your config tool's own file-reading support first; if it only accepts a literal argument, name that as a limitation too rather than routing the secret through shell substitution.
 
+**Authenticated fallback calls need the header, not just the endpoint.** `signup` and
+`login_email` are unauthenticated, so the plain call above works for them. Everything
+perspective-scoped (`add_model`, `list_perspectives`, `describe_perspective`, …) runs as
+*whoever the call is authenticated as* — a bare mcporter call carries no identity and
+fails with misleading errors like `Perspective not found` on a perspective you just
+created. Pass the JWT as an `Authorization` header, referencing an environment variable
+by name so the token never enters argv:
+
+```bash
+export AD4M_JWT="$(cat ~/.ad4m-token)"   # 0600 file, never echoed
+npx -y mcporter@latest call http://host:3001/mcp.list_perspectives \
+  --allow-http --header "Authorization=\$env:AD4M_JWT"
+```
+
+The JWT goes in **bare — no `Bearer ` prefix**. The `$env:NAME` indirection (and
+`--header`) exist only in newer mcporter; verified against mcporter 0.13.10 via `npx`,
+absent from 0.7.3.
+
 Some test/dev executors don't enforce email verification even though `signup` says "check your email" — check the `signup`/`login_email` response and your node's actual behavior rather than assuming verification is required.
 
 ### 4. Work on the level of classes, not links

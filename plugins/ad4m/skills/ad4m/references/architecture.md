@@ -201,12 +201,53 @@ Registering a class this way is unaffected by the static-tools change — `ad4m_
 | `max_count`        | number?      | Maximum cardinality. `1` = scalar property. Omit or `> 1` = collection |
 | `writable`         | bool?        | Whether the property can be updated after creation                     |
 | `collection`       | bool?        | Explicit collection flag (alternative to omitting `max_count`)         |
-| `node_kind`        | string?      | `"IRI"` for references to other entities, `"Literal"` for values       |
+| `node_kind`        | string?      | `"IRI"` if the value is a URI rather than a literal. **Does not by itself make the property a relation** — see below |
+| `relation_kind`    | string?      | Makes the property a typed relation: `"hasOne"`, `"hasMany"`, `"belongsToOne"`, `"belongsToMany"` (camelCase values, snake_case field) |
+| `target_class_name`| string?      | Bare local name of the class on the other end, e.g. `"Author"` (not the URI)                                        |
 | `local`            | bool?        | If true, links are stored locally (not shared in neighbourhood)        |
 | `resolve_language` | string?      | Language to use when resolving expression URIs (e.g. `"literal"`)      |
 | `setter`           | AD4MAction[] | Actions for setting a scalar property value                            |
 | `adder`            | AD4MAction[] | Actions for adding to a collection                                     |
 | `remover`          | AD4MAction[] | Actions for removing from a collection                                 |
+
+### Declaring a relation (not just an IRI)
+
+A property becomes a relation only when relation metadata is present —
+`relation_kind`, `target_class_name`, or an `sh://class` target. `node_kind: "IRI"`
+alone produces a **plain string property**: `describe_perspective` then reports
+`"type": "string"`, and the value is never hydrated as a linked instance.
+
+```json
+{
+  "path": "book://author",
+  "name": "author",
+  "relation_kind": "hasOne",
+  "target_class_name": "Author",
+  "max_count": 1,
+  "setter": [
+    {
+      "action": "setSingleTarget",
+      "source": "this",
+      "predicate": "book://author",
+      "target": "value"
+    }
+  ]
+}
+```
+
+Verify with `describe_perspective` after registering: a correct relation reports
+`"type": "reference"` with `relation_kind` and `target_class`.
+
+Two traps around relations and setters:
+
+- **A `hasOne` relation without a `setter` is dead on write.** `instance_create`
+  rejects it with a clear error, but `describe_perspective` shows it identically
+  to a working relation — no read-only flag, no hint. `hasMany` needs no setter
+  (the `adder` covers it), which makes the asymmetry easy to miss.
+- **`class_name` must be the local name of `target_class`.** Passing the URI form
+  (`board://Task`) or an unrelated name registers a class you cannot address or
+  cannot write to. Executors including the `add_model` validation reject this with
+  an explicit error; older ones return `success: true` and register something else.
 
 ### AD4MAction Fields
 
