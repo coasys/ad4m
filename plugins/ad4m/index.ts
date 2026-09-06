@@ -256,7 +256,6 @@ export default function ad4mPlugin(api: any) {
   const NEIGHBOURHOOD_TOOLS = new Set([
     "neighbourhood_join_from_url",
     "neighbourhood_publish_from_perspective",
-    "neighbourhood_publish",
   ]);
 
   // PR B: only these MCP tools become native OpenClaw tools. Dynamic
@@ -267,10 +266,8 @@ export default function ad4mPlugin(api: any) {
     "auth_status",
     "login_email",
     "list_perspectives",
-    "perspective_create",
     "add_perspective",
     "neighbourhood_join_from_url",
-    "neighbourhood_publish",
     "neighbourhood_publish_from_perspective",
     "add_link",
     "query_links",
@@ -282,6 +279,7 @@ export default function ad4mPlugin(api: any) {
     "instance_update",
     "instance_add_to_collection",
     "instance_remove",
+    "instance_ids",
   ]);
 
   /**

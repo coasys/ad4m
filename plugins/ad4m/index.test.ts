@@ -1678,6 +1678,12 @@ describe("ad4mPlugin", () => {
     expect(toolNames).toContain("ad4m_unsubscribe_from_children");
     expect(toolNames).toContain("ad4m_list_waker_subscriptions");
 
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "openclaw.plugin.json"), "utf8"),
+    ).contracts.tools as string[];
+    const missing = toolNames.filter((n) => !manifest.includes(n));
+    expect(missing).toEqual([]);
+
     // Check services
     const serviceIds = registeredServices.map((s) => s.id);
     expect(serviceIds).toContain("ad4m-mcp");
