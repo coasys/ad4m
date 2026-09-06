@@ -207,6 +207,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             undefined,          // relayUrl
             true,               // enableMcp = true
             MCP_PORT,           // mcpPort
+            true,               // dynamicClassTools = true — section 4 exercises the
+                                // per-class tools, which are hidden by default. The
+                                // default (static-only) surface is covered by
+                                // mcp-static-tools.test.ts.
         );
 
         // Wait for servers to settle
@@ -588,6 +592,16 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Static tools should still be present
             expect(toolNames).to.include('list_perspectives');
             expect(toolNames).to.include('add_model');
+
+            // Hybrid mode: the generic instance_* surface coexists with the
+            // per-class tools when dynamicClassTools is on.
+            expect(toolNames).to.include('describe_perspective');
+            expect(toolNames).to.include('instance_create');
+            expect(toolNames).to.include('instance_query');
+            expect(toolNames).to.include('instance_get');
+            expect(toolNames).to.include('instance_update');
+            expect(toolNames).to.include('instance_add_to_collection');
+            expect(toolNames).to.include('instance_remove');
         });
 
         it("should have correct schema for channel_create", async function() {
