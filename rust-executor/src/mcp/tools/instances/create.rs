@@ -67,11 +67,23 @@ impl Ad4mMcpHandler {
             Some(uri) if !uri.trim().is_empty() => link_target(uri.trim()),
             _ => generate_instance_uri(),
         };
-        if let Ok(Some(_)) = fetch_instance(&perspective, &class_name, &base_uri).await {
-            return error_json(format!(
-                "A {class_name} instance already exists at '{base_uri}'. Use instance_update to \
-                 change it, or omit base_uri to create a new instance with a generated id."
-            ));
+        // Three arms, not `if let Ok(Some(_))`: a store/query failure must not
+        // read as "no instance found" and let the create land on top of an
+        // existing instance, merging its property links.
+        match fetch_instance(&perspective, &class_name, &base_uri).await {
+            Ok(Some(_)) => {
+                return error_json(format!(
+                    "A {class_name} instance already exists at '{base_uri}'. Use instance_update \
+                     to change it, or omit base_uri to create a new instance with a generated id."
+                ))
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return error_json(format!(
+                    "Could not check whether a {class_name} instance already exists at \
+                     '{base_uri}': {e} — nothing was created."
+                ))
+            }
         }
 
         // Resolve every collection predicate BEFORE creating the subject, so
