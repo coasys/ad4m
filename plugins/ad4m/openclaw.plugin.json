@@ -57,7 +57,7 @@
       "allowInsecureHttp": {
         "type": "boolean",
         "default": false,
-        "description": "Allow sending AD4M credentials to a non-loopback plaintext http:// mcpEndpoint. Off by default: remote endpoints should use https://."
+        "description": "Allow sending AD4M credentials to a non-loopback plaintext http:// mcpEndpoint. This is a client-side guard only — it does not change how the executor serves MCP, which has no TLS of its own; put a TLS front (Caddy, Cloudflare Tunnel) in front of it and use https:// for anything off-LAN. Loopback, SSH tunnels and https:// are already allowed without this flag, so the one case it exists for is a plaintext endpoint on a trusted LAN (e.g. http://host.local:3002/mcp)."
       },
       "token": {
         "type": "string",

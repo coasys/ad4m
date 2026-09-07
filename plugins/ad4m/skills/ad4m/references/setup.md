@@ -197,6 +197,15 @@ cloudflared tunnel --url http://localhost:3001    # MCP        → https://yyy.t
 # named tunnel with an ingress config (host- or path-based rules) instead.
 ```
 
+#### Where TLS actually comes from, and what `allowInsecureHttp` is for
+
+Two different layers, easy to confuse:
+
+- **The executor has no TLS of its own on the MCP port.** It serves `/mcp` as plain HTTP, so encryption comes from the front you put in front of it — Caddy, Cloudflare Tunnel, or an SSH tunnel (Options A–C above). That is the recommended path for anything off-LAN. (`--tls-cert-file` / `--tls-key-file` cover the API port, not MCP; executor-native TLS for MCP is a separate piece of work.)
+- **`allowInsecureHttp` is a client-side guard in the plugin**, not a transport setting. Every MCP call carries the plugin's JWT or admin credential in an `Authorization` header, so the plugin refuses to talk to a non-loopback plaintext `http://` `mcpEndpoint` unless you set the flag. Turning it on does not weaken the executor; it only stops the plugin from refusing.
+
+`https://` endpoints, `http://localhost…`, and anything reached through an SSH tunnel are all allowed with the flag off — so the only case that needs it is a plaintext endpoint on a network path you trust end to end, e.g. `http://marvin.fritz.box:3002/mcp` on your own LAN. For anything leaving that LAN, put a TLS front in front of the executor and use `https://` rather than setting the flag.
+
 ### Scenario 3: Multi-user (humans via Flux + agents via MCP)
 
 Requires `--enable-multi-user true`. Each user (human or agent) authenticates as their own account.
@@ -256,7 +265,7 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
 | Agent + Flux UI | Remote/LAN   | **Yes** — TLS (Flux needs a cert)   | Caddy + domain, or Cloudflare Tunnel |
 | Multiple users  | Remote       | **Yes** — TLS                       | Caddy + domain + multi-user flag     |
 
-Plain HTTP is only ever acceptable on loopback. Every remote row above encrypts the whole connection, so admin credentials, JWTs and passwords never cross a network in the clear.
+Every remote row above encrypts the whole connection, so admin credentials, JWTs and passwords never cross a network in the clear. Plain HTTP is acceptable on loopback, and — at your own risk, with `allowInsecureHttp` — on a LAN path you fully control; never anywhere else. See "Where TLS actually comes from" above.
 
 ## Directory Structure
 
