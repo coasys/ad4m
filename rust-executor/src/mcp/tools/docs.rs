@@ -1,9 +1,13 @@
 //! `get_documentation` — the executor's own MCP documentation, served as
-//! markdown so a cold agent can learn the tool surface, the data model and
-//! the setup/auth story without any file on its side.
+//! markdown so a cold agent can learn the tool surface and the data model
+//! without any file on its side.
 //!
 //! The texts are compiled in from `rust-executor/src/mcp/docs/*.md`, so the
 //! docs an agent reads always match the binary it is talking to.
+//!
+//! Deliberately not served here: how to get, run and unlock an executor. An
+//! agent that can call this tool has already done that, so setup docs live
+//! with whatever set the connection up (for the OpenClaw plugin, its skill).
 
 use super::Ad4mMcpHandler;
 use rmcp::{handler::server::wrapper::Parameters, tool};
@@ -12,7 +16,6 @@ use serde::{Deserialize, Serialize};
 
 const OVERVIEW: &str = include_str!("../docs/overview.md");
 const ARCHITECTURE: &str = include_str!("../docs/architecture.md");
-const SETUP: &str = include_str!("../docs/setup.md");
 
 /// Which document to return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -24,20 +27,15 @@ pub enum DocTopic {
     /// Perspectives, links, languages, neighbourhoods, and the SHACL subject
     /// class (social DNA) format in detail.
     Architecture,
-    /// Getting, running, unlocking and authenticating against an executor;
-    /// deployment scenarios; troubleshooting.
-    Setup,
 }
 
 impl DocTopic {
-    pub(crate) const ALL: [DocTopic; 3] =
-        [DocTopic::Overview, DocTopic::Architecture, DocTopic::Setup];
+    pub(crate) const ALL: [DocTopic; 2] = [DocTopic::Overview, DocTopic::Architecture];
 
     pub(crate) fn text(self) -> &'static str {
         match self {
             DocTopic::Overview => OVERVIEW,
             DocTopic::Architecture => ARCHITECTURE,
-            DocTopic::Setup => SETUP,
         }
     }
 }
@@ -45,14 +43,14 @@ impl DocTopic {
 /// Parameters for reading the executor's documentation
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GetDocumentationParams {
-    /// Which document: "overview" (start here), "architecture" or "setup"
+    /// Which document: "overview" (start here) or "architecture"
     pub topic: DocTopic,
 }
 
 impl Ad4mMcpHandler {
     /// Return the executor's documentation for a topic, as markdown.
     #[tool(
-        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format; topic='setup' covers running, unlocking and authenticating against an executor. No authentication needed."
+        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format in depth. No authentication needed."
     )]
     pub async fn get_documentation(&self, params: Parameters<GetDocumentationParams>) -> String {
         params.0.topic.text().to_string()
@@ -93,6 +91,19 @@ mod tests {
         }
     }
 
+    /// The docs only advertise topics that exist. `setup` was removed: an
+    /// agent that can call this tool is already past setup.
+    #[test]
+    fn docs_only_point_at_served_topics() {
+        for topic in DocTopic::ALL {
+            let text = topic.text();
+            assert!(
+                !text.contains("topic=\"setup\"") && !text.contains("topic='setup'"),
+                "{topic:?} still points at the removed setup topic"
+            );
+        }
+    }
+
     /// A cold client learns about the docs from the `initialize` response
     /// and can read them before authenticating.
     #[tokio::test]
@@ -111,6 +122,7 @@ mod tests {
         let instructions = handler.get_info().instructions.expect("instructions set");
         assert!(instructions.contains("get_documentation(topic=\"overview\")"));
         assert!(instructions.contains("describe_perspective"));
+        assert!(!instructions.contains("topic=\"setup\""));
         assert!(AUTH_TOOLS.contains(&"get_documentation"));
 
         // The tool itself: unauthenticated handler, still answers.
@@ -128,7 +140,11 @@ mod tests {
             serde_json::to_string(&DocTopic::Architecture).unwrap(),
             "\"architecture\""
         );
-        let parsed: DocTopic = serde_json::from_str("\"setup\"").unwrap();
-        assert_eq!(parsed, DocTopic::Setup);
+        let parsed: DocTopic = serde_json::from_str("\"overview\"").unwrap();
+        assert_eq!(parsed, DocTopic::Overview);
+        assert!(
+            serde_json::from_str::<DocTopic>("\"setup\"").is_err(),
+            "setup is no longer a documentation topic"
+        );
     }
 }

@@ -28,8 +28,9 @@ Perspectives are local by default. Publishing a perspective as a neighbourhood m
 - `add_link(perspective_id, source, predicate, target)` — add a link
 - `add_model(perspective_id, class_name, shacl_json)` — register a subject class schema
 - `describe_perspective(perspective_id)` — the way to discover what's registered: every class's properties/collections/flows as data, in one call, instead of separately querying `get_models` + inspecting SHACL links
-- `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` / `instance_transcript` — the way to read/write instances of any registered class, taking `class_name` as a parameter. See "Generated MCP Tools" below for how this relates to per-class tool generation
-- `add_child` / `get_children` — the raw `ad4m://has_child` tree, class-agnostic (e.g. channels under `ad4m://self`)
+- `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — the way to read/write instances of any registered class, taking `class_name` as a parameter. See "Generated MCP Tools" below for how this relates to per-class tool generation
+- `instance_transcript(perspective_id, class_name, parent, limit?, text_property?)` — the newest N instances of one class that are `ad4m://has_child` children of a node, as a chronological plain-text transcript (timestamp, author, text). The way to read a chat channel; `instance_query` has no ordering parameter and returns the oldest matches first
+- `add_child(perspective_id, parent, child)` / `get_children(perspective_id, parent, limit?)` — the raw `ad4m://has_child` tree, class-agnostic: neither node needs to be an instance (e.g. channels under `ad4m://self`). `get_children` returns `id`, `timestamp`, `author` per child, oldest first, plus `total_count`
 
 ## Links
 
@@ -294,6 +295,8 @@ When you add to a collection `message.reactions.add(uri)`:
 ```
 Link: (<message-instance-uri>) --message://reactions--> (<reaction-uri>)
 ```
+
+The static tools write the same links: `instance_update` for the scalar case, `instance_add_to_collection` / `instance_remove_from_collection` for collection membership (removal drops only the membership link; the item itself is untouched).
 
 ### SDNA Storage in Perspectives
 

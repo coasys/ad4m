@@ -6,8 +6,11 @@ graphs), read and write structured data there, and collaborate with humans
 and other agents. This MCP server is the executor's tool surface for that.
 
 Read this first, then `get_documentation(topic="architecture")` for the data
-model and `get_documentation(topic="setup")` for running and authenticating
-against an executor.
+model. Getting, running and unlocking an executor is deliberately not
+documented here — an agent that can call this tool is already past that
+point — so those instructions live with whatever set up your connection (for
+the OpenClaw plugin, its skill's `references/setup.md`). Authenticating over
+MCP is covered under "Authentication" below.
 
 ## The tool surface is static
 
@@ -25,7 +28,7 @@ assume they are there; prefer the static tools below.
 
 | Tool | What it does |
 | --- | --- |
-| `get_documentation(topic)` | This documentation (`overview` / `architecture` / `setup`) |
+| `get_documentation(topic)` | This documentation (`overview` / `architecture`) |
 | `list_perspectives()` | Your local perspectives with their `uuid` and, when shared, `neighbourhood` URL |
 | `describe_perspective(perspective_id)` | Every registered class: properties (name, type, required, cardinality, hints), collections, flows |
 | `get_models(perspective_id)` | Just the class names |
@@ -69,12 +72,14 @@ cardinality, so fix what the error says rather than guessing.
 | `generate_waker_query` / `get_mention_waker_config` | Build subscriptions that wake you on changes |
 | `infer(perspective_id, query)` | Prolog query over a perspective |
 | `language_meta(address)` | Metadata of a language |
-| `auth_status` / `login_email` / `signup` / `verify_email_code` / `request_capability` / `generate_jwt` | Authentication (see `setup`) |
+| `auth_status` / `login_email` / `signup` / `verify_email_code` / `request_capability` / `generate_jwt` | Authentication (see "Authentication" below) |
 
 ## Workflow
 
 ```
-1. auth (see setup) — or nothing, if the executor was started with the admin credential for you
+1. auth_status()                                        → authenticate only if it says you are not
+                                                          (nothing to do if the executor was started
+                                                          with the admin credential for you)
 2. list_perspectives()                                  → find the perspective uuid
    neighbourhood_join_from_url(url)                     → …or join a shared space first
 3. describe_perspective(perspective_id)                 → classes, properties, collections, flows
@@ -84,6 +89,26 @@ cardinality, so fix what the error says rather than guessing.
 6. instance_create(perspective_id, class_name="Message", properties={"body": "Hello!"}, parent=<channel id>)
                                                         → post into it
 ```
+
+### Authentication
+
+`auth_status()` tells you where you stand. It and the other auth tools need
+no authentication themselves.
+
+- **Admin credential** — if the executor was started with `--admin-credential`
+  for you, every call in the session is already authenticated. Nothing to do.
+- **Multi-user node** — `signup(email, password)` once, then
+  `login_email(email, password)` returns a JWT that authenticates the rest of
+  the session. `verify_email_code` is only needed if the node enforces email
+  verification; try `login_email` first rather than assuming it does.
+- **Capability flow** (one shared node identity, not a per-agent account) —
+  `request_capability(app_name, app_desc)` auto-permits the request and
+  returns `request_id` and `code`; pass both to `generate_jwt`, which stores
+  the resulting JWT in the session for every later call.
+
+Both JWT paths need an unlocked executor: right after a restart the node's
+operator has to run `agent.unlock` first, otherwise `login_email` and
+`generate_jwt` fail with a "key not found" error.
 
 ## Rules that keep data usable by humans and other agents
 
