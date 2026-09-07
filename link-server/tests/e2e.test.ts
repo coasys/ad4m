@@ -1,5 +1,5 @@
 /**
- * True E2E encryption tests.
+ * E2E encryption tests.
  *
  * These tests prove the server NEVER sees plaintext room keys. Every
  * test constructs a scenario where a malicious server operator could
@@ -8,7 +8,7 @@
  *
  * Threat model: the server operator is honest-but-curious. They can
  * read memory, inspect DB rows, and log every HTTP request/response.
- * True E2E means the operator learns nothing about the room key even
+ * E2E means the operator learns nothing about the room key even
  * with full server access.
  */
 

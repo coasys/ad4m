@@ -146,7 +146,7 @@ export async function fetchAcl(config: RoomConfig, token: string): Promise<AclRe
 }
 
 // ---------------------------------------------------------------------------
-// E2E key rotation (client-side — true E2E, server never sees plaintext)
+// E2E key rotation (client-side, server never sees plaintext)
 // ---------------------------------------------------------------------------
 
 export interface RotateKeyEntry {
