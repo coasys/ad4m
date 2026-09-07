@@ -85,6 +85,7 @@ impl Ad4mMcpHandler {
             )
             .await
         {
+            perspective.discard_batch(&batch_id).await;
             return error_json(format!(
                 "Error updating {class_name} instance (batch abandoned): {e:#}"
             ));

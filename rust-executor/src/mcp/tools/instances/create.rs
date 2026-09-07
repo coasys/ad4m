@@ -102,7 +102,9 @@ impl Ad4mMcpHandler {
         // One batch for the whole create — subject, collection links, and the
         // parent link land atomically or not at all (same reasoning as
         // instance_update: no partially-constructed instance is ever
-        // observable, by peers or by a failed call's aftermath).
+        // observable, by peers or by a failed call's aftermath). Every
+        // pre-commit error path discards the batch so it does not sit in
+        // the store until the timeout sweep.
         let batch_id = perspective.create_batch().await;
         if let Err(e) = perspective
             .create_subject(
@@ -114,6 +116,7 @@ impl Ad4mMcpHandler {
             )
             .await
         {
+            perspective.discard_batch(&batch_id).await;
             return error_json(format!(
                 "Error creating {class_name} instance (nothing was created): {e:#}"
             ));
@@ -151,6 +154,7 @@ impl Ad4mMcpHandler {
                     )
                     .await
                 {
+                    perspective.discard_batch(&batch_id).await;
                     return error_json(format!(
                         "Failed to add '{item_str}' to collection '{collection}' — nothing was \
                          created (batch abandoned): {e:#}"
@@ -177,6 +181,7 @@ impl Ad4mMcpHandler {
                 )
                 .await
             {
+                perspective.discard_batch(&batch_id).await;
                 return error_json(format!(
                     "Failed to link to parent '{parent}' — nothing was created (batch \
                      abandoned): {e:#}"
