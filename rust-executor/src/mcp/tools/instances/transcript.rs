@@ -137,10 +137,9 @@ impl Ad4mMcpHandler {
                             info.name(),
                             class_name
                         ),
-                        None => format!(
-                            "Unknown text_property '{}' on class '{}'",
-                            name, class_name
-                        ),
+                        None => {
+                            format!("Unknown text_property '{}' on class '{}'", name, class_name)
+                        }
                     };
                     return error_json(format!(
                         "{}. Single-valued properties: {}",

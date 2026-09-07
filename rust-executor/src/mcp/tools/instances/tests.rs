@@ -599,7 +599,11 @@ async fn relation_targets_are_iri_gated_on_every_write_path() {
     let post_uri = post["base_uri"].as_str().unwrap().to_string();
     let got = get_post(&handler, &uuid, &post_uri).await;
     assert_eq!(relation_ids(&got["writer"]), vec![data.clone()], "{got}");
-    assert_eq!(relation_ids(&got["reviewers"]), vec![geordi.clone()], "{got}");
+    assert_eq!(
+        relation_ids(&got["reviewers"]),
+        vec![geordi.clone()],
+        "{got}"
+    );
 
     // instance_create: a prose relation-collection item is rejected by
     // validation and nothing is created.
@@ -620,7 +624,10 @@ async fn relation_targets_are_iri_gated_on_every_write_path() {
             .await,
     );
     assert!(bad["error"].is_string(), "{bad}");
-    assert_eq!(bad["validation_errors"][0]["property"], "reviewers", "{bad}");
+    assert_eq!(
+        bad["validation_errors"][0]["property"], "reviewers",
+        "{bad}"
+    );
     let problem = bad["validation_errors"][0]["problem"].as_str().unwrap();
     assert!(
         problem.contains("collection item") && problem.contains("existing User instance"),
@@ -887,7 +894,11 @@ async fn instance_tools_round_trip_typed_data() {
         })
         .await
         .unwrap();
-    assert_eq!(raw_membership.len(), 1, "exactly one membership link: {raw_membership:?}");
+    assert_eq!(
+        raw_membership.len(),
+        1,
+        "exactly one membership link: {raw_membership:?}"
+    );
 
     // Query: envelope-stored bodies come back as plain text; parent
     // scope and filters narrow; pagination reports the full count.
@@ -1541,11 +1552,17 @@ async fn instance_transcript_reads_children_chronologically() {
             .await,
     );
     let err = collection_prop["error"].as_str().unwrap();
-    assert!(err.contains("'messages'") && err.contains("collection"), "{err}");
+    assert!(
+        err.contains("'messages'") && err.contains("collection"),
+        "{err}"
+    );
     let (_, offered) = err
         .split_once("Single-valued properties:")
         .unwrap_or_else(|| panic!("no property list in: {err}"));
-    assert!(offered.contains("name") && offered.contains("description"), "{err}");
+    assert!(
+        offered.contains("name") && offered.contains("description"),
+        "{err}"
+    );
     assert!(
         !offered.contains("messages"),
         "collections must not be offered as text properties: {err}"
