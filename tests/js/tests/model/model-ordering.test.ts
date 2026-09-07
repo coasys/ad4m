@@ -196,6 +196,44 @@ describe("Ad4mModel — CRDT-ordered collections", function () {
     expect((found as any).tasks).to.deep.equal([c.id, b.id, a.id]);
   });
 
+  it("keeps CRDT order when the collection is eager-loaded via include", async () => {
+    const { a, b, c } = await seedTasks();
+    const column = await OrderColumn.create(perspective, {
+      tasks: [a.id, b.id, c.id],
+    });
+    column.tasks = [c.id, a.id, b.id];
+    await column.save();
+
+    // `include` is a separate path from the plain read: it takes the parent's
+    // already-populated array and hydrates each id. That inherits the CRDT
+    // order only because getters run before includes — a getter-backed
+    // relation's array is not correct until the getter stage has reordered it.
+    const found = await OrderColumn.findOne(perspective, {
+      where: { id: column.id },
+      include: { tasks: true },
+    });
+    expect(found, "column reads back").to.not.be.null;
+    const ids = (found!.tasks as any[]).map((t: any) => t.id ?? t);
+    expect(ids).to.deep.equal([c.id, a.id, b.id]);
+  });
+
+  it("lets an explicit sub-order override CRDT order on an include", async () => {
+    const { a, b, c } = await seedTasks();
+    const column = await OrderColumn.create(perspective, {
+      tasks: [c.id, a.id, b.id],
+    });
+
+    // A caller who asks for a sort means it. CRDT order is the default the
+    // relation carries, not a constraint on how it may be read.
+    const found = await OrderColumn.findOne(perspective, {
+      where: { id: column.id },
+      include: { tasks: { order: { title: "ASC" } } },
+    });
+    expect(found, "column reads back").to.not.be.null;
+    const titles = (found!.tasks as any[]).map((t: any) => t.title);
+    expect(titles).to.deep.equal(["a", "b", "c"]);
+  });
+
   // ── 3. Order survives membership changes ────────────────────────────────────
 
   it("holds a member's position when another is inserted before it", async () => {
