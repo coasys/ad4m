@@ -271,8 +271,6 @@ impl Ad4mMcpHandler {
             .with_route((Self::get_flows_tool_attr(), Self::get_flows))
             .with_route((Self::flow_state_tool_attr(), Self::flow_state))
             .with_route((Self::flow_actions_tool_attr(), Self::flow_actions))
-            .with_route((Self::flow_start_tool_attr(), Self::flow_start))
-            .with_route((Self::flow_run_action_tool_attr(), Self::flow_run_action))
             // auth.rs
             .with_route((Self::login_email_tool_attr(), Self::login_email))
             .with_route((

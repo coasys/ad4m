@@ -102,11 +102,6 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // no mutation.
     ("flow_state", SideEffect::Read),
     ("flow_actions", SideEffect::Read),
-    // `flow_start` mints a new flow instance node.
-    ("flow_start", SideEffect::Write),
-    // `flow_run_action` executes an action — writes the action's effect
-    // + advances the flow's state.
-    ("flow_run_action", SideEffect::Write),
     // ── children.rs ─────────────────────────────────────────────────
     ("add_child", SideEffect::Write),
     ("get_children", SideEffect::Read),

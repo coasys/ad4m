@@ -15,29 +15,35 @@
 //! order-independent SHA256 in [`evidence_hash`] so a later verification
 //! can detect evidence that no longer resolves.
 //!
-//! String values in `where` are substituted at evaluation time:
-//! `$flow.base` → the instance's subject, `$flow.uri` / `$flow.instance`
-//! → the instance URI, `$did` → the acting DID. `linkedTo` compiles to a
-//! `parent` scope; the `"base"`/`"flow"` shorthand uses
-//! `ad4m://has_child`, and `{ via, to }` names the predicate.
+//! Two optional refinements sit between evaluation and the write:
+//!
+//! - A state with a `semanticCheck` hint is confirmed by a second, small
+//!   LLM call (see `flow_semantic_check`); anything but a clear YES
+//!   discards the transition.
+//! - The LLM's own flow proposals (from the strategy path's JSON output or
+//!   the harness's `{Flow}_propose_transition` tool) never fire a
+//!   transition on their own. When one names a transition the guard has
+//!   already satisfied, its `reason` becomes the proposal's `rationale`;
+//!   otherwise it is dropped.
 //!
 //! Every failure here is a skip, never an error: a broken flow
 //! definition, an unregistered class or a transient query failure drops
-//! one transition and the extraction pass carries on. Untranslatable
-//! guards (`exists`/`matches`, a colliding `didProperty`, a malformed
-//! `linkedTo`) log at warn — they will never start working on retry.
+//! one transition and the extraction pass carries on.
 
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::write_flow_transition_proposal;
 use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, reachable_next_states, FlowInstanceRecord, FlowTokens,
 };
+use crate::perspectives::flow_semantic_check::{
+    build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
+};
+use crate::perspectives::interpretation::LlmFlowProposal;
 use crate::perspectives::model_query::ModelQueryInput;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
-use crate::types::LinkQuery;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
@@ -54,8 +60,30 @@ pub struct SatisfiedTransition {
     pub to_state: String,
     /// Every matched instance ID across the state's `requires`, deduplicated.
     pub evidence_ids: Vec<String>,
+    /// The same instances as `evidence_ids`, hydrated with the JSON
+    /// `model_query` returned for each — the semantic check reasons over
+    /// this content, not over bare identifiers. Deliberately NOT part of
+    /// [`evidence_hash`]: the seal stays a function of class names + IDs, so
+    /// a content edit to an already-sealed instance doesn't re-open a guard.
+    pub evidence: Vec<EvidenceItem>,
     /// See [`evidence_hash`].
     pub evidence_hash: String,
+    /// The target state's `semanticCheck` hint, if it declares one.
+    pub semantic_check: Option<String>,
+}
+
+/// One hydrated piece of guard evidence: an instance a `requires` query
+/// matched, carried with its full `model_query` JSON so downstream LLM
+/// passes can evaluate content ("was this agreed?") rather than rubber-stamp
+/// a URI list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EvidenceItem {
+    pub id: String,
+    /// SHACL class the matching guard queried for.
+    pub class_name: String,
+    /// Compact JSON of the matched instance exactly as `model_query`
+    /// returned it (id + properties).
+    pub content: String,
 }
 
 /// Order-independent seal over a satisfied guard's evidence: SHA256 of the
@@ -264,36 +292,44 @@ impl RequiresQueryable for PerspectiveInstance {
 /// split from query failures so the composer can `warn!` the former
 /// (persistent misconfig) and `debug!` the latter (transient).
 enum RequiresResult {
-    Satisfied(Vec<String>, Vec<String>),
+    Satisfied(Vec<String>, Vec<EvidenceItem>),
     Unmet,
     Untranslatable(anyhow::Error),
     QueryFailed(anyhow::Error),
 }
 
-/// Run one already-translated guard query. Returns the matched IDs.
+/// Run one already-translated guard query. Returns the matched instances,
+/// hydrated with the JSON `model_query` already returned for each (no
+/// second read).
 async fn run_query<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     class_name: &str,
     input: &Value,
-) -> Result<Vec<String>> {
+) -> Result<Vec<EvidenceItem>> {
     let raw = perspective
         .model_query(class_name, &input.to_string())
         .await?;
     let result: Value = serde_json::from_str(&raw)?;
-    let ids = result
+    let matched = result
         .get("instances")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("model_query for `{class_name}` returned no `instances` array"))?
         .iter()
-        .filter_map(|inst| inst.get("id").and_then(Value::as_str))
-        .map(str::to_string)
+        .filter_map(|inst| {
+            let id = inst.get("id").and_then(Value::as_str)?;
+            Some(EvidenceItem {
+                id: id.to_string(),
+                class_name: class_name.to_string(),
+                content: inst.to_string(),
+            })
+        })
         .collect();
-    Ok(ids)
+    Ok(matched)
 }
 
 /// AND across a state's `requires`. Unmet as soon as one guard misses;
-/// `Satisfied` (class names and evidence IDs, both deduplicated in
-/// first-seen order) when every guard holds.
+/// `Satisfied` (class names and hydrated evidence, both deduplicated in
+/// first-seen order, evidence by instance ID) when every guard holds.
 async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     requires: &[ModelQuery],
@@ -301,35 +337,35 @@ async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
     acting_did: &str,
 ) -> RequiresResult {
     let mut class_names: Vec<String> = Vec::new();
-    let mut evidence_ids: Vec<String> = Vec::new();
+    let mut evidence: Vec<EvidenceItem> = Vec::new();
     for query in requires {
         let input = match requires_query_input(query, record, acting_did) {
             Ok(v) => v,
             Err(e) => return RequiresResult::Untranslatable(e),
         };
-        let ids = match run_query(perspective, &query.class_name, &input).await {
-            Ok(ids) => ids,
+        let matched = match run_query(perspective, &query.class_name, &input).await {
+            Ok(items) => items,
             Err(e) => return RequiresResult::QueryFailed(e),
         };
-        if !cardinality_satisfied(query.count.as_ref(), ids.len()) {
+        if !cardinality_satisfied(query.count.as_ref(), matched.len()) {
             return RequiresResult::Unmet;
         }
         if !class_names.contains(&query.class_name) {
             class_names.push(query.class_name.clone());
         }
-        for id in ids {
-            if !evidence_ids.contains(&id) {
-                evidence_ids.push(id);
+        for item in matched {
+            if !evidence.iter().any(|e| e.id == item.id) {
+                evidence.push(item);
             }
         }
     }
-    RequiresResult::Satisfied(class_names, evidence_ids)
+    RequiresResult::Satisfied(class_names, evidence)
 }
 
 /// Walk every record's reachable next-states and collect the ones whose
 /// `requires` guard holds. Records whose flow is unknown and states without
-/// a guard are skipped. A query error skips that one transition (`debug!`);
-/// an untranslatable guard is the same skip at `warn!`.
+/// a guard are skipped; a query error skips that one transition and is
+/// logged at debug level.
 pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     records: &[FlowInstanceRecord],
@@ -347,7 +383,8 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                 continue;
             }
             match evaluate_requires(perspective, requires, record, acting_did).await {
-                RequiresResult::Satisfied(class_names, evidence_ids) => {
+                RequiresResult::Satisfied(class_names, evidence) => {
+                    let evidence_ids: Vec<String> = evidence.iter().map(|e| e.id.clone()).collect();
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
@@ -355,6 +392,8 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         to_state: state.name.clone(),
                         evidence_hash: evidence_hash(&class_names, &evidence_ids),
                         evidence_ids,
+                        evidence,
+                        semantic_check: state.semantic_check.clone(),
                     })
                 }
                 RequiresResult::Unmet => {}
@@ -376,16 +415,27 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     out
 }
 
-/// Load → evaluate → write, called by the extraction pass once its own
-/// writes are committed. `subjects` narrows the FlowInstance load to the
-/// given base URIs; an empty slice returns immediately — the extraction
-/// pass wrote nothing, so there are no flow instances to re-evaluate.
+/// Load → evaluate → (confirm) → write, called by the extraction pass once
+/// its own writes are committed. `subjects` bounds the FlowInstance load to
+/// what this pass actually touched or showed the LLM (written bases ∪
+/// cursor sources); an empty slice returns immediately — there is never a
+/// whole-perspective sweep from this entry point (that unbounded path was
+/// removed once and regressed once; see PR #940 review).
+///
+/// `llm_proposals` are the LLM's own transition proposals: one that names a
+/// satisfied transition contributes its `reason` as the proposal's
+/// `rationale`, the rest are ignored. `semantic_check`, when given, runs
+/// the confirmation LLM for every transition whose target state has a
+/// `semanticCheck` hint; only a YES lets it through.
+///
 /// Returns the URIs of the proposals minted. Never fails: loader errors
 /// yield an empty result and a failed write drops only that proposal.
 pub async fn run_engine_proposal_pass(
     perspective: &mut PerspectiveInstance,
     subjects: &[String],
     context: &AgentContext,
+    llm_proposals: &[LlmFlowProposal],
+    semantic_check: Option<&dyn SemanticCheckLlm>,
 ) -> Vec<String> {
     if subjects.is_empty() {
         return Vec::new();
@@ -410,94 +460,160 @@ pub async fn run_engine_proposal_pass(
 
     let mut minted = Vec::with_capacity(satisfied.len());
     for transition in &satisfied {
+        let label = format!(
+            "{}.{}→{}",
+            transition.flow_name, transition.from_state, transition.to_state
+        );
+
+        // Idempotency BEFORE the semantic gate: minting doesn't advance
+        // `currentState`, so a satisfied-but-unconsumed transition reappears
+        // on every pass — checking duplicates first means it costs two link
+        // queries per pass instead of one LLM call per pass.
         if proposal_already_exists(perspective, transition).await {
-            log::debug!(
-                "run_engine_proposal_pass: {}.{}→{} already proposed, skipping",
-                transition.flow_name,
-                transition.from_state,
-                transition.to_state
-            );
+            log::debug!("run_engine_proposal_pass: {label} already proposed; skipping");
             continue;
         }
-        match write_proposal(perspective, transition, &acting_did, context).await {
+
+        if let (Some(llm), Some(hint)) = (semantic_check, transition.semantic_check.as_deref()) {
+            // No hydrated evidence means there is no content the LLM could
+            // evaluate the hint against — asking would be a rubber stamp on
+            // identifiers. Same fail-closed disposition as an LLM error.
+            if transition.evidence.is_empty() {
+                log::warn!(
+                    "run_engine_proposal_pass: {label} has semanticCheck {hint:?} but no \
+                     hydrated evidence to evaluate it against; discarding (fail-closed)"
+                );
+                continue;
+            }
+            let flow_hint = records
+                .iter()
+                .find(|r| r.instance_uri == transition.instance_uri)
+                .and_then(|r| flows_by_uri.get(&r.flow_uri))
+                .and_then(|f| f.interpretation_hint.as_deref());
+            let prompt = build_semantic_check_prompt(transition, hint, flow_hint);
+            match llm.confirm(&prompt).await {
+                Ok(answer) if semantic_check_passed(&answer) => {}
+                Ok(answer) => {
+                    log::debug!(
+                        "run_engine_proposal_pass: {label} semantic check answered {answer:?}; discarding"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::debug!(
+                        "run_engine_proposal_pass: {label} semantic check failed: {e:#}; discarding"
+                    );
+                    continue;
+                }
+            }
+        }
+
+        let rationale = llm_proposals
+            .iter()
+            .find(|p| p.instance == transition.instance_uri && p.to_state == transition.to_state)
+            .and_then(|p| p.reason.as_deref())
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+
+        match write_proposal(perspective, transition, &acting_did, rationale, context).await {
             Ok(uri) => minted.push(uri),
-            Err(e) => log::debug!(
-                "run_engine_proposal_pass: {}.{}→{} not written: {e:#}",
-                transition.flow_name,
-                transition.from_state,
-                transition.to_state
-            ),
+            Err(e) => log::debug!("run_engine_proposal_pass: {label} not written: {e:#}"),
         }
     }
     minted
 }
 
-/// Check whether a proposal with the same evidence hash already exists for the
-/// same flow instance AND the same target state. Uses link queries: finds
-/// proposals carrying the evidence hash, then confirms one links to the same
-/// flow instance with the same `to_state`. Without the `to_state` check, two
-/// distinct transitions sharing identical requires guards would collide.
-async fn proposal_already_exists(
-    perspective: &PerspectiveInstance,
+/// Check whether a proposal with the same evidence hash already exists for
+/// the same flow instance AND target state. Keeps the pass idempotent:
+/// minting does not advance `currentState`, so without this check every
+/// later pass re-proposes each satisfied-unconsumed transition — and a
+/// consensus rule counting proposals rather than distinct DIDs could then
+/// be gamed by one agent re-running its own pass. The `to_state` check
+/// matters because two distinct transitions can share identical `requires`
+/// guards and therefore identical evidence hashes.
+async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
+    store: &S,
     transition: &SatisfiedTransition,
 ) -> bool {
-    let hash_literal = format!(
-        "literal:string:{}",
-        urlencoding::encode(&transition.evidence_hash)
-    );
-    let hash_links = match perspective
-        .get_links(&LinkQuery {
+    use crate::types::LinkQuery;
+    let literal = |s: &str| format!("literal:string:{}", urlencoding::encode(s));
+    // Every lookup below fails CLOSED (treat as already-proposed): a missed
+    // mint on a transient store error is recovered on the next pass, while a
+    // duplicate mint is exactly what this function exists to prevent — see
+    // the invariant above.
+    let hash_links = match store
+        .get_proposal_links(&LinkQuery {
             predicate: Some("ad4m://flow/evidence_hashes".into()),
-            target: Some(hash_literal),
+            target: Some(literal(&transition.evidence_hash)),
             ..Default::default()
         })
         .await
     {
         Ok(links) => links,
-        Err(_) => return false,
+        Err(e) => {
+            log::warn!(
+                "proposal_already_exists: evidence-hash lookup failed ({e:#}); \
+                 treating as already-proposed (fail-closed, skipping mint)"
+            );
+            return true;
+        }
     };
-    let to_state_literal = format!(
-        "literal:string:{}",
-        urlencoding::encode(&transition.to_state)
-    );
     for link in &hash_links {
         let proposal_uri = &link.data.source;
-        let instance_links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(proposal_uri.clone()),
-                predicate: Some("ad4m://flow/instance".into()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(_) => continue,
+        let links_to = |predicate: &'static str, want: String| async move {
+            store
+                .get_proposal_links(&LinkQuery {
+                    source: Some(proposal_uri.clone()),
+                    predicate: Some(predicate.into()),
+                    ..Default::default()
+                })
+                .await
+                .map(|links| links.iter().any(|l| l.data.target == want))
         };
-        let matches_instance = instance_links
-            .iter()
-            .any(|l| l.data.target == transition.instance_uri);
-        if !matches_instance {
-            continue;
+        let fail_closed = |e: anyhow::Error| {
+            log::warn!(
+                "proposal_already_exists: candidate lookup on {proposal_uri} failed \
+                 ({e:#}); treating as already-proposed (fail-closed, skipping mint)"
+            );
+        };
+        match links_to("ad4m://flow/instance", transition.instance_uri.clone()).await {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(e) => {
+                fail_closed(e);
+                return true;
+            }
         }
-        let to_state_links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(proposal_uri.clone()),
-                predicate: Some("ad4m://flow/to_state".into()),
-                ..Default::default()
-            })
-            .await
-        {
-            Ok(links) => links,
-            Err(_) => continue,
-        };
-        if to_state_links
-            .iter()
-            .any(|l| l.data.target == to_state_literal)
-        {
-            return true;
+        match links_to("ad4m://flow/to_state", literal(&transition.to_state)).await {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(e) => {
+                fail_closed(e);
+                return true;
+            }
         }
     }
     false
+}
+
+/// The one perspective call the idempotency check needs, behind a trait so
+/// its fail-closed error path can be unit-tested against a stub.
+#[async_trait]
+pub trait ProposalLookup: Send + Sync {
+    async fn get_proposal_links(
+        &self,
+        query: &crate::types::LinkQuery,
+    ) -> Result<Vec<crate::types::DecoratedLinkExpression>>;
+}
+
+#[async_trait]
+impl ProposalLookup for PerspectiveInstance {
+    async fn get_proposal_links(
+        &self,
+        query: &crate::types::LinkQuery,
+    ) -> Result<Vec<crate::types::DecoratedLinkExpression>> {
+        self.get_links(query).await
+    }
 }
 
 /// Write one proposal inside its own batch, so readers never see a
@@ -506,6 +622,7 @@ async fn write_proposal(
     perspective: &mut PerspectiveInstance,
     transition: &SatisfiedTransition,
     proposer_did: &str,
+    rationale: Option<&str>,
     context: &AgentContext,
 ) -> Result<String> {
     let batch_id = perspective.create_batch().await;
@@ -518,7 +635,7 @@ async fn write_proposal(
         &transition.to_state,
         &transition.evidence_ids,
         &transition.evidence_hash,
-        None,
+        rationale,
         Some(batch_id.clone()),
         context,
     )
@@ -561,10 +678,6 @@ mod tests {
         q
     }
 
-    fn count(min: Option<u32>, max: Option<u32>) -> Option<ModelQueryCount> {
-        Some(ModelQueryCount { min, max })
-    }
-
     fn inst() -> FlowInstanceRecord {
         FlowInstanceRecord {
             flow_uri: "delivery://DeliveryFlow".into(),
@@ -577,6 +690,10 @@ mod tests {
 
     fn qin(q: &ModelQuery, did: &str) -> Value {
         requires_query_input(q, &inst(), did).unwrap()
+    }
+
+    fn count(min: Option<u32>, max: Option<u32>) -> Option<ModelQueryCount> {
+        Some(ModelQueryCount { min, max })
     }
 
     #[test]
@@ -729,17 +846,6 @@ mod tests {
     }
 
     #[test]
-    fn query_input_bails_when_did_property_collides_with_where() {
-        let mut q = with_where(
-            mq("ns://T"),
-            vec![("author", PropertyCondition::Str("alice".into()))],
-        );
-        q.did_property = Some("author".into());
-        let err = requires_query_input(&q, &inst(), "did:key:x").unwrap_err();
-        assert!(err.to_string().contains("collides"), "got {err:#}");
-    }
-
-    #[test]
     fn query_input_compiles_linked_to_into_parent_scope() {
         let rec = inst();
         let mut base = mq("ns://T");
@@ -770,6 +876,46 @@ mod tests {
             branch
         }]);
         assert!(requires_query_input(&nested, &rec, "did:key:x").is_err());
+    }
+
+    #[test]
+    fn query_input_deserialises_as_model_query_input() {
+        let mut q = with_where(
+            mq("ns://T"),
+            vec![
+                ("title", PropertyCondition::Str("Onboard Ana".into())),
+                (
+                    "owner",
+                    PropertyCondition::Equals {
+                        equals: json!("alice"),
+                    },
+                ),
+                (
+                    "tag",
+                    PropertyCondition::In {
+                        one_of: vec![json!("a"), json!("b")],
+                    },
+                ),
+            ],
+        );
+        q.did_property = Some("author".into());
+        q.linked_to = Some(json!({ "via": "ns://about", "to": "base" }));
+        let value = qin(&q, "did:key:acting");
+        let parsed: crate::perspectives::model_query::ModelQueryInput =
+            serde_json::from_value(value).expect("translated JSON must be a ModelQueryInput");
+        assert!(parsed.where_clause.is_some());
+        assert!(parsed.parent.is_some());
+    }
+
+    #[test]
+    fn query_input_bails_when_did_property_collides_with_where() {
+        let mut q = with_where(
+            mq("ns://T"),
+            vec![("author", PropertyCondition::Str("alice".into()))],
+        );
+        q.did_property = Some("author".into());
+        let err = requires_query_input(&q, &inst(), "did:key:x").unwrap_err();
+        assert!(err.to_string().contains("collides"), "got {err:#}");
     }
 
     #[test]
@@ -806,48 +952,19 @@ mod tests {
         assert!(err.to_string().contains("empty"), "got {err:#}");
     }
 
-    #[test]
-    fn query_input_deserialises_as_model_query_input() {
-        let mut q = with_where(
-            mq("ns://T"),
-            vec![
-                ("title", PropertyCondition::Str("Onboard Ana".into())),
-                (
-                    "owner",
-                    PropertyCondition::Equals {
-                        equals: json!("alice"),
-                    },
-                ),
-                (
-                    "tag",
-                    PropertyCondition::In {
-                        one_of: vec![json!("a"), json!("b")],
-                    },
-                ),
-            ],
-        );
-        q.did_property = Some("author".into());
-        q.linked_to = Some(json!({ "via": "ns://about", "to": "base" }));
-        let value = qin(&q, "did:key:acting");
-        let parsed: crate::perspectives::model_query::ModelQueryInput =
-            serde_json::from_value(value).expect("translated JSON must be a ModelQueryInput");
-        assert!(parsed.where_clause.is_some());
-        assert!(parsed.parent.is_some());
-    }
-
     /// Canned `model_query` keyed by class name; records every call.
     #[derive(Default)]
     struct StubPerspective {
         calls: Mutex<Vec<(String, String)>>,
-        responses: HashMap<String, Result<Vec<String>, String>>,
+        responses: HashMap<String, Result<Vec<Value>, String>>,
     }
 
     impl StubPerspective {
         fn with_instances(mut self, class: &str, ids: &[&str]) -> Self {
-            self.responses.insert(
-                class.into(),
-                Ok(ids.iter().map(|s| s.to_string()).collect()),
-            );
+            self.with_instance_objects(class, ids.iter().map(|id| json!({ "id": id })).collect())
+        }
+        fn with_instance_objects(mut self, class: &str, objects: Vec<Value>) -> Self {
+            self.responses.insert(class.into(), Ok(objects));
             self
         }
         fn with_error(mut self, class: &str, msg: &str) -> Self {
@@ -873,9 +990,9 @@ mod tests {
                 .unwrap()
                 .push((class_name.to_string(), query_json.to_string()));
             match self.responses.get(class_name) {
-                Some(Ok(ids)) => Ok(json!({
-                    "instances": ids.iter().map(|id| json!({ "id": id })).collect::<Vec<_>>(),
-                    "totalCount": ids.len(),
+                Some(Ok(objects)) => Ok(json!({
+                    "instances": objects,
+                    "totalCount": objects.len(),
                 })
                 .to_string()),
                 Some(Err(msg)) => Err(anyhow!(msg.clone())),
@@ -937,7 +1054,8 @@ mod tests {
 
     #[tokio::test]
     async fn satisfied_guard_yields_one_transition_with_sealed_evidence() {
-        let flows = delivery(vec![mq("ns://Task")]);
+        let mut flows = delivery(vec![mq("ns://Task")]);
+        flows.get_mut(DELIVERY).unwrap().states[1].semantic_check = Some("Agreed?".into());
         let recs = vec![record(DELIVERY, "ad4m://flow/instance/1", "identified")];
         let stub = StubPerspective::default().with_instances("ns://Task", &["ad4m://task/1"]);
         let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x").await;
@@ -949,8 +1067,44 @@ mod tests {
                 from_state: "identified".into(),
                 to_state: "scoped".into(),
                 evidence_ids: vec!["ad4m://task/1".into()],
+                evidence: vec![EvidenceItem {
+                    id: "ad4m://task/1".into(),
+                    class_name: "ns://Task".into(),
+                    content: json!({ "id": "ad4m://task/1" }).to_string(),
+                }],
                 evidence_hash: evidence_hash(&["ns://Task".into()], &["ad4m://task/1".into()]),
+                semantic_check: Some("Agreed?".into()),
             }]
+        );
+    }
+
+    /// The hydration contract: whatever JSON `model_query` returned for a
+    /// matched instance rides along on the transition, so the semantic
+    /// check can reason over property values instead of bare URIs.
+    #[tokio::test]
+    async fn evidence_is_hydrated_with_instance_content() {
+        let flows = delivery(vec![mq("ns://Task")]);
+        let recs = vec![record(DELIVERY, "ad4m://flow/instance/1", "identified")];
+        let stub = StubPerspective::default().with_instance_objects(
+            "ns://Task",
+            vec![json!({
+                "id": "ad4m://task/1",
+                "title": "Ship parser",
+                "body": "We agreed on the scope."
+            })],
+        );
+        let out = evaluate_flow_transitions(&stub, &recs, &flows, "did:key:x").await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].evidence.len(), 1);
+        assert_eq!(out[0].evidence[0].id, "ad4m://task/1");
+        assert_eq!(out[0].evidence[0].class_name, "ns://Task");
+        assert!(out[0].evidence[0]
+            .content
+            .contains("We agreed on the scope."));
+        // Hash contract untouched: still a function of class names + IDs.
+        assert_eq!(
+            out[0].evidence_hash,
+            evidence_hash(&["ns://Task".into()], &["ad4m://task/1".into()])
         );
     }
 
@@ -1081,5 +1235,105 @@ mod tests {
             stub.calls.lock().unwrap().is_empty(),
             "untranslatable guard never reaches model_query"
         );
+    }
+
+    /// Idempotency must fail CLOSED: a store error during the
+    /// already-proposed lookup means "skip the mint", never "mint another".
+    /// A missed mint is recovered on the next pass; a duplicate mint is the
+    /// bug this check exists to prevent (proposal-count consensus gaming).
+    mod proposal_lookup_fail_closed {
+        use super::*;
+        use crate::types::{DecoratedLinkExpression, LinkQuery};
+
+        /// Scripted store: `None` for a predicate = that lookup errors.
+        struct ScriptedStore {
+            by_predicate: HashMap<String, Option<Vec<DecoratedLinkExpression>>>,
+        }
+
+        #[async_trait]
+        impl ProposalLookup for ScriptedStore {
+            async fn get_proposal_links(
+                &self,
+                query: &LinkQuery,
+            ) -> Result<Vec<DecoratedLinkExpression>> {
+                let predicate = query.predicate.clone().unwrap_or_default();
+                match self.by_predicate.get(&predicate) {
+                    Some(Some(links)) => Ok(links.clone()),
+                    Some(None) => Err(anyhow!("transient store error")),
+                    None => Ok(Vec::new()),
+                }
+            }
+        }
+
+        fn transition() -> SatisfiedTransition {
+            SatisfiedTransition {
+                flow_name: "Delivery".into(),
+                instance_uri: "ad4m://flow/instance/1".into(),
+                from_state: "identified".into(),
+                to_state: "scoped".into(),
+                evidence_ids: vec!["ad4m://task/1".into()],
+                evidence: Vec::new(),
+                evidence_hash: "hash".into(),
+                semantic_check: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn hash_lookup_error_reports_already_proposed() {
+            let store = ScriptedStore {
+                by_predicate: HashMap::from([("ad4m://flow/evidence_hashes".to_string(), None)]),
+            };
+            assert!(
+                proposal_already_exists(&store, &transition()).await,
+                "a failed evidence-hash lookup must skip the mint, not duplicate it"
+            );
+        }
+
+        fn link(source: &str, predicate: &str, target: &str) -> DecoratedLinkExpression {
+            DecoratedLinkExpression {
+                author: "did:key:test".into(),
+                timestamp: "2026-01-01T00:00:00Z".into(),
+                data: crate::types::Link {
+                    source: source.into(),
+                    predicate: Some(predicate.into()),
+                    target: target.into(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: String::new(),
+                    signature: String::new(),
+                    valid: None,
+                    invalid: None,
+                },
+                status: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn candidate_lookup_error_reports_already_proposed() {
+            let hash_link = link(
+                "proposal://1",
+                "ad4m://flow/evidence_hashes",
+                "literal:string:hash",
+            );
+            let store = ScriptedStore {
+                by_predicate: HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![hash_link]),
+                    ),
+                    // Candidate instance lookup errors.
+                    ("ad4m://flow/instance".to_string(), None),
+                ]),
+            };
+            assert!(proposal_already_exists(&store, &transition()).await);
+        }
+
+        #[tokio::test]
+        async fn empty_store_reports_not_proposed() {
+            let store = ScriptedStore {
+                by_predicate: HashMap::new(),
+            };
+            assert!(!proposal_already_exists(&store, &transition()).await);
+        }
     }
 }

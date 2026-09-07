@@ -116,8 +116,16 @@ async fn query_flow_instances(
     {
         Ok(j) => j,
         Err(e) => {
+            // Absent-class case: no FlowInstances have ever been minted
+            // on this perspective, so the SHACL shape isn't registered
+            // yet. That's a valid steady state — return empty rather
+            // than failing the extraction pass. Matches both the
+            // model_query/shape.rs message ("No SHACL shape stored for
+            // class 'FlowInstance'…") and legacy "shape not found"
+            // variants.
             let msg = format!("{e:#}");
-            if msg.to_lowercase().contains("no shacl shape stored") {
+            let lower = msg.to_lowercase();
+            if lower.contains("no shacl shape stored") || lower.contains("shape not found") {
                 return Ok(vec![]);
             }
             return Err(anyhow::anyhow!(
