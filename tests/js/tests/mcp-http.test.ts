@@ -149,7 +149,8 @@ const MESSAGE_SHACL = JSON.stringify({
     destructor_actions: []
 });
 
-// WakerSubscriptionManager — imported from @coasys/ad4m core
+// WakerSubscriptionManager — the canonical implementation, exported from core.
+// plugins/ad4m/wakerSubscriptionManager.ts is a re-export of this same module.
 import { WakerSubscriptionManager } from "@coasys/ad4m";
 
 // ============================================================================
@@ -1408,7 +1409,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     // ========================================================================
 
     describe("8. Waker Subscription (SPARQL Live Query)", function() {
-        // Uses the extracted WakerSubscriptionManager — same code path as the plugin
+        // Uses WakerSubscriptionManager from @coasys/ad4m — the single
+        // implementation; the OpenClaw plugin re-exports this same class.
         let wakerClient: Ad4mClient;
         let wakerPerspectiveUuid: string;
         let wakerChannelAddr: string;

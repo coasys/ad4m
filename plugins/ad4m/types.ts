@@ -11,7 +11,7 @@ export interface McpTool {
   inputSchema?: Record<string, any>;
 }
 
-// WakerSubscription is defined in wakerSubscriptionManager.ts (kept import-free for testability)
+// WakerSubscription comes from core via ./wakerSubscriptionManager (a pure re-export).
 export type { WakerSubscription } from "./wakerSubscriptionManager";
 
 export interface PluginConfig {
