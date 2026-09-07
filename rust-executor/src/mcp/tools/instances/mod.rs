@@ -15,8 +15,12 @@
 //! tool selection long before hard limits bite. Design and trade-offs:
 //! `planning/mcp-tool-surface-redesign-2026-09-06.md`.
 //!
-//! Correctness is unchanged. Every write is validated against the class's
-//! SHACL shape *before* anything is written ([`validate_properties`]), and a
+//! Correctness is unchanged. Every write through the typed tools is validated
+//! against the class's SHACL shape *before* anything is written
+//! ([`validate_properties`]); the one exception is [`commands`]'s
+//! `execute_commands`, the deliberate raw-SDNA escape hatch documented in its
+//! own module doc, which applies `{action, source, predicate, target}`
+//! commands with no SHACL validation at all. A validation
 //! rejection names the property, the expected type and the cardinality —
 //! the agent gets less schema up front than with per-property tool
 //! parameters, so the error has to carry it instead. Accepted writes go

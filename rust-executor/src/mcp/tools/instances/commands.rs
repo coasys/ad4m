@@ -7,7 +7,7 @@
 //! the only way over MCP to run an action the class declares but no
 //! `instance_*` tool models (custom actions, local-only links, …).
 
-use super::Ad4mMcpHandler;
+use super::{error_json, pretty, Ad4mMcpHandler};
 use crate::perspectives::perspective_instance::{Command, Parameter};
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -39,13 +39,13 @@ impl Ad4mMcpHandler {
             Ok((mut perspective, agent_context)) => {
                 let commands: Vec<Command> = match serde_json::from_str(&p.commands) {
                     Ok(cmds) => cmds,
-                    Err(e) => return format!("Error parsing commands JSON: {}", e),
+                    Err(e) => return error_json(format!("Error parsing commands JSON: {e}")),
                 };
 
                 let parameters: Vec<Parameter> = match &p.parameters {
                     Some(params_str) => match serde_json::from_str(params_str) {
                         Ok(parsed) => parsed,
-                        Err(e) => return format!("Error parsing parameters JSON: {}", e),
+                        Err(e) => return error_json(format!("Error parsing parameters JSON: {e}")),
                     },
                     None => Vec::new(),
                 };
@@ -60,16 +60,12 @@ impl Ad4mMcpHandler {
                     )
                     .await
                 {
-                    Ok(_) => {
-                        let result = json!({
-                            "executed": true,
-                            "perspective_id": p.perspective_id,
-                            "expression_address": p.expression_address
-                        });
-                        serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
-                    }
-                    Err(e) => format!("Error executing commands: {}", e),
+                    Ok(_) => pretty(&json!({
+                        "executed": true,
+                        "perspective_id": p.perspective_id,
+                        "expression_address": p.expression_address
+                    })),
+                    Err(e) => error_json(format!("Error executing commands: {e}")),
                 }
             }
             Err(e) => e,
