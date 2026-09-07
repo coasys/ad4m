@@ -25,6 +25,8 @@ pub struct SubscribeToModelParams {
     pub class_name: String,
     /// Parent expression address to scope the subscription (e.g., a channel address).
     /// If provided, only watches for new instances that are children of this parent.
+    /// Accepts the pre-rename `parent_address` spelling from older clients.
+    #[serde(alias = "parent_address")]
     pub parent: Option<String>,
     /// Predicate URI to filter by (e.g., "ad4m://has_child").
     /// If neither parent nor predicate is provided, the query is derived
@@ -360,6 +362,23 @@ pub fn build_mention_sub_id(perspective_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Clients built against the pre-rename schema still send
+    /// `parent_address`; both spellings must land in `parent`.
+    #[test]
+    fn subscribe_params_accept_legacy_parent_address() {
+        let legacy: SubscribeToModelParams = serde_json::from_str(
+            r#"{"perspective_id":"p","class_name":"Message","parent_address":"chan://1"}"#,
+        )
+        .expect("legacy spelling deserializes");
+        assert_eq!(legacy.parent.as_deref(), Some("chan://1"));
+
+        let current: SubscribeToModelParams = serde_json::from_str(
+            r#"{"perspective_id":"p","class_name":"Message","parent":"chan://2"}"#,
+        )
+        .expect("current spelling deserializes");
+        assert_eq!(current.parent.as_deref(), Some("chan://2"));
+    }
 
     #[test]
     fn scoped_query_excludes_ontology_proof_metadata() {
