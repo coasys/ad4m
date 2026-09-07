@@ -27,8 +27,9 @@
 use super::Ad4mMcpHandler;
 use crate::mcp::shacl;
 use crate::perspectives::flow_context::load_shacl_flows;
+use crate::perspectives::interpretation::class_local_name;
 use crate::perspectives::model_query::is_safe_iri_target;
-use crate::perspectives::model_query::types::ModelShape;
+use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::{Link, LinkQuery, LinkStatus, PerspectiveHandle};
 use rmcp::{handler::server::wrapper::Parameters, tool};
@@ -165,49 +166,107 @@ pub struct InstanceRemoveParams {
 // ============================================================================
 
 /// One property of a class as it is presented to (and validated for) MCP
-/// clients. Derived from the `ModelShape` the query pipeline already uses,
-/// so what `describe_perspective` says and what `instance_*` validates
-/// against is one and the same source.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PropertyInfo {
-    pub name: String,
-    pub predicate: String,
+/// clients.
+///
+/// A *borrowed view* over the `ShapeProperty` (plus its `ShapeRelation`, when
+/// the property is a link) that the query pipeline already loaded — not a
+/// second copy of the schema. Everything the MCP layer needs is either a
+/// field of those two or a one-line derivation from them, so this type owns
+/// no state and cannot drift from what `model_query` validates against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PropView<'a> {
+    prop: &'a ShapeProperty,
+    /// `Some` when the property is a relation — matched by name in
+    /// `ModelShape::include_relations`.
+    relation: Option<&'a ShapeRelation>,
+}
+
+impl<'a> PropView<'a> {
+    pub(crate) fn name(&self) -> &'a str {
+        &self.prop.name
+    }
+
+    pub(crate) fn predicate(&self) -> &'a str {
+        &self.prop.predicate
+    }
+
     /// Friendly type name: `string` / `boolean` / `integer` / `number` /
     /// `datetime` / `reference` (link to another instance) / raw xsd local
     /// name for anything else.
-    pub type_name: String,
-    pub required: bool,
-    /// Multi-valued (collection or *Many relation).
-    pub collection: bool,
+    pub(crate) fn type_name(&self) -> String {
+        if self.relation.is_some() {
+            "reference".to_string()
+        } else {
+            friendly_type(self.prop.datatype.as_deref())
+        }
+    }
+
+    pub(crate) fn required(&self) -> bool {
+        self.prop.is_required
+    }
+
+    /// Multi-valued (collection or `*Many` relation).
+    ///
+    /// Relations are all `is_collection` in the shape (the pipeline hydrates
+    /// them as arrays); `is_scalar_relation` is what tells us which ones are
+    /// really single-valued.
+    pub(crate) fn collection(&self) -> bool {
+        if self.relation.is_some() {
+            !self.prop.is_scalar_relation
+        } else {
+            self.prop.is_collection
+        }
+    }
+
     /// Relation kind (`hasOne`, `hasMany`, `belongsToOne`, `belongsToMany`)
     /// and the target class name, for link-typed properties.
-    pub relation: Option<(String, String)>,
+    pub(crate) fn relation(&self) -> Option<(&'a str, &'a str)> {
+        self.relation
+            .map(|r| (r.kind.as_str(), r.target_class_name.as_str()))
+    }
+
     /// `belongsTo*` — the link is stored on the *other* instance, so this
     /// side cannot write it.
-    pub reverse: bool,
+    pub(crate) fn reverse(&self) -> bool {
+        self.prop.direction.as_deref() == Some("reverse")
+    }
+
     /// Class marker (`sh:hasValue` + `minCount 1`), set by the constructor.
     /// Never supplied by clients.
-    pub flag: bool,
-    /// Derived via a getter expression; read-only.
-    pub computed: bool,
-    pub resolve_language: Option<String>,
-    pub interpretation_hint: Option<String>,
-    /// Dedup identity of the class (the "title-like" key).
-    pub identity: bool,
-}
+    pub(crate) fn flag(&self) -> bool {
+        self.prop.is_flag
+    }
 
-impl PropertyInfo {
+    /// Derived via a getter expression; read-only. Relations carry a getter
+    /// too (it encodes conformance filtering), so they are excluded.
+    pub(crate) fn computed(&self) -> bool {
+        self.relation.is_none() && self.prop.getter.is_some()
+    }
+
+    pub(crate) fn resolve_language(&self) -> Option<&'a str> {
+        self.prop.resolve_language.as_deref()
+    }
+
+    pub(crate) fn interpretation_hint(&self) -> Option<&'a str> {
+        self.prop.interpretation_hint.as_deref()
+    }
+
+    /// Dedup identity of the class (the "title-like" key).
+    pub(crate) fn identity(&self) -> bool {
+        self.prop.identity
+    }
+
     /// Whether an MCP client may write this property at all.
     pub(crate) fn writable(&self) -> bool {
-        !self.flag && !self.reverse && !self.computed
+        !self.flag() && !self.reverse() && !self.computed()
     }
 
     fn read_only_reason(&self) -> Option<&'static str> {
-        if self.flag {
+        if self.flag() {
             Some("class marker set automatically on create")
-        } else if self.reverse {
+        } else if self.reverse() {
             Some("reverse relation — stored on the target instance")
-        } else if self.computed {
+        } else if self.computed() {
             Some("computed by a getter expression")
         } else {
             None
@@ -217,14 +276,14 @@ impl PropertyInfo {
     /// Cardinality as data: `{"min": 0|1, "max": 1|null}`.
     pub(crate) fn cardinality(&self) -> Value {
         json!({
-            "min": if self.required { 1 } else { 0 },
-            "max": if self.collection { Value::Null } else { json!(1) },
+            "min": if self.required() { 1 } else { 0 },
+            "max": if self.collection() { Value::Null } else { json!(1) },
         })
     }
 
     /// Cardinality as words, for error messages.
     pub(crate) fn cardinality_text(&self) -> &'static str {
-        match (self.required, self.collection) {
+        match (self.required(), self.collection()) {
             (true, false) => "exactly one value (minCount 1, maxCount 1)",
             (false, false) => "at most one value (maxCount 1)",
             (true, true) => "one or more values (minCount 1, collection)",
@@ -234,23 +293,23 @@ impl PropertyInfo {
 
     fn to_json(&self) -> Value {
         let mut v = json!({
-            "name": self.name,
-            "type": self.type_name,
-            "required": self.required,
+            "name": self.name(),
+            "type": self.type_name(),
+            "required": self.required(),
             "cardinality": self.cardinality(),
-            "predicate": self.predicate,
+            "predicate": self.predicate(),
         });
-        if let Some((kind, target)) = &self.relation {
+        if let Some((kind, target)) = self.relation() {
             v["relation_kind"] = json!(kind);
             v["target_class"] = json!(target);
         }
-        if let Some(lang) = &self.resolve_language {
+        if let Some(lang) = self.resolve_language() {
             v["resolve_language"] = json!(lang);
         }
-        if let Some(hint) = &self.interpretation_hint {
+        if let Some(hint) = self.interpretation_hint() {
             v["interpretation_hint"] = json!(hint);
         }
-        if self.identity {
+        if self.identity() {
             v["identity"] = json!(true);
         }
         if let Some(reason) = self.read_only_reason() {
@@ -289,42 +348,27 @@ pub(crate) fn friendly_type(datatype: Option<&str>) -> String {
 /// Project a class shape into the per-property view. Flags are kept (so
 /// validation can reject them by name) but marked; callers presenting the
 /// schema drop them.
-pub(crate) fn class_properties(shape: &ModelShape) -> Vec<PropertyInfo> {
+pub(crate) fn class_properties(shape: &ModelShape) -> Vec<PropView<'_>> {
     shape
         .properties
         .iter()
-        .map(|p| {
-            let relation = shape.include_relations.iter().find(|r| r.name == p.name);
-            let reverse = p.direction.as_deref() == Some("reverse");
-            let type_name = if relation.is_some() {
-                "reference".to_string()
-            } else {
-                friendly_type(p.datatype.as_deref())
-            };
-            // Relations are all `is_collection` in the shape (the pipeline
-            // hydrates them as arrays); the scalar-relation flag tells us
-            // which ones are really single-valued.
-            let collection = if relation.is_some() {
-                !p.is_scalar_relation
-            } else {
-                p.is_collection
-            };
-            PropertyInfo {
-                name: p.name.clone(),
-                predicate: p.predicate.clone(),
-                type_name,
-                required: p.is_required,
-                collection,
-                relation: relation.map(|r| (r.kind.clone(), r.target_class_name.clone())),
-                reverse,
-                flag: p.is_flag,
-                computed: relation.is_none() && p.getter.is_some(),
-                resolve_language: p.resolve_language.clone(),
-                interpretation_hint: p.interpretation_hint.clone(),
-                identity: p.identity,
-            }
+        .map(|prop| PropView {
+            prop,
+            relation: shape.include_relations.iter().find(|r| r.name == prop.name),
         })
         .collect()
+}
+
+/// Look a property up by name, exact first, then case-insensitively — agents
+/// get the casing wrong often enough that a hard failure is not worth it.
+pub(crate) fn find_property<'a, 'p>(
+    infos: &'a [PropView<'p>],
+    name: &str,
+) -> Option<&'a PropView<'p>> {
+    infos
+        .iter()
+        .find(|i| i.name() == name)
+        .or_else(|| infos.iter().find(|i| i.name().eq_ignore_ascii_case(name)))
 }
 
 /// Describe one class as data: hint, single-valued `properties`, multi-valued
@@ -333,15 +377,18 @@ pub(crate) fn describe_class(class_name: &str, shape: &ModelShape) -> Value {
     let infos = class_properties(shape);
     let properties: Vec<Value> = infos
         .iter()
-        .filter(|i| !i.flag && !i.collection)
-        .map(PropertyInfo::to_json)
+        .filter(|i| !i.flag() && !i.collection())
+        .map(PropView::to_json)
         .collect();
     let collections: Vec<Value> = infos
         .iter()
-        .filter(|i| !i.flag && i.collection)
-        .map(PropertyInfo::to_json)
+        .filter(|i| !i.flag() && i.collection())
+        .map(PropView::to_json)
         .collect();
-    let identity = infos.iter().find(|i| i.identity).map(|i| i.name.clone());
+    let identity = infos
+        .iter()
+        .find(|i| i.identity())
+        .map(|i| i.name().to_string());
     let mut v = json!({
         "name": class_name,
         "class_uri": shape.target_class,
@@ -525,11 +572,11 @@ fn describe_value(v: &Value) -> String {
 /// Coerce one scalar value to the property's declared type, or explain why
 /// it can't be. Lenient where the intent is unambiguous ("true" for a
 /// boolean, "42" for an integer, 3 for a string), strict where it isn't.
-pub(crate) fn coerce_scalar(info: &PropertyInfo, value: &Value) -> Result<Value, ValidationError> {
+pub(crate) fn coerce_scalar(info: &PropView<'_>, value: &Value) -> Result<Value, ValidationError> {
     let err = |problem: String| ValidationError {
-        property: info.name.clone(),
+        property: info.name().to_string(),
         problem,
-        expected_type: Some(info.type_name.clone()),
+        expected_type: Some(info.type_name()),
         cardinality: Some(info.cardinality_text().to_string()),
         received: Some(describe_value(value)),
     };
@@ -546,7 +593,7 @@ pub(crate) fn coerce_scalar(info: &PropertyInfo, value: &Value) -> Result<Value,
         ));
     }
 
-    if let Some((_, target)) = &info.relation {
+    if let Some((_, target)) = info.relation() {
         return match value {
             Value::String(s) if is_safe_iri_target(s) => Ok(value.clone()),
             _ => Err(err(format!(
@@ -555,7 +602,7 @@ pub(crate) fn coerce_scalar(info: &PropertyInfo, value: &Value) -> Result<Value,
         };
     }
 
-    match info.type_name.as_str() {
+    match info.type_name().as_str() {
         "boolean" => match value {
             Value::Bool(_) => Ok(value.clone()),
             Value::String(s) if s.eq_ignore_ascii_case("true") => Ok(json!(true)),
@@ -589,7 +636,7 @@ pub(crate) fn coerce_scalar(info: &PropertyInfo, value: &Value) -> Result<Value,
             Value::String(_) => Ok(value.clone()),
             Value::Number(n) => Ok(Value::String(n.to_string())),
             Value::Bool(b) => Ok(Value::String(b.to_string())),
-            _ => Err(err(format!("expects a {}", info.type_name))),
+            _ => Err(err(format!("expects a {}", info.type_name()))),
         },
         // Unknown / custom datatype: accept any single JSON value verbatim.
         _ => Ok(value.clone()),
@@ -615,18 +662,13 @@ pub(crate) fn validate_properties(
         let names: Vec<&str> = infos
             .iter()
             .filter(|i| i.writable())
-            .map(|i| i.name.as_str())
+            .map(|i| i.name())
             .collect();
         names.join(", ")
     };
 
     for (given_name, value) in props {
-        let info = infos.iter().find(|i| i.name == *given_name).or_else(|| {
-            infos
-                .iter()
-                .find(|i| i.name.eq_ignore_ascii_case(given_name))
-        });
-        let Some(info) = info else {
+        let Some(info) = find_property(&infos, given_name) else {
             errors.push(ValidationError {
                 property: given_name.clone(),
                 problem: format!(
@@ -643,23 +685,23 @@ pub(crate) fn validate_properties(
 
         if let Some(reason) = info.read_only_reason() {
             errors.push(ValidationError {
-                property: info.name.clone(),
+                property: info.name().to_string(),
                 problem: format!("read-only: {reason}"),
-                expected_type: Some(info.type_name.clone()),
+                expected_type: Some(info.type_name()),
                 cardinality: Some(info.cardinality_text().to_string()),
                 received: Some(describe_value(value)),
             });
             continue;
         }
 
-        if info.collection {
+        if info.collection() {
             match mode {
                 WriteMode::Update => errors.push(ValidationError {
-                    property: info.name.clone(),
+                    property: info.name().to_string(),
                     problem: "is a collection — instance_update only sets single-valued \
                               properties; use instance_add_to_collection to add items"
                         .to_string(),
-                    expected_type: Some(info.type_name.clone()),
+                    expected_type: Some(info.type_name()),
                     cardinality: Some(info.cardinality_text().to_string()),
                     received: Some(describe_value(value)),
                 }),
@@ -682,7 +724,7 @@ pub(crate) fn validate_properties(
                         }
                     }
                     if !bad && !coerced.is_empty() {
-                        out.collections.push((info.name.clone(), coerced));
+                        out.collections.push((info.name().to_string(), coerced));
                     }
                 }
             }
@@ -691,25 +733,25 @@ pub(crate) fn validate_properties(
 
         match coerce_scalar(info, value) {
             Ok(v) => {
-                out.scalars.insert(info.name.clone(), v);
+                out.scalars.insert(info.name().to_string(), v);
             }
             Err(e) => errors.push(e),
         }
     }
 
     if mode == WriteMode::Create {
-        for info in infos.iter().filter(|i| i.required && i.writable()) {
-            let supplied = if info.collection {
-                out.collections.iter().any(|(n, _)| n == &info.name)
+        for info in infos.iter().filter(|i| i.required() && i.writable()) {
+            let supplied = if info.collection() {
+                out.collections.iter().any(|(n, _)| n == info.name())
             } else {
-                out.scalars.contains_key(&info.name)
+                out.scalars.contains_key(info.name())
             };
-            let already_reported = errors.iter().any(|e| e.property == info.name);
+            let already_reported = errors.iter().any(|e| e.property == info.name());
             if !supplied && !already_reported {
                 errors.push(ValidationError {
-                    property: info.name.clone(),
+                    property: info.name().to_string(),
                     problem: "missing required property".to_string(),
-                    expected_type: Some(info.type_name.clone()),
+                    expected_type: Some(info.type_name()),
                     cardinality: Some(info.cardinality_text().to_string()),
                     received: None,
                 });
@@ -722,13 +764,6 @@ pub(crate) fn validate_properties(
     } else {
         Err(errors)
     }
-}
-
-/// Local name of a class URI (`flux://Channel` → `Channel`).
-fn class_local_name(uri: &str) -> &str {
-    uri.rsplit(|c: char| c == '/' || c == '#')
-        .next()
-        .unwrap_or(uri)
 }
 
 /// Render a validation failure as the tool's JSON error payload. The
@@ -791,12 +826,8 @@ pub(crate) fn normalize_filter(
                 out.insert(key.clone(), value.clone());
             }
             _ => {
-                let info = infos
-                    .iter()
-                    .find(|i| i.name == *key)
-                    .or_else(|| infos.iter().find(|i| i.name.eq_ignore_ascii_case(key)));
-                let Some(info) = info else {
-                    let names: Vec<&str> = infos.iter().map(|i| i.name.as_str()).collect();
+                let Some(info) = find_property(&infos, key) else {
+                    let names: Vec<&str> = infos.iter().map(|i| i.name()).collect();
                     return Err(format!(
                         "unknown filter property '{}' on class '{}'. Available: id, {}",
                         key,
@@ -804,7 +835,7 @@ pub(crate) fn normalize_filter(
                         names.join(", ")
                     ));
                 };
-                out.insert(info.name.clone(), value.clone());
+                out.insert(info.name().to_string(), value.clone());
             }
         }
     }
@@ -949,11 +980,11 @@ async fn check_setters(
     let mut errors = Vec::new();
     for name in scalars.keys() {
         if !has_setter(perspective, &shape.target_class, name).await {
-            let info = infos.iter().find(|i| &i.name == name);
+            let info = infos.iter().find(|i| i.name() == name);
             errors.push(ValidationError {
                 property: name.clone(),
                 problem: "read-only: the class declares no setter for this property".to_string(),
-                expected_type: info.map(|i| i.type_name.clone()),
+                expected_type: info.map(|i| i.type_name()),
                 cardinality: info.map(|i| i.cardinality_text().to_string()),
                 received: None,
             });
@@ -1348,16 +1379,11 @@ impl Ad4mMcpHandler {
         };
 
         let infos = class_properties(&shape);
-        let info = infos.iter().find(|i| i.name == p.collection).or_else(|| {
-            infos
-                .iter()
-                .find(|i| i.name.eq_ignore_ascii_case(&p.collection))
-        });
-        let Some(info) = info else {
+        let Some(info) = find_property(&infos, &p.collection) else {
             let names: Vec<&str> = infos
                 .iter()
-                .filter(|i| i.collection && i.writable())
-                .map(|i| i.name.as_str())
+                .filter(|i| i.collection() && i.writable())
+                .map(|i| i.name())
                 .collect();
             return validation_failure(
                 &class_name,
@@ -1378,15 +1404,15 @@ impl Ad4mMcpHandler {
                 }],
             );
         };
-        if !info.collection {
+        if !info.collection() {
             return validation_failure(
                 &class_name,
                 &[ValidationError {
-                    property: info.name.clone(),
+                    property: info.name().to_string(),
                     problem: "is a single-valued property, not a collection — use \
                               instance_update to set it"
                         .to_string(),
-                    expected_type: Some(info.type_name.clone()),
+                    expected_type: Some(info.type_name()),
                     cardinality: Some(info.cardinality_text().to_string()),
                     received: Some(describe_value(&Value::String(p.item_uri.clone()))),
                 }],
@@ -1396,9 +1422,9 @@ impl Ad4mMcpHandler {
             return validation_failure(
                 &class_name,
                 &[ValidationError {
-                    property: info.name.clone(),
+                    property: info.name().to_string(),
                     problem: format!("read-only: {reason}"),
-                    expected_type: Some(info.type_name.clone()),
+                    expected_type: Some(info.type_name()),
                     cardinality: Some(info.cardinality_text().to_string()),
                     received: None,
                 }],
@@ -1414,17 +1440,26 @@ impl Ad4mMcpHandler {
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
-        let predicate =
-            match shacl::resolve_property_predicate(&perspective, &class_name, &info.name).await {
-                Ok(pred) => pred,
-                Err(e) => {
-                    return error_json(format!("Error resolving collection '{}': {}", info.name, e))
-                }
-            };
+        let predicate = match shacl::resolve_property_predicate(
+            &perspective,
+            &class_name,
+            &info.name(),
+        )
+        .await
+        {
+            Ok(pred) => pred,
+            Err(e) => {
+                return error_json(format!(
+                    "Error resolving collection '{}': {}",
+                    info.name(),
+                    e
+                ))
+            }
+        };
         let target = Self::create_property_expression(
             &perspective,
             &class_name,
-            &info.name,
+            &info.name(),
             &p.item_uri,
             &agent_context,
         )
@@ -1442,12 +1477,13 @@ impl Ad4mMcpHandler {
                 "success": true,
                 "class_name": class_name,
                 "base_uri": p.base_uri,
-                "collection": info.name,
+                "collection": info.name(),
                 "item_uri": p.item_uri,
             })),
             Err(e) => error_json(format!(
                 "Error adding to collection '{}': {:#}",
-                info.name, e
+                info.name(),
+                e
             )),
         }
     }
