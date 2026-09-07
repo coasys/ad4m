@@ -1,6 +1,6 @@
 # AD4M Executor Setup for AI Agents
 
-> **The executor documents itself.** Over MCP, `get_documentation(topic="setup")` returns the executor's own version of this material (`topic="overview"` and `"architecture"` cover the tool surface and the data model). It needs no authentication and is compiled into the binary, so when this file and the node disagree, the node's answer describes what's actually running.
+> **Scope.** This file covers what has to happen *before* the MCP tools work: getting, running, unlocking and authenticating against an executor. Once you are connected, the executor documents itself — `ad4m_get_documentation(topic="overview")` (tool surface, workflow, authentication over MCP, data rules) and `topic="architecture"` (data model, SHACL format) need no authentication and are compiled into the binary, so they always describe the node in front of you. Setup is deliberately *not* served there: an agent that can call the tool is already past it, which is why this file lives in the skill.
 
 ## Getting the Executor
 

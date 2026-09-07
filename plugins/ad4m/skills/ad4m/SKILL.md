@@ -19,7 +19,7 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 
 **Your guaranteed default native surface (as of this writing):**
 
-- `get_documentation` — the executor's own docs (`overview` / `architecture` / `setup`) as markdown, no auth needed — the cold-start entry point (see below)
+- `get_documentation` — the executor's own docs (`overview` / `architecture`) as markdown, no auth needed — the cold-start entry point (see below)
 - `describe_perspective` — the schema of every registered class, as data
 - `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — read/write any subject class by name
 - `instance_transcript` — the newest N instances of one class under a parent as a readable transcript (the way to read a channel, see Rule 6)
@@ -45,7 +45,7 @@ The whole multi-user onboarding path — `signup` → `verify_email_code` → `l
 
 Call `ad4m_get_sample_config` any time you need to see the exact config shape for your mode — it's native and self-documenting, no need to guess field names.
 
-**Cold start — when this skill is all you have:** call `ad4m_get_documentation(topic="overview")` first. It needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format; `topic="setup"` covers running, unlocking and authenticating. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you.
+**Cold start — when this skill is all you have:** call `ad4m_get_documentation(topic="overview")` first. It needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you. Setup — getting, running, unlocking an executor — is deliberately not served there (you need it before the tools work): that is `references/setup.md` in this skill.
 
 ---
 
@@ -162,7 +162,7 @@ Work at the **class/model level**, not raw links. AD4M's type system (SHACL subj
 
 **Use `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` (and `instance_transcript` for reading) with a `class_name` parameter.** These replace the old per-class dynamic tools (`ad4m_message_create`, `ad4m_channel_set_name`, etc.) as your default vocabulary — see Rule 9 for when the old tools still apply.
 
-**Why classes over raw links:** `add_link` writes exactly the triple you give it — no concept of "this one particular message" vs. "this text." Link directly against content and two entities with identical property values become indistinguishable. Subject classes fix this because every instance gets its own randomly-generated, content-independent id the moment it's created — that id, not the property values, is what makes it unique. Full explanation in `references/architecture.md`.
+**Why classes over raw links:** `add_link` writes exactly the triple you give it — no concept of "this one particular message" vs. "this text." Link directly against content and two entities with identical property values become indistinguishable. Subject classes fix this because every instance gets its own randomly-generated, content-independent id the moment it's created — that id, not the property values, is what makes it unique. Full explanation in `ad4m_get_documentation(topic="architecture")`, section "Links Alone Don't Give You Uniqueness".
 
 **Field name trap:** the static tools use `base_uri` for an instance's id (optional on `instance_create`, required elsewhere). The legacy per-class tools (Rule 9) use `expression_address` for the same concept. **These are not interchangeable names** — using the wrong one for the surface you're on will fail confusingly.
 
@@ -240,7 +240,7 @@ instance_create(class_name="App", properties={"name": "Chat", "icon": "chat", "p
 
 The executor can still generate one tool per (class × action) — `channel_create`, `message_set_body`, etc. — the way it always did. This is now **off by default** (`dynamicClassTools: false`) because it doesn't scale: ~45 tools with one social DNA loaded, ~85 with two, growing at runtime as neighbourhoods are joined, degrading LLM tool selection well before any hard limit. Even when a node enables it server-side, the tool names still need individual entries in `contracts.tools` client-side to reach you as native tools — there is no wildcard/pattern support for this.
 
-If you genuinely need this mode (e.g. an existing integration built against it), it uses `expression_address` (not `base_uri`) and the naming convention `{class_lower}_{action}` / `{class_lower}_{action}_{property_lower}`. Full reference in `references/architecture.md`, kept for compatibility — don't teach this as the default path to a fresh bot.
+If you genuinely need this mode (e.g. an existing integration built against it), it uses `expression_address` (not `base_uri`) and the naming convention `{class_lower}_{action}` / `{class_lower}_{action}_{property_lower}`. Full reference in `ad4m_get_documentation(topic="architecture")`, section "Generated MCP Tools", plus the plugin-side manifest caveat in `references/architecture.md` — don't teach this as the default path to a fresh bot.
 
 ### 10. Perspective UUIDs are local — Neighbourhood URLs are global
 
@@ -391,7 +391,7 @@ Unchanged architecture: `AD4M Executor → Plugin (ad4m-waker) → OpenClaw /hoo
 
 ## Subject Classes (SHACL) — defining new models
 
-This is about *authoring* classes via `ad4m_add_model` — native since the static surface added it — not consuming them. Full SHACL field reference in `references/architecture.md`; read the relation and setter sections there before your first schema, because a schema that registers successfully can still be unwritable.
+This is about *authoring* classes via `ad4m_add_model` — native since the static surface added it — not consuming them. Full SHACL field reference in `ad4m_get_documentation(topic="architecture")`; read its relation and setter sections before your first schema, because a schema that registers successfully can still be unwritable.
 
 **Expect a few rounds, not one.** This isn't limited to relations: omitting `constructor_actions`, or a per-property `setter`/`adder`/`remover`, registers the class fine and only surfaces as a write-time rejection later, one property at a time — `add_model` doesn't validate that a schema is actually usable, only that it's well-formed. A first-draft schema commonly takes 2–3 register-then-test iterations before every property is writable. Verify with `describe_perspective` after registering, then try writing to every property you expect to be writable, before treating the schema as done.
 
