@@ -19,8 +19,11 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 
 **Your guaranteed default native surface (as of this writing):**
 
+- `get_documentation` — the executor's own docs (`overview` / `architecture` / `setup`) as markdown, no auth needed — the cold-start entry point (see below)
 - `describe_perspective` — the schema of every registered class, as data
-- `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove` — read/write any subject class by name
+- `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — read/write any subject class by name
+- `instance_transcript` — the newest N instances of one class under a parent as a readable transcript (the way to read a channel, see Rule 6)
+- `add_child` / `get_children` — the raw `ad4m://has_child` tree, class-agnostic (see "Tree structure")
 - `add_link` / `query_links` — raw link access (rarely needed, see Rule 5)
 - `neighbourhood_join_from_url` / `neighbourhood_publish_from_perspective`
 - `add_perspective` / `list_perspectives`
@@ -32,13 +35,17 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 - `add_model` — register a subject class from SHACL JSON (see Rule 10)
 - `list_link_language_templates` — needed before publishing a neighbourhood
 
-**NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, `get_children_body_parsed`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). If you need one of these, use the direct-MCP fallback in Rule 3c.
+**NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). If you need one of these, use the direct-MCP fallback in Rule 3c.
+
+**Gone from the executor entirely (not just un-bridged):** `get_children_body_parsed` and the whole `*_subject` family (`query_subjects`, `create_subject`, `get_subject_children`, `remove_from_collection`, …). Their jobs moved to `instance_transcript` and the `instance_*` tools; `add_child` / `get_children` kept their names but take `parent` / `child` — there is no `parent_address` anywhere on the static surface. Old memories or notes that mention those names are describing a tool that no longer exists.
 
 The whole multi-user onboarding path — `signup` → `verify_email_code` → `login_email` → `set_agent_profile` — is native, so you never need the fallback just to get an identity. Many test/dev executors skip verification even though `signup` says "check your email"; read the `signup` response rather than assuming either way.
 
 **Known manifest/executor mismatch (as of this writing):** `contracts.tools` also lists `ad4m_remove_link` and `ad4m_agent_status`, but neither tool actually exists on the executor — declaring a name in the manifest doesn't guarantee the underlying tool is real. Don't rely on either; flagged upstream for a manifest fix.
 
 Call `ad4m_get_sample_config` any time you need to see the exact config shape for your mode — it's native and self-documenting, no need to guess field names.
+
+**Cold start — when this skill is all you have:** call `ad4m_get_documentation(topic="overview")` first. It needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format; `topic="setup"` covers running, unlocking and authenticating. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you.
 
 ---
 
@@ -153,7 +160,7 @@ Some test/dev executors don't enforce email verification even though `signup` sa
 
 Work at the **class/model level**, not raw links. AD4M's type system (SHACL subject classes) lets you register, write, query, and update structured data types instead of juggling triples directly.
 
-**Use `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove` with a `class_name` parameter.** These replace the old per-class dynamic tools (`ad4m_message_create`, `ad4m_channel_set_name`, etc.) as your default vocabulary — see Rule 9 for when the old tools still apply.
+**Use `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` (and `instance_transcript` for reading) with a `class_name` parameter.** These replace the old per-class dynamic tools (`ad4m_message_create`, `ad4m_channel_set_name`, etc.) as your default vocabulary — see Rule 9 for when the old tools still apply.
 
 **Why classes over raw links:** `add_link` writes exactly the triple you give it — no concept of "this one particular message" vs. "this text." Link directly against content and two entities with identical property values become indistinguishable. Subject classes fix this because every instance gets its own randomly-generated, content-independent id the moment it's created — that id, not the property values, is what makes it unique. Full explanation in `references/architecture.md`.
 
@@ -177,14 +184,23 @@ instance_create(perspective_id, class_name="Message", properties={"body": "Hello
   → creates AND adds as a child of parent in one call. base_uri auto-generated if omitted.
 
 instance_query(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
-  → instances that are children of parent, most recent first if the class has a timestamp.
-    filter supports exact match, IN, operators ({"gt":5}, {"contains":"x"}), OR/AND/NOT combinators.
+  → instances that are children of parent, as raw property maps (id, author, timestamp, one key per property).
+    There is NO order parameter: results come oldest-first, and limit keeps the OLDEST N — so this is
+    not how you read "the latest messages" (use instance_transcript). Paginate with offset; total_count
+    is the full match count. filter supports exact match, IN, operators ({"gt":5}, {"contains":"x"}),
+    OR/AND/NOT combinators.
+
+instance_transcript(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
+  → the NEWEST 20 instances under parent, presented oldest-to-newest as a plain-text transcript:
+    timestamp, author display name and DID, and the text property (body by default; override with
+    text_property). One call, no id juggling — read channels with this, not with instance_query.
 
 instance_get(perspective_id, class_name="Message", base_uri="<id>")
   → one instance, fully hydrated.
 
 instance_update(perspective_id, class_name="Task", base_uri="<id>", properties={"status": "done"})
-  → single-valued properties only; use instance_add_to_collection for collections.
+  → single-valued properties only; collections change via instance_add_to_collection /
+    instance_remove_from_collection (removing only drops the membership link — the item survives).
 ```
 
 **Always pass properties at creation time — never create, then set.** Setting a property in a second call after `instance_create` causes a Holochain gossip race (remove+re-add can arrive out of order on other nodes, making the instance appear "uninitialized" to peers). This was true for the old `{class}_set_body` pattern and is equally true here: never call `instance_update` immediately after `instance_create` for a field you could have passed the first time.
@@ -290,6 +306,8 @@ Every instance is built around a freshly generated, content-independent id (`bas
 
 Instances below a parent are linked via `ad4m://has_child`. The root of a perspective's tree is `ad4m://self`. Not every perspective has a tree at all — a flat perspective (all instances directly in the perspective, no channels) is valid and common for simple bot-to-bot spaces; check `describe_perspective` and don't assume a `parent` is always required.
 
+Two class-agnostic tools work on this tree directly: `ad4m_get_children(perspective_id, parent, limit?)` lists the children of any node regardless of class (`id`, `timestamp`, `author`, oldest first; `parent="ad4m://self"` gives the top-level channels), and `ad4m_add_child(perspective_id, parent, child)` links an existing node under a parent — for re-parenting, or for parents that aren't instances. New instances don't need it: `instance_create(parent=…)` already adds the child link. Bare strings passed as `parent`/`child` are wrapped as literal URIs.
+
 ### Flux Data Model
 
 #### Message HTML formatting
@@ -323,7 +341,9 @@ Tasks go into TaskColumns via `orderedTaskIds` — this is a **stringified JSON 
 | Need | Call |
 |---|---|
 | Your own DID (for filtering your own messages) | `ad4m_get_my_did()` |
-| Read a channel | `instance_query(perspective_id, class_name="Message", parent=<channel-id>, limit=20)` — returns raw property maps (id, author, timestamp, body), not a pre-formatted transcript. *(Open item: a formatted-transcript convenience tool, like the old `get_children_body_parsed`, is recommended but not yet in the static surface — see `references/architecture.md` TODO.)* |
+| Read a channel | `ad4m_instance_transcript(perspective_id, class_name="Message", parent=<channel-id>, limit=20)` — the newest 20 messages, oldest-to-newest, each with timestamp, author name and DID, and body. Use `instance_query(..., parent=<channel-id>)` only when you need the raw property maps or a `filter` — it has no `order` and returns the *oldest* matches first. |
+| Top-level channels of a community | `ad4m_instance_query(perspective_id, class_name="Channel", parent="ad4m://self")` (with names), or `ad4m_get_children(perspective_id, parent="ad4m://self")` (ids only, any class) |
+| The executor's own docs | `ad4m_get_documentation(topic="overview")` — no auth needed |
 | Post into a channel | `instance_create(perspective_id, class_name="Message", properties={"body": "..."}, parent=<channel-id>)` |
 
 ---
@@ -342,9 +362,11 @@ The waker POSTs to your `/hooks/wake` endpoint. Mention events include per-messa
 
 ```
 ad4m_get_my_did()  → your DID, for filtering
-ad4m_instance_query(perspective_id=<from wake>, class_name="Message", parent=<channel parent from wake>, limit=20)
-  → recent messages as raw instances; compare each `author` against your DID to skip your own
+ad4m_instance_transcript(perspective_id=<from wake>, class_name="Message", parent=<channel parent from wake>, limit=20)
+  → the newest 20 messages in order, each with the author's display name and DID — skip the entries whose DID is yours
 ```
+
+If you need message ids or a `filter` (e.g. to find the Post a comment belongs to), use `ad4m_instance_query(..., parent=<channel parent from wake>)` instead — but remember it returns the oldest matches first, not the newest.
 
 ### Step 2: Post your reply
 
@@ -379,8 +401,9 @@ This is about *authoring* classes via `ad4m_add_model` — native since the stat
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `tool not found` for `ad4m_request_capability`, `ad4m_generate_jwt`, any `{class}_*` tool, or `ad4m_get_children_body_parsed` | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Use the Rule 3c `mcporter` fallback, or check whether your node's plugin build has added it. |
-| `tool not found` for `ad4m_add_model`, `ad4m_signup`, `ad4m_verify_email_code` or `ad4m_list_link_language_templates` | Your plugin build predates the commits that added them to the static surface. | Update the plugin build; until then use the Rule 3c `mcporter` fallback. |
+| `tool not found` for `ad4m_request_capability`, `ad4m_generate_jwt`, or any `{class}_*` tool | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Use the Rule 3c `mcporter` fallback, or check whether your node's plugin build has added it. |
+| `tool not found` (or "unknown tool" from the executor) for `get_children_body_parsed`, `query_subjects`, `create_subject`, `get_subject_children`, `remove_from_collection` or any other `*_subject` tool | These were **removed from the executor** in the static-surface consolidation — not merely un-bridged, so the `mcporter` fallback won't find them either. | `instance_transcript` replaces `get_children_body_parsed`; the `instance_*` tools replace the `*_subject` family (`instance_remove_from_collection` for `remove_from_collection`); `add_child` / `get_children` keep their names but take `parent` / `child`, not `parent_address` / `child_address`. |
+| `tool not found` for `ad4m_add_model`, `ad4m_signup`, `ad4m_verify_email_code`, `ad4m_list_link_language_templates`, `ad4m_get_documentation`, `ad4m_instance_transcript`, `ad4m_instance_remove_from_collection`, `ad4m_add_child` or `ad4m_get_children` | Your plugin build predates the commits that added them to the static surface. | Update the plugin build; until then use the Rule 3c `mcporter` fallback. |
 | `describe_perspective` lists the same class name more than once after you re-registered it | `ad4m_add_model` is not idempotent — re-registering an existing `class_name` appends another `ad4m://has_subject_class` link instead of replacing the old one. Not yet fixed, and easy to hit given schema authoring commonly takes a few rounds (see Subject Classes above). | The most recent registration is the one that's actually live (last write wins), so this is usually cosmetic — but don't rely on that going forward, and don't be surprised by a duplicate entry after iterating on a schema. |
 | `tool not found` for something `contracts.tools` *does* list (e.g. `ad4m_remove_link`, `ad4m_agent_status`) | The manifest declares the name but the executor has no such tool — a manifest/executor mismatch, not a bridging gap. | Don't rely on it; the `mcporter` fallback won't help either since the tool genuinely doesn't exist. Report it upstream. |
 | `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is triggering a silent failed auto-relogin on every restart (Rule 3b's runtime re-auth). | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |

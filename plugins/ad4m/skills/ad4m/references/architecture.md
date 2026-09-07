@@ -23,12 +23,15 @@ Perspectives are local by default. Publishing a perspective as a neighbourhood m
 
 ### Key Operations
 
+- `ad4m_get_documentation(topic)` — the executor's own documentation (`overview` / `architecture` / `setup`) as markdown; no auth needed, compiled into the binary, so it always describes the node you're talking to. The entry point for a cold agent.
 - `ad4m_add_perspective(name)` — create a new perspective
 - `ad4m_query_links(perspective_id, source?, predicate?, target?)` — query links by source/predicate/target
 - `ad4m_add_link(perspective_id, source, predicate, target)` — add a link
-- `ad4m_add_model(perspective_id, class_name, shacl_json)` — register a subject class schema *(not in the default native surface — use the mcporter fallback from the main skill's Rule 3c)*
+- `ad4m_add_model(perspective_id, class_name, shacl_json)` — register a subject class schema (native; see the main skill's Rule 10)
 - `ad4m_describe_perspective(perspective_id)` — the default way to discover what's registered: every class's properties/collections/flows as data, in one call, instead of separately querying `get_models` + inspecting SHACL links. See the main skill's Rule 5.
-- `ad4m_instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove` — the default way to read/write instances of any registered class, taking `class_name` as a parameter. See "Generated MCP Tools" below for how this relates to per-class tool generation.
+- `ad4m_instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — the default way to read/write instances of any registered class, taking `class_name` as a parameter. See "Generated MCP Tools" below for how this relates to per-class tool generation.
+- `ad4m_instance_transcript(perspective_id, class_name, parent, limit?, text_property?)` — the newest N instances of one class that are `ad4m://has_child` children of a node, as a chronological plain-text transcript (timestamp, author name and DID, text). The way to read a chat channel; `instance_query` has no ordering parameter and returns the oldest matches first.
+- `ad4m_add_child(perspective_id, parent, child)` / `ad4m_get_children(perspective_id, parent, limit?)` — the raw `ad4m://has_child` tree, class-agnostic: neither node needs to be an instance (e.g. channels under `ad4m://self`). `get_children` returns `id`, `timestamp`, `author` per child, oldest first, plus `total_count`.
 
 ## Links
 
@@ -68,7 +71,7 @@ interface LinkExpression {
 
 **Reifiers provide provenance, not identity.** Every link is stored with an RDF 1.2 reifier — `<link:HASH> rdf:reifies <<( source predicate target )>>` — carrying author, timestamp, and signature metadata for that specific triple-assertion (`rust-executor/src/perspectives/sparql_store.rs`). This answers "who claimed this link, when, and is it validly signed" for any individual write. It does **not** give the entity the triple describes a stable, addressable identity. Two different messages, each independently reified with their own author and timestamp, are still indistinguishable as entities if both use the same literal as their source/target — the reifier authenticates the assertion, not the thing being asserted about.
 
-**Subject classes are the canonical fix.** Instantiating a subject class always mints a fresh, random, content-independent base expression (called `base_uri` on the `instance_*` tools, `ad4m://obj/<24 random chars>`-style id / `expression_address` on the legacy per-class tools — same concept, two names depending which surface you're on, see `core/src/model/Ad4mModel.ts`) *before* any property is written, and every property write for that instance uses this IRI as the link's `source` — never the property's own value. Two instances with byte-identical properties therefore stay distinct: identity lives in the instance's IRI, not in whatever its properties happen to hold. Work at the class/model level (`ad4m_add_model` to define — not natively bridged by default, see Key Operations above; `instance_create`/`instance_*` to consume by default, `{class}_create` as the opt-in legacy alternative) rather than writing raw links directly, unless you're deliberately reconstructing this uniqueness guarantee yourself.
+**Subject classes are the canonical fix.** Instantiating a subject class always mints a fresh, random, content-independent base expression (called `base_uri` on the `instance_*` tools, `ad4m://obj/<24 random chars>`-style id / `expression_address` on the legacy per-class tools — same concept, two names depending which surface you're on, see `core/src/model/Ad4mModel.ts`) *before* any property is written, and every property write for that instance uses this IRI as the link's `source` — never the property's own value. Two instances with byte-identical properties therefore stay distinct: identity lives in the instance's IRI, not in whatever its properties happen to hold. Work at the class/model level (`ad4m_add_model` to define; `instance_create`/`instance_*` to consume by default, `{class}_create` as the opt-in legacy alternative) rather than writing raw links directly, unless you're deliberately reconstructing this uniqueness guarantee yourself.
 
 ## Languages
 
@@ -111,7 +114,7 @@ Subject classes impose structure on the link graph using SHACL (Shapes Constrain
 
 ### How It Works
 
-Classes are registered via the `ad4m_add_model` MCP tool (not natively bridged by default — use the mcporter fallback from the main skill's Rule 3c; or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
+Classes are registered via the `ad4m_add_model` MCP tool (or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
 
 Each instance's identity is its base expression — a freshly generated, content-independent `ad4m://obj/<id>` IRI (see [Links Alone Don't Give You Uniqueness](#links-alone-dont-give-you-uniqueness) above). This is what makes subject classes the canonical way to model anything where two instances might end up with identical property values.
 
@@ -293,6 +296,8 @@ When you add to a collection `message.reactions.add(uri)`:
 ```
 Link: (<message-instance-uri>) --message://reactions--> (<reaction-uri>)
 ```
+
+The static tools write the same links: `instance_update` for the scalar case, `instance_add_to_collection` / `instance_remove_from_collection` for collection membership (removal drops only the membership link; the item itself is untouched).
 
 ### SDNA Storage in Perspectives
 

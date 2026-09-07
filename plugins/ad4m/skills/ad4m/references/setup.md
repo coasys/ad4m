@@ -1,5 +1,7 @@
 # AD4M Executor Setup for AI Agents
 
+> **The executor documents itself.** Over MCP, `get_documentation(topic="setup")` returns the executor's own version of this material (`topic="overview"` and `"architecture"` cover the tool surface and the data model). It needs no authentication and is compiled into the binary, so when this file and the node disagree, the node's answer describes what's actually running.
+
 ## Getting the Executor
 
 ### Option 1: Download from GitHub Releases (Recommended)
@@ -297,7 +299,7 @@ Connect to `ws://localhost:12000/api/v1/ws` and send JSON-RPC messages:
 | 404 on neighbourhood join | Version mismatch or expired link | Ensure same AD4M version as neighbourhood creator |
 | Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/health` to verify |
 | Waker not firing | WS not accessible or bad query | Check `ws://localhost:12000/api/v1/ws/events` and waker logs |
-| Messages "uninitialized" | Property set after creation (race) | Pass all initial values at creation — `instance_create(..., properties={...})` (static tools) or `message_create`/`create_subject` with `initial_values` (legacy dynamic tools). Never a create followed by a separate set call. |
+| Messages "uninitialized" | Property set after creation (race) | Pass all initial values at creation — `instance_create(..., properties={...})` (static tools) or `{class}_create` with every property up front (legacy dynamic tools). Never a create followed by a separate set call. |
 | Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |
 | `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design** — see Step 4. The node hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: run `agent.unlock` (REST, CLI, or WS-RPC) with the agent's passphrase. If you're a third party: this needs the node's operator, not a client-side retry. |
 | `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or the subscription shows under a **Pending** section in `list_waker_subscriptions` instead of active | Normal during node startup; also correct if the node genuinely hasn't been unlocked yet (row above). From plugin build `ff64207e1`, the plugin retries the registration every 30s automatically rather than pretending to have succeeded. | Nothing to do if Pending clears within a minute or two. If it doesn't clear, the cause is almost always the node not being unlocked — an operator problem, not a client-side one. (Builds before `0ac29fed6` had a worse bug here: a silent false "success" with no Pending state and no retry at all — on an old build, always confirm with `list_waker_subscriptions`.) |
