@@ -57,6 +57,7 @@ import {
 } from "./index";
 
 import ad4mPlugin, { _resetModuleState } from "./index";
+import { STATIC_TOOL_DEFS } from "./staticToolDefs";
 import { WakerSubscriptionManager, hintFor } from "./wakerSubscriptionManager";
 
 // ---------------------------------------------------------------------------
@@ -1732,6 +1733,43 @@ describe("ad4mPlugin", () => {
     ).contracts.tools as string[];
     const missing = toolNames.filter((n) => !manifest.includes(n));
     expect(missing).toEqual([]);
+
+    // Every captured executor def is registered at register() time — with
+    // no executor reachable — and is declared in the manifest. A def that
+    // is missing from STATIC_MCP_TOOLS (index.ts) would silently never
+    // reach agent sessions.
+    const unregisteredDefs = STATIC_TOOL_DEFS.map((d) => `ad4m_${d.name}`)
+      .filter((n) => !toolNames.includes(n));
+    expect(unregisteredDefs).toEqual([]);
+    const undeclaredDefs = STATIC_TOOL_DEFS.map((d) => `ad4m_${d.name}`)
+      .filter((n) => !manifest.includes(n));
+    expect(undeclaredDefs).toEqual([]);
+
+    // The consolidation's additions to the static surface.
+    for (const name of [
+      "ad4m_get_documentation",
+      "ad4m_instance_remove_from_collection",
+      "ad4m_instance_transcript",
+      "ad4m_add_child",
+      "ad4m_get_children",
+    ]) {
+      expect(toolNames).toContain(name);
+    }
+
+    // Parameter schemas come from the captured defs with $schema stripped;
+    // everything else (including get_documentation's $defs/$ref enum) is
+    // passed through as the executor emits it.
+    const getDoc = registeredTools.find((t) => t.name === "ad4m_get_documentation");
+    expect(getDoc!.parameters.$schema).toBeUndefined();
+    expect(getDoc!.parameters.required).toEqual(["topic"]);
+    expect(getDoc!.parameters.properties.topic.$ref).toBe("#/$defs/DocTopic");
+    expect(getDoc!.parameters.$defs.DocTopic.oneOf.map((o: any) => o.const))
+      .toEqual(["overview", "architecture", "setup"]);
+    const transcript = registeredTools.find((t) => t.name === "ad4m_instance_transcript");
+    expect(transcript!.parameters.required).toEqual(["perspective_id", "class_name", "parent"]);
+    expect(transcript!.parameters.properties).not.toHaveProperty("parent_address");
+    const query = registeredTools.find((t) => t.name === "ad4m_instance_query");
+    expect(query!.parameters.properties).not.toHaveProperty("order");
 
     // Check services
     const serviceIds = registeredServices.map((s) => s.id);
