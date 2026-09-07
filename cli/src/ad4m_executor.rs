@@ -151,7 +151,10 @@ enum Domain {
         hc_relay_url: Option<String>,
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
-        #[arg(long, action)]
+        /// Admin credential granting full capabilities to whoever presents it.
+        /// Prefer the AD4M_ADMIN_CREDENTIAL environment variable: a flag value is
+        /// visible to every user on the host via `ps` and stays in shell history.
+        #[arg(long, action, env = "AD4M_ADMIN_CREDENTIAL", hide_env_values = true)]
         admin_credential: Option<String>,
         #[arg(long, action)]
         localhost: Option<bool>,
@@ -295,4 +298,57 @@ async fn main() -> Result<()> {
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_admin_credential(argv: &[&str]) -> Option<String> {
+        let app = ClapApp::try_parse_from(argv).expect("argv parses");
+        match app.domain {
+            Domain::Run {
+                admin_credential, ..
+            } => admin_credential,
+            other => panic!("expected the run subcommand, got {other:?}"),
+        }
+    }
+
+    /// `--admin-credential` on the command line is visible in `ps` and shell
+    /// history, so the documented way to pass it is the environment. Both
+    /// must land in the same field, the explicit flag winning when both are
+    /// set. One test for all three cases: the variable is process-global and
+    /// tests run in parallel, so splitting them would race.
+    #[test]
+    fn run_reads_the_admin_credential_from_the_environment() {
+        std::env::set_var("AD4M_ADMIN_CREDENTIAL", "from-env");
+        assert_eq!(
+            run_admin_credential(&["ad4m-executor", "run"]).as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(
+            run_admin_credential(&["ad4m-executor", "run", "--admin-credential", "from-flag"])
+                .as_deref(),
+            Some("from-flag"),
+            "an explicit flag overrides the environment"
+        );
+        std::env::remove_var("AD4M_ADMIN_CREDENTIAL");
+        assert_eq!(
+            run_admin_credential(&["ad4m-executor", "run"]),
+            None,
+            "no flag and no variable means no credential"
+        );
+    }
+
+    /// The help text must not echo the variable's value.
+    #[test]
+    fn run_help_hides_the_environment_value() {
+        std::env::set_var("AD4M_ADMIN_CREDENTIAL", "s3cret-value");
+        let err = ClapApp::try_parse_from(["ad4m-executor", "run", "--help"])
+            .expect_err("--help exits through an error");
+        let help = err.to_string();
+        std::env::remove_var("AD4M_ADMIN_CREDENTIAL");
+        assert!(help.contains("AD4M_ADMIN_CREDENTIAL"), "{help}");
+        assert!(!help.contains("s3cret-value"), "{help}");
+    }
 }

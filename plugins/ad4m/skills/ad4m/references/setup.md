@@ -63,10 +63,13 @@ Creates:
 ### Step 2: Run Executor
 
 ```bash
+# Keep the secret in a mode-600 file and export it. Never pass it as a flag:
+# `--admin-credential <value>` is visible to every user on the host via `ps`
+# and stays in the shell history.
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/.ad4m/admin-credential)"
 ad4m-executor run \
   --app-data-path /path/to/.ad4m \
   --port 12000 \
-  --admin-credential <your-secret> \
   --enable-mcp true
 ```
 
@@ -75,7 +78,7 @@ ad4m-executor run \
 |------|---------|-------------|
 | `--app-data-path` | (required) | Data directory |
 | `--port` | 12000 | API port (WebSocket RPC + HTTP) |
-| `--admin-credential` | (none) | Admin auth token — without this, empty token has admin access |
+| `AD4M_ADMIN_CREDENTIAL` (env) / `--admin-credential` | (none) | Admin auth token. Set it through the environment variable; the flag form leaks the secret into `ps` output and shell history. Without it, an empty token has admin access |
 | `--enable-mcp` | false | Enable MCP server |
 | `--mcp-port` | 3001 | MCP server port |
 | `--hc-admin-port` | 2000 | Holochain admin port |
@@ -84,10 +87,11 @@ ad4m-executor run \
 **For AI agents**: Always run in a screen session with logging:
 
 ```bash
-screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --port 12000 --admin-credential mysecret --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
+export AD4M_ADMIN_CREDENTIAL="$(cat ~/.ad4m/admin-credential)"   # screen inherits the exported variable
+screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --port 12000 --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
 ```
 
-After startup, **write down** the admin credential, screen session name (`ad4m-executor`), log path (`/tmp/ad4m-executor.log`), MCP endpoint, and data path so you and your human can debug later. The executor is now running in the background — don't start another one.
+After startup, **write down** where the admin credential lives (the file path — never the value itself), the screen session name (`ad4m-executor`), log path (`/tmp/ad4m-executor.log`), MCP endpoint, and data path so you and your human can debug later. The executor is now running in the background — don't start another one.
 
 ### Step 3: Generate Agent
 
@@ -130,7 +134,7 @@ The `holochain: true` parameter starts the Holochain conductor during unlock.
 
 If you're the executor's operator and don't have REST/CLI access handy, the same unlock is available over the WebSocket RPC API (see below): `agent.unlock` with the agent's passphrase. If you're a third party hitting either error, this isn't something to retry your way around — someone with operator access needs to unlock the node first.
 
-**Test-only mode, not a security bug:** on a node with no `--admin-credential` configured, an empty token resolves to full (`ALL_CAPABILITY`) access on the WS-RPC API, including `agent.unlock` — found live 2026-09-06 recovering a test executor. This is intentional, for local/test convenience, not a gap to fix. **Never run a node without `--admin-credential` set except on loopback/local test setups** — on anything reachable by another user or over a network, this means anyone can unlock and fully control the node.
+**Test-only mode, not a security bug:** on a node with no admin credential configured (neither `AD4M_ADMIN_CREDENTIAL` nor `--admin-credential`), an empty token resolves to full (`ALL_CAPABILITY`) access on the WS-RPC API, including `agent.unlock` — found live 2026-09-06 recovering a test executor. This is intentional, for local/test convenience, not a gap to fix. **Never run a node without an admin credential set except on loopback/local test setups** — on anything reachable by another user or over a network, this means anyone can unlock and fully control the node.
 
 ### Step 5: Verify
 
@@ -149,17 +153,17 @@ curl -s http://localhost:12000/api/v1/agent/status \
 Agent and executor on the same machine. No TLS needed.
 
 ```bash
-ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
-  --admin-credential mysecret --enable-mcp true
+export AD4M_ADMIN_CREDENTIAL="$(cat ~/.ad4m/admin-credential)"
+ad4m-executor run --app-data-path ~/.ad4m --port 12000 --enable-mcp true
 # MCP at http://localhost:3001/mcp
 # API at http://localhost:12000
 ```
 
 ### Scenario 2: Agent connects to remote executor
 
-Agent on machine A, executor on machine B (LAN or internet). MCP works over plain HTTP for agent-to-agent connections. **Flux UI (browser) requires TLS for non-localhost connections.**
+Agent on machine A, executor on machine B (LAN or internet). The executor itself only speaks plain HTTP / WebSocket on its ports, and every request carries a secret — the admin credential, a JWT, or a password on login. **Anything that leaves the machine therefore goes through an SSH tunnel or a TLS proxy. Never point an agent at `http://<remote-host>:3001/mcp` or `http://<remote-host>:12000` across a network.** Flux UI (browser) additionally needs a real TLS certificate for non-localhost connections, because browsers block mixed content.
 
-**Option A: SSH tunnel (no TLS needed, simplest for agents)**
+**Option A: SSH tunnel (encrypted by SSH, no certificate needed — simplest for agents)**
 
 ```bash
 # On agent machine — forward both API and MCP ports
@@ -170,19 +174,32 @@ ssh -L 12000:localhost:12000 -L 3001:localhost:3001 user@executor-host
 **Option B: Caddy reverse proxy (auto TLS, needed for Flux UI)**
 
 ```bash
-# On executor machine — install Caddy, then:
-caddy reverse-proxy --from ad4m.yourdomain.com --to localhost:12000
+# On executor machine — install Caddy, then one TLS front for BOTH ports
+# (the `caddy reverse-proxy` one-liner only fronts a single upstream):
+cat > Caddyfile <<'EOF'
+ad4m.yourdomain.com {
+    reverse_proxy localhost:12000
+}
+mcp.yourdomain.com {
+    reverse_proxy localhost:3001
+}
+EOF
+caddy run --config Caddyfile
 # Flux connects to https://ad4m.yourdomain.com
-# Requires: domain name pointing to executor IP, ports 80/443 open
+# MCP clients connect to https://mcp.yourdomain.com/mcp
+# Requires: both names pointing to the executor IP, ports 80/443 open
 ```
 
 **Option C: Cloudflare Tunnel (no port forwarding, free TLS)**
 
 ```bash
-# On executor machine
-cloudflared tunnel --url http://localhost:12000
-# Gives you a public https://xxx.trycloudflare.com URL
-# Works for both Flux and agents
+# On executor machine. A quick tunnel exposes ONE local port, so run one per port:
+cloudflared tunnel --url http://localhost:12000   # API + Flux → https://xxx.trycloudflare.com
+cloudflared tunnel --url http://localhost:3001    # MCP        → https://yyy.trycloudflare.com/mcp
+# Each process prints its own https://….trycloudflare.com URL: point Flux at the
+# first and MCP clients at the second (plus /mcp). Exposing only port 12000 gives
+# you the API but no MCP endpoint. For a single hostname that routes both, use a
+# named tunnel with an ingress config (host- or path-based rules) instead.
 ```
 
 ### Scenario 3: Multi-user (humans via Flux + agents via MCP)
@@ -197,9 +214,9 @@ Requires `--enable-multi-user true`. Each user (human or agent) authenticates as
 - Self-signed cert via `mkcert` (install CA on all client devices)
 
 ```bash
+export AD4M_ADMIN_CREDENTIAL="$(cat ~/.ad4m/admin-credential)"
 ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
-  --admin-credential mysecret --enable-mcp true \
-  --enable-multi-user true
+  --enable-mcp true --enable-multi-user true
 ```
 
 **Agent provisioning + auth flow (recommended, one command):**
@@ -229,13 +246,15 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
 
 ### Quick Decision Guide
 
-| Who connects?   | Where?       | TLS needed?        | Recommended setup                    |
-| --------------- | ------------ | ------------------ | ------------------------------------- |
-| Just your agent | Same machine | No                 | Scenario 1 (local)                   |
-| Just your agent | Remote       | No                 | SSH tunnel                           |
-| Agent + Flux UI | Same machine | No                 | Scenario 1                           |
-| Agent + Flux UI | Remote/LAN   | **Yes (for Flux)** | Caddy + domain, or Cloudflare Tunnel |
-| Multiple users  | Remote       | **Yes**            | Caddy + domain + multi-user flag     |
+| Who connects?   | Where?       | Encryption                          | Recommended setup                    |
+| --------------- | ------------ | ----------------------------------- | ------------------------------------- |
+| Just your agent | Same machine | None needed (loopback only)         | Scenario 1 (local)                   |
+| Just your agent | Remote       | **Yes** — SSH tunnel (or TLS proxy) | SSH tunnel                           |
+| Agent + Flux UI | Same machine | None needed (loopback only)         | Scenario 1                           |
+| Agent + Flux UI | Remote/LAN   | **Yes** — TLS (Flux needs a cert)   | Caddy + domain, or Cloudflare Tunnel |
+| Multiple users  | Remote       | **Yes** — TLS                       | Caddy + domain + multi-user flag     |
+
+Plain HTTP is only ever acceptable on loopback. Every remote row above encrypts the whole connection, so admin credentials, JWTs and passwords never cross a network in the clear.
 
 ## Directory Structure
 
@@ -266,15 +285,16 @@ The plugin manages MCP authentication internally — credentials are not sent in
 ### Executor Security
 
 - **Never expose the admin credential** in logs, chat messages, or shared config files
+- Pass the admin credential through `AD4M_ADMIN_CREDENTIAL` (exported from a mode-600 file), not `--admin-credential`: command-line arguments are readable by every user on the host via `ps` and end up in shell history
 - The executor's API endpoint (`--port`, default 12000) should only be accessible to trusted agents
-- Use TLS (`--tls-cert-file`, `--tls-key-file`) for any remote executor access
+- Anything that is not loopback goes through an SSH tunnel or TLS (`--tls-cert-file` / `--tls-key-file`, or a reverse proxy as in Scenario 2). There is no case where auth traffic travels over plain HTTP across a network
 - Same rule for multi-user passwords and JWTs: never in logs, chat messages, shared config, or command arguments. See the main skill's Rule 3c for the specific mechanics (file-based secrets, `mcporter`'s `key=@path` argument syntax) rather than shell interpolation.
 
 ## WebSocket RPC API (Fallback)
 
 **Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging, and — see Step 4 — unlocking a wallet when you lack REST/CLI access).
 
-Connect to `ws://localhost:12000/api/v1/ws` and send JSON-RPC messages:
+Connect to `ws://localhost:12000/api/v1/ws` (loopback or through an SSH tunnel; `wss://` behind your TLS proxy when remote) and send JSON-RPC messages:
 
 ```json
 {"method": "agent.status", "params": {}, "id": "1"}
@@ -284,7 +304,7 @@ Connect to `ws://localhost:12000/api/v1/ws` and send JSON-RPC messages:
 {"method": "agent.unlock", "params": {"passphrase": "<agent-passphrase>"}, "id": "3"}
 ```
 
-**Auth:** Send `{"method": "auth", "params": {"credential": "<admin-credential>"}}` (single-user) or `{"method": "auth", "params": {"jwt": "<token>"}}` (multi-user) as the first message. Remember the test-only behavior from Step 4: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without `--admin-credential` must never be exposed beyond loopback.
+**Auth:** Send `{"method": "auth", "params": {"credential": "<admin-credential>"}}` (single-user) or `{"method": "auth", "params": {"jwt": "<token>"}}` (multi-user) as the first message. Remember the test-only behavior from Step 4: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
 **Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`)
 
 ## Troubleshooting
