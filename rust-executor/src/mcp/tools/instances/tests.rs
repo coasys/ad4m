@@ -584,6 +584,24 @@ async fn instance_tools_round_trip_typed_data() {
             .await,
     );
     assert_eq!(add["success"], true, "{add}");
+    assert_eq!(add["links_added"], 1, "{add}");
+
+    // Adding an item that is already a member is a no-op: no second link,
+    // no duplicate entry when the collection is read back.
+    let again = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+                collection: "messages".into(),
+                item_uri: msg2.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(again["success"], true, "{again}");
+    assert_eq!(again["links_added"], 0, "{again}");
+    assert_eq!(again["already_member"], true, "{again}");
 
     let got = parse(
         &handler
@@ -596,6 +614,18 @@ async fn instance_tools_round_trip_typed_data() {
     );
     let members = got["messages"].as_array().expect("messages array");
     assert!(members.contains(&json!(msg1)) && members.contains(&json!(msg2)));
+    assert_eq!(members.len(), 2, "no duplicate membership: {got}");
+    let raw_membership = crate::perspectives::get_perspective(&uuid)
+        .unwrap()
+        .get_links(&crate::types::LinkQuery {
+            source: Some(channel.clone()),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: Some(msg2.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(raw_membership.len(), 1, "exactly one membership link: {raw_membership:?}");
 
     // Query: envelope-stored bodies come back as plain text; parent
     // scope and filters narrow; pagination reports the full count.

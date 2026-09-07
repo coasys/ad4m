@@ -106,10 +106,19 @@ fn resolve_collection<'a, 'p>(
     Ok(info)
 }
 
+/// Whether a stored collection link target denotes `wanted`. The target may
+/// be the item URI itself (references), the literal-encoded form of a bare
+/// value, or a signed literal envelope whose payload is the value — accept
+/// all three spellings so the caller can pass back whatever instance_get
+/// showed them.
+fn target_matches(target: &str, wanted: &str, encoded: &str) -> bool {
+    target == wanted || target == encoded || decoded_literal(target) == wanted
+}
+
 impl Ad4mMcpHandler {
     /// Add an item to a collection property of an instance.
     #[tool(
-        description = "Add an item to a collection property of an instance (e.g. add a Message to a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the URI of the item (usually another instance's id). Adding the same item twice is a no-op. Undo with instance_remove_from_collection."
+        description = "Add an item to a collection property of an instance (e.g. add a Message to a Channel's messages). class_name is the owning instance's class, base_uri its id, collection one of the names listed under collections by describe_perspective, item_uri the URI of the item (usually another instance's id). Adding an item that is already in the collection is a no-op (links_added: 0). Undo with instance_remove_from_collection."
     )]
     pub async fn instance_add_to_collection(
         &self,
@@ -157,6 +166,46 @@ impl Ad4mMcpHandler {
                 ))
             }
         };
+
+        // Idempotent: the store dedups the raw triple, but every signed
+        // link expression gets its own reifier, so adding the same item
+        // twice would show up as a duplicate member. Look for an existing
+        // membership link first and leave the collection untouched if the
+        // item is already in it.
+        let wanted = p.item_uri.trim();
+        let encoded = link_target(wanted);
+        let existing = match perspective
+            .get_links(&LinkQuery {
+                source: Some(p.base_uri.clone()),
+                predicate: Some(predicate.clone()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) => links,
+            Err(e) => {
+                return error_json(format!(
+                    "Error reading collection '{}': {:#}",
+                    info.name(),
+                    e
+                ))
+            }
+        };
+        if existing
+            .iter()
+            .any(|link| target_matches(&link.data.target, wanted, &encoded))
+        {
+            return pretty(&json!({
+                "success": true,
+                "class_name": class_name,
+                "base_uri": p.base_uri,
+                "collection": info.name(),
+                "item_uri": p.item_uri,
+                "links_added": 0,
+                "already_member": true,
+            }));
+        }
+
         let target = Self::create_property_expression(
             &perspective,
             &class_name,
@@ -180,6 +229,7 @@ impl Ad4mMcpHandler {
                 "base_uri": p.base_uri,
                 "collection": info.name(),
                 "item_uri": p.item_uri,
+                "links_added": 1,
             })),
             Err(e) => error_json(format!(
                 "Error adding to collection '{}': {:#}",
@@ -237,10 +287,6 @@ impl Ad4mMcpHandler {
             }
         };
 
-        // The stored target may be the item URI itself (references), the
-        // literal-encoded form of a bare value, or a signed literal envelope
-        // whose payload is the value — accept all three spellings so the
-        // caller can pass back whatever instance_get showed them.
         let wanted = p.item_uri.trim();
         let encoded = link_target(wanted);
         let links = match perspective
@@ -262,10 +308,7 @@ impl Ad4mMcpHandler {
         };
         let mut removed = 0usize;
         for link in links {
-            let target = link.data.target.as_str();
-            let matches =
-                target == wanted || target == encoded || decoded_literal(target) == wanted;
-            if !matches {
+            if !target_matches(&link.data.target, wanted, &encoded) {
                 continue;
             }
             match perspective.remove_link(link.into(), None).await {
