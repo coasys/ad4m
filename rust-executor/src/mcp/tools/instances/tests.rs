@@ -1804,3 +1804,89 @@ async fn removing_from_a_custom_resolve_language_collection_is_not_a_silent_no_o
     assert_eq!(ok["success"], true, "{ok}");
     assert_eq!(ok["links_removed"], 1, "{ok}");
 }
+
+/// An explicit `limit` above `MAX_QUERY_LIMIT` is clamped: `instance_query`
+/// returns at most `MAX_QUERY_LIMIT` instances, while `total_count` keeps
+/// reporting the true number of matches so the caller can page through the
+/// rest. A limit under the cap is passed through untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_query_clamps_an_oversized_limit_without_hiding_the_total() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    // Enough Channels that the cap actually bites. The create path has its
+    // own tests; here the instances are staged in one batch so the fixture
+    // stays cheap.
+    let total = MAX_QUERY_LIMIT + 7;
+    let (mut perspective, agent_context) = handler
+        .get_writable_perspective(&uuid)
+        .await
+        .expect("writable fixture perspective");
+    let batch_id = perspective.create_batch().await;
+    for i in 0..total {
+        perspective
+            .create_subject(
+                subject_class("Channel"),
+                format!("ad4m://obj/clamp-{i}"),
+                Some(json!({ "name": format!("channel-{i}") })),
+                Some(batch_id.clone()),
+                &agent_context,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("staging channel {i}: {e:#}"));
+    }
+    perspective
+        .commit_batch(batch_id, &agent_context)
+        .await
+        .expect("commit fixture channels");
+
+    let query = |limit: Option<usize>| {
+        let handler = &handler;
+        let uuid = uuid.clone();
+        async move {
+            parse(
+                &handler
+                    .instance_query(Parameters(InstanceQueryParams {
+                        perspective_id: uuid,
+                        class_name: "Channel".into(),
+                        filter: None,
+                        parent: None,
+                        limit,
+                        offset: None,
+                    }))
+                    .await,
+            )
+        }
+    };
+
+    let clamped = query(Some(MAX_QUERY_LIMIT * 2)).await;
+    assert_eq!(
+        clamped["count"].as_u64().unwrap(),
+        MAX_QUERY_LIMIT as u64,
+        "an oversized limit must be clamped to MAX_QUERY_LIMIT: {clamped}"
+    );
+    assert_eq!(
+        clamped["instances"].as_array().unwrap().len(),
+        MAX_QUERY_LIMIT,
+        "count must match the instances actually returned"
+    );
+    assert_eq!(
+        clamped["total_count"].as_u64().unwrap(),
+        total as u64,
+        "total_count must still report every match: {clamped}"
+    );
+
+    // A limit below the cap is honoured as given, so the clamp is a ceiling
+    // and not a fixed page size.
+    let small = query(Some(3)).await;
+    assert_eq!(small["count"].as_u64().unwrap(), 3, "{small}");
+    assert_eq!(small["total_count"].as_u64().unwrap(), total as u64);
+
+    // The default (no limit) is DEFAULT_QUERY_LIMIT, also below the total.
+    let defaulted = query(None).await;
+    assert_eq!(
+        defaulted["count"].as_u64().unwrap(),
+        DEFAULT_QUERY_LIMIT as u64,
+        "{defaulted}"
+    );
+    assert_eq!(defaulted["total_count"].as_u64().unwrap(), total as u64);
+}
