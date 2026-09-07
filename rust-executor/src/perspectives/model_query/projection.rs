@@ -22,7 +22,6 @@ use super::types::{
 };
 use super::utils::{
     escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
-    values_or_str_filter,
 };
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -74,7 +73,11 @@ pub(super) async fn resolve_projections(
         return Ok(());
     }
 
-    let parent_constraint = values_or_str_filter("parent", &parent_ids);
+    let values_clause = parent_ids
+        .iter()
+        .map(|id| format!("<{id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     for (key, proj) in projections {
         let predicate = match shape.properties.iter().find(|p| p.name == proj.from) {
@@ -116,13 +119,13 @@ pub(super) async fn resolve_projections(
             let sparql = format!(
                 concat!(
                     "SELECT ?parent (COUNT(DISTINCT ?t) AS ?n) WHERE {{\n",
-                    "    {parent_constraint}\n",
+                    "    VALUES ?parent {{ {values_clause} }}\n",
                     "    ?parent <{safe_pred}> ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
                     "}} GROUP BY ?parent"
                 ),
-                parent_constraint = parent_constraint,
+                values_clause = values_clause,
                 safe_pred = safe_pred,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
@@ -159,13 +162,13 @@ pub(super) async fn resolve_projections(
             let sparql = format!(
                 concat!(
                     "SELECT ?parent ?t WHERE {{\n",
-                    "    {parent_constraint}\n",
+                    "    VALUES ?parent {{ {values_clause} }}\n",
                     "    ?parent <{safe_pred}> ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
                     "}}{order_clause}"
                 ),
-                parent_constraint = parent_constraint,
+                values_clause = values_clause,
                 safe_pred = safe_pred,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,

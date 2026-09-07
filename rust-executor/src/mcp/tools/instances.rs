@@ -823,20 +823,24 @@ fn error_json(msg: impl Into<String>) -> String {
     json!({ "error": msg.into() }).to_string()
 }
 
-/// Random instance URI in the same form the per-class `{class}_create`
-/// tool generates.
-fn generate_instance_uri() -> String {
+/// Random instance URI, in the same form the TypeScript SDK mints for a
+/// `Ad4mModel` without an explicit base expression (`Ad4mModel.ts:468`):
+/// `ad4m://obj/` + 24 lowercase letters.
+///
+/// Deliberately *not* a `literal:` URI. Two reasons:
+/// 1. `literal://string:x` is not a parseable IRI (`string:x` reads as
+///    host:port with a non-numeric port), so it cannot be emitted inside
+///    `<…>` in SPARQL — every query that inlines an id breaks on it.
+/// 2. The single-colon form `literal:string:x` is not an option either: the
+///    store decodes `literal:*:` *targets* into RDF literals
+///    (`sparql_store::target_to_storage_term`), so an id in that form would
+///    stop being a node the moment it is used as a link target — which is
+///    exactly what a `parent` / collection link does.
+pub(crate) fn generate_instance_uri() -> String {
     let random_id: String = (0..24)
-        .map(|_| {
-            let idx = rand::random::<u8>() % 36;
-            if idx < 10 {
-                (b'0' + idx) as char
-            } else {
-                (b'a' + idx - 10) as char
-            }
-        })
+        .map(|_| (b'a' + (rand::random::<u8>() % 26)) as char)
         .collect();
-    format!("literal://string:{random_id}")
+    format!("ad4m://obj/{random_id}")
 }
 
 /// Resolve a caller-supplied class name to its canonical spelling and shape.

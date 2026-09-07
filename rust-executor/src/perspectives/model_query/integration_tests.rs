@@ -1295,7 +1295,7 @@ async fn test_strip_trailing_limit() {
 async fn test_convert_ask_to_batched_select() {
     let result = convert_ask_to_batched_select(
         r#"ASK WHERE { ?source <test://active> "true" . }"#,
-        "VALUES ?source { <test://a> <test://b> }",
+        "<test://a> <test://b>",
     );
     assert!(
         result.contains("SELECT ?source"),
@@ -1313,10 +1313,8 @@ async fn test_convert_ask_to_batched_select() {
 
 #[tokio::test]
 async fn test_convert_ask_with_base_to_batched_select() {
-    let result = convert_ask_to_batched_select(
-        "ASK WHERE { <Base> <test://active> ?x }",
-        "VALUES ?source { <test://a> }",
-    );
+    let result =
+        convert_ask_to_batched_select("ASK WHERE { <Base> <test://active> ?x }", "<test://a>");
     assert!(
         result.contains("?source <test://active>"),
         "should replace <Base> with ?source: {result}"
@@ -1331,7 +1329,7 @@ async fn test_convert_ask_with_base_to_batched_select() {
 async fn test_inject_values_into_select() {
     let result = inject_values_into_select(
         "SELECT ?target WHERE { ?source <test://reply> ?target . } LIMIT 1",
-        "VALUES ?source { <test://a> <test://b> }",
+        "<test://a> <test://b>",
     );
     assert!(
         result.contains("?source"),
@@ -1351,7 +1349,7 @@ async fn test_inject_values_into_select() {
 async fn test_inject_values_adds_source_to_projection() {
     let result = inject_values_into_select(
         "SELECT ?target WHERE { ?source <test://p> ?target . }",
-        "VALUES ?source { <test://a> }",
+        "<test://a>",
     );
     // ?source should appear in the SELECT projection
     let upper = result.to_uppercase();

@@ -22,7 +22,7 @@ use super::query::execute_model_query_inner;
 use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
-use super::utils::{validate_iri, values_or_str_filter};
+use super::utils::validate_iri;
 use crate::perspectives::sparql_store::SparqlStore;
 
 /// Resolve reverse relations (`@BelongsTo`) for all instances in a batch.
@@ -50,7 +50,11 @@ pub fn resolve_reverse_relations(
         return Ok(());
     }
 
-    let target_constraint = values_or_str_filter("target", &instance_iris);
+    let values_clause = instance_iris
+        .iter()
+        .map(|id| format!("<{id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     for (rel_name, predicate, is_single) in relations {
         let safe_pred = match validate_iri(predicate) {
@@ -59,8 +63,8 @@ pub fn resolve_reverse_relations(
         };
 
         let sparql = format!(
-            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target . }}",
-            target_constraint
+            "SELECT ?source ?target WHERE {{ VALUES ?target {{ {} }} ?source <{safe_pred}> ?target . }}",
+            values_clause
         );
         let result_json = store.query(&sparql)?;
         let rows: Vec<Value> = serde_json::from_str(&result_json)?;
@@ -540,21 +544,21 @@ async fn resolve_reverse_include(
         return Ok(());
     }
 
-    let safe_ids: Vec<String> = all_ids
+    let id_list = all_ids
         .iter()
         .filter(|id| validate_iri(id).is_ok())
-        .map(|id| id.to_string())
-        .collect();
-    if safe_ids.is_empty() {
+        .map(|id| format!("<{id}>"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if id_list.is_empty() {
         return Ok(());
     }
     let safe_pred = match validate_iri(&rel.predicate) {
         Ok(p) => p,
         Err(_) => return Ok(()),
     };
-    let target_constraint = values_or_str_filter("target", &safe_ids);
     let sparql = format!(
-        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint} }}"
+        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . FILTER(?target IN ({id_list})) }}"
     );
     let result_json = store.query(&sparql)?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;

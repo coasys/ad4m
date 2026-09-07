@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::filtering::matches_condition;
 use super::types::{IncludeValue, ModelShape, ShapeProperty};
-use super::utils::{parse_literal_value, validate_iri, values_or_str_filter};
+use super::utils::{parse_literal_value, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 
 /// Decode a SPARQL getter row's raw string based on the property's
@@ -142,16 +142,14 @@ pub(super) fn strip_trailing_limit(query: &str) -> String {
 /// Convert an `ASK` getter to a batched `SELECT` returning matching source IRIs.
 ///
 /// Replaces `<Base>` with `?source`, extracts the body between `{ }`, and
-/// wraps it in `SELECT ?source WHERE { <source_constraint> <body> }` where
-/// `source_constraint` is a complete `VALUES`/`FILTER` line (see
-/// [`super::utils::values_or_str_filter`]).
-pub(super) fn convert_ask_to_batched_select(ask: &str, source_constraint: &str) -> String {
+/// wraps it in `SELECT ?source WHERE { VALUES ?source { ... } <body> }`.
+pub(super) fn convert_ask_to_batched_select(ask: &str, values_clause: &str) -> String {
     let normalized = ask.replace("<Base>", "?source");
     if let (Some(open), Some(close)) = (normalized.find('{'), normalized.rfind('}')) {
         let body = &normalized[open + 1..close];
         format!(
-            "SELECT ?source WHERE {{ {} {} }}",
-            source_constraint,
+            "SELECT ?source WHERE {{ VALUES ?source {{ {} }} {} }}",
+            values_clause,
             body.trim()
         )
     } else {
@@ -159,14 +157,14 @@ pub(super) fn convert_ask_to_batched_select(ask: &str, source_constraint: &str) 
     }
 }
 
-/// Inject a `?source` batching constraint into a `SELECT` getter.
+/// Inject a `VALUES ?source` clause into a `SELECT` getter for batching.
 ///
 /// Performs three transformations:
 /// 1. Replaces `<Base>` with `?source`.
 /// 2. Strips any trailing `LIMIT N` (see [`strip_trailing_limit`]).
-/// 3. Ensures `?source` is in the projection and adds `source_constraint` (a
-///    complete `VALUES`/`FILTER` line) inside the first `{`.
-pub(super) fn inject_values_into_select(select: &str, source_constraint: &str) -> String {
+/// 3. Ensures `?source` is in the projection and adds `VALUES ?source { ... }`
+///    inside the first `{`.
+pub(super) fn inject_values_into_select(select: &str, values_clause: &str) -> String {
     let mut query = select.replace("<Base>", "?source");
 
     query = strip_trailing_limit(&query);
@@ -182,7 +180,7 @@ pub(super) fn inject_values_into_select(select: &str, source_constraint: &str) -
     }
 
     if let Some(brace_pos) = query.find('{') {
-        let insert = format!(" {source_constraint}");
+        let insert = format!(" VALUES ?source {{ {values_clause} }}");
         query.insert_str(brace_pos + 1, &insert);
     }
 
@@ -225,10 +223,14 @@ pub(super) fn evaluate_getters(
         return Ok(());
     }
 
-    let source_constraint = values_or_str_filter("source", &instance_iris);
+    let values_clause = instance_iris
+        .iter()
+        .map(|id| format!("<{id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     log::debug!(
-        "evaluate_getters: {} getter props for {} instances (batched)",
+        "evaluate_getters: {} getter props for {} instances (batched VALUES)",
         getter_props.len(),
         instance_iris.len()
     );
@@ -238,7 +240,7 @@ pub(super) fn evaluate_getters(
         let upper = getter.trim().to_uppercase();
 
         if upper.starts_with("ASK") {
-            let batched = convert_ask_to_batched_select(getter, &source_constraint);
+            let batched = convert_ask_to_batched_select(getter, &values_clause);
             match store.query(&batched) {
                 Ok(result_json) => {
                     let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
@@ -266,7 +268,7 @@ pub(super) fn evaluate_getters(
                 }
             }
         } else if upper.starts_with("SELECT") {
-            let batched = inject_values_into_select(getter, &source_constraint);
+            let batched = inject_values_into_select(getter, &values_clause);
 
             match store.query(&batched) {
                 Ok(result_json) => {
@@ -395,15 +397,16 @@ pub(super) fn apply_where_filter_to_relation(
             .collect()
     };
 
-    let target_ids: Vec<String> = unique_targets
+    let values_clause = unique_targets
         .iter()
-        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
-        .collect();
+        .filter_map(|id| validate_iri(id).ok())
+        .map(|id| format!("<{id}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
 
-    if target_ids.is_empty() {
+    if values_clause.is_empty() {
         return Ok(());
     }
-    let target_constraint = values_or_str_filter("source", &target_ids);
 
     let mut target_pass: HashMap<String, bool> = unique_targets
         .iter()
@@ -420,8 +423,8 @@ pub(super) fn apply_where_filter_to_relation(
         }
 
         let query = format!(
-            "SELECT ?source ?val WHERE {{ {} ?source <{}> ?val . }}",
-            target_constraint, predicate
+            "SELECT ?source ?val WHERE {{ VALUES ?source {{ {} }} ?source <{}> ?val . }}",
+            values_clause, predicate
         );
 
         let result_json = store.query(&query)?;

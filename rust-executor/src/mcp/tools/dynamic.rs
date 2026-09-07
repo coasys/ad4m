@@ -416,20 +416,7 @@ impl Ad4mMcpHandler {
         // expression_address is optional - generate random if not provided
         let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
             Some(addr) if !addr.is_empty() => addr.to_string(),
-            _ => {
-                // Generate random 24-character alphanumeric string
-                let random_id: String = (0..24)
-                    .map(|_| {
-                        let idx = rand::random::<u8>() % 36;
-                        if idx < 10 {
-                            (b'0' + idx) as char
-                        } else {
-                            (b'a' + idx - 10) as char
-                        }
-                    })
-                    .collect();
-                format!("literal://string:{}", random_id)
-            }
+            _ => super::instances::generate_instance_uri(),
         };
 
         // Check for optional parent parameter
