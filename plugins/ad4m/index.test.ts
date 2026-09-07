@@ -53,10 +53,11 @@ import {
   type McpResponse,
   type ExecutorStartResult,
   type AgentResult,
+  withTimeout,
 } from "./index";
 
 import ad4mPlugin, { _resetModuleState } from "./index";
-import { WakerSubscriptionManager } from "./wakerSubscriptionManager";
+import { WakerSubscriptionManager, hintFor } from "./wakerSubscriptionManager";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1647,6 +1648,54 @@ describe("ad4mPlugin", () => {
     mockExecFileSync.mockClear();
   });
 
+  it("waker start() returns even when the executor never answers", async () => {
+    // The executor accepts the socket but never replies (locked wallet,
+    // mid-restart). Before this was detached, start() awaited agent.status()
+    // forever and stalled plugin startup — and the gateway control channel
+    // with it, so the box could not even be woken.
+    const registeredServices: Array<{ id: string; [k: string]: any }> = [];
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
+
+    const neverResolves = vi.fn(() => new Promise(() => {}));
+    vi.doMock("@coasys/ad4m", () => ({
+      Ad4mClient: vi.fn(() => makeMockAd4mClient({ status: neverResolves })),
+      QuerySubscriptionProxy: vi.fn(),
+    }));
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        token: "eyJhbGciOiJIUzI1NiJ9.test.token",
+        wakeToken: "wake-token",
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
+    };
+
+    await ad4mPlugin(mockApi);
+    const waker = registeredServices.find((s) => s.id === "ad4m-waker");
+    expect(waker).toBeDefined();
+
+    const started = Date.now();
+    await waker!.start({ stateDir: undefined });
+    expect(Date.now() - started).toBeLessThan(2000);
+
+    waker!.stop();
+    vi.doUnmock("@coasys/ad4m");
+  });
+
+  it("withTimeout rejects a promise that never settles, and passes one that does", async () => {
+    await expect(
+      withTimeout(new Promise(() => {}), 20, "[test] hang"),
+    ).rejects.toThrow(/timed out after 20ms/);
+    await expect(withTimeout(Promise.resolve("ok"), 1000, "[test] fast")).resolves.toBe(
+      "ok",
+    );
+  });
+
   it("registers expected tools and services", async () => {
     const registeredTools: Array<{ name: string; [k: string]: any }> = [];
     const registeredServices: Array<{ id: string; [k: string]: any }> = [];
@@ -1671,12 +1720,18 @@ describe("ad4mPlugin", () => {
     // Check that base tools are registered
     const toolNames = registeredTools.map((t) => t.name);
     expect(toolNames).toContain("ad4m_get_sample_config");
-    expect(toolNames).toContain("ad4m_refresh_ad4m_tools");
+    expect(toolNames).not.toContain("ad4m_refresh_ad4m_tools");
     expect(toolNames).toContain("ad4m_subscribe_to_mentions");
     expect(toolNames).toContain("ad4m_unsubscribe_from_mentions");
     expect(toolNames).toContain("ad4m_subscribe_to_children");
     expect(toolNames).toContain("ad4m_unsubscribe_from_children");
     expect(toolNames).toContain("ad4m_list_waker_subscriptions");
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "openclaw.plugin.json"), "utf8"),
+    ).contracts.tools as string[];
+    const missing = toolNames.filter((n) => !manifest.includes(n));
+    expect(missing).toEqual([]);
 
     // Check services
     const serviceIds = registeredServices.map((s) => s.id);
@@ -1739,35 +1794,6 @@ describe("ad4mPlugin", () => {
 
     const result = await listTool!.execute();
     expect(result.content[0].text).toContain("No active waker subscriptions");
-  });
-
-  it("refresh_ad4m_tools returns count when MCP is unavailable", async () => {
-    const registeredTools: Array<{ name: string; execute: Function }> = [];
-
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
-
-    const mockApi = {
-      pluginConfig: {
-        mode: "external",
-        mcpEndpoint: "http://localhost:3001/mcp",
-        token: "test-cred",
-      },
-      logger: makeMockLogger(),
-      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
-      registerService: vi.fn(),
-      registerCli: vi.fn(),
-    };
-
-    await ad4mPlugin(mockApi);
-
-    const refreshTool = registeredTools.find(
-      (t) => t.name === "ad4m_refresh_ad4m_tools",
-    );
-    expect(refreshTool).toBeDefined();
-
-    const result = await refreshTool!.execute();
-    // MCP unavailable, so "No new tools found"
-    expect(result.content[0].text).toContain("No new tools found");
   });
 
   it("ad4m_subscribe_to_mentions reports 'Waker service not connected' when the waker isn't running", async () => {
@@ -2056,7 +2082,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "recovered_tool",
+                name: "get_my_did",
                 description: "A tool discovered after session recovery",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2093,7 +2119,7 @@ describe("ad4mPlugin", () => {
 
     // The recovered tool should be registered
     const toolNames = registeredTools.map((t) => t.name);
-    expect(toolNames).toContain("ad4m_recovered_tool");
+    expect(toolNames).toContain("ad4m_get_my_did");
 
     // Logger should show re-initialization
     const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
@@ -2144,7 +2170,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "test_tool",
+                name: "instance_query",
                 description: "A test tool",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2192,7 +2218,7 @@ describe("ad4mPlugin", () => {
     await mcpService!.start(makeServiceCtx());
 
     // Find the dynamically registered MCP tool
-    const testTool = registeredTools.find((t) => t.name === "ad4m_test_tool");
+    const testTool = registeredTools.find((t) => t.name === "ad4m_instance_query");
     expect(testTool).toBeDefined();
 
     // Reset counters to track just the tool call
@@ -2251,7 +2277,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "failing_tool",
+                name: "add_link",
                 description: "Tool that fails with 500",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2287,7 +2313,7 @@ describe("ad4mPlugin", () => {
     await mcpService!.start(makeServiceCtx());
 
     const failingTool = registeredTools.find(
-      (t) => t.name === "ad4m_failing_tool",
+      (t) => t.name === "ad4m_add_link",
     );
     expect(failingTool).toBeDefined();
 
@@ -2983,6 +3009,116 @@ describe("WakerSubscriptionManager", () => {
   const mockPerspectiveClientSimple = {
     querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] }})),
   };
+
+  it("should throw when the executor rejects the subscription, and not keep it active", async () => {
+    const mock = makeMockProxy();
+    mock.proxy.subscribe = vi.fn(() =>
+      Promise.reject(new Error("RPC error 403: main key not found")),
+    );
+    const persisted: { subs: any[] } = { subs: [{ placeholder: true }] };
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => {},
+      onPersist: (subs: any[]) => { persisted.subs = subs; },
+    });
+
+    // A failed subscription must surface to the caller — the subscribe tools
+    // replied "Subscribed..." on a 403 before this.
+    await expect(manager.subscribe({
+      id: "mention-fail",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    })).rejects.toThrow(/main key not found/);
+
+    expect(manager.has("mention-fail")).toBe(false);
+    expect(manager.getActive()).toHaveLength(0);
+    expect(persisted.subs).toHaveLength(0);
+    expect(mock.proxy.dispose).toHaveBeenCalled();
+    // ...and it stays pending, because the caller asked to be enrolled
+    expect(manager.getPending().map((s) => s.id)).toEqual(["mention-fail"]);
+  });
+
+  it("re-attempts a rejected subscription until the executor accepts it", async () => {
+    const mock = makeMockProxy();
+    let attempt = 0;
+    mock.proxy.subscribe = vi.fn(() => {
+      attempt += 1;
+      // Fails while the wallet is locked, succeeds once it is unlocked.
+      return attempt === 1
+        ? Promise.reject(new Error("RPC error 403: main key not found"))
+        : Promise.resolve();
+    });
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      retryPendingMs: 20,
+      onWake: () => {},
+    });
+
+    const sub = {
+      id: "mention-retry",
+      type: "mention" as const,
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    };
+    await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting every/);
+    expect(manager.getPending()).toHaveLength(1);
+
+    // Wait for the scheduled re-attempt to run.
+    await vi.waitFor(() => {
+      expect(manager.has("mention-retry")).toBe(true);
+    });
+    expect(manager.getPending()).toHaveLength(0);
+    expect(attempt).toBe(2);
+    manager.disposeAll();
+  });
+
+  it("stops re-attempting a subscription that was disposed", async () => {
+    const mock = makeMockProxy();
+    mock.proxy.subscribe = vi.fn(() =>
+      Promise.reject(new Error("RPC error 403: main key not found")),
+    );
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      retryPendingMs: 20,
+      onWake: () => {},
+    });
+
+    await expect(manager.subscribe({
+      id: "mention-gone",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    })).rejects.toThrow();
+    expect(manager.getPending()).toHaveLength(1);
+
+    manager.dispose("mention-gone");
+    expect(manager.getPending()).toHaveLength(0);
+
+    const attemptsAfterDispose = mock.proxy.subscribe.mock.calls.length;
+    await manager.retryPending();
+    expect(mock.proxy.subscribe.mock.calls.length).toBe(attemptsAfterDispose);
+  });
+
+  it("should hint at a locked wallet on a main-key 403 only", () => {
+    expect(hintFor("RPC error 403: main key not found")).toContain("wallet is locked");
+    expect(hintFor("connection refused")).toBe("");
+  });
 
   it("should ignore non-array results (e.g. false) and not store them as seen", async () => {
     const mock = makeMockProxy();
