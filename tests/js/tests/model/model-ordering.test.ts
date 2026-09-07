@@ -261,9 +261,10 @@ describe("Ad4mModel — CRDT-ordered collections", function () {
     const found = await OrderColumn.findOne(perspective, {
       where: { id: column.id },
     });
-    // Same members, no claim about sequence: an unordered relation is returned
-    // by link timestamp, and re-assigning the same members in another order is
-    // not a change at all.
+    // Same members, no claim about sequence: an unordered relation is a set,
+    // and re-assigning the same members in another order is not a change at
+    // all — `changedFields` sorts both sides before comparing unless the
+    // relation declares an ordering.
     expect((found!.watchers as string[]).slice().sort()).to.deep.equal(
       [a.id, b.id, c.id].slice().sort(),
     );
@@ -271,7 +272,7 @@ describe("Ad4mModel — CRDT-ordered collections", function () {
 
   // ── 5. The migration path ───────────────────────────────────────────────────
 
-  it("falls back to timestamp order when a collection has no entries yet", async () => {
+  it("still returns every member when a collection has no entries yet", async () => {
     const { a, b, c } = await seedTasks();
     const column = await OrderColumn.create(perspective, {});
 
@@ -288,8 +289,18 @@ describe("Ad4mModel — CRDT-ordered collections", function () {
       );
     }
 
-    // No entries, so reconstruction has nothing to apply and the relation reads
-    // as an ordinary unordered one rather than failing.
-    expect(await readTasks(column.id)).to.deep.equal([c.id, a.id, b.id]);
+    // Membership, not sequence: with no entries there is nothing to reconstruct
+    // from, and this relation names a target class, so its array comes from a
+    // conformance getter whose SELECT carries no ORDER BY. The order is
+    // genuinely unspecified until the first save writes a chain — asserting one
+    // here would be asserting a guarantee the executor does not make.
+    //
+    // What the migration path does promise is that the collection still reads:
+    // an ordered relation whose ordering links have not arrived degrades to an
+    // ordinary unordered one rather than failing or coming back empty.
+    const read = await readTasks(column.id);
+    expect(read.slice().sort()).to.deep.equal(
+      [a.id, b.id, c.id].slice().sort(),
+    );
   });
 });
