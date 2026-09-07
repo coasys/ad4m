@@ -27,7 +27,7 @@ Perspectives are local by default. Publishing a perspective as a neighbourhood m
 - `query_links(perspective_id, source?, predicate?, target?)` — query links by source/predicate/target
 - `add_link(perspective_id, source, predicate, target)` — add a link
 - `add_model(perspective_id, class_name, shacl_json)` — register a subject class schema
-- `describe_perspective(perspective_id)` — the way to discover what's registered: every class's properties/collections/flows as data, in one call, instead of separately querying `get_models` + inspecting SHACL links
+- `describe_perspective(perspective_id)` — the way to discover what's registered: every class's properties/collections/flows as data, in one call, instead of inspecting the raw SHACL links
 - `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — the way to read/write instances of any registered class, taking `class_name` as a parameter. See "Generated MCP Tools" below for how this relates to per-class tool generation
 - `instance_transcript(perspective_id, class_name, parent, limit?, text_property?)` — the newest N instances of one class that are `ad4m://has_child` children of a node, as a chronological plain-text transcript (timestamp, author, text). The way to read a chat channel; `instance_query` has no ordering parameter and returns the oldest matches first
 - `add_child(perspective_id, parent, child)` / `get_children(perspective_id, parent, limit?)` — the raw `ad4m://has_child` tree, class-agnostic: neither node needs to be an instance (e.g. channels under `ad4m://self`). `get_children` returns `id`, `timestamp`, `author` per child, oldest first, plus `total_count`
@@ -309,7 +309,7 @@ SHACL definitions are decomposed into RDF links in the perspective. Key link pat
 (message://MessageShape) --sh://property--> (message://Message.body)
 ```
 
-Query available models: `get_models`, or retrieve links with predicate `ad4m://has_shacl`. Or call `describe_perspective` for the fully-resolved schema in one call — see Key Operations above.
+Query available models with `describe_perspective` (the fully-resolved schema of every class in one call — see Key Operations above), or retrieve the raw links with predicate `ad4m://has_shacl`.
 
 ## Built-in Services
 

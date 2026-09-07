@@ -67,16 +67,10 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     ("get_documentation", SideEffect::Read),
     // ── perspectives.rs ─────────────────────────────────────────────
     ("list_perspectives", SideEffect::Read),
-    ("get_models", SideEffect::Read),
     ("add_perspective", SideEffect::Write),
     ("add_link", SideEffect::Write),
     ("query_links", SideEffect::Read),
     ("add_model", SideEffect::Write),
-    // `infer` runs an LLM prompt and returns the text. No graph mutation —
-    // the tool is a compute-and-return, not a state change. Billing is
-    // handled per-completion inside AIService; the harness classifies on
-    // the graph-state axis.
-    ("infer", SideEffect::Read),
     // ── instances/ ──────────────────────────────────────────────────
     // The static, class-agnostic surface. Same read/write split as the
     // per-class tools they replace: describe/query/get inspect, the
@@ -213,7 +207,6 @@ mod tests {
         assert_eq!(side_effect_of("list_perspectives"), SideEffect::Read);
         assert_eq!(side_effect_of("query_links"), SideEffect::Read);
         assert_eq!(side_effect_of("add_link"), SideEffect::Write);
-        assert_eq!(side_effect_of("infer"), SideEffect::Read);
     }
 
     #[test]

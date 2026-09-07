@@ -107,9 +107,7 @@ impl Ad4mMcpHandler {
             "get_documentation" => dispatch_static_tool!(get_documentation),
             // ── perspectives.rs ─────────────────────────────────────────
             "list_perspectives" => dispatch_static_tool!(list_perspectives),
-            "get_models" => dispatch_static_tool!(get_models),
             "query_links" => dispatch_static_tool!(query_links),
-            "infer" => dispatch_static_tool!(infer),
             // ── instances/ ──────────────────────────────────────────────
             // The static class-agnostic surface is on the router, so
             // `list_tool_schemas` advertises it to the harness LLM; these

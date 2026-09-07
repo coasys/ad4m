@@ -261,7 +261,6 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
             // Subject class tools (higher-level)
             expect(toolNames).to.include('add_model');
-            expect(toolNames).to.include('get_models');
             expect(toolNames).to.include('describe_perspective');
             expect(toolNames).to.include('instance_create');
             expect(toolNames).to.include('instance_query');
@@ -430,13 +429,13 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should discover subject classes (understand the data model)", async function() {
-            const classes = await callMcpTool(MCP_BASE_URL,'get_models', {
+            const desc = await callMcpTool(MCP_BASE_URL,'describe_perspective', {
                 perspective_id: perspectiveUuid,
             }, mcpSessionId);
-            var classStr = typeof classes === 'string' ? classes : JSON.stringify(classes);
-            expect(classStr).to.include('Channel');
-            expect(classStr).to.include('Message');
-            console.log("Bot discovered subject classes:", classStr);
+            const classNames: string[] = (desc.classes || []).map(function(c: any) { return c.name; });
+            expect(classNames).to.include('Channel');
+            expect(classNames).to.include('Message');
+            console.log("Bot discovered subject classes:", classNames.join(", "));
         });
 
         it("should list all channels", async function() {

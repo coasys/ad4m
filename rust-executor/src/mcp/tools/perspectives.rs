@@ -5,7 +5,6 @@
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
 use crate::perspectives::perspective_instance::SdnaType;
-use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::perspectives::{add_perspective, all_perspectives};
 use crate::types::Link;
 use crate::types::{LinkQuery, LinkStatus, PerspectiveHandle};
@@ -21,13 +20,6 @@ use serde_json::json;
 /// Parameters for listing perspectives
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListPerspectivesParams {}
-
-/// Parameters for listing subject classes in a perspective
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ListSubjectClassesParams {
-    /// Perspective UUID
-    pub perspective_id: String,
-}
 
 /// Parameters for creating a new perspective
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -117,15 +109,6 @@ fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Parameters for running a Prolog query
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct InferParams {
-    /// Perspective UUID
-    pub perspective_id: String,
-    /// Prolog query string
-    pub query: String,
-}
-
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -159,46 +142,6 @@ impl Ad4mMcpHandler {
             }));
         }
         serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
-    }
-
-    /// Get all models (subject classes) defined in a perspective
-    #[tool(
-        description = "Get the names of all models (SHACL subject classes) defined in a perspective. Models are schemas that give structure to the raw link graph — like database table definitions. For the full schema (properties, types, cardinality, collections, flows) call describe_perspective, then work with instances via instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove_from_collection / instance_remove / instance_transcript."
-    )]
-    pub async fn get_models(&self, params: Parameters<ListSubjectClassesParams>) -> String {
-        let uuid = &params.0.perspective_id;
-
-        match self.get_readable_perspective(uuid).await {
-            Ok(perspective) => {
-                let links = perspective
-                    .get_links(&LinkQuery {
-                        predicate: Some("rdf://type".to_string()),
-                        target: Some("ad4m://SubjectClass".to_string()),
-                        ..Default::default()
-                    })
-                    .await;
-
-                match links {
-                    Ok(class_links) => {
-                        let classes: Vec<String> = class_links
-                            .iter()
-                            .map(|l| {
-                                l.data
-                                    .source
-                                    .split("://")
-                                    .last()
-                                    .unwrap_or(&l.data.source)
-                                    .to_string()
-                            })
-                            .collect();
-                        serde_json::to_string_pretty(&classes)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
-                    }
-                    Err(e) => format!("Error listing subject classes: {}", e),
-                }
-            }
-            Err(e) => e,
-        }
     }
 
     /// Create a new perspective
@@ -361,27 +304,6 @@ impl Ad4mMcpHandler {
                             .unwrap_or_else(|e| format!("Error: {}", e))
                     }
                     Err(e) => format!("Error adding SDNA: {}", e),
-                }
-            }
-            Err(e) => e,
-        }
-    }
-
-    /// Run a Prolog query for complex reasoning
-    #[tool(
-        description = "Run a Prolog query on a perspective for complex reasoning. The link graph is exposed as Prolog facts (triple/3), enabling pattern matching and inference beyond simple link queries. Example: 'triple(X, \"rdf://type\", \"ad4m://SubjectClass\")' finds all subject classes. Use for advanced queries not covered by other tools."
-    )]
-    pub async fn infer(&self, params: Parameters<InferParams>) -> String {
-        let p = &params.0;
-
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((perspective, agent_context)) => {
-                match perspective
-                    .prolog_query_with_context(p.query.clone(), &agent_context)
-                    .await
-                {
-                    Ok(result) => prolog_resolution_to_string(result),
-                    Err(e) => format!("Error running query: {}", e),
                 }
             }
             Err(e) => e,

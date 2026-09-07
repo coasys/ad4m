@@ -31,7 +31,6 @@ assume they are there; prefer the static tools below.
 | `get_documentation(topic)` | This documentation (`overview` / `architecture`) |
 | `list_perspectives()` | Your local perspectives with their `uuid` and, when shared, `neighbourhood` URL |
 | `describe_perspective(perspective_id)` | Every registered class: properties (name, type, required, cardinality, hints), collections, flows |
-| `get_models(perspective_id)` | Just the class names |
 
 ### Typed data (`class_name` is a name from `describe_perspective`)
 
@@ -70,7 +69,6 @@ cardinality, so fix what the error says rather than guessing.
 | `get_my_did()` / `get_agent_profile` / `set_agent_profile` / `set_agent_profile_picture` | Your identity and public profile |
 | `add_flow` / `get_flows` / `flow_state` / `flow_actions` | Flows (state machines) declared on classes |
 | `generate_waker_query` / `get_mention_waker_config` | Build subscriptions that wake you on changes |
-| `infer(perspective_id, query)` | Prolog query over a perspective |
 | `language_meta(address)` | Metadata of a language |
 | `auth_status` / `login_email` / `signup` / `verify_email_code` / `request_capability` / `generate_jwt` | Authentication (see "Authentication" below) |
 

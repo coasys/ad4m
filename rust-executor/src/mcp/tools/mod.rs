@@ -255,12 +255,10 @@ impl Ad4mMcpHandler {
         ToolRouter::<Self>::new()
             // perspectives.rs
             .with_route((Self::list_perspectives_tool_attr(), Self::list_perspectives))
-            .with_route((Self::get_models_tool_attr(), Self::get_models))
             .with_route((Self::add_perspective_tool_attr(), Self::add_perspective))
             .with_route((Self::add_link_tool_attr(), Self::add_link))
             .with_route((Self::query_links_tool_attr(), Self::query_links))
             .with_route((Self::add_model_tool_attr(), Self::add_model))
-            .with_route((Self::infer_tool_attr(), Self::infer))
             // instances/
             .with_route((
                 Self::describe_perspective_tool_attr(),
