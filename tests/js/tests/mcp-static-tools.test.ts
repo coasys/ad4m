@@ -14,6 +14,10 @@
  *    instance_add_to_collection / instance_remove round-trip typed data.
  * 4. Validation errors name the property, the expected type and the
  *    cardinality (design doc risk #2).
+ * 5. Relation-typed properties (relationKind set): every write path that
+ *    stores a relation target — instance_create, instance_update,
+ *    instance_add_to_collection — accepts instance URIs and rejects prose
+ *    (the is_safe_iri_target gate).
  *
  * The hybrid mode (flag on: per-class tools + instance_* side by side) is
  * covered by mcp-http.test.ts.
@@ -132,6 +136,82 @@ const MESSAGE_SHACL = JSON.stringify({
     constructor_actions: [
         { action: "addLink", source: "this", predicate: "flux://entry_type", target: "flux://has_message", local: false },
         { action: "addLink", source: "this", predicate: "rdf://type", target: "flux://Message", local: false }
+    ],
+    destructor_actions: []
+});
+
+// ============================================================================
+// Relation-typed fixtures — `relation_kind` set, so the executor treats the
+// property as a link to another instance and gates every write on
+// is_safe_iri_target: well-formed instance URIs are stored, prose is rejected.
+// ============================================================================
+
+const USER_SHACL = JSON.stringify({
+    target_class: "ns://User",
+    properties: [
+        {
+            path: "ns://user_name",
+            name: "name",
+            datatype: "xsd:string",
+            min_count: 1,
+            max_count: 1,
+            writable: true,
+            setter: [
+                { action: "setSingleTarget", source: "this", predicate: "ns://user_name", target: "value", local: false }
+            ]
+        }
+    ],
+    constructor_actions: [
+        { action: "addLink", source: "this", predicate: "rdf://type", target: "ns://User", local: false }
+    ],
+    destructor_actions: []
+});
+
+const POST_SHACL = JSON.stringify({
+    target_class: "ns://Post",
+    properties: [
+        {
+            path: "ns://post_title",
+            name: "title",
+            datatype: "xsd:string",
+            min_count: 1,
+            max_count: 1,
+            writable: true,
+            setter: [
+                { action: "setSingleTarget", source: "this", predicate: "ns://post_title", target: "value", local: false }
+            ]
+        },
+        {
+            // hasOne: a single-valued reference, written through `properties`.
+            path: "ns://post_author",
+            name: "writer",
+            node_kind: "IRI",
+            relation_kind: "hasOne",
+            max_count: 1,
+            target_class_name: "User",
+            writable: true,
+            setter: [
+                { action: "setSingleTarget", source: "this", predicate: "ns://post_author", target: "value", local: false }
+            ]
+        },
+        {
+            // hasMany: a relation collection, written through instance_add_to_collection.
+            path: "ns://post_reviewer",
+            name: "reviewers",
+            node_kind: "IRI",
+            relation_kind: "hasMany",
+            target_class_name: "User",
+            writable: true,
+            adder: [
+                { action: "addLink", source: "this", predicate: "ns://post_reviewer", target: "value", local: false }
+            ],
+            remover: [
+                { action: "removeLink", source: "this", predicate: "ns://post_reviewer", target: "value", local: false }
+            ]
+        }
+    ],
+    constructor_actions: [
+        { action: "addLink", source: "this", predicate: "rdf://type", target: "ns://Post", local: false }
     ],
     destructor_actions: []
 });
@@ -553,6 +633,149 @@ describe("MCP static instance tools (dynamicClassTools off)", function() {
                 perspective_id: perspectiveUuid, class_name: "Message", base_uri: msg2Uri,
             }, mcpSessionId);
             expect(gone.error).to.include('No Message instance');
+        });
+    });
+
+    // ========================================================================
+    // 5. Relation-typed properties (relationKind set): the is_safe_iri_target
+    //    gate on every write path
+    // ========================================================================
+
+    describe("5. Relation-typed properties", function() {
+        let dataUri = "";
+        let geordiUri = "";
+        let postUri = "";
+
+        // The URIs a hydrated relation value refers to: a scalar relation is a
+        // URI string or an {id} object, a collection relation an array of either.
+        const relationIds = (v: any): string[] => {
+            const one = (x: any) => typeof x === 'string' ? x : (x && typeof x.id === 'string' ? x.id : undefined);
+            return (Array.isArray(v) ? v : [v]).map(one).filter((x: any): x is string => typeof x === 'string');
+        };
+        const getPost = () => callMcpTool(mcpBaseUrl, 'instance_get', {
+            perspective_id: perspectiveUuid, class_name: "Post", base_uri: postUri,
+        }, mcpSessionId);
+
+        it("registers User + Post and describes both relations with kind and target class", async function() {
+            const u = await callMcpTool(mcpBaseUrl, 'add_model', {
+                perspective_id: perspectiveUuid, class_name: "User", shacl_json: USER_SHACL,
+            }, mcpSessionId);
+            expect(u.success, asText(u)).to.be.true;
+            const p = await callMcpTool(mcpBaseUrl, 'add_model', {
+                perspective_id: perspectiveUuid, class_name: "Post", shacl_json: POST_SHACL,
+            }, mcpSessionId);
+            expect(p.success, asText(p)).to.be.true;
+
+            const desc = await callMcpTool(mcpBaseUrl, 'describe_perspective', {
+                perspective_id: perspectiveUuid,
+            }, mcpSessionId);
+            const post = desc.classes.find((c: any) => c.name === 'Post');
+            expect(post, "Post class").to.exist;
+            const writer = post.properties.find((x: any) => x.name === 'writer');
+            expect(writer.type).to.equal('reference');
+            expect(writer.relation_kind).to.equal('hasOne');
+            expect(writer.target_class).to.equal('User');
+            const reviewers = post.collections.find((x: any) => x.name === 'reviewers');
+            expect(reviewers, "reviewers collection").to.exist;
+            expect(reviewers.type).to.equal('reference');
+            expect(reviewers.relation_kind).to.equal('hasMany');
+            expect(reviewers.target_class).to.equal('User');
+
+            for (const name of ["Data", "Geordi"]) {
+                const r = await callMcpTool(mcpBaseUrl, 'instance_create', {
+                    perspective_id: perspectiveUuid, class_name: "User", properties: { name },
+                }, mcpSessionId);
+                expect(r.created, asText(r)).to.be.true;
+                if (name === "Data") dataUri = r.base_uri; else geordiUri = r.base_uri;
+            }
+        });
+
+        it("instance_create stores instance URIs on the hasOne and hasMany relations", async function() {
+            const r = await callMcpTool(mcpBaseUrl, 'instance_create', {
+                perspective_id: perspectiveUuid, class_name: "Post",
+                properties: { title: "Warp field notes", writer: dataUri, reviewers: [geordiUri] },
+            }, mcpSessionId);
+            expect(r.created, asText(r)).to.be.true;
+            expect(r.collections_set.reviewers).to.deep.equal([geordiUri]);
+            postUri = r.base_uri;
+
+            const post = await getPost();
+            expect(relationIds(post.writer)).to.deep.equal([dataUri]);
+            expect(relationIds(post.reviewers)).to.deep.equal([geordiUri]);
+        });
+
+        it("instance_create rejects a prose relation item before writing anything", async function() {
+            const before = await callMcpTool(mcpBaseUrl, 'instance_query', {
+                perspective_id: perspectiveUuid, class_name: "Post",
+            }, mcpSessionId);
+
+            const r = await callMcpTool(mcpBaseUrl, 'instance_create', {
+                perspective_id: perspectiveUuid, class_name: "Post",
+                properties: { title: "Bad reviewers", writer: dataUri, reviewers: ["Beverly Crusher"] },
+            }, mcpSessionId);
+            expect(r.error, asText(r)).to.be.a('string');
+            const ve = r.validation_errors.find((e: any) => e.property === 'reviewers');
+            expect(ve, asText(r)).to.exist;
+            expect(ve.problem).to.include('collection item');
+            expect(ve.problem).to.include('existing User instance');
+
+            const after = await callMcpTool(mcpBaseUrl, 'instance_query', {
+                perspective_id: perspectiveUuid, class_name: "Post",
+            }, mcpSessionId);
+            expect(after.count).to.equal(before.count);
+        });
+
+        it("instance_update stores a URI on the hasOne relation and rejects prose, keeping the old value", async function() {
+            const ok = await callMcpTool(mcpBaseUrl, 'instance_update', {
+                perspective_id: perspectiveUuid, class_name: "Post", base_uri: postUri,
+                properties: { writer: geordiUri },
+            }, mcpSessionId);
+            expect(ok.success, asText(ok)).to.be.true;
+            expect(relationIds((await getPost()).writer)).to.deep.equal([geordiUri]);
+
+            // Plain prose and scheme-lookalike prose ("Note: …") are both rejected.
+            for (const prose of ["Data Soong", "Note: buy milk"]) {
+                const r = await callMcpTool(mcpBaseUrl, 'instance_update', {
+                    perspective_id: perspectiveUuid, class_name: "Post", base_uri: postUri,
+                    properties: { writer: prose },
+                }, mcpSessionId);
+                expect(r.error, `${prose}: ${asText(r)}`).to.be.a('string');
+                const ve = r.validation_errors.find((e: any) => e.property === 'writer');
+                expect(ve, `${prose}: ${asText(r)}`).to.exist;
+                expect(ve.problem).to.include('existing User instance');
+            }
+            expect(relationIds((await getPost()).writer)).to.deep.equal([geordiUri]);
+        });
+
+        it("instance_add_to_collection stores a URI on the hasMany relation and rejects prose", async function() {
+            const add = await callMcpTool(mcpBaseUrl, 'instance_add_to_collection', {
+                perspective_id: perspectiveUuid, class_name: "Post", base_uri: postUri,
+                collection: "reviewers", item_uri: dataUri,
+            }, mcpSessionId);
+            expect(add.success, asText(add)).to.be.true;
+            expect(add.links_added).to.equal(1);
+            expect(relationIds((await getPost()).reviewers)).to.have.members([dataUri, geordiUri]);
+
+            for (const prose of ["Beverly Crusher", "TODO: ask Picard"]) {
+                const r = await callMcpTool(mcpBaseUrl, 'instance_add_to_collection', {
+                    perspective_id: perspectiveUuid, class_name: "Post", base_uri: postUri,
+                    collection: "reviewers", item_uri: prose,
+                }, mcpSessionId);
+                expect(r.error, `${prose}: ${asText(r)}`).to.be.a('string');
+                const ve = r.validation_errors.find((e: any) => e.property === 'reviewers');
+                expect(ve, `${prose}: ${asText(r)}`).to.exist;
+                expect(ve.problem).to.include('existing User instance');
+            }
+            const reviewers = relationIds((await getPost()).reviewers);
+            expect(reviewers).to.have.members([dataUri, geordiUri]);
+            expect(reviewers).to.have.length(2);
+
+            // Only the two instance URIs ever reached the store as reviewer links.
+            const raw = await callMcpTool(mcpBaseUrl, 'query_links', {
+                perspective_id: perspectiveUuid, source: postUri, predicate: "ns://post_reviewer",
+            }, mcpSessionId);
+            const targets = (Array.isArray(raw) ? raw : []).map((l: any) => l.data ? l.data.target : l.target);
+            expect(targets).to.have.members([dataUri, geordiUri]);
         });
     });
 });

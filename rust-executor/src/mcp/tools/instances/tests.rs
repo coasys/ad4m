@@ -53,7 +53,9 @@ const MESSAGE_SDNA: &str = r#"{
 /// A perspective with both classes registered in the global registry, and
 /// an MCP handler authenticated as admin against it — the same path an
 /// external client takes minus the HTTP transport.
-/// Relation-typed fixtures: Post --hasOne--> User (forward, writable),
+/// Relation-typed fixtures (`relation_kind` set on every relation):
+/// Post --hasOne--> User (`writer`: forward, single-valued, writable),
+/// Post --hasMany--> User (`reviewers`: forward relation collection),
 /// Comment --belongsToOne--> Post (reverse, read-only on this side).
 const USER_SDNA: &str = r#"{
   "target_class": "ns://User",
@@ -76,7 +78,11 @@ const POST_SDNA: &str = r#"{
      "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://post_title","target":"value"}]},
     {"path":"ns://post_author","name":"writer","node_kind":"IRI","relation_kind":"hasOne","max_count":1,
      "target_class_name":"User","writable":true,
-     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://post_author","target":"value"}]}
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://post_author","target":"value"}]},
+    {"path":"ns://post_reviewer","name":"reviewers","node_kind":"IRI","relation_kind":"hasMany",
+     "target_class_name":"User","writable":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"ns://post_reviewer","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"ns://post_reviewer","target":"value"}]}
   ]
 }"#;
 
@@ -470,6 +476,262 @@ async fn instance_tools_relation_typed_properties() {
         reverse_write["validation_errors"][0]["property"], "post",
         "{reverse_write}"
     );
+}
+
+/// The URIs a hydrated relation value refers to: a scalar relation is a
+/// URI string or an `{id: …}` object, a collection relation an array of
+/// either.
+fn relation_ids(value: &Value) -> Vec<String> {
+    let one = |v: &Value| -> Option<String> {
+        v.as_str()
+            .map(str::to_string)
+            .or_else(|| v.get("id").and_then(Value::as_str).map(str::to_string))
+    };
+    match value {
+        Value::Array(items) => items.iter().filter_map(one).collect(),
+        other => one(other).into_iter().collect(),
+    }
+}
+
+/// Every write path that stores a relation target runs through the
+/// `is_safe_iri_target` gate, on a class whose relations carry
+/// `relationKind`: well-formed instance URIs are stored and read back;
+/// prose — including scheme-lookalike prose such as "Note: …" — is
+/// rejected before anything is written. Covered: instance_create (scalar
+/// relation and relation-collection items), instance_update, and
+/// instance_add_to_collection.
+#[tokio::test(flavor = "multi_thread")]
+async fn relation_targets_are_iri_gated_on_every_write_path() {
+    let (handler, uuid, _guard) = setup_with(
+        &[
+            ("User", USER_SDNA),
+            ("Post", POST_SDNA),
+            ("Comment", COMMENT_SDNA),
+        ],
+        false,
+    )
+    .await;
+
+    async fn get_post(handler: &Ad4mMcpHandler, uuid: &str, base_uri: &str) -> Value {
+        parse(
+            &handler
+                .instance_get(Parameters(InstanceGetParams {
+                    perspective_id: uuid.to_string(),
+                    class_name: "Post".into(),
+                    base_uri: base_uri.to_string(),
+                }))
+                .await,
+        )
+    }
+    async fn post_count(handler: &Ad4mMcpHandler, uuid: &str) -> u64 {
+        parse(
+            &handler
+                .instance_query(Parameters(InstanceQueryParams {
+                    perspective_id: uuid.to_string(),
+                    class_name: "Post".into(),
+                    filter: None,
+                    parent: None,
+                    limit: None,
+                    offset: None,
+                }))
+                .await,
+        )["count"]
+            .as_u64()
+            .unwrap()
+    }
+
+    // The hasMany relation is presented as a collection typed as a
+    // reference to User, with its kind.
+    let desc = parse(
+        &handler
+            .describe_perspective(Parameters(DescribePerspectiveParams {
+                perspective_id: uuid.clone(),
+            }))
+            .await,
+    );
+    let post_class = find(desc["classes"].as_array().unwrap(), "Post");
+    let reviewers = find(post_class["collections"].as_array().unwrap(), "reviewers");
+    assert_eq!(reviewers["type"], "reference", "{reviewers}");
+    assert_eq!(reviewers["relation_kind"], "hasMany", "{reviewers}");
+    assert_eq!(reviewers["target_class"], "User", "{reviewers}");
+
+    let mut users = Vec::new();
+    for name in ["Data", "Geordi"] {
+        let u = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "User".into(),
+                    properties: Some(props(&[("name", json!(name))])),
+                    base_uri: None,
+                    parent: None,
+                }))
+                .await,
+        );
+        assert_eq!(u["created"], true, "{u}");
+        users.push(u["base_uri"].as_str().unwrap().to_string());
+    }
+    let (data, geordi) = (users[0].clone(), users[1].clone());
+
+    // instance_create: instance URIs are accepted on the scalar relation
+    // and as relation-collection items, and read back as those instances.
+    let post = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Post".into(),
+                properties: Some(props(&[
+                    ("title", json!("Warp field notes")),
+                    ("writer", json!(data.clone())),
+                    ("reviewers", json!([geordi.clone()])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(post["created"], true, "{post}");
+    assert_eq!(
+        post["collections_set"]["reviewers"],
+        json!([geordi.clone()]),
+        "{post}"
+    );
+    let post_uri = post["base_uri"].as_str().unwrap().to_string();
+    let got = get_post(&handler, &uuid, &post_uri).await;
+    assert_eq!(relation_ids(&got["writer"]), vec![data.clone()], "{got}");
+    assert_eq!(relation_ids(&got["reviewers"]), vec![geordi.clone()], "{got}");
+
+    // instance_create: a prose relation-collection item is rejected by
+    // validation and nothing is created.
+    let posts_before = post_count(&handler, &uuid).await;
+    let bad = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Post".into(),
+                properties: Some(props(&[
+                    ("title", json!("Bad reviewers")),
+                    ("writer", json!(data.clone())),
+                    ("reviewers", json!(["Beverly Crusher"])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert!(bad["error"].is_string(), "{bad}");
+    assert_eq!(bad["validation_errors"][0]["property"], "reviewers", "{bad}");
+    let problem = bad["validation_errors"][0]["problem"].as_str().unwrap();
+    assert!(
+        problem.contains("collection item") && problem.contains("existing User instance"),
+        "{bad}"
+    );
+    assert_eq!(post_count(&handler, &uuid).await, posts_before);
+
+    // instance_update on the hasOne relation: a URI is stored; prose (plain
+    // or scheme-lookalike) is rejected and the stored value survives.
+    let upd = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Post".into(),
+                base_uri: post_uri.clone(),
+                properties: props(&[("writer", json!(geordi.clone()))]),
+            }))
+            .await,
+    );
+    assert_eq!(upd["success"], true, "{upd}");
+    let got = get_post(&handler, &uuid, &post_uri).await;
+    assert_eq!(relation_ids(&got["writer"]), vec![geordi.clone()], "{got}");
+    for prose in ["Data Soong", "Note: buy milk"] {
+        let rejected = parse(
+            &handler
+                .instance_update(Parameters(InstanceUpdateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Post".into(),
+                    base_uri: post_uri.clone(),
+                    properties: props(&[("writer", json!(prose))]),
+                }))
+                .await,
+        );
+        assert!(rejected["error"].is_string(), "{prose}: {rejected}");
+        assert_eq!(
+            rejected["validation_errors"][0]["property"], "writer",
+            "{prose}: {rejected}"
+        );
+        assert!(
+            rejected["validation_errors"][0]["problem"]
+                .as_str()
+                .unwrap()
+                .contains("existing User instance"),
+            "{prose}: {rejected}"
+        );
+    }
+    let got = get_post(&handler, &uuid, &post_uri).await;
+    assert_eq!(relation_ids(&got["writer"]), vec![geordi.clone()], "{got}");
+
+    // instance_add_to_collection on the hasMany relation: same gate.
+    let add = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Post".into(),
+                base_uri: post_uri.clone(),
+                collection: "reviewers".into(),
+                item_uri: data.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(add["success"], true, "{add}");
+    assert_eq!(add["links_added"], 1, "{add}");
+    let got = get_post(&handler, &uuid, &post_uri).await;
+    let mut ids = relation_ids(&got["reviewers"]);
+    ids.sort();
+    let mut expected = vec![data.clone(), geordi.clone()];
+    expected.sort();
+    assert_eq!(ids, expected, "{got}");
+    for prose in ["Beverly Crusher", "TODO: ask Picard"] {
+        let rejected = parse(
+            &handler
+                .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Post".into(),
+                    base_uri: post_uri.clone(),
+                    collection: "reviewers".into(),
+                    item_uri: prose.into(),
+                }))
+                .await,
+        );
+        assert!(rejected["error"].is_string(), "{prose}: {rejected}");
+        assert_eq!(
+            rejected["validation_errors"][0]["property"], "reviewers",
+            "{prose}: {rejected}"
+        );
+        assert!(
+            rejected["validation_errors"][0]["problem"]
+                .as_str()
+                .unwrap()
+                .contains("existing User instance"),
+            "{prose}: {rejected}"
+        );
+    }
+
+    // Nothing but the two instance URIs ever reached the store as a
+    // reviewer link — no prose target was written and then hidden.
+    let raw = crate::perspectives::get_perspective(&uuid)
+        .unwrap()
+        .get_links(&crate::types::LinkQuery {
+            source: Some(post_uri.clone()),
+            predicate: Some("ns://post_reviewer".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut stored: Vec<&str> = raw.iter().map(|l| l.data.target.as_str()).collect();
+    stored.sort();
+    let mut expected: Vec<&str> = vec![data.as_str(), geordi.as_str()];
+    expected.sort();
+    assert_eq!(stored, expected, "{raw:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1280,10 +1542,12 @@ async fn instance_transcript_reads_children_chronologically() {
     );
     let err = collection_prop["error"].as_str().unwrap();
     assert!(err.contains("'messages'") && err.contains("collection"), "{err}");
-    assert!(err.contains("name") && err.contains("description"), "{err}");
+    let (_, offered) = err
+        .split_once("Single-valued properties:")
+        .unwrap_or_else(|| panic!("no property list in: {err}"));
+    assert!(offered.contains("name") && offered.contains("description"), "{err}");
     assert!(
-        !err["Single-valued properties".len()..].contains("messages")
-            || err.rfind("messages").unwrap() < err.find("Single-valued").unwrap(),
+        !offered.contains("messages"),
         "collections must not be offered as text properties: {err}"
     );
 
