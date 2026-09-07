@@ -122,7 +122,26 @@ impl Ad4mMcpHandler {
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
-        let removed = remove_all_links_of(&mut perspective, &p.base_uri).await;
+        // Success only when both link queries and every removal succeeded.
+        // The cascade is not batched, so on failure the links already
+        // removed stay removed: say so, with the count, instead of
+        // reporting a deletion that did not fully happen.
+        let removed = match remove_all_links_of(&mut perspective, &p.base_uri).await {
+            Ok(removed) => removed,
+            Err(failure) => {
+                return pretty(&json!({
+                    "error": format!(
+                        "Error removing {} instance at '{}': {}. {} link(s) had already been \
+                         removed, so the instance may be partially deleted — inspect what is \
+                         left with query_links (source or target = '{}') and retry.",
+                        class_name, p.base_uri, failure.error, failure.removed, p.base_uri
+                    ),
+                    "class_name": class_name,
+                    "base_uri": p.base_uri,
+                    "links_removed": failure.removed,
+                }))
+            }
+        };
         pretty(&json!({
             "success": true,
             "class_name": class_name,

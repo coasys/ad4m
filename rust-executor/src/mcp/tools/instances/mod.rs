@@ -494,9 +494,29 @@ pub(super) fn link_target(value: &str) -> String {
     }
 }
 
+/// A link cascade that stopped on a store error, and how far it got.
+///
+/// The cascade is not batched, so the links removed before the failure
+/// stay removed — the caller has to report that, not hide it behind a
+/// success.
+#[derive(Debug)]
+pub(crate) struct CascadeFailure {
+    /// Links removed before the error.
+    pub removed: usize,
+    /// What failed.
+    pub error: String,
+}
+
 /// Remove every link touching `uri` (as source or target). Same cascade as
 /// `delete_subject` / `{class}_delete`.
-pub(crate) async fn remove_all_links_of(perspective: &mut PerspectiveInstance, uri: &str) -> usize {
+///
+/// Stops at the first `get_links` / `remove_link` error and reports it
+/// together with the number of links already removed. `Ok` means the two
+/// queries and every removal succeeded.
+pub(crate) async fn remove_all_links_of(
+    perspective: &mut PerspectiveInstance,
+    uri: &str,
+) -> Result<usize, CascadeFailure> {
     let mut removed = 0;
     for query in [
         LinkQuery {
@@ -508,13 +528,30 @@ pub(crate) async fn remove_all_links_of(perspective: &mut PerspectiveInstance, u
             ..Default::default()
         },
     ] {
-        if let Ok(links) = perspective.get_links(&query).await {
-            for link in links {
-                if perspective.remove_link(link.into(), None).await.is_ok() {
-                    removed += 1;
-                }
+        let links = match perspective.get_links(&query).await {
+            Ok(links) => links,
+            Err(e) => {
+                return Err(CascadeFailure {
+                    removed,
+                    error: format!("listing the links of '{uri}' failed: {e:#}"),
+                })
             }
+        };
+        for link in links {
+            let described = format!(
+                "{} -[{}]-> {}",
+                link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                link.data.target
+            );
+            if let Err(e) = perspective.remove_link(link.into(), None).await {
+                return Err(CascadeFailure {
+                    removed,
+                    error: format!("removing link {described} failed: {e:#}"),
+                });
+            }
+            removed += 1;
         }
     }
-    removed
+    Ok(removed)
 }
