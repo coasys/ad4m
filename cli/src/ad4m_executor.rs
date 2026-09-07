@@ -303,6 +303,20 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `AD4M_ADMIN_CREDENTIAL` is process-global, so every test that sets it
+    /// must hold this lock — otherwise a parallel test observes the other
+    /// one's value. Poisoning is irrelevant here: the guard protects an
+    /// environment variable, not an invariant, so a panicking test leaves
+    /// nothing inconsistent behind.
+    static ADMIN_CREDENTIAL_ENV: Mutex<()> = Mutex::new(());
+
+    fn lock_admin_credential_env() -> MutexGuard<'static, ()> {
+        ADMIN_CREDENTIAL_ENV
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn run_admin_credential(argv: &[&str]) -> Option<String> {
         let app = ClapApp::try_parse_from(argv).expect("argv parses");
@@ -317,10 +331,10 @@ mod tests {
     /// `--admin-credential` on the command line is visible in `ps` and shell
     /// history, so the documented way to pass it is the environment. Both
     /// must land in the same field, the explicit flag winning when both are
-    /// set. One test for all three cases: the variable is process-global and
-    /// tests run in parallel, so splitting them would race.
+    /// set.
     #[test]
     fn run_reads_the_admin_credential_from_the_environment() {
+        let _env = lock_admin_credential_env();
         std::env::set_var("AD4M_ADMIN_CREDENTIAL", "from-env");
         assert_eq!(
             run_admin_credential(&["ad4m-executor", "run"]).as_deref(),
@@ -343,6 +357,7 @@ mod tests {
     /// The help text must not echo the variable's value.
     #[test]
     fn run_help_hides_the_environment_value() {
+        let _env = lock_admin_credential_env();
         std::env::set_var("AD4M_ADMIN_CREDENTIAL", "s3cret-value");
         let err = ClapApp::try_parse_from(["ad4m-executor", "run", "--help"])
             .expect_err("--help exits through an error");
