@@ -61,9 +61,14 @@ test("server stores only sealed envelopes — plaintext room key bytes never app
     const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
     const roomKeyHex = bytesToHex(roomKey);
 
-    // Fetch every key the server stores for this room and stringify the
-    // entire response. The plaintext room key must NOT appear anywhere.
-    const adminKeys = await getJson<unknown>(`${server.url}/rooms/${roomId}/keys`, adminToken);
+    // Fetch every key the server stores for this room. Verify the
+    // response succeeded and contains sealed records, THEN check that
+    // the plaintext room key does not appear anywhere in it.
+    const adminKeys = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload }> }>(
+      `${server.url}/rooms/${roomId}/keys`, adminToken,
+    );
+    assert.equal(adminKeys.status, 200);
+    assert.ok(adminKeys.body.keys.length > 0, "server must have stored sealed keys");
     const raw = JSON.stringify(adminKeys.body);
     assert.ok(
       !raw.includes(roomKeyHex),
@@ -171,6 +176,22 @@ test("server rejects rotation with empty keys array", async () => {
     );
     assert.equal(res.status, 400);
     assert.match(res.body.error, /keys array/i);
+  });
+});
+
+test("server rejects rotation with null entry in keys array", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const res = await postJson<{ error: string }>(
+      `${server.url}/rooms/${roomId}/keys/rotate`,
+      { keys: [null] },
+      token,
+    );
+    assert.equal(res.status, 400);
+    assert.match(res.body.error, /non-null object/);
   });
 });
 

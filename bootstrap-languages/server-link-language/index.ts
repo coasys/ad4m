@@ -312,12 +312,17 @@ const language = defineLanguage({
                 },
                 onPeerJoined(msg) {
                     telepresenceModule.handlePeerJoined(msg);
-                    // When a new peer joins, if we hold admin rights and
-                    // the key ring has keys, check for and grant missing keys
-                    // so the new member can decrypt the room's history.
-                    void performAdminKeyGrants().catch((err) => {
-                        console.error("[server-link-language] peer-joined admin grant failed:", err);
-                    });
+                    if (!isRoomAdmin) return;
+                    // When a new peer joins an E2E room, rotate the key so
+                    // they receive the latest version, then grant any
+                    // historical versions they missed.
+                    if (keyRing && keyRing.size > 0) {
+                        void performRotation()
+                            .then(() => performAdminKeyGrants())
+                            .catch((err) => {
+                                console.error("[server-link-language] peer-joined rotate+grant failed:", err);
+                            });
+                    }
                 },
                 onPeerLeft(msg) {
                     telepresenceModule.handlePeerLeft(msg);

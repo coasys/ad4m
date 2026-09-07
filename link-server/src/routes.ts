@@ -385,6 +385,9 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       // must have the expected shape.
       const aclDids = new Set(ctx.db.getAcl(claims.roomId).map((a) => a.did));
       for (const entry of body.keys) {
+        if (!entry || typeof entry !== "object") {
+          return reply.code(400).send({ error: "each key entry must be a non-null object" });
+        }
         if (typeof entry.did !== "string" || !aclDids.has(entry.did)) {
           return reply.code(400).send({
             error: `DID ${entry.did ?? "(missing)"} is not in this room's ACL`,
