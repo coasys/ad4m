@@ -76,7 +76,7 @@ impl Ad4mMcpHandler {
     /// harness wiring. Additional static tools land here one arm at a time;
     /// the pattern is mechanical.
     pub(crate) async fn call_tool_by_name(&self, name: &str, args: Value) -> Result<String> {
-        // The seven static-tool arms below all deserialize into a distinct
+        // The static-tool arms below all deserialize into a distinct
         // `Parameters<T>` where T is the argument struct on the
         // `#[tool]`-annotated method. That's why they can't collapse into
         // a `match` value + a shared closure — each T's turbofish is
@@ -108,11 +108,7 @@ impl Ad4mMcpHandler {
             "get_models" => dispatch_static_tool!(get_models),
             "query_links" => dispatch_static_tool!(query_links),
             "infer" => dispatch_static_tool!(infer),
-            // ── subjects.rs ─────────────────────────────────────────────
-            "query_subjects" => dispatch_static_tool!(query_subjects),
-            "get_subject_data" => dispatch_static_tool!(get_subject_data),
-            "get_subject_children" => dispatch_static_tool!(get_subject_children),
-            // ── instances.rs ────────────────────────────────────────────
+            // ── instances/ ──────────────────────────────────────────────
             // The static class-agnostic surface is on the router, so
             // `list_tool_schemas` advertises it to the harness LLM; these
             // arms make it callable there too (otherwise a call would fall
@@ -130,6 +126,7 @@ impl Ad4mMcpHandler {
             "instance_transcript" => dispatch_static_tool!(instance_transcript),
             "add_child" => dispatch_static_tool!(add_child),
             "get_children" => dispatch_static_tool!(get_children),
+            "execute_commands" => dispatch_static_tool!(execute_commands),
             // ── fallback: per-class dynamic tools ───────────────────────
             _ => {
                 // `handle_dynamic_tool` expects the args as a

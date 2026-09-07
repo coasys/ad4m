@@ -35,12 +35,14 @@
 //!   `ad4m://has_child` tree
 //! - [`transcript`] — `instance_transcript`, a compact chronological reading
 //!   of one class's children under a node
+//! - [`commands`] — `execute_commands`, raw SDNA actions on an instance
 //! - [`validate`] — SHACL-derived property validation shared by every write
 //! - this file — the borrowed [`PropView`] over a class shape, class
 //!   resolution, instance URI minting and the other helpers the tools share
 
 pub mod children;
 pub mod collections;
+pub mod commands;
 pub mod create;
 pub mod describe;
 pub mod query;
@@ -53,6 +55,7 @@ mod tests;
 
 pub use children::{AddChildParams, GetChildrenParams};
 pub use collections::{InstanceAddToCollectionParams, InstanceRemoveFromCollectionParams};
+pub use commands::ExecuteCommandsParams;
 pub use create::InstanceCreateParams;
 pub use describe::DescribePerspectiveParams;
 pub use query::{InstanceGetParams, InstanceQueryParams};

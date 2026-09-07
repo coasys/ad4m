@@ -59,9 +59,9 @@ use crate::ai_service::harness::provider::SideEffect;
 /// the parity test in this module ensures no static tool actually hits
 /// that fallback in practice.
 ///
-/// Ordering matches the tool-file layout (perspectives → subjects →
-/// instances → profiles → flows → children → subscriptions →
-/// neighbourhoods → auth → languages) for readability.
+/// Ordering matches the tool-file layout (perspectives → instances →
+/// profiles → flows → subscriptions → neighbourhoods → auth → languages)
+/// for readability.
 pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // ── perspectives.rs ─────────────────────────────────────────────
     ("list_perspectives", SideEffect::Read),
@@ -75,20 +75,7 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // handled per-completion inside AIService; the harness classifies on
     // the graph-state axis.
     ("infer", SideEffect::Read),
-    // ── subjects.rs ─────────────────────────────────────────────────
-    ("query_subjects", SideEffect::Read),
-    ("get_subject_data", SideEffect::Read),
-    ("create_subject", SideEffect::Write),
-    // `execute_commands` runs SDNA-declared setter actions on an instance
-    // — always a mutation.
-    ("execute_commands", SideEffect::Write),
-    ("set_subject_property", SideEffect::Write),
-    ("get_subject_collection", SideEffect::Read),
-    ("add_to_collection", SideEffect::Write),
-    ("remove_from_collection", SideEffect::Write),
-    ("get_subject_children", SideEffect::Read),
-    ("delete_subject", SideEffect::Write),
-    // ── instances.rs ────────────────────────────────────────────────
+    // ── instances/ ──────────────────────────────────────────────────
     // The static, class-agnostic surface. Same read/write split as the
     // per-class tools they replace: describe/query/get inspect, the
     // rest mutate.
@@ -104,6 +91,9 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // Raw ad4m://has_child tree ops, class-agnostic.
     ("add_child", SideEffect::Write),
     ("get_children", SideEffect::Read),
+    // `execute_commands` runs SDNA-declared actions on an instance —
+    // always a mutation.
+    ("execute_commands", SideEffect::Write),
     // ── profiles.rs ─────────────────────────────────────────────────
     ("get_my_did", SideEffect::Read),
     ("get_agent_profile", SideEffect::Read),

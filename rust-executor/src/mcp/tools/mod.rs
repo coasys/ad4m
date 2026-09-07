@@ -13,13 +13,15 @@
 //!
 //! Tools are organized by domain:
 //! - `perspectives` — perspective & link operations
-//! - `subjects` — subject CRUD, properties, collections
+//! - `instances` — the static, class-agnostic surface for typed data:
+//!   `describe_perspective`, the `instance_*` family (class name as a
+//!   parameter), the raw `add_child` / `get_children` tree ops and
+//!   `execute_commands`
 //! - `flows` — flow state machine tools
 //! - `auth` — authentication & JWT tools
 //! - `profiles` — agent profile management
 //! - `subscriptions` — waker query generation
-//! - `instances` — static, class-agnostic `describe_perspective` + `instance_*`
-//!   tools (the default MCP surface for typed data)
+//! - `neighbourhoods` / `languages` — P2P sharing and language metadata
 //! - `dynamic` — auto-generated per-class SHACL tools (exposed over MCP only
 //!   with `dynamicClassTools`; always fed to the in-process harness)
 
@@ -34,7 +36,6 @@ pub mod perspectives;
 pub mod profiles;
 pub mod provider_impl;
 pub(crate) mod side_effects;
-pub mod subjects;
 pub mod subscriptions;
 
 use super::server::McpContext;
@@ -244,30 +245,7 @@ impl Ad4mMcpHandler {
             .with_route((Self::query_links_tool_attr(), Self::query_links))
             .with_route((Self::add_model_tool_attr(), Self::add_model))
             .with_route((Self::infer_tool_attr(), Self::infer))
-            // subjects.rs
-            .with_route((Self::query_subjects_tool_attr(), Self::query_subjects))
-            .with_route((Self::get_subject_data_tool_attr(), Self::get_subject_data))
-            .with_route((Self::create_subject_tool_attr(), Self::create_subject))
-            .with_route((Self::execute_commands_tool_attr(), Self::execute_commands))
-            .with_route((
-                Self::set_subject_property_tool_attr(),
-                Self::set_subject_property,
-            ))
-            .with_route((
-                Self::get_subject_collection_tool_attr(),
-                Self::get_subject_collection,
-            ))
-            .with_route((Self::add_to_collection_tool_attr(), Self::add_to_collection))
-            .with_route((
-                Self::remove_from_collection_tool_attr(),
-                Self::remove_from_collection,
-            ))
-            .with_route((
-                Self::get_subject_children_tool_attr(),
-                Self::get_subject_children,
-            ))
-            .with_route((Self::delete_subject_tool_attr(), Self::delete_subject))
-            // instances.rs
+            // instances/
             .with_route((
                 Self::describe_perspective_tool_attr(),
                 Self::describe_perspective,
@@ -291,6 +269,7 @@ impl Ad4mMcpHandler {
             ))
             .with_route((Self::add_child_tool_attr(), Self::add_child))
             .with_route((Self::get_children_tool_attr(), Self::get_children))
+            .with_route((Self::execute_commands_tool_attr(), Self::execute_commands))
             // flows.rs
             .with_route((Self::add_flow_tool_attr(), Self::add_flow))
             .with_route((Self::get_flows_tool_attr(), Self::get_flows))
