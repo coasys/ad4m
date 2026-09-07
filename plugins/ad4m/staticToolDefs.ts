@@ -255,7 +255,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "list_link_language_templates",
-    "description": "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language_template` when calling `neighbourhood_publish_from_perspective`.",
+    "description": "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language` when calling `neighbourhood_publish_from_perspective`.",
     "inputSchema": {
       "type": "object",
       "properties": {}
