@@ -138,6 +138,47 @@ export async function withTimeout<T>(
   }
 }
 
+/**
+ * Why an endpoint must not receive the plugin's credentials, or `null` when
+ * it may.
+ *
+ * Every MCP call carries `_authToken` in an `Authorization` header, so a
+ * plaintext `http://` endpoint on anything but the loopback interface puts
+ * the JWT (or the admin credential) on the wire in the clear. Loopback stays
+ * allowed because that is the default managed-mode setup; remote endpoints
+ * must be `https://`, or the operator must opt in explicitly with
+ * `allowInsecureHttp: true`.
+ */
+export function insecureEndpointReason(
+  endpoint: string,
+  allowInsecureHttp = false,
+): string | null {
+  if (allowInsecureHttp) return null;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return `mcpEndpoint is not a valid URL: ${endpoint}`;
+  }
+  if (url.protocol === "https:") return null;
+  if (url.protocol !== "http:") {
+    return `mcpEndpoint must be an http(s) URL, got ${url.protocol}//`;
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const loopback =
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host === "::1" ||
+    host === "0:0:0:0:0:0:0:1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+  if (loopback) return null;
+  return (
+    `refusing to send AD4M credentials to ${url.protocol}//${url.host} in cleartext — ` +
+    `use https:// for a remote executor, or set allowInsecureHttp: true in the plugin ` +
+    `config if you genuinely control the network path`
+  );
+}
+
 /** @internal Reset module-level state between tests. */
 export function _resetModuleState(): void {
   _authToken = "";
@@ -166,6 +207,15 @@ export default function ad4mPlugin(api: any) {
 
   // Determine endpoint - default to localhost for managed, use provided for external
   const endpoint = providedConfig.mcpEndpoint ?? "http://localhost:3001/mcp";
+
+  // Refuse to put the credential on the wire in cleartext. Reported once
+  // here and enforced in ensureSession(), so a misconfigured endpoint fails
+  // every MCP call with the reason instead of quietly leaking the token.
+  const endpointRefusal = insecureEndpointReason(
+    endpoint,
+    providedConfig.allowInsecureHttp === true,
+  );
+  if (endpointRefusal) logger.error(`[ad4m] ${endpointRefusal}`);
 
   // Resolve executorUrl once — used by both ensureAgentReady and waker service
   const executorUrl =
@@ -232,6 +282,7 @@ export default function ad4mPlugin(api: any) {
    * session becomes invalid (e.g. executor restart, session expiry -> 422).
    */
   async function ensureSession(): Promise<string> {
+    if (endpointRefusal) throw new Error(endpointRefusal);
     if (_sessionId) return _sessionId;
     logger.info(`[ad4m] Initializing MCP session at ${endpoint}`);
     const init = await mcpInitialize(endpoint, _authToken);

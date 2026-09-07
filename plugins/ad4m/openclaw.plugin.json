@@ -54,6 +54,11 @@
         "type": "string",
         "description": "AD4M executor MCP endpoint URL"
       },
+      "allowInsecureHttp": {
+        "type": "boolean",
+        "default": false,
+        "description": "Allow sending AD4M credentials to a non-loopback plaintext http:// mcpEndpoint. Off by default: remote endpoints should use https://."
+      },
       "token": {
         "type": "string",
         "description": "Auth token — JWT obtained during external mode setup. In managed mode this is generated automatically and not persisted."

@@ -54,6 +54,7 @@ import {
   type ExecutorStartResult,
   type AgentResult,
   withTimeout,
+  insecureEndpointReason,
 } from "./index";
 
 import ad4mPlugin, { _resetModuleState } from "./index";
@@ -3410,5 +3411,28 @@ describe("WakerSubscriptionManager", () => {
     expect(capturedMentions![0].parents).toEqual([]);
 
     manager.disposeAll();
+  });
+});
+
+describe("insecureEndpointReason", () => {
+  it("allows https anywhere and http only on loopback", () => {
+    expect(insecureEndpointReason("http://localhost:3001/mcp")).toBeNull();
+    expect(insecureEndpointReason("http://127.0.0.1:3001/mcp")).toBeNull();
+    expect(insecureEndpointReason("http://[::1]:3001/mcp")).toBeNull();
+    expect(insecureEndpointReason("https://executor.example.com/mcp")).toBeNull();
+  });
+
+  it("refuses to send credentials to a remote http endpoint", () => {
+    const reason = insecureEndpointReason("http://their-executor:3001/mcp");
+    expect(reason).toMatch(/cleartext/);
+    expect(reason).toMatch(/allowInsecureHttp/);
+  });
+
+  it("honours the explicit opt-in and rejects non-http schemes", () => {
+    expect(
+      insecureEndpointReason("http://their-executor:3001/mcp", true),
+    ).toBeNull();
+    expect(insecureEndpointReason("ftp://executor/mcp")).toMatch(/http\(s\)/);
+    expect(insecureEndpointReason("not a url")).toMatch(/not a valid URL/);
   });
 });
