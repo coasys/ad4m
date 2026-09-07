@@ -1437,6 +1437,36 @@ describe("loginViaEmailVerification (auth-both fallback)", () => {
     expect(n).toBe(2);
   });
 
+  it("sends verification_type, not type, and skips the login request for a signup code", async () => {
+    const bodies: any[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return fakeJsonResponse({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ type: "text", text: JSON.stringify({ token: "jwt-signup" }) }] },
+      });
+    });
+    const token = await loginViaEmailVerification(
+      makeMockLogger(),
+      "http://localhost:3001/mcp",
+      "a@b.c",
+      "sess",
+      async () => "123456",
+      "signup",
+    );
+    expect(token).toBe("jwt-signup");
+    // signup already emailed a signup-typed code — no login code is requested.
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].params.name).toBe("verify_email_code");
+    expect(bodies[0].params.arguments).toMatchObject({
+      email: "a@b.c",
+      code: "123456",
+      verification_type: "signup",
+    });
+    expect(bodies[0].params.arguments.type).toBeUndefined();
+  });
+
   it("returns null when no code is entered (does not call verify_email_code)", async () => {
     let n = 0;
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => {

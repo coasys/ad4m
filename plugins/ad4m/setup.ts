@@ -262,11 +262,16 @@ async function setupExternalMode(
       logger.info(`[ad4m-setup] Multi-user node — provisioning own identity (${email})...`);
       // mcpCallTool returns a JSON-RPC error as result text rather than throwing,
       // so inspect the result — the catch alone only sees transport failures.
+      // Did *this* run create the account? If so the node has just emailed a
+      // `signup`-typed code, and that is the one to verify with.
+      let justSignedUp = false;
       try {
         const signupResult = await mcpCallTool(endpoint, "signup", { email, password }, initResp.sessionId);
         const signupData = extractMcpResultData(signupResult);
         if (signupData?.error) {
           logger.info(`[ad4m-setup] signup: ${signupData.error} (user may already exist — continuing to login)`);
+        } else if (signupData?.success) {
+          justSignedUp = true;
         }
       } catch (e: any) {
         logger.info(`[ad4m-setup] signup failed (transport): ${e.message} (continuing to login)`);
@@ -290,10 +295,25 @@ async function setupExternalMode(
         });
         return;
       }
-      // login_email returned no token — the node may enforce SMTP-backed email
-      // verification. Fall back to the code-verification flow: request a code,
-      // read it (interactive prompt / /dev/tty), and exchange it for a JWT.
-      const verifiedToken = await loginViaEmailVerification(logger, endpoint, email, initResp.sessionId);
+      // login_email returned no token — the node enforces SMTP-backed email
+      // verification. Fall back to the code-verification flow: get a code to
+      // the inbox, read it (interactive prompt / /dev/tty), exchange it for a
+      // JWT. A brand-new account has to complete *signup* verification first;
+      // only fall back to a login code if that produced nothing.
+      let verifiedToken: string | null = null;
+      if (justSignedUp) {
+        verifiedToken = await loginViaEmailVerification(
+          logger,
+          endpoint,
+          email,
+          initResp.sessionId,
+          undefined,
+          "signup",
+        );
+      }
+      if (!verifiedToken) {
+        verifiedToken = await loginViaEmailVerification(logger, endpoint, email, initResp.sessionId);
+      }
       if (verifiedToken) {
         logger.info(`[ad4m-setup] Verified ${email} via email code; own user identity ready.`);
         printConfigSnippet(logger, "external", {
@@ -438,9 +458,15 @@ async function resolveMultiUserPassword(
 /**
  * Email-verification fallback for multi-user login. Used when a node enforces
  * SMTP-backed email verification, so `login_email` alone returns no token: the
- * plugin requests a code, reads it, and exchanges it for a JWT via
- * `verify_email_code`. `readCode` defaults to an interactive prompt; tests
+ * plugin gets a code to the user's inbox, reads it, and exchanges it for a JWT
+ * via `verify_email_code`. `readCode` defaults to an interactive prompt; tests
  * inject a fixed reader. Returns the JWT, or null when no token results.
+ *
+ * `verificationType` picks which code the user is being asked for, and has to
+ * match the one the executor issued — `verify_and_login` looks the code up by
+ * (email, type). `signup` already emailed a `signup` code, so that branch must
+ * not request a second, `login`-typed one; a plain login does need the
+ * `request_login_verification` round-trip first.
  */
 export async function loginViaEmailVerification(
   logger: any,
@@ -449,20 +475,32 @@ export async function loginViaEmailVerification(
   sessionId: string,
   readCode: () => Promise<string> = () =>
     promptUser("[ad4m-setup] Enter the 6-digit code from your email (blank to skip): "),
+  verificationType: "signup" | "login" = "login",
 ): Promise<string | null> {
-  try {
-    // Trigger the verification email (best-effort — the user already signed up).
-    await mcpCallTool(endpoint, "request_login_verification", { email }, sessionId);
-  } catch (e: any) {
-    logger.info(`[ad4m-setup] request_login_verification: ${e.message}`);
+  if (verificationType === "login") {
+    try {
+      // Trigger the verification email (best-effort — the user already signed up).
+      await mcpCallTool(endpoint, "request_login_verification", { email }, sessionId);
+    } catch (e: any) {
+      logger.info(`[ad4m-setup] request_login_verification: ${e.message}`);
+    }
+    logger.info("[ad4m-setup] A verification code has been sent to your email (if the node has SMTP configured).");
+  } else {
+    logger.info("[ad4m-setup] signup sent a verification code to your email (if the node has SMTP configured).");
   }
-  logger.info("[ad4m-setup] A verification code has been sent to your email (if the node has SMTP configured).");
   const code = await readCode();
   if (!code) {
     logger.info("[ad4m-setup] No code entered — skipping email-verification login.");
     return null;
   }
-  const verifyResult = await mcpCallTool(endpoint, "verify_email_code", { email, code, type: "login" }, sessionId);
+  // The parameter is `verification_type`; a bare `type` is silently not the
+  // field the tool reads, and the call fails on the missing required field.
+  const verifyResult = await mcpCallTool(
+    endpoint,
+    "verify_email_code",
+    { email, code, verification_type: verificationType },
+    sessionId,
+  );
   const verifyData = extractMcpResultData(verifyResult);
   const token = verifyData?.token ?? verifyData?.jwt ?? null;
   if (!token) {
