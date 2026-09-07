@@ -181,7 +181,8 @@ impl Ad4mMcpHandler {
                 p.class_name,
                 p.parent.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
             ),
-        }).to_string()
+        })
+        .to_string()
     }
 
     /// Generate a single waker subscription config for mention tracking
