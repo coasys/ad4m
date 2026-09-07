@@ -65,7 +65,7 @@ use std::collections::BTreeMap;
 /// no separate type flag): the presence of a `kind` link marks a base as
 /// overlay-carrying (used by `write::overlay_exists` and `model_query`
 /// conformance matching alike).
-pub(super) const OVERLAY_KIND_PRED: &str = "ad4m://interp/kind";
+pub(crate) const OVERLAY_KIND_PRED: &str = "ad4m://interp/kind";
 /// Parallel-predicate prefix for the LLM's per-property value snapshot: the full
 /// predicate is `ad4m://interp/inferred/<realPredicate>`.
 pub(super) const INFERRED_PREFIX: &str = "ad4m://interp/inferred/";
