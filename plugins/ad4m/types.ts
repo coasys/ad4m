@@ -19,8 +19,6 @@ export interface PluginConfig {
   mcpEndpoint?: string;
   /** Opt in to sending credentials to a non-loopback plaintext http:// mcpEndpoint. */
   allowInsecureHttp?: boolean;
-  /** Opt in to sending credentials to a non-loopback plaintext http:// mcpEndpoint. */
-  allowInsecureHttp?: boolean;
   /** Auth token — JWT in external mode, admin credential in managed mode (internal). */
   token?: string;
   agentPassphrase?: string;

@@ -274,11 +274,15 @@ Two traps around relations and setters:
 
 Per-class tool generation over MCP is **opt-in**, controlled by the `dynamicClassTools` config flag (`ad4m-executor run --dynamic-class-tools true`, default `false`). With it off — the default — a registered class is consumed exclusively through the generic `instance_*` tools (`instance_create(class_name=..., properties=...)` etc., see the overview), not through auto-generated per-class tool names. The table below describes what gets generated **when `dynamicClassTools` is enabled**:
 
-| Property type                                     | Generated tools                               |
-| -------------------------------------------------- | ---------------------------------------------- |
-| Scalar (`max_count: 1`)                           | `{class}_set_{prop}`                          |
-| Collection (`collection: true` or no `max_count`) | `{class}_add_{prop}`, `{class}_remove_{prop}` |
-| Required (`min_count: 1`)                         | Parameter included in `{class}_create`        |
+| Property type                                     | Generated tools                                                      |
+| -------------------------------------------------- | --------------------------------------------------------------------- |
+| Scalar (`max_count: 1`)                           | `{class}_set_{prop}`                                                 |
+| Collection (`collection: true` or no `max_count`) | `{class}_get_{prop}`, `{class}_add_{prop}`, `{class}_remove_{prop}` |
+
+Plus one `{class}_create` / `_query` / `_list` / `_get` / `_delete` set per
+class. `{class}_create` takes **every** non-collection property as a
+parameter — `min_count` only decides whether the description marks it `*`;
+`perspective_id` is the sole entry in the schema's `required` list.
 
 The tool count in that mode is linear in (classes × actions) and changes at runtime as neighbourhoods are joined, which is why it is not the default: statically declared integrations (plugin manifests, agent tool configs) cannot follow it.
 

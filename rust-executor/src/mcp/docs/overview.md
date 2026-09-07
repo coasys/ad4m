@@ -90,11 +90,18 @@ cardinality, so fix what the error says rather than guessing.
 
 ### Authentication
 
-`auth_status()` tells you where you stand. It and the other auth tools need
-no authentication themselves.
+`auth_status()` reports on the **session** token — the one `generate_jwt` /
+`login_email` store. It and the other auth tools need no authentication
+themselves.
 
-- **Admin credential** — if the executor was started with `--admin-credential`
-  for you, every call in the session is already authenticated. Nothing to do.
+- **Admin credential** — if the executor was started with
+  `AD4M_ADMIN_CREDENTIAL` / `--admin-credential`, the session still starts
+  with no token: send the credential as an `Authorization: Bearer <credential>`
+  header on your calls. The first protected call that carries a matching
+  header stores it in the session, and everything after that is authenticated.
+  Until then `auth_status()` answers `authenticated: false` — it does not
+  check the header, so treat that answer as "no *session* token yet", not as
+  "your credential is wrong".
 - **Multi-user node** — `signup(email, password)` once, then
   `login_email(email, password)` returns a JWT that authenticates the rest of
   the session. `verify_email_code` is only needed if the node enforces email

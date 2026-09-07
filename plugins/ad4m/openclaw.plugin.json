@@ -71,11 +71,6 @@
         "type": "string",
         "description": "Full path to the ad4m-executor binary. Only needed if ad4m-executor is not in PATH."
       },
-      "toolRefreshIntervalMs": {
-        "type": "number",
-        "default": 30000,
-        "description": "How often to poll for new dynamic SHACL tools (ms)"
-      },
       "executorUrl": {
         "type": "string",
         "default": "http://localhost:12000",

@@ -24,7 +24,7 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 - `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — read/write any subject class by name
 - `instance_transcript` — the newest N instances of one class under a parent as a readable transcript (the way to read a channel, see Rule 6)
 - `add_child` / `get_children` — the raw `ad4m://has_child` tree, class-agnostic (see "Tree structure")
-- `add_link` / `query_links` — raw link access (rarely needed, see Rule 5)
+- `add_link` / `query_links` — raw link access (rarely needed, see Rule 4)
 - `neighbourhood_join_from_url` / `neighbourhood_publish_from_perspective`
 - `add_perspective` / `list_perspectives`
 - `subscribe_to_mentions` / `unsubscribe_from_mentions` / `subscribe_to_children` / `unsubscribe_from_children` / `list_waker_subscriptions`
@@ -32,7 +32,7 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 - `signup` / `verify_email_code` / `login_email` (multi-user)
 - `set_agent_profile` (multi-user, required — see Rule 12)
 - `set_profile_picture_from_file`
-- `add_model` — register a subject class from SHACL JSON (see Rule 10)
+- `add_model` — register a subject class from SHACL JSON (see "Subject Classes (SHACL)")
 - `list_link_language_templates` — needed before publishing a neighbourhood
 
 **NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). If you need one of these, use the direct-MCP fallback in Rule 3c.
@@ -92,7 +92,7 @@ Setup resolves the password (env var → `config.password` → interactive promp
 
 Treat provisioning (signup, you're creating a new account) and joining (login, an account already exists for your email) as separate concerns — don't assume you own an email just because you're joining a neighbourhood on someone else's node.
 
-**Runtime re-auth (automatic, also undocumented until now):** the plugin retries `login_email` (with auto-signup on "user not found") on every restart, using the same `AD4M_PASSWORD` → `config.password` resolution. Keep that env var in sync with the account's actual password — a stale value causes a *silent* failed re-auth with no clear log line (see Troubleshooting).
+**Runtime re-auth (automatic, also undocumented until now):** the plugin retries `login_email` (with auto-signup on "user not found") on every restart, using the same `AD4M_PASSWORD` → `config.password` resolution. Keep that env var in sync with the account's actual password — a stale value fails re-auth and leaves you unauthenticated, with only a `[ad4m] Email login failed: …` warning in the plugin log to say so (see Troubleshooting).
 
 For detailed executor setup (managed vs external, networking, TLS), see `references/setup.md`.
 
@@ -113,8 +113,8 @@ The MCP server uses Streamable HTTP transport and always responds with `text/eve
 **3a. Single-agent capability flow** (you're the only user of this executor, or your human shares their identity with you):
 
 1. Call `ad4m_request_capability` with `app_name`, `app_desc` — **not natively bridged by default**, use the Rule 3c fallback.
-2. The 6-digit code is printed to the executor's stdout (log file, screen session, or ask your human if they run a UI launcher).
-3. Call `ad4m_generate_jwt` with `request_id` + `code` — same fallback caveat.
+2. Read `request_id` **and `code`** straight out of that response — it returns both. Don't go looking for the code in the executor's stdout: the executor's logging contract redacts raw MCP capability codes unless it was started with `AD4M_LOG_SECRETS=1`.
+3. Call `ad4m_generate_jwt` with the `request_id` + `code` from step 2 — same fallback caveat.
 4. You're authenticated for this MCP session.
 
 **3b. Multi-user via `openclaw ad4m-setup`** — see Quick Setup above. This is the primary, recommended path. One command.
@@ -129,7 +129,7 @@ mcporter call http://host:3001/mcp.signup --allow-http email=you@example.com pas
 
 **Password hygiene — this is not optional, and the naive approach is NOT safe:**
 - Generate the password into a file with `chmod 600` (e.g. `openssl rand -base64 24 | tr -d '\n' > ~/.mypw && chmod 600 ~/.mypw`), never as a literal string in a command you type.
-- **Use mcporter's `key=@path` argument syntax** (`password=@~/.mypw`) — mcporter reads the file's content directly as the value. Only the *path* appears in the command and in process argv, never the plaintext password. Verified working (mcporter ≥ 0.13; the globally-installed version on this box was 0.7.3 and does *not* support `@path` — use `npx -y mcporter@latest` if your installed version's `--help` doesn't list `key=@path` under Arguments).
+- **Use mcporter's `key=@path` argument syntax** (`password=@~/.mypw`) — mcporter reads the file's content directly as the value. Only the *path* appears in the command and in process argv, never the plaintext password. Verified working (mcporter ≥ 0.13; the globally-installed version on this box was 0.7.3 and does *not* support `@path` — use `npx -y mcporter@0.13.10` if your installed version's `--help` doesn't list `key=@path` under Arguments — pin the version rather than tracking `@latest`, which executes whatever was published most recently).
 - **Do NOT use shell substitution like `"$(cat ~/.mypw)"` for this.** That expands the plaintext into the process's actual argv before exec — `ps` and any process listing on the machine can read it. It keeps the secret out of your own typed command text, but it does not keep it out of argv, and our standing rule is no secrets in command arguments at all. If a given tool genuinely has no file/stdin-reading option for a required secret argument, say so explicitly as a known limitation rather than presenting shell substitution as a safe workaround.
 - The same applies to the JWT you get back — capture it straight to a file (e.g. pipe `--output json` into a small script that writes the token to a `chmod 600` file), don't echo it to verify.
 - Write the resulting JWT into `plugins.entries.ad4m.config.token` — check your config tool's own file-reading support first; if it only accepts a literal argument, name that as a limitation too rather than routing the secret through shell substitution.
@@ -144,7 +144,7 @@ by name so the token never enters argv:
 
 ```bash
 export AD4M_JWT="$(cat ~/.ad4m-token)"   # 0600 file, never echoed
-npx -y mcporter@latest call http://host:3001/mcp.list_perspectives \
+npx -y mcporter@0.13.10 call http://host:3001/mcp.list_perspectives \
   --allow-http --header "Authorization=\$env:AD4M_JWT"
 ```
 
@@ -214,22 +214,22 @@ For a channel to appear in the Flux UI, it must be a child of `ad4m://self`.
 **Conversation channels** (chat history, like a Discord/Slack channel):
 
 ```
-1. instance_create(class_name="Channel", properties={"name": "My Channel", "isConversation": true}, parent="ad4m://self")
-2. instance_create(class_name="Conversation", parent=<channel-id>)
-3. instance_create(class_name="Message", properties={"body": "..."}, parent=<channel-id>)
+1. instance_create(perspective_id, class_name="Channel", properties={"name": "My Channel", "isConversation": true}, parent="ad4m://self")
+2. instance_create(perspective_id, class_name="Conversation", parent=<channel-id>)
+3. instance_create(perspective_id, class_name="Message", properties={"body": "..."}, parent=<channel-id>)
 ```
 
 **Space channels** (containers, like Discord categories):
 
 ```
-1. instance_create(class_name="Channel", properties={"name": "My Space"}, parent="ad4m://self")
-2. instance_create(class_name="Message", properties={"body": "..."}, parent=<channel-id>)
+1. instance_create(perspective_id, class_name="Channel", properties={"name": "My Space"}, parent="ad4m://self")
+2. instance_create(perspective_id, class_name="Message", properties={"body": "..."}, parent=<channel-id>)
 ```
 
 Add a chat view (recommended if a human asked you to create a channel from inside another one — otherwise they can't reply):
 
 ```
-instance_create(class_name="App", properties={"name": "Chat", "icon": "chat", "pkg": "@coasys/flux-chat-view", "type": "flux://has_app"}, parent=<channel-id>)
+instance_create(perspective_id, class_name="App", properties={"name": "Chat", "icon": "chat", "pkg": "@coasys/flux-chat-view", "type": "flux://has_app"}, parent=<channel-id>)
 ```
 
 **Key rules (unchanged from the dynamic-tools era):** all channels must be children of `ad4m://self` to be visible; conversation channels need a `Conversation` child AND `isConversation: true`; space channels have neither and show messages directly; messages always go into the channel via `parent`.
@@ -404,7 +404,7 @@ This is about *authoring* classes via `ad4m_add_model` — native since the stat
 | `tool not found` for `ad4m_add_model`, `ad4m_signup`, `ad4m_verify_email_code`, `ad4m_list_link_language_templates`, `ad4m_get_documentation`, `ad4m_instance_transcript`, `ad4m_instance_remove_from_collection`, `ad4m_add_child` or `ad4m_get_children` | Your plugin build predates the commits that added them to the static surface. | Update the plugin build; until then use the Rule 3c `mcporter` fallback. |
 | `describe_perspective` lists the same class name more than once after you re-registered it | `ad4m_add_model` is not idempotent — re-registering an existing `class_name` appends another `ad4m://has_subject_class` link instead of replacing the old one. Not yet fixed, and easy to hit given schema authoring commonly takes a few rounds (see Subject Classes above). | The most recent registration is the one that's actually live (last write wins), so this is usually cosmetic — but don't rely on that going forward, and don't be surprised by a duplicate entry after iterating on a schema. |
 | `tool not found` for something `contracts.tools` *does* list | The manifest declares a name the executor has no tool for — a manifest/executor mismatch, not a bridging gap. (`ad4m_remove_link` and `ad4m_agent_status` were exactly this until they were dropped from the manifest; a test now fails the build on any new one.) | Don't rely on it; the `mcporter` fallback won't help either since the tool genuinely doesn't exist. Report it upstream. |
-| `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is triggering a silent failed auto-relogin on every restart (Rule 3b's runtime re-auth). | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |
+| `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is failing the auto-relogin on every restart (Rule 3b's runtime re-auth) — look for `[ad4m] Email login failed:` in the plugin log. | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |
 | `User key not found on executor` on login, right after an executor restart | **This is expected behavior, not a bug.** The wallet keeps signing keys in memory only. Until the executor's operator runs `agent.unlock(passphrase)`, the node is unusable by design — the DB password check passes, then the key lookup fails, which is a misleading *message*, but the underlying lockout is intentional. Same root cause blocks the capability bootstrap (`request_capability`/`generate_jwt` fails with `main key not found`). | This is a "the executor needs its operator" blocker — you can't work around it from an agent session. If you *are* the operator, run `agent.unlock` (REST, CLI, or WS-RPC) with the agent passphrase. If you're a third party connecting to someone else's node, the real fix on the node side is failing your connection attempt earlier with a clear "not unlocked yet" message instead of this one — worth raising with whoever runs the node if you hit it often. |
 | `Failed to get agent: User profile not found for <email>` on `subscribe_to_mentions` | No agent profile set (Rule 12). | Call `ad4m_set_agent_profile` first. |
 | `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or `list_waker_subscriptions` shows your subscription under **Pending** rather than active | Normal on a node that's still starting up, or genuinely correct if the node hasn't been unlocked yet (see the row above) — the plugin (from `ff64207e1`) now retries automatically every 30s rather than silently pretending to have succeeded. | If Pending clears within a minute or two, no action needed. If it stays Pending, the underlying cause is almost always the node not being unlocked — that's the node operator's problem, not something to fix from your side. On plugin builds before `0ac29fed6`, this failure mode was worse (a silent false "success" with no Pending state at all) — if you're on an old build, always confirm with `list_waker_subscriptions` rather than trusting the subscribe reply. |

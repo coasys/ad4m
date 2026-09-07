@@ -97,20 +97,15 @@ After startup, **write down** where the admin credential lives (the file path �
 
 First run only. Creates cryptographic keys and DID identity.
 
-**Via CLI:**
-
 ```bash
 ad4m --executor-url http://localhost:12000 agent generate --passphrase <passphrase>
 ```
 
-**Via REST API:**
-
-```bash
-curl -s http://localhost:12000/api/v1/agent/generate \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <admin-credential>" \
-  -d '{"passphrase": "<passphrase>"}'
-```
+**There is no REST endpoint for this.** The executor's only HTTP routes are
+`/`, `/health`, `/internal/shutdown` and the binary audio feed — everything
+else, `agent.generate` included, is a WebSocket-RPC method (`api/mod.rs`).
+The CLI above is the WS client; see "WebSocket RPC API" below to call it
+directly.
 
 This triggers Holochain conductor startup and language installation. Takes 30-60 seconds.
 
@@ -119,13 +114,11 @@ This triggers Holochain conductor startup and language installation. Takes 30-60
 After restarting the executor, unlock the agent:
 
 ```bash
-curl -s http://localhost:12000/api/v1/agent/unlock \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <admin-credential>" \
-  -d '{"passphrase": "<passphrase>"}'
+ad4m --executor-url http://localhost:12000 agent unlock --passphrase <passphrase> --holochain true
 ```
 
-The `holochain: true` parameter starts the Holochain conductor during unlock.
+`--holochain true` starts the Holochain conductor during unlock. Same caveat
+as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.
 
 **Skipping this step is expected to break every other auth path — by design, not by bug.** An executor is only usable once its main operator has unlocked it. The wallet keeps signing keys in memory only; immediately after a restart, before `unlock` runs, the executor holds just the encrypted cipher — it can check that a password/credential is *structurally* valid but cannot actually sign anything, so it fails at key lookup instead. **What's actually wrong here is the error message, not the lockout itself:** a third party trying to authenticate against a not-yet-unlocked node should fail immediately with a clear "this executor hasn't been unlocked yet" message, not a confusing one that reads like a bad credential:
 
@@ -139,11 +132,13 @@ If you're the executor's operator and don't have REST/CLI access handy, the same
 ### Step 5: Verify
 
 ```bash
-# Check agent status
-curl -s http://localhost:12000/api/v1/agent/status \
-  -H "Authorization: Bearer <admin-credential>"
+# Is the executor up at all? (this one really is an HTTP route)
+curl -s http://localhost:12000/health          # {"status":"ok"}
 
-# Expected: {"isInitialized":true,"isUnlocked":true,"did":"did:key:z6Mk..."}
+# Agent status — WS-RPC `agent.status`, via the CLI
+ad4m --executor-url http://localhost:12000 agent status
+
+# Expected: initialized + unlocked, with the agent's did:key:z6Mk… DID
 ```
 
 ## Deployment Scenarios & Networking
@@ -225,9 +220,16 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
 
 **Agent provisioning + auth flow (manual, MCP tool calls — only if you're not using the OpenClaw plugin or `ad4m-setup` can't run):**
 
-1. `signup(email, password)` → creates the account, returns a DID. Some nodes' `signup` response mentions email verification even when the node doesn't actually enforce it (seen on a test executor with SMTP disabled) — check `verify_email_code`'s actual necessity by attempting `login_email` next rather than assuming verification is required.
-2. `login_email(email, password)` → JWT token.
-3. Include the JWT on subsequent requests (for the OpenClaw plugin: `plugins.entries.ad4m.config.token`).
+1. `signup(email, password)` → creates the account, returns a DID, and emails a **`signup`**-typed verification code. Some nodes' `signup` response mentions that email even when the node doesn't actually enforce verification (seen on a test executor with SMTP disabled) — try `login_email` next rather than assuming.
+2. `login_email(email, password)` → JWT token. Done, if the node doesn't enforce verification.
+3. **If `login_email` returns no token, the node does enforce verification and this step is interactive** — a human has to read the code out of the inbox:
+   - Straight after signup, verify the code signup already sent:
+     `verify_email_code(email, code, verification_type="signup")` → JWT.
+   - For an existing, already-verified account, ask for a fresh login code first:
+     `request_login_verification(email)`, then
+     `verify_email_code(email, code, verification_type="login")` → JWT.
+   - The parameter is `verification_type` (`"signup"` or `"login"`), not `type`, and it has to match the code the executor issued — `verify_and_login` looks the code up by (email, type). `openclaw ad4m-setup` does exactly this, prompting for the code.
+4. Include the JWT on subsequent requests (for the OpenClaw plugin: `plugins.entries.ad4m.config.token`).
 
 **Legacy capability flow (single shared node identity, not a distinct per-agent account):**
 
@@ -296,15 +298,31 @@ The plugin manages MCP authentication internally — credentials are not sent in
 
 Connect to `ws://localhost:12000/api/v1/ws` (loopback or through an SSH tunnel; `wss://` behind your TLS proxy when remote) and send JSON-RPC messages:
 
+The envelope field is **`type`**, not `method` — the dispatcher rejects a
+message without it (`{"error":{"code":400,"message":"Missing 'type' field"}}`):
+
 ```json
-{"method": "agent.status", "params": {}, "id": "1"}
+{"type": "agent.status", "params": {}, "id": "1"}
 
-{"method": "perspectives.add_link", "params": {"uuid": "<perspective-uuid>", "link": {"source": "ad4m://self", "predicate": "has_name", "target": "literal:string:Data"}}, "id": "2"}
+{"type": "perspective.addLink", "params": {"uuid": "<perspective-uuid>", "link": {"source": "ad4m://self", "predicate": "has_name", "target": "literal:string:Data"}}, "id": "2"}
 
-{"method": "agent.unlock", "params": {"passphrase": "<agent-passphrase>"}, "id": "3"}
+{"type": "agent.unlock", "params": {"passphrase": "<agent-passphrase>"}, "id": "3"}
 ```
 
-**Auth:** Send `{"method": "auth", "params": {"credential": "<admin-credential>"}}` (single-user) or `{"method": "auth", "params": {"jwt": "<token>"}}` (multi-user) as the first message. Remember the test-only behavior from Step 4: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
+Method names are the registered handler names (`agent.status`,
+`agent.generate`, `agent.unlock`, `perspective.addLink`,
+`perspective.queryLinks`, …) — camelCase after the dot, and `perspective.`
+singular. There is no `perspectives.add_link`.
+
+**Auth is a connection-upgrade query parameter, not a first message.** Pass
+the admin credential (single-user) or the JWT (multi-user) as `?token=…` on
+the WebSocket URL:
+
+```
+ws://localhost:12000/api/v1/ws?token=<admin-credential-or-jwt>
+```
+
+Remember the test-only behavior from Step 4: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
 **Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`)
 
 ## Troubleshooting
@@ -317,7 +335,7 @@ Connect to `ws://localhost:12000/api/v1/ws` (loopback or through an SSH tunnel; 
 | Holochain conductor `IoError(internal)` | Corrupted conductor DB | Nuke `h/c/` directory, re-generate agent |
 | Port already in use | Previous instance running | Kill old process, clean lair files |
 | 404 on neighbourhood join | Version mismatch or expired link | Ensure same AD4M version as neighbourhood creator |
-| Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/health` to verify |
+| Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/health` to verify (`/health` and `/` are the only general-purpose HTTP routes; everything else is WS-RPC) |
 | Waker not firing | WS not accessible or bad query | Check `ws://localhost:12000/api/v1/ws/events` and waker logs |
 | Messages "uninitialized" | Property set after creation (race) | Pass all initial values at creation — `instance_create(..., properties={...})` (static tools) or `{class}_create` with every property up front (legacy dynamic tools). Never a create followed by a separate set call. |
 | Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |
