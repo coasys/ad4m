@@ -55,6 +55,7 @@ import {
   type AgentResult,
   withTimeout,
   insecureEndpointReason,
+  closeWakerClient,
 } from "./index";
 
 import ad4mPlugin, { _resetModuleState } from "./index";
@@ -3414,6 +3415,102 @@ describe("WakerSubscriptionManager", () => {
   });
 });
 
+describe("WakerSubscriptionManager disposal races", () => {
+  const noopLogger = () => ({
+    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+  });
+  const perspectiveClient = {
+    querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] } })),
+  };
+
+  /** A proxy whose subscribe() only settles when the test says so. */
+  function makeSlowProxy() {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const proxy = {
+      initialized: Promise.resolve(),
+      subscribe: vi.fn(() => gate),
+      dispose: vi.fn(),
+      onResult: vi.fn(),
+    };
+    return { ProxyClass: vi.fn(function () { return proxy; }), proxy, release };
+  }
+
+  const sub: WakerSubscription = {
+    id: "mention-race",
+    type: "mention",
+    perspective: "fake-uuid",
+    channel: "",
+    query: "SELECT * FROM link",
+  };
+
+  it("dispose() during subscribe() must not leave a live subscription behind", async () => {
+    const mock = makeSlowProxy();
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => {},
+    });
+
+    const pending = manager.subscribe(sub);
+    manager.dispose(sub.id);
+    mock.release();
+    await pending;
+
+    expect(manager.getActive()).toEqual([]);
+    expect(manager.has(sub.id)).toBe(false);
+    expect(mock.proxy.dispose).toHaveBeenCalled();
+  });
+
+  it("disposeAll() during subscribe() must not leave a live subscription behind", async () => {
+    const mock = makeSlowProxy();
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => {},
+    });
+
+    const pending = manager.subscribe(sub);
+    manager.disposeAll();
+    mock.release();
+    await pending;
+
+    expect(manager.getActive()).toEqual([]);
+    expect(manager.getPending()).toEqual([]);
+    expect(mock.proxy.dispose).toHaveBeenCalled();
+  });
+
+  it("a subscription disposed mid-attempt is not re-queued as pending on failure", async () => {
+    let reject!: (e: Error) => void;
+    const gate = new Promise<void>((_r, rj) => { reject = rj; });
+    const proxy = {
+      initialized: Promise.resolve(),
+      subscribe: vi.fn(() => gate),
+      dispose: vi.fn(),
+      onResult: vi.fn(),
+    };
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: vi.fn(function () { return proxy; }),
+      debounceMs: 10,
+      onWake: () => {},
+    });
+
+    const pending = manager.subscribe(sub);
+    manager.dispose(sub.id);
+    reject(new Error("RPC error 403: main key not found"));
+    await pending;
+
+    expect(manager.getPending()).toEqual([]);
+    expect(manager.getActive()).toEqual([]);
+  });
+});
+
 describe("insecureEndpointReason", () => {
   it("allows https anywhere and http only on loopback", () => {
     expect(insecureEndpointReason("http://localhost:3001/mcp")).toBeNull();
@@ -3434,5 +3531,22 @@ describe("insecureEndpointReason", () => {
     ).toBeNull();
     expect(insecureEndpointReason("ftp://executor/mcp")).toMatch(/http\(s\)/);
     expect(insecureEndpointReason("not a url")).toMatch(/not a valid URL/);
+  });
+});
+
+describe("closeWakerClient", () => {
+  it("closes the client and swallows a throwing close()", () => {
+    const close = vi.fn();
+    closeWakerClient({ close });
+    expect(close).toHaveBeenCalled();
+
+    const warn = vi.fn();
+    closeWakerClient(
+      { close: () => { throw new Error("already gone"); } },
+      { warn },
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("already gone"));
+    // A client that was never created is not an error.
+    expect(() => closeWakerClient(null)).not.toThrow();
   });
 });

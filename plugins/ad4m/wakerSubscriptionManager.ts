@@ -79,6 +79,18 @@ export class WakerSubscriptionManager {
   /** Subscriptions the executor rejected, waiting to be re-attempted. */
   private pendingSubscriptions = new Map<string, WakerSubscription>();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Cancellation tokens for in-flight `subscribe()` calls.
+   *
+   * `subscribe()` awaits `proxy.subscribe()` and `proxy.initialized`; a
+   * `dispose()` / `disposeAll()` landing during either await used to leave a
+   * live subscription behind, because nothing stopped the resumed call from
+   * registering the proxy in `proxies` / `activeSubscriptions` afterwards.
+   * `epoch` is bumped by `disposeAll()` (which cannot enumerate in-flight
+   * ids), `generations` per id by `dispose()` and by each new `subscribe()`.
+   */
+  private epoch = 0;
+  private generations = new Map<string, number>();
   private debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Per-subscription set of already-processed message addresses (for mention subs)
    *  or serialized result hash (for channel-messages subs). */
@@ -95,6 +107,18 @@ export class WakerSubscriptionManager {
     this.retryPendingMs = options.retryPendingMs ?? 30000;
   }
 
+  /** A token identifying this attempt at subscribing `id`. */
+  private beginAttempt(id: string): { epoch: number; gen: number } {
+    const gen = (this.generations.get(id) ?? 0) + 1;
+    this.generations.set(id, gen);
+    return { epoch: this.epoch, gen };
+  }
+
+  /** Whether this attempt has been superseded by a dispose or a newer one. */
+  private isStale(id: string, token: { epoch: number; gen: number }): boolean {
+    return token.epoch !== this.epoch || this.generations.get(id) !== token.gen;
+  }
+
   /**
    * Create a live SPARQL subscription.
    * If a subscription with the same id already exists, it is disposed first.
@@ -102,6 +126,7 @@ export class WakerSubscriptionManager {
   async subscribe(sub: WakerSubscription): Promise<void> {
     // Dispose existing subscription with same id if any
     this.dispose(sub.id, false);
+    const token = this.beginAttempt(sub.id);
 
     if (!this.QuerySubscriptionProxyCtor) {
       throw new Error("WakerSubscriptionManager: QuerySubscriptionProxy must be provided via constructor options");
@@ -127,6 +152,10 @@ export class WakerSubscriptionManager {
     }
     try {
       await proxy.subscribe();
+      if (this.isStale(sub.id, token)) {
+        try { proxy.dispose(); } catch {}
+        return;
+      }
       await proxy.initialized;
     } catch (err: any) {
       const msg = err?.message ?? String(err);
@@ -134,6 +163,9 @@ export class WakerSubscriptionManager {
         `[waker] ${sub.id}: subscription failed — ${msg}`,
       );
       try { proxy.dispose(); } catch {}
+      // A dispose that landed mid-attempt wins: don't re-queue something the
+      // caller has since asked us to forget.
+      if (this.isStale(sub.id, token)) return;
       // Remove from active state — it is not listening, so it must not be
       // reported as active or persisted as if it were.
       this.activeSubscriptions.delete(sub.id);
@@ -152,6 +184,10 @@ export class WakerSubscriptionManager {
             ? `. Not listening yet — re-attempting every ${Math.round(this.retryPendingMs / 1000)}s; check ad4m_list_waker_subscriptions.`
             : ""),
       );
+    }
+    if (this.isStale(sub.id, token)) {
+      try { proxy.dispose(); } catch {}
+      return;
     }
     this.pendingSubscriptions.delete(sub.id);
     this.logger.info(`[waker] ${sub.id}: subscription initialized successfully`);
@@ -264,6 +300,10 @@ export class WakerSubscriptionManager {
       }
     });
 
+    if (this.isStale(sub.id, token)) {
+      try { proxy.dispose(); } catch {}
+      return;
+    }
     this.proxies.set(sub.id, proxy);
     this.activeSubscriptions.set(sub.id, sub);
     this.persist();
@@ -296,7 +336,12 @@ export class WakerSubscriptionManager {
     this.logger.info(
       `[waker] re-attempting ${waiting.length} pending subscription(s)`,
     );
+    const epoch = this.epoch;
     for (const sub of waiting) {
+      // A disposeAll() between two awaits must stop the whole sweep, and a
+      // dispose() of this id must skip just it.
+      if (epoch !== this.epoch) return;
+      if (!this.pendingSubscriptions.has(sub.id)) continue;
       this.pendingSubscriptions.delete(sub.id);
       try {
         await this.subscribe(sub);
@@ -320,6 +365,8 @@ export class WakerSubscriptionManager {
    * @param persist — if false, skip calling onPersist (used during batch cleanup).
    */
   dispose(id: string, persist = true): void {
+    // Invalidate any subscribe() for this id that is still awaiting.
+    this.generations.set(id, (this.generations.get(id) ?? 0) + 1);
     const proxy = this.proxies.get(id);
     if (proxy) {
       try {
@@ -342,6 +389,9 @@ export class WakerSubscriptionManager {
 
   /** Dispose all active subscriptions and drop anything still pending. */
   disposeAll(): void {
+    // Bump the epoch first: in-flight subscribe() calls have no proxy in the
+    // map yet, so per-id invalidation alone cannot reach them.
+    this.epoch++;
     for (const [id] of this.proxies) {
       this.dispose(id, false);
     }
