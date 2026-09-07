@@ -63,6 +63,8 @@ use crate::ai_service::harness::provider::SideEffect;
 /// profiles → flows → subscriptions → neighbourhoods → auth → languages)
 /// for readability.
 pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
+    // ── docs.rs ─────────────────────────────────────────────────────
+    ("get_documentation", SideEffect::Read),
     // ── perspectives.rs ─────────────────────────────────────────────
     ("list_perspectives", SideEffect::Read),
     ("get_models", SideEffect::Read),

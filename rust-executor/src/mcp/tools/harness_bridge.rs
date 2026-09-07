@@ -103,6 +103,8 @@ impl Ad4mMcpHandler {
         }
 
         match name {
+            // ── docs.rs ─────────────────────────────────────────────────
+            "get_documentation" => dispatch_static_tool!(get_documentation),
             // ── perspectives.rs ─────────────────────────────────────────
             "list_perspectives" => dispatch_static_tool!(list_perspectives),
             "get_models" => dispatch_static_tool!(get_models),

@@ -26,6 +26,7 @@
 //!   with `dynamicClassTools`; always fed to the in-process harness)
 
 pub mod auth;
+pub mod docs;
 pub mod dynamic;
 pub mod flows;
 pub mod harness_bridge;
@@ -74,9 +75,23 @@ pub struct Ad4mMcpHandler {
     tool_router: ToolRouter<Self>,
 }
 
+/// What an MCP client sees in the `initialize` response. Kept short — it
+/// points at `get_documentation`, which carries the real text.
+pub(crate) const SERVER_INSTRUCTIONS: &str =
+    "AD4M executor: an agent-centric P2P knowledge graph. \
+If you are new to AD4M, call get_documentation(topic=\"overview\") first — it explains the \
+tool surface (describe_perspective + the generic instance_* tools, which take a class_name \
+parameter), the workflow and the rules for writing data that humans and other agents can \
+use; topic=\"architecture\" and topic=\"setup\" go deeper. Typical flow: authenticate (or \
+nothing, if the executor was started with the admin credential for you) -> list_perspectives \
+or neighbourhood_join_from_url -> describe_perspective -> instance_query / instance_transcript \
+to read, instance_create to write.";
+
 /// Tool names that can be called without authentication.
-/// These are the auth bootstrapping tools for multi-user mode.
-const AUTH_TOOLS: &[&str] = &[
+/// These are the auth bootstrapping tools for multi-user mode, plus the
+/// documentation (which is what tells a cold agent how to authenticate).
+pub(crate) const AUTH_TOOLS: &[&str] = &[
+    "get_documentation",
     "login_email",
     "signup",
     "verify_email_code",
@@ -104,6 +119,7 @@ impl ServerHandler for Ad4mMcpHandler {
                 icons: None,
                 website_url: Some("https://ad4m.dev".to_string()),
             },
+            instructions: Some(SERVER_INSTRUCTIONS.to_string()),
             ..Default::default()
         }
     }
@@ -270,6 +286,8 @@ impl Ad4mMcpHandler {
             .with_route((Self::add_child_tool_attr(), Self::add_child))
             .with_route((Self::get_children_tool_attr(), Self::get_children))
             .with_route((Self::execute_commands_tool_attr(), Self::execute_commands))
+            // docs.rs
+            .with_route((Self::get_documentation_tool_attr(), Self::get_documentation))
             // flows.rs
             .with_route((Self::add_flow_tool_attr(), Self::add_flow))
             .with_route((Self::get_flows_tool_attr(), Self::get_flows))

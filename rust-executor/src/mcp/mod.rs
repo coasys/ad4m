@@ -12,6 +12,7 @@
 //! - [`server`] — HTTP transport setup and auth middleware
 //! - [`shacl`] — SHACL class/property parsing from perspective links
 //! - `tools` — MCP tool definitions (static + dynamic SHACL-generated)
+//! - `docs/` — the markdown served by the `get_documentation` tool
 
 pub mod server;
 pub mod shacl;
