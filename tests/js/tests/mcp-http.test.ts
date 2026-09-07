@@ -1751,7 +1751,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }
         });
 
-        it("should gracefully handle subscription to non-existent perspective without throwing", async function() {
+        // A subscription the executor refuses used to resolve silently, which
+        // told the caller it was listening when it was not — an agent then sat
+        // waiting for wake events that could never arrive. It now reports the
+        // failure and keeps the subscription pending for retry. The sibling
+        // test below still guards the crash mode that silence was hiding.
+        it("should report a refused subscription instead of claiming success", async function() {
             this.timeout(15000);
 
             var wakeCount = 0;
@@ -1763,19 +1768,31 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 onWake: function() { wakeCount++; },
             });
 
-            // Subscribe to a perspective UUID that doesn't exist — should NOT throw
             var bogusId = "00000000-0000-0000-0000-000000000000";
-            await manager.subscribe({
-                id: "test-stale-" + Date.now(),
-                type: "mention" as const,
-                perspective: bogusId,
-                channel: "",
-                query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
-            });
+            var subscriptionId = "test-stale-" + Date.now();
+            var error: any = null;
+            try {
+                await manager.subscribe({
+                    id: subscriptionId,
+                    type: "mention" as const,
+                    perspective: bogusId,
+                    channel: "",
+                    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
+                });
+            } catch (e) {
+                error = e;
+            }
 
-            // Should not have woken or added to active subscriptions
+            expect(error, "subscribe must reject when the executor refuses it").to.not.be.null;
+            expect(String(error.message)).to.contain(bogusId);
+            expect(String(error.message)).to.contain("re-attempting");
+
+            // Refused, so: nothing woke, and it is queued for retry rather than
+            // silently dropped.
             await sleep(500);
             expect(wakeCount).to.equal(0, "onWake should not fire for non-existent perspective");
+            expect(manager.getPending().map(function(p: any) { return p.id; }))
+                .to.contain(subscriptionId, "a refused subscription must stay pending for retry");
             manager.disposeAll();
         });
 
