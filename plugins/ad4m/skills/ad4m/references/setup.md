@@ -125,7 +125,7 @@ as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.
 - `login_email` (multi-user) → `User key not found on executor` — reads like a wrong password. It's actually "nobody has unlocked this node yet."
 - `request_capability` → `generate_jwt` (capability flow) → `main key not found` — the capability bootstrap is equally blocked until unlock.
 
-If you're the executor's operator and don't have REST/CLI access handy, the same unlock is available over the WebSocket RPC API (see below): `agent.unlock` with the agent's passphrase. If you're a third party hitting either error, this isn't something to retry your way around — someone with operator access needs to unlock the node first.
+If you're the executor's operator and don't have CLI access handy, the same unlock is available over the WebSocket RPC API (see below): `agent.unlock` with the agent's passphrase. If you're a third party hitting either error, this isn't something to retry your way around — someone with operator access needs to unlock the node first.
 
 **Test-only mode, not a security bug:** on a node with no admin credential configured (neither `AD4M_ADMIN_CREDENTIAL` nor `--admin-credential`), an empty token resolves to full (`ALL_CAPABILITY`) access on the WS-RPC API, including `agent.unlock` — found live 2026-09-06 recovering a test executor. This is intentional, for local/test convenience, not a gap to fix. **Never run a node without an admin credential set except on loopback/local test setups** — on anything reachable by another user or over a network, this means anyone can unlock and fully control the node.
 
@@ -294,7 +294,7 @@ The plugin manages MCP authentication internally — credentials are not sent in
 
 ## WebSocket RPC API (Fallback)
 
-**Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging, and — see Step 4 — unlocking a wallet when you lack REST/CLI access).
+**Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging, and — see Step 4 — unlocking a wallet when you lack CLI access).
 
 Connect to `ws://localhost:12000/api/v1/ws` (loopback or through an SSH tunnel; `wss://` behind your TLS proxy when remote) and send JSON-RPC messages:
 
@@ -339,5 +339,5 @@ Remember the test-only behavior from Step 4: an empty token resolves to full acc
 | Waker not firing | WS not accessible or bad query | Check `ws://localhost:12000/api/v1/ws/events` and waker logs |
 | Messages "uninitialized" | Property set after creation (race) | Pass all initial values at creation — `instance_create(..., properties={...})` (static tools) or `{class}_create` with every property up front (legacy dynamic tools). Never a create followed by a separate set call. |
 | Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |
-| `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design** — see Step 4. The node hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: run `agent.unlock` (REST, CLI, or WS-RPC) with the agent's passphrase. If you're a third party: this needs the node's operator, not a client-side retry. |
+| `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design** — see Step 4. The node hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: unlock with the agent's passphrase — `ad4m agent unlock` on the CLI, or `agent.unlock` over WS-RPC (there is no REST route for it). If you're a third party: this needs the node's operator, not a client-side retry. |
 | `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or the subscription shows under a **Pending** section in `list_waker_subscriptions` instead of active | Normal during node startup; also correct if the node genuinely hasn't been unlocked yet (row above). From plugin build `ff64207e1`, the plugin retries the registration every 30s automatically rather than pretending to have succeeded. | Nothing to do if Pending clears within a minute or two. If it doesn't clear, the cause is almost always the node not being unlocked — an operator problem, not a client-side one. (Builds before `0ac29fed6` had a worse bug here: a silent false "success" with no Pending state and no retry at all — on an old build, always confirm with `list_waker_subscriptions`.) |
