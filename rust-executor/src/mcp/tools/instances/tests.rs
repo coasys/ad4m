@@ -1711,3 +1711,96 @@ async fn legacy_literal_ids_round_trip_through_the_instance_tools() {
         "{bad}"
     );
 }
+
+/// A class whose collection property declares a *custom* `resolveLanguage`
+/// (an expression-language address, not "literal"): every member is stored
+/// as the `expression_create` URL that language returns, never as the value
+/// the caller passed.
+const ALBUM_SDNA: &str = r#"{
+  "target_class": "flux://Album",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"flux://Album"}
+  ],
+  "properties": [
+    {"path":"flux://album_title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"flux://album_title","target":"value"}]},
+    {"path":"flux://album_photo","name":"photos","collection":true,"writable":true,
+     "resolve_language":"QmPhotoLanguageAddress",
+     "adder":[{"action":"addLink","source":"this","predicate":"flux://album_photo","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"flux://album_photo","target":"value"}]}
+  ]
+}"#;
+
+/// `instance_remove_from_collection` used to answer `{"success": true,
+/// "links_removed": 0}` for a collection whose property has a custom
+/// `resolveLanguage` — the stored target is an expression address, so no
+/// value-based match can ever hit, and the tool silently contradicted its
+/// own "Undo with instance_remove_from_collection" promise. It now says
+/// what the members actually are.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_from_a_custom_resolve_language_collection_is_not_a_silent_no_op() {
+    let (handler, uuid, _guard) = setup_with(&[("Album", ALBUM_SDNA)], false).await;
+
+    let album = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Album".into(),
+                properties: Some(props(&[("title", json!("Holodeck run 3"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(album["created"], true, "{album}");
+    let album_uri = album["base_uri"].as_str().unwrap().to_string();
+
+    // Stand in for what `expression_create` on the custom language stores:
+    // an address that has nothing to do with the value passed to
+    // instance_add_to_collection.
+    let stored = "QmPhotoLanguageAddress://QmPhotoExpressionHash";
+    let added = parse(
+        &handler
+            .add_link(Parameters(crate::mcp::tools::perspectives::AddLinkParams {
+                perspective_id: uuid.clone(),
+                source: album_uri.clone(),
+                predicate: "flux://album_photo".into(),
+                target: stored.into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["success"], true, "{added}");
+
+    let removed = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Album".into(),
+                base_uri: album_uri.clone(),
+                collection: "photos".into(),
+                item_uri: "ad4m://obj/thephotoitself".into(),
+            }))
+            .await,
+    );
+    let err = removed["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an error, got: {removed}"));
+    assert!(err.contains("QmPhotoLanguageAddress"), "{err}");
+    assert!(err.contains(stored), "{err}");
+    assert!(err.contains("instance_get"), "{err}");
+
+    // Passing the address instance_get actually lists does remove it.
+    let ok = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Album".into(),
+                base_uri: album_uri,
+                collection: "photos".into(),
+                item_uri: stored.into(),
+            }))
+            .await,
+    );
+    assert_eq!(ok["success"], true, "{ok}");
+    assert_eq!(ok["links_removed"], 1, "{ok}");
+}

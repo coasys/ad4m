@@ -314,6 +314,7 @@ impl Ad4mMcpHandler {
                 ))
             }
         };
+        let stored_targets: Vec<String> = links.iter().map(|l| l.data.target.clone()).collect();
         let mut removed = 0usize;
         for link in links {
             if !target_matches(&link.data.target, wanted, &encoded) {
@@ -330,6 +331,32 @@ impl Ad4mMcpHandler {
                         removed,
                         e
                     ))
+                }
+            }
+        }
+
+        // A collection whose property declares a custom `resolveLanguage`
+        // stores each member as an `expression_create` address, not as the
+        // value the caller passed to instance_add_to_collection — so nothing
+        // here can match by value and "0 links removed, success" would be a
+        // silent lie. Say what the stored addresses are instead.
+        if removed == 0 && !stored_targets.is_empty() {
+            if let Ok(Some(lang)) = perspective
+                .get_resolve_language_from_shacl(&class_name, &info.name())
+                .await
+            {
+                if lang != "literal" {
+                    return error_json(format!(
+                        "'{}' is not how collection '{}' stores its members: the property \
+                         declares resolveLanguage '{}', so each member is an expression \
+                         address created at write time, not the value passed to \
+                         instance_add_to_collection. Pass item_uri exactly as instance_get \
+                         lists it. Current members: {}.",
+                        wanted,
+                        info.name(),
+                        lang,
+                        stored_targets.join(", ")
+                    ));
                 }
             }
         }
