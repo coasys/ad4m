@@ -12,7 +12,7 @@
 
 use super::{
     class_properties, error_json, find_property, link_target, resolve_class, run_model_query,
-    Ad4mMcpHandler, HAS_CHILD, MAX_QUERY_LIMIT,
+    Ad4mMcpHandler, PropView, HAS_CHILD, MAX_QUERY_LIMIT,
 };
 use crate::languages::LanguageController;
 use crate::types::Agent;
@@ -110,26 +110,48 @@ impl Ad4mMcpHandler {
 
         // Which property to print: the caller's choice, else `body`, else the
         // class's identity property — and a clear error if none applies.
+        // Only single-valued, non-flag properties qualify (a collection
+        // renders as an array, a flag is a class marker), so the lookup is
+        // restricted to exactly the set the error message offers.
         let infos = class_properties(&shape);
-        let scalar_names: Vec<&str> = infos
+        let scalars: Vec<PropView<'_>> = infos
             .iter()
             .filter(|i| !i.flag() && !i.collection())
-            .map(|i| i.name())
+            .copied()
             .collect();
+        let scalar_names: Vec<&str> = scalars.iter().map(|i| i.name()).collect();
         let text_property = match p.text_property.as_deref().map(str::trim) {
-            Some(name) if !name.is_empty() => match find_property(&infos, name) {
+            Some(name) if !name.is_empty() => match find_property(&scalars, name) {
                 Some(info) => info.name().to_string(),
                 None => {
+                    let problem = match find_property(&infos, name) {
+                        Some(info) if info.collection() => format!(
+                            "text_property '{}' on class '{}' is a collection, not a \
+                             single-valued property",
+                            info.name(),
+                            class_name
+                        ),
+                        Some(info) => format!(
+                            "text_property '{}' on class '{}' is a class marker, not a \
+                             text property",
+                            info.name(),
+                            class_name
+                        ),
+                        None => format!(
+                            "Unknown text_property '{}' on class '{}'",
+                            name, class_name
+                        ),
+                    };
                     return error_json(format!(
-                        "Unknown text_property '{}' on class '{}'. Single-valued properties: {}",
-                        name,
-                        class_name,
+                        "{}. Single-valued properties: {}",
+                        problem,
                         scalar_names.join(", ")
-                    ))
+                    ));
                 }
             },
             _ => {
-                match find_property(&infos, "body").or_else(|| infos.iter().find(|i| i.identity()))
+                match find_property(&scalars, "body")
+                    .or_else(|| scalars.iter().find(|i| i.identity()))
                 {
                     Some(info) => info.name().to_string(),
                     None => {

@@ -1235,6 +1235,28 @@ async fn instance_transcript_reads_children_chronologically() {
     let err = bad_prop["error"].as_str().unwrap();
     assert!(err.contains("subject") && err.contains("body"), "{err}");
 
+    // A collection is a property of the class but not a text property: the
+    // error says so and offers only the single-valued ones.
+    let collection_prop = parse(
+        &handler
+            .instance_transcript(Parameters(InstanceTranscriptParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                parent: "ad4m://self".into(),
+                limit: None,
+                text_property: Some("messages".into()),
+            }))
+            .await,
+    );
+    let err = collection_prop["error"].as_str().unwrap();
+    assert!(err.contains("'messages'") && err.contains("collection"), "{err}");
+    assert!(err.contains("name") && err.contains("description"), "{err}");
+    assert!(
+        !err["Single-valued properties".len()..].contains("messages")
+            || err.rfind("messages").unwrap() < err.find("Single-valued").unwrap(),
+        "collections must not be offered as text properties: {err}"
+    );
+
     let empty = handler
         .instance_transcript(Parameters(InstanceTranscriptParams {
             perspective_id: uuid.clone(),
