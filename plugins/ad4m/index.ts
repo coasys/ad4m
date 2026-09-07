@@ -735,7 +735,7 @@ Notes:
         const result = await callToolWithRetry("generate_waker_query", {
           perspective_id: params.perspective_id,
           class_name: "Message",
-          parent_address: params.expression_address,
+          parent: params.expression_address,
         });
         const data = extractMcpResultData(result);
 
