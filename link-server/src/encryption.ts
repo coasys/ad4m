@@ -2,25 +2,15 @@ import { hkdfSync, randomBytes as nodeRandomBytes } from "node:crypto";
 import * as ed from "@noble/ed25519";
 import { x25519 } from "@noble/curves/ed25519.js";
 import { gcm } from "@noble/ciphers/aes.js";
-import type { LinkServerDB } from "./db.js";
 
 /**
- * E2E encryption for rooms.
+ * E2E encryption helpers for rooms.
  *
- * Trust model: the server generates each room's AES-256-GCM symmetric key
- * (so it can seal it to every current member's derived X25519 public key
- * in one pass) but never persists the plaintext key — only the per-member
- * sealed copies (room_keys table) are stored. From that point on the
- * server only ever handles ciphertext for that room's link data.
- *
- * HONEST LIMIT: the server generates the plaintext room key in memory at
- * every rotation. An honest operator cannot read room data after the key
- * leaves memory — but a malicious operator could retain every key it
- * generates. The client-side sealing primitives exist (see
- * `sealRoomKeyForRecipient` in server-link-language), so moving key
- * generation to the admin client would close this gap. Until then, the
- * guarantee covers at-rest compromise and honest-but-curious operators,
- * not a malicious operator. See README "Known limitations" for detail.
+ * Trust model: the admin's language client generates each room's
+ * AES-256-GCM symmetric key, seals it to every current member's X25519
+ * public key, and POSTs only the sealed envelopes to the server. The
+ * server never sees the plaintext key — it stores sealed copies in the
+ * `room_keys` table and relays them to members via `GET /keys`.
  *
  * Key wrapping uses a one-shot ECIES-style construction: an ephemeral
  * X25519 keypair does ECDH with the recipient's X25519 public key, the
@@ -28,6 +18,11 @@ import type { LinkServerDB } from "./db.js";
  * info = domain-separated tag) to produce the AES-256-GCM key that seals
  * the room key. This matches the server-link-language's `deriveSealKey`
  * so sealed keys can cross the wire between server and language client.
+ *
+ * `generateRoomKey` and `encryptRoomKeyForRecipient` remain exported for
+ * use in tests (verifying sealed envelopes round-trip correctly). In
+ * production, key generation and sealing happen exclusively client-side
+ * in the server-link-language.
  */
 
 const { bytesToHex, hexToBytes } = ed.etc;
@@ -113,71 +108,3 @@ export function decryptRoomKeyWithX25519(
 }
 
 
-export interface MemberMissingKeys {
-  did: string;
-  missingVersions: number[];
-  x25519PublicKey: string;
-}
-
-export interface RotateResult {
-  version: number;
-  recipients: string[];
-  /** Members in the ACL who lack one or more historical key versions. */
-  membersNeedingHistoricalKeys: MemberMissingKeys[];
-}
-
-/**
- * Generates a fresh room key, seals it to every current ACL member that
- * has a registered X25519 public key, stores the sealed copies, marks the
- * room E2E-enabled, and discards the plaintext key. This serves as both
- * "enable E2E" (first call) and "rotate" (subsequent calls).
- *
- * Key ring model: each rotation creates a new version. Members receive
- * the new version sealed to their X25519 public key. Historical versions
- * remain in `room_keys` — `GET /rooms/:roomId/keys` returns all versions
- * a member has access to, so they can decrypt links encrypted under any
- * past version they were present for.
- *
- * Forward secrecy: a removed member keeps versions 1–N (already
- * delivered) but never receives N+1. New members added after a rotation
- * can only decrypt links from the version they first received onward.
- *
- * Members whose X25519 public key has not yet been registered are
- * skipped — they receive their sealed copy on the next rotation after
- * they authenticate.
- */
-export function rotateRoomKey(db: LinkServerDB, roomId: string): RotateResult {
-  const aclRows = db.getAcl(roomId);
-  const roomKey = generateRoomKey();
-  const version = db.getLatestKeyVersion(roomId) + 1;
-  const recipients: string[] = [];
-  for (const row of aclRows) {
-    if (!row.x25519_public_key) continue;
-    const recipientPub = hexToBytes(row.x25519_public_key);
-    const encrypted = encryptRoomKeyForRecipient(roomKey, recipientPub);
-    db.addRoomKey(roomId, row.did, version, JSON.stringify(encrypted));
-    recipients.push(row.did);
-  }
-  db.setE2eEnabled(roomId, true);
-
-  // Detect members missing historical versions so the admin can grant them.
-  const membersNeedingHistoricalKeys: MemberMissingKeys[] = [];
-  if (version > 1) {
-    const allVersions = db.getAllMemberKeyVersions(roomId);
-    const expectedVersions = Array.from({ length: version }, (_, i) => i + 1);
-    for (const row of aclRows) {
-      if (!row.x25519_public_key) continue;
-      const memberVersions = new Set(allVersions.get(row.did) ?? []);
-      const missing = expectedVersions.filter((v) => !memberVersions.has(v));
-      if (missing.length > 0) {
-        membersNeedingHistoricalKeys.push({
-          did: row.did,
-          missingVersions: missing,
-          x25519PublicKey: row.x25519_public_key,
-        });
-      }
-    }
-  }
-
-  return { version, recipients, membersNeedingHistoricalKeys };
-}

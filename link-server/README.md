@@ -98,17 +98,21 @@ The server handles storage and sync — it does not speak AD4M on its own. The c
 
 ### End-to-end encryption (optional)
 
-Encrypt link data so it cannot be read at rest or during transit:
+E2E encryption uses **true client-side key generation**: the admin's language client generates each room key locally, seals it to every member's X25519 public key via ECIES (ephemeral X25519 ECDH + HKDF-SHA256 + AES-256-GCM), and uploads only the sealed envelopes. The server never sees the plaintext key.
 
 ```bash
-# Enable or rotate the room key (admin only)
+# Enable or rotate the room key (admin only).
+# The client generates the key, fetches ACL for X25519 public keys,
+# seals the key to each member, and POSTs only sealed envelopes:
 curl -X POST https://your-server:3456/rooms/YOUR_ROOM/keys/rotate \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"keys": [{"did": "did:key:z6Mk...", "encryptedKey": {"ephemeralPublicKey": "...", "nonce": "...", "ciphertext": "..."}}]}'
 ```
 
 After rotation, each member receives a sealed copy of the new room key the next time they connect or refresh their key ring. Once a room has E2E enabled, the server rejects plaintext commits — a client without keys cannot write until it receives them.
 
-After adding a new member to an encrypted room, run `keys/rotate` again so they receive the new version. The admin's language instance then automatically detects members missing historical key versions and re-seals those versions for them (see `performAdminKeyGrants` in server-link-language).
+After adding a new member to an encrypted room, rotate again so they receive the new version. The admin's language instance then automatically detects members missing historical key versions and re-seals those versions for them (see `performAdminKeyGrants` in server-link-language).
 
 ## How it works
 
@@ -134,7 +138,7 @@ GET  /rooms/:roomId/render    -> { links: LinkExpression[], revision }
 GET  /rooms/:roomId/revision  -> { revision, sequence }
 GET  /rooms/:roomId/peers     -> { peers: string[] }               (currently online agents)
 POST /rooms/:roomId/acl       { action: "add"|"remove", did } (admin only)
-GET  /rooms/:roomId/acl       -> { admin, members: string[] }
+GET  /rooms/:roomId/acl       -> { admin, members: [{did, x25519PublicKey}] }
 GET  /rooms/:roomId/keys       -> { keys: [...], e2e_enabled } | 404 (no E2E)
 GET  /rooms/:roomId/keys/missing  (admin only) -> { membersNeedingHistoricalKeys }
 POST /rooms/:roomId/keys/rotate (admin only) -> { version, recipients, membersNeedingHistoricalKeys }
@@ -163,32 +167,27 @@ Tests boot a real server per test (random port, temp SQLite file) and drive it o
 
 ## Known limitations
 
-### E2E encryption — trust model and future requirements
+### E2E encryption — trust model and remaining gaps
 
-The current E2E implementation protects link data against **at-rest compromise
-and passive observation** (an honest server operator cannot read room data after
-the plaintext key leaves memory). It does **not** protect against a
-**malicious server operator**:
+Key generation now happens exclusively client-side — the admin generates each
+room key locally, seals it to members' X25519 public keys, and uploads only
+sealed envelopes. The server never touches plaintext key material. This closes
+the most significant trust gap (server-side key generation).
 
-- **Server-side key generation.** The server generates each room key and seals
-  it to members in one pass. An honest server discards the plaintext key
-  immediately — but a malicious operator could retain every key it generates.
-  The client-side sealing primitives already exist (see `sealRoomKeyForRecipient`
-  in server-link-language), so moving key generation to the admin client (admin
-  generates, seals to each member, uploads sealed copies; server only stores)
-  would close this gap without new primitives.
+**Remaining gap:**
+
 - **Unsigned X25519 public key.** The DID challenge signature covers only the
   nonce, not the `x25519PublicKey` field sent alongside it. A malicious server
-  could substitute its own X25519 key for a member's during the rotate response
-  (`membersNeedingHistoricalKeys`), causing the admin to seal historical keys
-  to the server instead. Fix: require the client to send
+  could substitute its own X25519 key for a member's during the ACL or
+  `membersNeedingHistoricalKeys` response, causing the admin to seal keys
+  to the server instead of the real member. Fix: require the client to send
   `signature = sign(x25519PublicKey)` at registration, store it, return it in
-  rotate/missing-keys responses, and have the admin verify the DID signature before
+  ACL/missing-keys responses, and have the admin verify the DID signature before
   sealing. The signing capability already exists.
 
-Until these are addressed, the E2E guarantee should be understood as
-"protection against later compromise and honest-but-curious operators," not
-"protection against the operator."
+With this gap open, the E2E guarantee protects against passive observation
+and later compromise, but not against an actively malicious server operator
+who tampers with X25519 public keys at registration time.
 
 ### E2E encryption — other future requirements
 

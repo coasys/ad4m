@@ -145,6 +145,38 @@ export async function fetchAcl(config: RoomConfig, token: string): Promise<AclRe
     return { admin: res.admin ?? "", members: res.members ?? [] };
 }
 
+// ---------------------------------------------------------------------------
+// E2E key rotation (client-side — true E2E, server never sees plaintext)
+// ---------------------------------------------------------------------------
+
+export interface RotateKeyEntry {
+    did: string;
+    encryptedKey: { ephemeralPublicKey: string; nonce: string; ciphertext: string };
+}
+
+export interface RotateResponse {
+    version: number;
+    recipients: string[];
+}
+
+/**
+ * Rotates the room's E2E key. The caller generates the room key locally,
+ * seals it to each member's X25519 public key, and sends only the sealed
+ * envelopes. The server never touches the plaintext key.
+ */
+export async function rotateKeys(
+    config: RoomConfig,
+    token: string,
+    keys: RotateKeyEntry[],
+): Promise<RotateResponse> {
+    return request<RotateResponse>(
+        roomUrl(config, "/keys/rotate"),
+        "POST",
+        jsonHeaders(token),
+        JSON.stringify({ keys }),
+    );
+}
+
 /**
  * Fetches the room's E2E keys for this agent.
  *
@@ -204,7 +236,7 @@ export async function fetchMissingKeys(config: RoomConfig, token: string): Promi
     return { membersNeedingHistoricalKeys: res.membersNeedingHistoricalKeys ?? [] };
 }
 
-/** Returns the room's admin DID and full member list. */
+/** Returns the room's admin DID and full member list (with X25519 public keys). */
 export async function fetchAclInfo(config: RoomConfig, token: string): Promise<AclResponse> {
     const res = await request<Partial<AclResponse>>(roomUrl(config, "/acl"), "GET", jsonHeaders(token));
     return { admin: res.admin ?? "", members: res.members ?? [] };

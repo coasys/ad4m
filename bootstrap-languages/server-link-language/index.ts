@@ -24,6 +24,7 @@ import { WsClient } from "./src/ws-client.js";
 import {
     buildKeyRing,
     deriveX25519KeyPair,
+    generateRoomKey,
     hexToBytes,
     sealRoomKeyForRecipient,
     type KeyRing,
@@ -190,6 +191,50 @@ async function performAdminKeyGrants(): Promise<void> {
         }
     } catch (err) {
         console.error("[server-link-language] admin auto-grant failed (non-fatal):", err);
+    }
+}
+
+/**
+ * Client-side key rotation — generates the room key locally, seals it to
+ * every ACL member's X25519 public key, and sends only the sealed
+ * envelopes to the server. The server never touches plaintext key
+ * material. Exposed for programmatic use but currently called from the
+ * language's init flow or admin tooling.
+ */
+async function performRotation(): Promise<void> {
+    if (!isRoomAdmin) return;
+    const config = getConfig();
+    try {
+        const token = await auth.getValidToken();
+        const aclRes = await api.fetchAclInfo(config, token);
+
+        const roomKey = generateRoomKey();
+
+        const sealedKeys: api.RotateKeyEntry[] = [];
+        for (const member of aclRes.members) {
+            if (!member.x25519PublicKey) continue;
+            const recipientPub = hexToBytes(member.x25519PublicKey);
+            sealedKeys.push({
+                did: member.did,
+                encryptedKey: sealRoomKeyForRecipient(roomKey, recipientPub),
+            });
+        }
+
+        if (sealedKeys.length === 0) {
+            console.log("[server-link-language] no members with X25519 keys — skipping rotation");
+            return;
+        }
+
+        const result = await api.rotateKeys(config, token, sealedKeys);
+        console.log(
+            `[server-link-language] client-side key rotation complete: version ${result.version}, ` +
+            `${result.recipients.length} recipient(s)`,
+        );
+
+        await setupKeyRing();
+    } catch (err) {
+        console.error("[server-link-language] key rotation failed:", err);
+        throw err;
     }
 }
 
