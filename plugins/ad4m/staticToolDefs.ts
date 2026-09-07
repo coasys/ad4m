@@ -711,7 +711,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_documentation",
-    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format in depth. No authentication needed.",
+    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the ad4m://has_child tree, the Flux data model (channels, messages, posts, tasks), authoring subject classes with add_model, and the traps that cost the most time. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format in depth. No authentication needed.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetDocumentationParams",
@@ -719,7 +719,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
       "type": "object",
       "properties": {
         "topic": {
-          "description": "Which document: \"overview\" (start here) or \"architecture\"",
+          "description": "Which document: \"overview\" (start here), \"architecture\" or \"usage\"",
           "$ref": "#/$defs/DocTopic"
         }
       },
@@ -739,6 +739,11 @@ export const STATIC_TOOL_DEFS: McpTool[] =
               "description": "Perspectives, links, languages, neighbourhoods, and the SHACL subject\nclass (social DNA) format in detail.",
               "type": "string",
               "const": "architecture"
+            },
+            {
+              "description": "How to actually use the tools: reading and writing instances, the tree,\nthe Flux data model, authoring subject classes, and the common traps.",
+              "type": "string",
+              "const": "usage"
             }
           ]
         }

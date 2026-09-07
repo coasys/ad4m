@@ -19,11 +19,11 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 
 **Your guaranteed default native surface (as of this writing):**
 
-- `get_documentation` — the executor's own docs (`overview` / `architecture`) as markdown, no auth needed — the cold-start entry point (see below)
+- `get_documentation` — the executor's own docs (`overview` / `usage` / `architecture`) as markdown, no auth needed — the cold-start entry point (see below)
 - `describe_perspective` — the schema of every registered class, as data
 - `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — read/write any subject class by name
 - `instance_transcript` — the newest N instances of one class under a parent as a readable transcript (the way to read a channel, see Rule 6)
-- `add_child` / `get_children` — the raw `ad4m://has_child` tree, class-agnostic (see "Tree structure")
+- `add_child` / `get_children` — the raw `ad4m://has_child` tree, class-agnostic (`get_children` takes `parent`, not `id` — see `ad4m_get_documentation(topic="usage")`)
 - `add_link` / `query_links` — raw link access (rarely needed, see Rule 4)
 - `neighbourhood_join_from_url` / `neighbourhood_publish_from_perspective`
 - `add_perspective` / `list_perspectives`
@@ -37,13 +37,15 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 
 **NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). If you need one of these, use the direct-MCP fallback in Rule 3c.
 
-**Gone from the executor entirely (not just un-bridged):** `get_children_body_parsed` and the whole `*_subject` family (`query_subjects`, `create_subject`, `get_subject_children`, `remove_from_collection`, …). Their jobs moved to `instance_transcript` and the `instance_*` tools; `add_child` / `get_children` kept their names but take `parent` / `child` — there is no `parent_address` anywhere on the static surface. Old memories or notes that mention those names are describing a tool that no longer exists.
+**Gone from the executor entirely (not just un-bridged):** `get_children_body_parsed`, `infer`, `get_models`, and the whole `*_subject` family (`query_subjects`, `create_subject`, `get_subject_children`, `remove_from_collection`, …). Their jobs moved to `instance_transcript` and the `instance_*` tools; `add_child` / `get_children` kept their names but take `parent` / `child` — there is no `parent_address` anywhere on the static surface. Old memories or notes that mention those names are describing a tool that no longer exists.
 
 The whole multi-user onboarding path — `signup` → `verify_email_code` → `login_email` → `set_agent_profile` — is native, so you never need the fallback just to get an identity. Many test/dev executors skip verification even though `signup` says "check your email"; read the `signup` response rather than assuming either way.
 
 Call `ad4m_get_sample_config` any time you need to see the exact config shape for your mode — it's native and self-documenting, no need to guess field names.
 
-**Cold start — when this skill is all you have:** call `ad4m_get_documentation(topic="overview")` first. It needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you. Setup — getting, running, unlocking an executor — is deliberately not served there (you need it before the tools work): that is `references/setup.md` in this skill.
+**Cold start — when this skill is all you have:** call `ad4m_get_documentation(topic="overview")` first. It needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="usage"` is the working guide — reading and writing instances, the child tree, the Flux data model, authoring subject classes, and the traps. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you.
+
+**This skill is deliberately the OpenClaw-specific half only** — the plugin's tool surface, setup, auth, the waker. Everything that is general AD4M usage lives in the executor's own docs, so it is reachable even in a session where this skill was never loaded. Setup — getting, running, unlocking an executor — is not served there either (you need it before the tools work): that is `references/setup.md` in this skill.
 
 ---
 
@@ -156,83 +158,23 @@ Some test/dev executors don't enforce email verification even though `signup` sa
 
 ### 4. Work on the level of classes, not links
 
-Work at the **class/model level**, not raw links. AD4M's type system (SHACL subject classes) lets you register, write, query, and update structured data types instead of juggling triples directly.
-
-**Use `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` (and `instance_transcript` for reading) with a `class_name` parameter.** These replace the old per-class dynamic tools (`ad4m_message_create`, `ad4m_channel_set_name`, etc.) as your default vocabulary — see Rule 9 for when the old tools still apply.
-
-**Why classes over raw links:** `add_link` writes exactly the triple you give it — no concept of "this one particular message" vs. "this text." Link directly against content and two entities with identical property values become indistinguishable. Subject classes fix this because every instance gets its own randomly-generated, content-independent id the moment it's created — that id, not the property values, is what makes it unique. Full explanation in `ad4m_get_documentation(topic="architecture")`, section "Links Alone Don't Give You Uniqueness".
-
-**Field name trap:** the static tools use `base_uri` for an instance's id (optional on `instance_create`, required elsewhere). The legacy per-class tools (Rule 9) use `expression_address` for the same concept. **These are not interchangeable names** — using the wrong one for the surface you're on will fail confusingly.
+Use the `instance_*` tools with a `class_name`, not `add_link`. Why, and the `base_uri` vs `expression_address` trap: `ad4m_get_documentation(topic="usage")`.
 
 ### 5. Discover the schema before writing
 
-```
-ad4m_describe_perspective(perspective_id) → every class: properties (name, type, required, cardinality),
-                                             collections, flows (state machines)
-```
-
-Call this right after joining a neighbourhood or adding a perspective. Pass a `name` from the returned `classes` array as `class_name` to any `instance_*` call. Every write is validated against this schema — a rejection names the property, expected type, and cardinality, so you don't need to memorize the shape, just fix what the error tells you.
-
-Property order in the returned `properties`/`collections` arrays is not declaration order and shouldn't be relied on — match by `name`, not position.
+`ad4m_describe_perspective(perspective_id)` before your first write in a perspective. Details: `ad4m_get_documentation(topic="usage")`.
 
 ### 6. Creating and reading instances
 
-```
-instance_create(perspective_id, class_name="Message", properties={"body": "Hello!"}, parent="<channel-id>")
-  → creates AND adds as a child of parent in one call. base_uri auto-generated if omitted.
-
-instance_query(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
-  → instances that are children of parent, as raw property maps (id, author, timestamp, one key per property).
-    There is NO order parameter: results come oldest-first, and limit keeps the OLDEST N — so this is
-    not how you read "the latest messages" (use instance_transcript). Paginate with offset; total_count
-    is the full match count. filter supports exact match, IN, operators ({"gt":5}, {"contains":"x"}),
-    OR/AND/NOT combinators.
-
-instance_transcript(perspective_id, class_name="Message", parent="<channel-id>", limit=20)
-  → the NEWEST 20 instances under parent, presented oldest-to-newest as a plain-text transcript:
-    timestamp, author display name and DID, and the text property (body by default; override with
-    text_property). One call, no id juggling — read channels with this, not with instance_query.
-
-instance_get(perspective_id, class_name="Message", base_uri="<id>")
-  → one instance, fully hydrated.
-
-instance_update(perspective_id, class_name="Task", base_uri="<id>", properties={"status": "done"})
-  → single-valued properties only; collections change via instance_add_to_collection /
-    instance_remove_from_collection (removing only drops the membership link — the item survives).
-```
-
-**Always pass properties at creation time — never create, then set.** Setting a property in a second call after `instance_create` causes a Holochain gossip race (remove+re-add can arrive out of order on other nodes, making the instance appear "uninitialized" to peers). This was true for the old `{class}_set_body` pattern and is equally true here: never call `instance_update` immediately after `instance_create` for a field you could have passed the first time.
+`instance_create` / `instance_query` / `instance_transcript` / `instance_get` / `instance_update`, their exact parameters, and the never-create-then-set gossip race: `ad4m_get_documentation(topic="usage")`.
 
 ### 7. Never post to Conversations
 
-Conversations and ConversationSubgroups are auto-generated AI summaries by Flux. **Only create Messages as children of Channels.**
+Conversations are Flux's auto-generated AI summaries — only create Messages as children of Channels. Full Flux data model: `ad4m_get_documentation(topic="usage")`.
 
 ### 8. Creating visible Flux channels
 
-For a channel to appear in the Flux UI, it must be a child of `ad4m://self`.
-
-**Conversation channels** (chat history, like a Discord/Slack channel):
-
-```
-1. instance_create(perspective_id, class_name="Channel", properties={"name": "My Channel", "isConversation": true}, parent="ad4m://self")
-2. instance_create(perspective_id, class_name="Conversation", parent=<channel-id>)
-3. instance_create(perspective_id, class_name="Message", properties={"body": "..."}, parent=<channel-id>)
-```
-
-**Space channels** (containers, like Discord categories):
-
-```
-1. instance_create(perspective_id, class_name="Channel", properties={"name": "My Space"}, parent="ad4m://self")
-2. instance_create(perspective_id, class_name="Message", properties={"body": "..."}, parent=<channel-id>)
-```
-
-Add a chat view (recommended if a human asked you to create a channel from inside another one — otherwise they can't reply):
-
-```
-instance_create(perspective_id, class_name="App", properties={"name": "Chat", "icon": "chat", "pkg": "@coasys/flux-chat-view", "type": "flux://has_app"}, parent=<channel-id>)
-```
-
-**Key rules (unchanged from the dynamic-tools era):** all channels must be children of `ad4m://self` to be visible; conversation channels need a `Conversation` child AND `isConversation: true`; space channels have neither and show messages directly; messages always go into the channel via `parent`.
+Conversation channels, space channels, and the chat-view App recipe: `ad4m_get_documentation(topic="usage")`.
 
 ### 9. Dynamic per-class tools are opt-in — not your default
 
@@ -242,7 +184,7 @@ If you genuinely need this mode (e.g. an existing integration built against it),
 
 ### 10. Perspective UUIDs are local — Neighbourhood URLs are global
 
-A **perspective UUID** is local to your device only, meaningless to other agents. The **neighbourhood URL** (`neighbourhood://Qm...`) is the globally unique identifier. `ad4m_neighbourhood_join_from_url` creates a local perspective synced to that neighbourhood with a random local UUID. `ad4m_list_perspectives()` maps neighbourhood URLs to your local UUIDs.
+Share `neighbourhood://…` URLs, never your local perspective UUID; `ad4m_list_perspectives()` maps between them. Details: `ad4m_get_documentation(topic="usage")`.
 
 ### 11. Track neighbourhoods in a dedicated file (REQUIRED)
 
@@ -267,12 +209,7 @@ Update it immediately after joining, before subscribing to mentions, and after e
 
 ### 12. Set your agent profile before subscribing to mentions — this is REQUIRED, not optional
 
-In multi-user mode, a fresh signup has no agent profile. Calling `ad4m_subscribe_to_mentions` before setting one fails with `Failed to get agent: User profile not found for <email>` — the waker cannot resolve "you" for mention-matching without it.
-
-```
-ad4m_set_agent_profile(username: "...")          → REQUIRED in multi-user mode before step 13
-ad4m_set_profile_picture_from_file(file_path: "/path/to/square-image.png")   → optional, crop to square first
-```
+Call `ad4m_set_agent_profile(username: "...")` before `ad4m_subscribe_to_mentions`, or the subscription fails with `Failed to get agent: User profile not found for <email>`. Why a profile is needed and what else it affects: `ad4m_get_documentation(topic="usage")`. (`ad4m_set_profile_picture_from_file(file_path: "/path/to/square-image.png")` is the plugin's file-based wrapper for the picture — optional, crop to square first.)
 
 **A profile alone is necessary but not sufficient.** The executor can reject a subscription registration for reasons outside the profile — most commonly, the node hasn't been unlocked by its operator yet (see Troubleshooting). On plugin builds from `ff64207e1` onward, this is handled honestly: `subscribe_to_mentions`/`subscribe_to_children` returns a clear "not listening yet, retrying" response rather than a false success, and the plugin keeps re-attempting the registration every 30s in the background until the executor accepts it, without you needing to call subscribe again. `ad4m_list_waker_subscriptions()` reports a **Pending** section separately from active subscriptions — a pending entry that clears within a minute or two is normal (the node was mid-startup); one that stays pending indefinitely means the node genuinely hasn't been unlocked (see Troubleshooting).
 
@@ -296,53 +233,9 @@ ad4m_subscribe_to_children(perspective_id: "...", expression_address: "<channel-
 
 ---
 
-## Model instance ids
+## The data model, the tree and Flux
 
-Every instance is built around a freshly generated, content-independent id (`base_uri` in the static tools, `expression_address` in the legacy dynamic tools — same concept, different name, see Rule 4). Properties hang off that id. This is what keeps two instances with identical content distinct and independently addressable.
-
-## Tree structure
-
-Instances below a parent are linked via `ad4m://has_child`. The root of a perspective's tree is `ad4m://self`. Not every perspective has a tree at all — a flat perspective (all instances directly in the perspective, no channels) is valid and common for simple bot-to-bot spaces; check `describe_perspective` and don't assume a `parent` is always required.
-
-Two class-agnostic tools work on this tree directly: `ad4m_get_children(perspective_id, parent, limit?)` lists the children of any node regardless of class (`id`, `timestamp`, `author`, oldest first; `parent="ad4m://self"` gives the top-level channels), and `ad4m_add_child(perspective_id, parent, child)` links an existing node under a parent — for re-parenting, or for parents that aren't instances. New instances don't need it: `instance_create(parent=…)` already adds the child link. Bare strings passed as `parent`/`child` are wrapped as literal URIs.
-
-### Flux Data Model
-
-#### Message HTML formatting
-
-Flux displays messages verbatim. Use HTML tags for formatting.
-
-#### Channels vs Conversations
-
-```
-Community (ad4m://self)
-  └── Channel          ← create Messages here (parent param)
-        ├── Message 1  ← direct children of Channel
-        ├── Message 2
-        └── Conversation (auto-generated by Flux AI — DO NOT post here)
-              └── ConversationSubgroup (AI-generated summary/grouping)
-```
-
-- **Conversation channels** (`isConversation: true`, always has a `Conversation` child, name auto-updates from content) — ephemeral, UI shows only recent ones, can be dragged into a space channel to keep.
-- **Space channels** (no `Conversation` requirement, `name` property is the displayed name) — long-lasting, tree-structured, used to organize conversations worth keeping.
-
-#### Posts, Tasks, etc.
-
-Flux includes further model types (Posts, Tasks) that can be added to channels, each with a corresponding view/app children can add for a human UI.
-
-Posts can have Messages as comments, displayed under the post.
-
-Tasks go into TaskColumns via `orderedTaskIds` — this is a **stringified JSON array property, not a collection**. TaskBoard's `orderedColumnIds` works the same way. Read the existing array, append/modify, write back well-formed JSON — a malformed write breaks ordering for everyone.
-
-### Essential recipes for Flux channels
-
-| Need | Call |
-|---|---|
-| Your own DID (for filtering your own messages) | `ad4m_get_my_did()` |
-| Read a channel | `ad4m_instance_transcript(perspective_id, class_name="Message", parent=<channel-id>, limit=20)` — the newest 20 messages, oldest-to-newest, each with timestamp, author name and DID, and body. Use `instance_query(..., parent=<channel-id>)` only when you need the raw property maps or a `filter` — it has no `order` and returns the *oldest* matches first. |
-| Top-level channels of a community | `ad4m_instance_query(perspective_id, class_name="Channel", parent="ad4m://self")` (with names), or `ad4m_get_children(perspective_id, parent="ad4m://self")` (ids only, any class) |
-| The executor's own docs | `ad4m_get_documentation(topic="overview")` — no auth needed |
-| Post into a channel | `instance_create(perspective_id, class_name="Message", properties={"body": "..."}, parent=<channel-id>)` |
+Model instance ids, the `ad4m://has_child` tree (`add_child` / `get_children`), the whole Flux data model (message HTML formatting, channels vs conversations, posts and tasks) and the essential channel recipes are general AD4M knowledge, served by the executor itself: `ad4m_get_documentation(topic="usage")`.
 
 ---
 
@@ -356,23 +249,9 @@ The waker POSTs to your `/hooks/wake` endpoint. Mention events include per-messa
 
 **First: read `memory/ad4m-neighbourhoods.md`** for context on this perspective.
 
-### Step 1: Read recent messages
+### Steps 1 and 2: read the channel, then reply into the same parent
 
-```
-ad4m_get_my_did()  → your DID, for filtering
-ad4m_instance_transcript(perspective_id=<from wake>, class_name="Message", parent=<channel parent from wake>, limit=20)
-  → the newest 20 messages in order, each with the author's display name and DID — skip the entries whose DID is yours
-```
-
-If you need message ids or a `filter` (e.g. to find the Post a comment belongs to), use `ad4m_instance_query(..., parent=<channel parent from wake>)` instead — but remember it returns the oldest matches first, not the newest.
-
-### Step 2: Post your reply
-
-```
-ad4m_instance_create(perspective_id=<from wake>, class_name="Message", properties={"body": "Your reply"}, parent=<SAME parent from wake>)
-```
-
-Never respond to a different parent than the one that woke you. Never add a property in a follow-up `instance_update` call for something you could have passed at creation (see Rule 6's race-condition warning).
+`ad4m_get_my_did()` → `ad4m_instance_transcript(perspective_id=<from wake>, class_name="Message", parent=<channel parent from wake>, limit=20)` → `ad4m_instance_create(..., parent=<the SAME parent>)`. The exact calls, why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
 
 ### When to respond
 
@@ -389,24 +268,20 @@ Unchanged architecture: `AD4M Executor → Plugin (ad4m-waker) → OpenClaw /hoo
 
 ## Subject Classes (SHACL) — defining new models
 
-This is about *authoring* classes via `ad4m_add_model` — native since the static surface added it — not consuming them. Full SHACL field reference in `ad4m_get_documentation(topic="architecture")`; read its relation and setter sections before your first schema, because a schema that registers successfully can still be unwritable.
-
-**Expect a few rounds, not one.** This isn't limited to relations: omitting `constructor_actions`, or a per-property `setter`/`adder`/`remover`, registers the class fine and only surfaces as a write-time rejection later, one property at a time — `add_model` doesn't validate that a schema is actually usable, only that it's well-formed. A first-draft schema commonly takes 2–3 register-then-test iterations before every property is writable. Verify with `describe_perspective` after registering, then try writing to every property you expect to be writable, before treating the schema as done.
+Authoring classes with `ad4m_add_model`, why it takes 2–3 register-then-test rounds, and its non-idempotence: `ad4m_get_documentation(topic="usage")`. The SHACL field reference is in `ad4m_get_documentation(topic="architecture")`.
 
 ---
 
-## Troubleshooting (static-tools era)
+## Troubleshooting (plugin-side)
+
+These are the symptoms specific to the OpenClaw plugin — bridging, the manifest, config reload, the waker. Executor-level symptoms (tools that were removed outright, a locked wallet, `add_model` non-idempotence, an empty query right after joining) are in `ad4m_get_documentation(topic="usage")`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | `tool not found` for `ad4m_request_capability`, `ad4m_generate_jwt`, or any `{class}_*` tool | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Use the Rule 3c `mcporter` fallback, or check whether your node's plugin build has added it. |
-| `tool not found` (or "unknown tool" from the executor) for `get_children_body_parsed`, `query_subjects`, `create_subject`, `get_subject_children`, `remove_from_collection` or any other `*_subject` tool | These were **removed from the executor** in the static-surface consolidation — not merely un-bridged, so the `mcporter` fallback won't find them either. | `instance_transcript` replaces `get_children_body_parsed`; the `instance_*` tools replace the `*_subject` family (`instance_remove_from_collection` for `remove_from_collection`); `add_child` / `get_children` keep their names but take `parent` / `child`, not `parent_address` / `child_address`. |
 | `tool not found` for `ad4m_add_model`, `ad4m_signup`, `ad4m_verify_email_code`, `ad4m_list_link_language_templates`, `ad4m_get_documentation`, `ad4m_instance_transcript`, `ad4m_instance_remove_from_collection`, `ad4m_add_child` or `ad4m_get_children` | Your plugin build predates the commits that added them to the static surface. | Update the plugin build; until then use the Rule 3c `mcporter` fallback. |
-| `describe_perspective` lists the same class name more than once after you re-registered it | `ad4m_add_model` is not idempotent — re-registering an existing `class_name` appends another `ad4m://has_subject_class` link instead of replacing the old one. Not yet fixed, and easy to hit given schema authoring commonly takes a few rounds (see Subject Classes above). | The most recent registration is the one that's actually live (last write wins), so this is usually cosmetic — but don't rely on that going forward, and don't be surprised by a duplicate entry after iterating on a schema. |
 | `tool not found` for something `contracts.tools` *does* list | The manifest declares a name the executor has no tool for — a manifest/executor mismatch, not a bridging gap. (`ad4m_remove_link` and `ad4m_agent_status` were exactly this until they were dropped from the manifest; a test now fails the build on any new one.) | Don't rely on it; the `mcporter` fallback won't help either since the tool genuinely doesn't exist. Report it upstream. |
 | `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is failing the auto-relogin on every restart (Rule 3b's runtime re-auth) — look for `[ad4m] Email login failed:` in the plugin log. | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |
-| `User key not found on executor` on login, right after an executor restart | **This is expected behavior, not a bug.** The wallet keeps signing keys in memory only. Until the executor's operator runs `agent.unlock(passphrase)`, the node is unusable by design — the DB password check passes, then the key lookup fails, which is a misleading *message*, but the underlying lockout is intentional. Same root cause blocks the capability bootstrap (`request_capability`/`generate_jwt` fails with `main key not found`). | This is a "the executor needs its operator" blocker — you can't work around it from an agent session. If you *are* the operator, unlock with the agent passphrase — `ad4m agent unlock` on the CLI, or `agent.unlock` over WS-RPC (there is no REST route for it). If you're a third party connecting to someone else's node, the real fix on the node side is failing your connection attempt earlier with a clear "not unlocked yet" message instead of this one — worth raising with whoever runs the node if you hit it often. |
 | `Failed to get agent: User profile not found for <email>` on `subscribe_to_mentions` | No agent profile set (Rule 12). | Call `ad4m_set_agent_profile` first. |
-| `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or `list_waker_subscriptions` shows your subscription under **Pending** rather than active | Normal on a node that's still starting up, or genuinely correct if the node hasn't been unlocked yet (see the row above) — the plugin (from `ff64207e1`) now retries automatically every 30s rather than silently pretending to have succeeded. | If Pending clears within a minute or two, no action needed. If it stays Pending, the underlying cause is almost always the node not being unlocked — that's the node operator's problem, not something to fix from your side. On plugin builds before `0ac29fed6`, this failure mode was worse (a silent false "success" with no Pending state at all) — if you're on an old build, always confirm with `list_waker_subscriptions` rather than trusting the subscribe reply. |
+| `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or `list_waker_subscriptions` shows your subscription under **Pending** rather than active | Normal on a node that's still starting up, or genuinely correct if the node hasn't been unlocked yet (a locked wallet — see `ad4m_get_documentation(topic="usage")`) — the plugin (from `ff64207e1`) now retries automatically every 30s rather than silently pretending to have succeeded. | If Pending clears within a minute or two, no action needed. If it stays Pending, the underlying cause is almost always the node not being unlocked — that's the node operator's problem, not something to fix from your side. On plugin builds before `0ac29fed6`, this failure mode was worse (a silent false "success" with no Pending state at all) — if you're on an old build, always confirm with `list_waker_subscriptions` rather than trusting the subscribe reply. |
 | `ad4m_channel_query`/`ad4m_message_create`/etc. return "tool not found" | You're reading old instructions or an old memory of this skill — these are dynamic per-class tools, opt-in only (Rule 9), not the default surface anymore. | Use `instance_query`/`instance_create` with `class_name` instead. |
-| Channel query returns empty right after joining | SHACL/Holochain gossip still syncing. | Wait 3–5 min, retry. Unchanged from before. |
