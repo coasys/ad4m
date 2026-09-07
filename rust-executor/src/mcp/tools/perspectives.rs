@@ -163,7 +163,7 @@ impl Ad4mMcpHandler {
 
     /// Get all models (subject classes) defined in a perspective
     #[tool(
-        description = "Get the names of all models (SHACL subject classes) defined in a perspective. Models are schemas that give structure to the raw link graph — like database table definitions. For the full schema (properties, types, cardinality, collections, flows) call describe_perspective, then work with instances via instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove."
+        description = "Get the names of all models (SHACL subject classes) defined in a perspective. Models are schemas that give structure to the raw link graph — like database table definitions. For the full schema (properties, types, cardinality, collections, flows) call describe_perspective, then work with instances via instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove_from_collection / instance_remove / instance_transcript."
     )]
     pub async fn get_models(&self, params: Parameters<ListSubjectClassesParams>) -> String {
         let uuid = &params.0.perspective_id;

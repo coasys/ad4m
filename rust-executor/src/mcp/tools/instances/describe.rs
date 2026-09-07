@@ -143,16 +143,19 @@ pub(crate) async fn describe_perspective_value(
         "flows": flows,
         "usage": "Pass a class `name` from `classes` as `class_name` to instance_create / \
                   instance_query / instance_get / instance_update / instance_add_to_collection / \
-                  instance_remove. `properties` entries are single JSON values typed as shown; \
-                  `collections` are written with instance_add_to_collection using item URIs. \
-                  Properties are validated against this schema on every write.",
+                  instance_remove_from_collection / instance_remove / instance_transcript. \
+                  `properties` entries are single JSON values typed as shown; `collections` \
+                  are written with instance_add_to_collection / instance_remove_from_collection \
+                  using item URIs. Properties are validated against this schema on every \
+                  write. For the raw ad4m://has_child tree (e.g. children of ad4m://self) use \
+                  add_child / get_children.",
     })
 }
 
 impl Ad4mMcpHandler {
     /// Describe the data model of a perspective — the discovery step before any instance_* call.
     #[tool(
-        description = "Describe the data model of a perspective: every registered subject class (model) with its properties (name, type, required, cardinality, hints), its collections, and any flows (state machines). Call this right after list_perspectives / neighbourhood_join_from_url — it returns the schema as data so you can then use the generic instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove tools with class_name set to one of the returned class names. Property values passed to those tools are validated against this schema."
+        description = "Describe the data model of a perspective: every registered subject class (model) with its properties (name, type, required, cardinality, hints), its collections, and any flows (state machines). Call this right after list_perspectives / neighbourhood_join_from_url — it returns the schema as data so you can then use the generic instance_create / instance_query / instance_get / instance_update / instance_add_to_collection / instance_remove_from_collection / instance_remove / instance_transcript tools with class_name set to one of the returned class names. Property values passed to those tools are validated against this schema."
     )]
     pub async fn describe_perspective(
         &self,

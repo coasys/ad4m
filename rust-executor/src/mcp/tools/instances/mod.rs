@@ -30,25 +30,33 @@
 //! - [`create`] — `instance_create`
 //! - [`query`] — `instance_query` + `instance_get`
 //! - [`update`] — `instance_update` + `instance_remove`
-//! - [`collections`] — `instance_add_to_collection`
+//! - [`collections`] — `instance_add_to_collection` + `instance_remove_from_collection`
+//! - [`children`] — class-agnostic `add_child` / `get_children` on the
+//!   `ad4m://has_child` tree
+//! - [`transcript`] — `instance_transcript`, a compact chronological reading
+//!   of one class's children under a node
 //! - [`validate`] — SHACL-derived property validation shared by every write
 //! - this file — the borrowed [`PropView`] over a class shape, class
 //!   resolution, instance URI minting and the other helpers the tools share
 
+pub mod children;
 pub mod collections;
 pub mod create;
 pub mod describe;
 pub mod query;
+pub mod transcript;
 pub mod update;
 pub(crate) mod validate;
 
 #[cfg(test)]
 mod tests;
 
-pub use collections::InstanceAddToCollectionParams;
+pub use children::{AddChildParams, GetChildrenParams};
+pub use collections::{InstanceAddToCollectionParams, InstanceRemoveFromCollectionParams};
 pub use create::InstanceCreateParams;
 pub use describe::DescribePerspectiveParams;
 pub use query::{InstanceGetParams, InstanceQueryParams};
+pub use transcript::InstanceTranscriptParams;
 pub use update::{InstanceRemoveParams, InstanceUpdateParams};
 pub(crate) use validate::{
     coerce_scalar, describe_value, normalize_filter, validate_properties, validation_failure,
@@ -449,9 +457,34 @@ pub(super) fn subject_class(class_name: &str) -> SubjectClassOption {
     }
 }
 
+/// The plain value behind a literal link target: a `literal:string:x` decodes
+/// to `x`, a signed literal envelope (`literal:json:{…,"data":…}`) to its
+/// `data` payload. Non-literal targets come back unchanged.
+pub(super) fn decoded_literal(target: &str) -> String {
+    let decoded = Ad4mMcpHandler::resolve_literal_value(target);
+    if decoded == target {
+        return decoded;
+    }
+    if let Ok(Value::Object(envelope)) = serde_json::from_str::<Value>(&decoded) {
+        if let Some(data) = envelope.get("data") {
+            return match data {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+        }
+    }
+    decoded
+}
+
 /// URI-or-literal encoding for link targets, shared with the per-class tools.
+///
+/// Anything that already is a URI passes through: `scheme://…`, the
+/// single-colon `literal:…` form the store hands back as link targets (so an
+/// id read from `get_children` / `instance_get` can be passed straight back
+/// in without being wrapped a second time), and `did:…`. Everything else is a
+/// bare string and becomes a literal URI.
 pub(super) fn link_target(value: &str) -> String {
-    if value.contains("://") {
+    if value.contains("://") || value.starts_with("literal:") || value.starts_with("did:") {
         value.to_string()
     } else {
         Ad4mMcpHandler::encode_literal(value)

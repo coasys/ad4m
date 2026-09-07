@@ -123,7 +123,13 @@ impl Ad4mMcpHandler {
             "instance_get" => dispatch_static_tool!(instance_get),
             "instance_update" => dispatch_static_tool!(instance_update),
             "instance_add_to_collection" => dispatch_static_tool!(instance_add_to_collection),
+            "instance_remove_from_collection" => {
+                dispatch_static_tool!(instance_remove_from_collection)
+            }
             "instance_remove" => dispatch_static_tool!(instance_remove),
+            "instance_transcript" => dispatch_static_tool!(instance_transcript),
+            "add_child" => dispatch_static_tool!(add_child),
+            "get_children" => dispatch_static_tool!(get_children),
             // ── fallback: per-class dynamic tools ───────────────────────
             _ => {
                 // `handle_dynamic_tool` expects the args as a

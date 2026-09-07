@@ -206,7 +206,8 @@ pub(crate) fn validate_properties(
                 WriteMode::Update => errors.push(ValidationError {
                     property: info.name().to_string(),
                     problem: "is a collection — instance_update only sets single-valued \
-                              properties; use instance_add_to_collection to add items"
+                              properties; use instance_add_to_collection / \
+                              instance_remove_from_collection to change its items"
                         .to_string(),
                     expected_type: Some(info.type_name()),
                     cardinality: Some(info.cardinality_text().to_string()),

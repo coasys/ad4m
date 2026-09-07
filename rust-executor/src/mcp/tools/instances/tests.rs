@@ -844,3 +844,405 @@ async fn dynamic_tools_are_hidden_unless_flag_is_set() {
     assert!(names.iter().any(|n| n == "channel_create"), "{names:?}");
     assert!(names.iter().any(|n| n == "instance_create"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_remove_from_collection_removes_only_the_membership_link() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let channel = channel["base_uri"].as_str().unwrap().to_string();
+
+    let mut msgs = Vec::new();
+    for body in ["kept", "dropped"] {
+        let m = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Message".into(),
+                    properties: Some(props(&[("body", json!(body))])),
+                    base_uri: None,
+                    parent: Some(channel.clone()),
+                }))
+                .await,
+        );
+        assert_eq!(m["created"], true, "{m}");
+        msgs.push(m["base_uri"].as_str().unwrap().to_string());
+    }
+    let (kept, dropped) = (msgs[0].clone(), msgs[1].clone());
+
+    let members = |got: &Value| got["messages"].as_array().cloned().unwrap_or_default();
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(members(&got).len(), 2, "{got}");
+
+    let removed = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "channel".into(), // case-insensitive class name
+                base_uri: channel.clone(),
+                collection: "Messages".into(), // case-insensitive collection
+                item_uri: dropped.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["success"], true, "{removed}");
+    assert_eq!(removed["links_removed"], 1, "{removed}");
+    assert_eq!(removed["collection"], "messages");
+
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(members(&got), vec![json!(kept)], "{got}");
+
+    // Only the membership link went away — the item itself still exists.
+    let still_there = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Message".into(),
+                base_uri: dropped.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(still_there["body"], "dropped", "{still_there}");
+
+    // Removing again is a no-op, not an error.
+    let again = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+                collection: "messages".into(),
+                item_uri: dropped.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(again["success"], true, "{again}");
+    assert_eq!(again["links_removed"], 0, "{again}");
+
+    // Same validation as the add side: unknown / single-valued collections.
+    let unknown = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+                collection: "members".into(),
+                item_uri: kept.clone(),
+            }))
+            .await,
+    );
+    assert!(
+        unknown["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown collection"),
+        "{unknown}"
+    );
+    let scalar = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+                collection: "name".into(),
+                item_uri: kept.clone(),
+            }))
+            .await,
+    );
+    assert!(
+        scalar["error"]
+            .as_str()
+            .unwrap()
+            .contains("instance_update"),
+        "{scalar}"
+    );
+
+    // Wrong owner: refuses before touching any link.
+    let missing = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: "ad4m://obj/nosuchchannel".into(),
+                collection: "messages".into(),
+                item_uri: kept.clone(),
+            }))
+            .await,
+    );
+    assert!(
+        missing["error"]
+            .as_str()
+            .unwrap()
+            .contains("No Channel instance"),
+        "{missing}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn add_child_and_get_children_are_class_agnostic() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    // Bare-string parent and a URI child: the parent is wrapped as a literal.
+    let first = parse(
+        &handler
+            .add_child(Parameters(AddChildParams {
+                perspective_id: uuid.clone(),
+                parent: "my-room".into(),
+                child: "ad4m://obj/one".into(),
+            }))
+            .await,
+    );
+    assert_eq!(first["success"], true, "{first}");
+    assert_eq!(first["link"]["predicate"], "ad4m://has_child");
+    assert_eq!(first["link"]["target"], "ad4m://obj/one");
+    let wrapped_parent = first["link"]["source"].as_str().unwrap().to_string();
+    assert!(
+        wrapped_parent.starts_with("literal:"),
+        "bare parent must be literal-wrapped, got {wrapped_parent}"
+    );
+
+    // Bare-string child gets wrapped too.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let second = parse(
+        &handler
+            .add_child(Parameters(AddChildParams {
+                perspective_id: uuid.clone(),
+                parent: "my-room".into(),
+                child: "second-thing".into(),
+            }))
+            .await,
+    );
+    assert_eq!(second["success"], true, "{second}");
+    let second_child = second["link"]["target"].as_str().unwrap().to_string();
+    assert!(second_child.starts_with("literal:"), "{second_child}");
+
+    let listed = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: "my-room".into(),
+                limit: None,
+            }))
+            .await,
+    );
+    assert_eq!(listed["parent"], wrapped_parent, "{listed}");
+    assert_eq!(listed["count"], 2, "{listed}");
+    assert_eq!(listed["total_count"], 2);
+    let children = listed["children"].as_array().unwrap();
+    assert_eq!(
+        children[0]["id"], "ad4m://obj/one",
+        "oldest first: {listed}"
+    );
+    assert_eq!(children[1]["id"], second_child);
+    assert!(
+        children[0]["timestamp"].as_str().unwrap() <= children[1]["timestamp"].as_str().unwrap()
+    );
+    assert!(children[0]["author"].as_str().unwrap().starts_with("did:"));
+
+    // limit keeps the most recent N but still reports the full count.
+    let last = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: "my-room".into(),
+                limit: Some(1),
+            }))
+            .await,
+    );
+    assert_eq!(last["count"], 1, "{last}");
+    assert_eq!(last["total_count"], 2);
+    assert_eq!(last["children"][0]["id"], second_child);
+
+    // The already-wrapped form addresses the same node.
+    let via_uri = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: wrapped_parent.clone(),
+                limit: None,
+            }))
+            .await,
+    );
+    assert_eq!(via_uri["count"], 2, "{via_uri}");
+
+    // Unknown parent: empty, not an error.
+    let none = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: "nobody-home".into(),
+                limit: None,
+            }))
+            .await,
+    );
+    assert_eq!(none["count"], 0, "{none}");
+    assert_eq!(none["children"], json!([]));
+
+    // Interop with the class-aware side: an instance created with `parent`
+    // shows up in the raw children listing of that parent.
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("interop"))])),
+                base_uri: None,
+                parent: Some("ad4m://self".into()),
+            }))
+            .await,
+    );
+    let channel = channel["base_uri"].as_str().unwrap().to_string();
+    let root = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: "ad4m://self".into(),
+                limit: None,
+            }))
+            .await,
+    );
+    assert_eq!(root["parent"], "ad4m://self");
+    assert!(
+        root["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"] == channel),
+        "{root}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_transcript_reads_children_chronologically() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let channel = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let channel = channel["base_uri"].as_str().unwrap().to_string();
+
+    for body in ["first words", "second words", "third words"] {
+        let m = parse(
+            &handler
+                .instance_create(Parameters(InstanceCreateParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Message".into(),
+                    properties: Some(props(&[("body", json!(body))])),
+                    base_uri: None,
+                    parent: Some(channel.clone()),
+                }))
+                .await,
+        );
+        assert_eq!(m["created"], true, "{m}");
+        // Distinct reifier timestamps so the chronological order is defined.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
+    let all = handler
+        .instance_transcript(Parameters(InstanceTranscriptParams {
+            perspective_id: uuid.clone(),
+            class_name: "message".into(), // case-insensitive class name
+            parent: channel.clone(),
+            limit: None,
+            text_property: None,
+        }))
+        .await;
+    assert!(!all.starts_with("(showing"), "{all}");
+    let pos = |needle: &str| {
+        all.find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing in:\n{all}"))
+    };
+    assert!(pos("first words") < pos("second words") && pos("second words") < pos("third words"));
+    assert!(all.contains("(did:key:"), "author DID per entry: {all}");
+    assert_eq!(
+        all.matches("]:\n").count() + all.matches("):\n").count(),
+        3,
+        "{all}"
+    );
+
+    let last_two = handler
+        .instance_transcript(Parameters(InstanceTranscriptParams {
+            perspective_id: uuid.clone(),
+            class_name: "Message".into(),
+            parent: channel.clone(),
+            limit: Some(2),
+            text_property: None,
+        }))
+        .await;
+    assert!(
+        last_two.starts_with("(showing last 2 of 3 Message instances"),
+        "{last_two}"
+    );
+    assert!(!last_two.contains("first words"), "{last_two}");
+    assert!(last_two.find("second words").unwrap() < last_two.find("third words").unwrap());
+
+    // Explicit text property on a class without `body`: the Channel's name.
+    let channels = handler
+        .instance_transcript(Parameters(InstanceTranscriptParams {
+            perspective_id: uuid.clone(),
+            class_name: "Channel".into(),
+            parent: "ad4m://self".into(),
+            limit: None,
+            text_property: Some("name".into()),
+        }))
+        .await;
+    assert!(channels.starts_with("(no Channel instances"), "{channels}");
+
+    let bad_prop = parse(
+        &handler
+            .instance_transcript(Parameters(InstanceTranscriptParams {
+                perspective_id: uuid.clone(),
+                class_name: "Message".into(),
+                parent: channel.clone(),
+                limit: None,
+                text_property: Some("subject".into()),
+            }))
+            .await,
+    );
+    let err = bad_prop["error"].as_str().unwrap();
+    assert!(err.contains("subject") && err.contains("body"), "{err}");
+
+    let empty = handler
+        .instance_transcript(Parameters(InstanceTranscriptParams {
+            perspective_id: uuid.clone(),
+            class_name: "Message".into(),
+            parent: "ad4m://obj/emptyroom".into(),
+            limit: None,
+            text_property: None,
+        }))
+        .await;
+    assert_eq!(empty, "(no Message instances under ad4m://obj/emptyroom)");
+}

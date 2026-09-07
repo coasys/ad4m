@@ -24,7 +24,6 @@
 //!   with `dynamicClassTools`; always fed to the in-process harness)
 
 pub mod auth;
-pub mod children;
 pub mod dynamic;
 pub mod flows;
 pub mod harness_bridge;
@@ -281,7 +280,17 @@ impl Ad4mMcpHandler {
                 Self::instance_add_to_collection_tool_attr(),
                 Self::instance_add_to_collection,
             ))
+            .with_route((
+                Self::instance_remove_from_collection_tool_attr(),
+                Self::instance_remove_from_collection,
+            ))
             .with_route((Self::instance_remove_tool_attr(), Self::instance_remove))
+            .with_route((
+                Self::instance_transcript_tool_attr(),
+                Self::instance_transcript,
+            ))
+            .with_route((Self::add_child_tool_attr(), Self::add_child))
+            .with_route((Self::get_children_tool_attr(), Self::get_children))
             // flows.rs
             .with_route((Self::add_flow_tool_attr(), Self::add_flow))
             .with_route((Self::get_flows_tool_attr(), Self::get_flows))
@@ -316,13 +325,6 @@ impl Ad4mMcpHandler {
             .with_route((
                 Self::set_agent_public_perspective_tool_attr(),
                 Self::set_agent_public_perspective,
-            ))
-            // children.rs
-            .with_route((Self::add_child_tool_attr(), Self::add_child))
-            .with_route((Self::get_children_tool_attr(), Self::get_children))
-            .with_route((
-                Self::get_children_body_parsed_tool_attr(),
-                Self::get_children_body_parsed,
             ))
             // subscriptions.rs
             .with_route((
@@ -407,8 +409,10 @@ impl Ad4mMcpHandler {
                      server (config `dynamicClassTools` is false). Use the generic instance \
                      tools instead: describe_perspective, instance_create, instance_query, \
                      instance_get, instance_update, instance_add_to_collection, \
-                     instance_remove — pass the class name as `class_name`. To re-enable \
-                     per-class tools start the executor with `--dynamic-class-tools true`.",
+                     instance_remove_from_collection, instance_remove, instance_transcript \
+                     — pass the class name as `class_name`; add_child / get_children for \
+                     the raw ad4m://has_child tree. To re-enable per-class tools start the \
+                     executor with `--dynamic-class-tools true`.",
                     tool_name
                 ),
             })

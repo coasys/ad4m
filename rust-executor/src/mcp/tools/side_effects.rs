@@ -98,7 +98,12 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     ("instance_get", SideEffect::Read),
     ("instance_update", SideEffect::Write),
     ("instance_add_to_collection", SideEffect::Write),
+    ("instance_remove_from_collection", SideEffect::Write),
     ("instance_remove", SideEffect::Write),
+    ("instance_transcript", SideEffect::Read),
+    // Raw ad4m://has_child tree ops, class-agnostic.
+    ("add_child", SideEffect::Write),
+    ("get_children", SideEffect::Read),
     // ── profiles.rs ─────────────────────────────────────────────────
     ("get_my_did", SideEffect::Read),
     ("get_agent_profile", SideEffect::Read),
@@ -113,10 +118,6 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // no mutation.
     ("flow_state", SideEffect::Read),
     ("flow_actions", SideEffect::Read),
-    // ── children.rs ─────────────────────────────────────────────────
-    ("add_child", SideEffect::Write),
-    ("get_children", SideEffect::Read),
-    ("get_children_body_parsed", SideEffect::Read),
     // ── subscriptions.rs ────────────────────────────────────────────
     // Both tools construct a query string / return config metadata; the
     // actual subscription is a separate transport-level concern outside
