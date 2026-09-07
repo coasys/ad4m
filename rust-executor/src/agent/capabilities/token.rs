@@ -17,6 +17,13 @@ pub fn generate_jwt(
     let backend = wallet_backend();
     let name = signing_key_name();
 
+    if !backend.is_unlocked() {
+        return Err(anyhow!(
+            "Executor is locked: the wallet has not been unlocked since the last restart. \
+             Ask the executor operator to call unlockAgent, then retry."
+        ));
+    }
+
     let secret_key = backend.get_secret_key(&name).ok_or(anyhow!(
         "{} key not found. call createMainKey() first",
         name
