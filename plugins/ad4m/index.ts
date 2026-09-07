@@ -325,7 +325,12 @@ export default function ad4mPlugin(api: any) {
     "instance_get",
     "instance_update",
     "instance_add_to_collection",
+    "instance_remove_from_collection",
     "instance_remove",
+    "instance_transcript",
+    "add_child",
+    "get_children",
+    "get_documentation",
   ]);
 
   /**

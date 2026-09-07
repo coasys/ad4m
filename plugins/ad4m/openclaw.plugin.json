@@ -7,6 +7,7 @@
   "contracts": {
     "tools": [
       "ad4m_get_sample_config",
+      "ad4m_get_documentation",
       "ad4m_get_my_did",
       "ad4m_agent_status",
       "ad4m_auth_status",
@@ -29,7 +30,11 @@
       "ad4m_instance_get",
       "ad4m_instance_update",
       "ad4m_instance_add_to_collection",
+      "ad4m_instance_remove_from_collection",
       "ad4m_instance_remove",
+      "ad4m_instance_transcript",
+      "ad4m_add_child",
+      "ad4m_get_children",
       "ad4m_subscribe_to_mentions",
       "ad4m_unsubscribe_from_mentions",
       "ad4m_subscribe_to_children",
