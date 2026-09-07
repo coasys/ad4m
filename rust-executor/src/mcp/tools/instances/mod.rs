@@ -68,10 +68,12 @@ pub(crate) use validate::{
 
 use super::Ad4mMcpHandler;
 use crate::mcp::shacl;
+use crate::perspectives::model_query::is_safe_iri_target;
 use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRelation};
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkQuery;
 use serde_json::{json, Map, Value};
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -479,19 +481,62 @@ pub(super) fn decoded_literal(target: &str) -> String {
     decoded
 }
 
+/// Rewrite the legacy double-slash `literal://<kind>:<value>` form (still
+/// minted by Flux's TypeScript `Literal`) to the single-colon
+/// `literal:<kind>:<value>` form everything else in this executor speaks.
+///
+/// `literal://string:x` is *not* a parseable IRI — `string:x` reads as
+/// `host:port` with a non-numeric port, so oxigraph's SPARQL parser rejects
+/// `<literal://string:x>` outright and every query that inlines the value
+/// fails (see [`generate_instance_uri`] for the same reasoning applied to
+/// minted ids). Normalising here means an agent that passes the legacy
+/// spelling — which `add_link`'s examples used to advertise — gets the same
+/// node as one that passes the current spelling, instead of a hard SPARQL
+/// error or an unmatchable `NamedNode::new_unchecked` target.
+pub(super) fn normalize_legacy_literal(value: &str) -> Cow<'_, str> {
+    match value.strip_prefix("literal://") {
+        // Only the `literal://<kind>:…` shape; `literal://` alone is not one.
+        Some(rest) if rest.contains(':') => Cow::Owned(format!("literal:{rest}")),
+        _ => Cow::Borrowed(value),
+    }
+}
+
 /// URI-or-literal encoding for link targets, shared with the per-class tools.
 ///
 /// Anything that already is a URI passes through: `scheme://…`, the
 /// single-colon `literal:…` form the store hands back as link targets (so an
 /// id read from `get_children` / `instance_get` can be passed straight back
 /// in without being wrapped a second time), and `did:…`. Everything else is a
-/// bare string and becomes a literal URI.
+/// bare string and becomes a literal URI. The legacy `literal://…` spelling
+/// is normalised first ([`normalize_legacy_literal`]).
 pub(super) fn link_target(value: &str) -> String {
+    let value = normalize_legacy_literal(value);
     if value.contains("://") || value.starts_with("literal:") || value.starts_with("did:") {
-        value.to_string()
+        value.into_owned()
     } else {
-        Ad4mMcpHandler::encode_literal(value)
+        Ad4mMcpHandler::encode_literal(&value)
     }
+}
+
+/// Gate a caller-supplied instance identifier — a `base_uri`, a `parent`, a
+/// child id — before it is inlined into SPARQL as `<…>`.
+///
+/// Trims, normalises the legacy `literal://…` spelling, then requires the
+/// result to be a well-formed absolute IRI (the same predicate the query
+/// builder uses to decide a value is safe to emit inside `<…>`). Without the
+/// gate a value like `literal://string:my-channel` or `Note: buy milk`
+/// reaches the SPARQL builder and either fails to parse — taking the whole
+/// query with it — or is stored as an invalid `NamedNode` no query can match.
+pub(super) fn instance_uri(field: &str, value: &str) -> Result<String, String> {
+    let candidate = normalize_legacy_literal(value.trim());
+    if is_safe_iri_target(&candidate) {
+        return Ok(candidate.into_owned());
+    }
+    Err(error_json(format!(
+        "'{value}' is not a usable {field}: instance ids must be absolute URIs, like the \
+         'ad4m://obj/…' id that instance_create returns. Pass the id exactly as \
+         instance_query / instance_get / get_children reported it."
+    )))
 }
 
 /// A link cascade that stopped on a store error, and how far it got.

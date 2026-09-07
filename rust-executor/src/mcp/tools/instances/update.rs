@@ -2,9 +2,9 @@
 //! instance of any subject class.
 
 use super::{
-    check_setters, error_json, fetch_instance, not_found, pretty, remove_all_links_of,
-    resolve_class, subject_class, validate_properties, validation_failure, Ad4mMcpHandler,
-    WriteMode,
+    check_setters, error_json, fetch_instance, instance_uri, not_found, pretty,
+    remove_all_links_of, resolve_class, subject_class, validate_properties, validation_failure,
+    Ad4mMcpHandler, WriteMode,
 };
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -65,9 +65,13 @@ impl Ad4mMcpHandler {
             return validation_failure(&class_name, &setter_errors);
         }
 
-        match fetch_instance(&perspective, &class_name, &p.base_uri).await {
+        let base_uri = match instance_uri("base_uri", &p.base_uri) {
+            Ok(uri) => uri,
+            Err(e) => return e,
+        };
+        match fetch_instance(&perspective, &class_name, &base_uri).await {
             Ok(Some(_)) => {}
-            Ok(None) => return not_found(&class_name, &p.base_uri),
+            Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
@@ -78,7 +82,7 @@ impl Ad4mMcpHandler {
         if let Err(e) = perspective
             .update_subject(
                 subject_class(&class_name),
-                p.base_uri.clone(),
+                base_uri.clone(),
                 Value::Object(validated.scalars.clone()),
                 Some(batch_id.clone()),
                 &agent_context,
@@ -97,7 +101,7 @@ impl Ad4mMcpHandler {
         pretty(&json!({
             "success": true,
             "class_name": class_name,
-            "base_uri": p.base_uri,
+            "base_uri": base_uri,
             "updated_properties": validated.scalars.keys().cloned().collect::<Vec<_>>(),
         }))
     }
@@ -117,9 +121,13 @@ impl Ad4mMcpHandler {
             Ok(v) => v,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &p.base_uri).await {
+        let base_uri = match instance_uri("base_uri", &p.base_uri) {
+            Ok(uri) => uri,
+            Err(e) => return e,
+        };
+        match fetch_instance(&perspective, &class_name, &base_uri).await {
             Ok(Some(_)) => {}
-            Ok(None) => return not_found(&class_name, &p.base_uri),
+            Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
@@ -127,7 +135,7 @@ impl Ad4mMcpHandler {
         // The cascade is not batched, so on failure the links already
         // removed stay removed: say so, with the count, instead of
         // reporting a deletion that did not fully happen.
-        let removed = match remove_all_links_of(&mut perspective, &p.base_uri).await {
+        let removed = match remove_all_links_of(&mut perspective, &base_uri).await {
             Ok(removed) => removed,
             Err(failure) => {
                 return pretty(&json!({
@@ -135,10 +143,10 @@ impl Ad4mMcpHandler {
                         "Error removing {} instance at '{}': {}. {} link(s) had already been \
                          removed, so the instance may be partially deleted — inspect what is \
                          left with query_links (source or target = '{}') and retry.",
-                        class_name, p.base_uri, failure.error, failure.removed, p.base_uri
+                        class_name, base_uri, failure.error, failure.removed, base_uri
                     ),
                     "class_name": class_name,
-                    "base_uri": p.base_uri,
+                    "base_uri": base_uri,
                     "links_removed": failure.removed,
                 }))
             }
@@ -146,7 +154,7 @@ impl Ad4mMcpHandler {
         pretty(&json!({
             "success": true,
             "class_name": class_name,
-            "deleted": p.base_uri,
+            "deleted": base_uri,
             "links_removed": removed,
         }))
     }

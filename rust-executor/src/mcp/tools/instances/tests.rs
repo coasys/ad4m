@@ -1579,3 +1579,135 @@ async fn instance_transcript_reads_children_chronologically() {
         .await;
     assert_eq!(empty, "(no Message instances under ad4m://obj/emptyroom)");
 }
+
+#[test]
+fn legacy_literal_uris_are_normalised_to_the_single_colon_form() {
+    // `literal://string:x` is not a parseable IRI — `string:x` reads as
+    // host:port with a non-numeric port — so oxigraph rejects
+    // `<literal://string:x>` and any query that inlines it fails outright.
+    assert_eq!(
+        normalize_legacy_literal("literal://string:Alice"),
+        "literal:string:Alice"
+    );
+    assert_eq!(
+        link_target("literal://string:Alice"),
+        "literal:string:Alice"
+    );
+    // Non-legacy spellings are untouched.
+    assert_eq!(
+        normalize_legacy_literal("literal:string:Alice"),
+        "literal:string:Alice"
+    );
+    assert_eq!(normalize_legacy_literal("ad4m://obj/abc"), "ad4m://obj/abc");
+    assert_eq!(normalize_legacy_literal("did:key:z6Mk"), "did:key:z6Mk");
+    // `literal://` with no `<kind>:` body is not the legacy form.
+    assert_eq!(normalize_legacy_literal("literal://"), "literal://");
+}
+
+#[test]
+fn instance_uri_normalises_legacy_ids_and_rejects_prose() {
+    assert_eq!(
+        instance_uri("base_uri", " literal://string:my-channel ").unwrap(),
+        "literal:string:my-channel"
+    );
+    assert_eq!(
+        instance_uri("base_uri", "ad4m://obj/abc").unwrap(),
+        "ad4m://obj/abc"
+    );
+    let err = instance_uri("base_uri", "Note: buy milk").unwrap_err();
+    assert!(
+        parse(&err)["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a usable base_uri"),
+        "{err}"
+    );
+}
+
+/// The legacy `literal://…` spelling — which `add_link`'s tool description
+/// used to advertise — must not reach the SPARQL builder. An instance
+/// created under it is readable and queryable through both spellings, and
+/// prose in an identity position gets a named error instead of a SPARQL
+/// parse failure surfacing as "Error querying …".
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_literal_ids_round_trip_through_the_instance_tools() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("General"))])),
+                base_uri: Some("literal://string:my-channel".into()),
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    assert_eq!(
+        created["base_uri"], "literal:string:my-channel",
+        "{created}"
+    );
+
+    // Both spellings resolve to the same node.
+    for spelling in ["literal://string:my-channel", "literal:string:my-channel"] {
+        let got = parse(
+            &handler
+                .instance_get(Parameters(InstanceGetParams {
+                    perspective_id: uuid.clone(),
+                    class_name: "Channel".into(),
+                    base_uri: spelling.into(),
+                }))
+                .await,
+        );
+        assert_eq!(got["name"], "General", "{spelling}: {got}");
+    }
+
+    // A message under that channel, read back with the legacy parent
+    // spelling — the "read a channel" recipe.
+    let msg = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Message".into(),
+                properties: Some(props(&[("body", json!("Hi"))])),
+                base_uri: None,
+                parent: Some("literal://string:my-channel".into()),
+            }))
+            .await,
+    );
+    assert_eq!(msg["created"], true, "{msg}");
+
+    let listed = parse(
+        &handler
+            .instance_query(Parameters(InstanceQueryParams {
+                perspective_id: uuid.clone(),
+                class_name: "Message".into(),
+                filter: None,
+                parent: Some("literal://string:my-channel".into()),
+                limit: None,
+                offset: None,
+            }))
+            .await,
+    );
+    assert_eq!(listed["count"], 1, "{listed}");
+
+    // Prose in an identity position is named, not passed to SPARQL.
+    let bad = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: "Note: buy milk".into(),
+            }))
+            .await,
+    );
+    assert!(
+        bad["error"]
+            .as_str()
+            .unwrap()
+            .contains("not a usable base_uri"),
+        "{bad}"
+    );
+}

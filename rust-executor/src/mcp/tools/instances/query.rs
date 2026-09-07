@@ -1,8 +1,9 @@
 //! `instance_query` + `instance_get` — read instances of any subject class.
 
 use super::{
-    error_json, fetch_instance, link_target, normalize_filter, not_found, pretty, resolve_class,
-    run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, HAS_CHILD, MAX_QUERY_LIMIT,
+    error_json, fetch_instance, instance_uri, link_target, normalize_filter, not_found, pretty,
+    resolve_class, run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, HAS_CHILD,
+    MAX_QUERY_LIMIT,
 };
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -102,9 +103,13 @@ impl Ad4mMcpHandler {
             Ok(v) => v,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &p.base_uri).await {
+        let base_uri = match instance_uri("base_uri", &p.base_uri) {
+            Ok(uri) => uri,
+            Err(e) => return e,
+        };
+        match fetch_instance(&perspective, &class_name, &base_uri).await {
             Ok(Some(instance)) => pretty(&instance),
-            Ok(None) => not_found(&class_name, &p.base_uri),
+            Ok(None) => not_found(&class_name, &base_uri),
             Err(e) => error_json(format!("Error reading {class_name} instance: {e}")),
         }
     }

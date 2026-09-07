@@ -574,7 +574,7 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// Encode a string value as a literal:// URL.
+    /// Encode a string value as a `literal:string:` URL.
     /// Uses rust-client's `Literal` for proper URL encoding.
     pub(crate) fn encode_literal(value: &str) -> String {
         use ad4m_client::literal::Literal;
@@ -585,8 +585,8 @@ impl Ad4mMcpHandler {
 
     /// Get the SHACL name literal for a class, trying both encoded and raw formats.
     /// Flux's TypeScript Literal doesn't URL-encode inner URIs, producing
-    /// "literal://string:shacl://Class", while Rust's Literal produces
-    /// "literal://string:shacl%3A%2F%2FClass". Returns (encoded, raw).
+    /// "literal:string:shacl://Class", while Rust's Literal produces
+    /// "literal:string:shacl%3A%2F%2FClass". Returns (encoded, raw).
     pub(crate) fn shacl_name_variants(class_name: &str) -> (String, String) {
         let encoded = Self::encode_literal(&format!("shacl://{}", class_name));
         let raw = format!("literal:string:shacl://{}", class_name);
@@ -644,7 +644,7 @@ impl Ad4mMcpHandler {
     /// Resolve a property value through the appropriate storage path, respecting
     /// the SHACL `resolveLanguage` setting for the property.
     ///
-    /// If the value already has a URI scheme (e.g. `literal://...`, `did:...`),
+    /// If the value already has a URI scheme (e.g. `literal:...`, `did:...`),
     /// it is returned as-is. Otherwise, the value is parsed as JSON to recover
     /// its native type (boolean, number, etc.) and resolved through the
     /// perspective's `resolve_property_value` method.

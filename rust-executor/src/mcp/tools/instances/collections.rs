@@ -3,7 +3,7 @@
 
 use super::{
     class_properties, coerce_scalar, decoded_literal, describe_value, error_json, fetch_instance,
-    find_property, link_target, not_found, pretty, resolve_class, validation_failure,
+    find_property, instance_uri, link_target, not_found, pretty, resolve_class, validation_failure,
     Ad4mMcpHandler, PropView, ValidationError,
 };
 use crate::mcp::shacl;
@@ -144,9 +144,13 @@ impl Ad4mMcpHandler {
             return validation_failure(&class_name, &[e]);
         }
 
-        match fetch_instance(&perspective, &class_name, &p.base_uri).await {
+        let base_uri = match instance_uri("base_uri", &p.base_uri) {
+            Ok(uri) => uri,
+            Err(e) => return e,
+        };
+        match fetch_instance(&perspective, &class_name, &base_uri).await {
             Ok(Some(_)) => {}
-            Ok(None) => return not_found(&class_name, &p.base_uri),
+            Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
@@ -176,7 +180,7 @@ impl Ad4mMcpHandler {
         let encoded = link_target(wanted);
         let existing = match perspective
             .get_links(&LinkQuery {
-                source: Some(p.base_uri.clone()),
+                source: Some(base_uri.clone()),
                 predicate: Some(predicate.clone()),
                 ..Default::default()
             })
@@ -198,7 +202,7 @@ impl Ad4mMcpHandler {
             return pretty(&json!({
                 "success": true,
                 "class_name": class_name,
-                "base_uri": p.base_uri,
+                "base_uri": base_uri,
                 "collection": info.name(),
                 "item_uri": p.item_uri,
                 "links_added": 0,
@@ -215,7 +219,7 @@ impl Ad4mMcpHandler {
         )
         .await;
         let link = Link {
-            source: p.base_uri.clone(),
+            source: base_uri.clone(),
             predicate: Some(predicate),
             target,
         };
@@ -226,7 +230,7 @@ impl Ad4mMcpHandler {
             Ok(_) => pretty(&json!({
                 "success": true,
                 "class_name": class_name,
-                "base_uri": p.base_uri,
+                "base_uri": base_uri,
                 "collection": info.name(),
                 "item_uri": p.item_uri,
                 "links_added": 1,
@@ -264,9 +268,13 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        match fetch_instance(&perspective, &class_name, &p.base_uri).await {
+        let base_uri = match instance_uri("base_uri", &p.base_uri) {
+            Ok(uri) => uri,
+            Err(e) => return e,
+        };
+        match fetch_instance(&perspective, &class_name, &base_uri).await {
             Ok(Some(_)) => {}
-            Ok(None) => return not_found(&class_name, &p.base_uri),
+            Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
         }
 
@@ -291,7 +299,7 @@ impl Ad4mMcpHandler {
         let encoded = link_target(wanted);
         let links = match perspective
             .get_links(&LinkQuery {
-                source: Some(p.base_uri.clone()),
+                source: Some(base_uri.clone()),
                 predicate: Some(predicate),
                 ..Default::default()
             })
@@ -329,7 +337,7 @@ impl Ad4mMcpHandler {
         pretty(&json!({
             "success": true,
             "class_name": class_name,
-            "base_uri": p.base_uri,
+            "base_uri": base_uri,
             "collection": info.name(),
             "item_uri": p.item_uri,
             "links_removed": removed,

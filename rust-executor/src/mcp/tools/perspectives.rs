@@ -2,6 +2,7 @@
 //!
 //! Tools for managing perspectives (knowledge graphs) and raw links.
 
+use super::instances::normalize_legacy_literal;
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
 use crate::perspectives::perspective_instance::SdnaType;
@@ -194,17 +195,22 @@ impl Ad4mMcpHandler {
 
     /// Add a link to a perspective
     #[tool(
-        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members."
+        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal:string:Alice' — note the single colon: the legacy 'literal://string:…' spelling is not a parseable IRI and breaks every query that inlines it. In shared neighbourhoods, links sync to all members."
     )]
     pub async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
         let p = &params.0;
 
         match self.get_writable_perspective(&p.perspective_id).await {
             Ok((mut perspective, agent_context)) => {
+                // The legacy `literal://…` spelling the old example advertised
+                // is not a parseable IRI, so storing it verbatim poisons every
+                // SPARQL read of the link. Normalise to the single-colon form
+                // (what the TypeScript SDK's `Literal` now requires too) and
+                // echo the stored target back so the caller sees it.
                 let link = Link {
-                    source: p.source.clone(),
+                    source: normalize_legacy_literal(&p.source).into_owned(),
                     predicate: Some(p.predicate.clone()),
-                    target: p.target.clone(),
+                    target: normalize_legacy_literal(&p.target).into_owned(),
                 };
 
                 match perspective
