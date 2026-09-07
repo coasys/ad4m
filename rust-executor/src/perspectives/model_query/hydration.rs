@@ -73,6 +73,43 @@ fn reorder_collection(
     ordering_targets: &[String],
     relation_predicate: &str,
 ) -> Option<Vec<String>> {
+    let members: Vec<(String, String)> = values
+        .iter()
+        .map(|&(t, ts)| (t.to_string(), ts.to_string()))
+        .collect();
+    reorder_members(
+        strategy_name,
+        &members,
+        ordering_targets,
+        relation_predicate,
+    )
+}
+
+/// The reserved key `hydrate_one` parks a parent's raw ordering entries under so
+/// the getter stage can reach them.
+///
+/// A relation that names a target class is given a conformance getter, and
+/// `hydrate_one` skips every getter-backed property — its array is produced
+/// later, in `evaluate_getters`. The entries arrive on the parent's own links
+/// and are free here; re-reading them there would be an extra query for
+/// something already in hand. [`evaluate_getters`](super::getters) removes this
+/// key unconditionally, so it never outlives that call and cannot reach a
+/// caller: `filter_properties` only runs when a query names its properties.
+pub(super) const ORDERING_STASH_KEY: &str = "__ad4m_ordering_entries";
+
+/// Reorder `members` — `(target, timestamp)` — from the parent's ordering
+/// entries.
+///
+/// `None` when there is nothing to apply: an unknown strategy, or no entries for
+/// this relation. The caller's existing order stands, so a collection whose
+/// ordering links have not synced yet, or whose strategy this executor does not
+/// know, reads as an ordinary unordered relation rather than failing.
+pub(super) fn reorder_members(
+    strategy_name: &str,
+    members: &[(String, String)],
+    ordering_targets: &[String],
+    relation_predicate: &str,
+) -> Option<Vec<String>> {
     let entries = parse_ordering_entries(ordering_targets, relation_predicate);
     if entries.is_empty() {
         return None;
@@ -90,11 +127,7 @@ fn reorder_collection(
             return None;
         }
     };
-    let members: Vec<(String, String)> = values
-        .iter()
-        .map(|&(t, ts)| (t.to_string(), ts.to_string()))
-        .collect();
-    Some(strategy.reconstruct(&members, &entries))
+    Some(strategy.reconstruct(members, &entries))
 }
 
 /// Hydrate a single instance from its collected links.
@@ -286,6 +319,26 @@ pub(super) fn hydrate_one(shape: &ModelShape, inst: &InstanceLinks) -> Option<Va
             };
             obj.insert(name.to_string(), Value::Array(arr));
         }
+    }
+
+    // Park the entries for the getter stage when this class has an ordered
+    // relation that stage owns. Costs nothing when it has none, which is every
+    // relation that does not name a target class.
+    if !ordering_targets.is_empty()
+        && shape
+            .properties
+            .iter()
+            .any(|p| p.getter.is_some() && p.ordering.is_some())
+    {
+        obj.insert(
+            ORDERING_STASH_KEY.to_string(),
+            Value::Array(
+                ordering_targets
+                    .iter()
+                    .map(|t| Value::String(t.clone()))
+                    .collect(),
+            ),
+        );
     }
 
     if let Some(ts) = earliest_timestamp {
