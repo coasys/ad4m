@@ -304,7 +304,6 @@ export default function ad4mPlugin(api: any) {
   // per-class tools stay off this surface (see mcp-tool-surface-redesign).
   const STATIC_MCP_TOOLS = new Set([
     "get_my_did",
-    "agent_status",
     "auth_status",
     "login_email",
     "signup",
@@ -318,7 +317,6 @@ export default function ad4mPlugin(api: any) {
     "list_link_language_templates",
     "add_link",
     "query_links",
-    "remove_link",
     "describe_perspective",
     "instance_create",
     "instance_query",

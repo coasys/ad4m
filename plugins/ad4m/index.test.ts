@@ -1733,6 +1733,12 @@ describe("ad4mPlugin", () => {
     ).contracts.tools as string[];
     const missing = toolNames.filter((n) => !manifest.includes(n));
     expect(missing).toEqual([]);
+    // …and the other direction: a manifest entry with nothing behind it is a
+    // name agents can see and call but that always fails with tool-not-found
+    // (this is how `ad4m_remove_link` / `ad4m_agent_status` survived after
+    // the executor stopped implementing them).
+    const phantom = manifest.filter((n) => !toolNames.includes(n));
+    expect(phantom).toEqual([]);
 
     // Every captured executor def is registered at register() time — with
     // no executor reachable — and is declared in the manifest. A def that
