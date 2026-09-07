@@ -116,6 +116,29 @@ mod tests {
         }
     }
 
+    /// `overview` is the entry point a cold agent is told to read first, so a
+    /// topic it never names is a topic nobody discovers — which is exactly how
+    /// `usage` shipped invisible in the first place. Every non-overview topic
+    /// must be reachable from the overview's own prose.
+    #[test]
+    fn overview_points_at_every_other_topic() {
+        let overview = DocTopic::Overview.text();
+        for topic in DocTopic::ALL {
+            if topic == DocTopic::Overview {
+                continue;
+            }
+            let name = serde_json::to_value(topic)
+                .expect("topic serializes")
+                .as_str()
+                .expect("topic is a string on the wire")
+                .to_string();
+            assert!(
+                overview.contains(&format!("topic=\"{name}\"")),
+                "overview never tells the reader that topic={name:?} exists"
+            );
+        }
+    }
+
     /// No doc may teach a tool the executor no longer registers. The whole
     /// `*_subject` family, `infer` and `get_models` went away in the static-surface
     /// consolidation, so they may only appear as "this is gone" prose — which is

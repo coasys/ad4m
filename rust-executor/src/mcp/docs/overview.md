@@ -5,8 +5,17 @@ join **neighbourhoods** (shared P2P spaces that are semantic knowledge
 graphs), read and write structured data there, and collaborate with humans
 and other agents. This MCP server is the executor's tool surface for that.
 
-Read this first, then `get_documentation(topic="architecture")` for the data
-model. Getting, running and unlocking an executor is deliberately not
+Read this first. It is the map: the tool surface, the workflow, and the rules
+that keep what you write usable. Then:
+
+- `get_documentation(topic="usage")` — the working guide. How to read and write
+  instances, the child tree, the Flux data model and its channel recipes,
+  authoring subject classes, and the traps that cost other agents time. Read it
+  before your first write.
+- `get_documentation(topic="architecture")` — the data model underneath:
+  perspectives, links, neighbourhoods, and the SHACL class format.
+
+Getting, running and unlocking an executor is deliberately not
 documented here — an agent that can call this tool is already past that
 point — so those instructions live with whatever set up your connection (for
 the OpenClaw plugin, its skill's `references/setup.md`). Authenticating over
@@ -28,7 +37,7 @@ assume they are there; prefer the static tools below.
 
 | Tool | What it does |
 | --- | --- |
-| `get_documentation(topic)` | This documentation (`overview` / `architecture`) |
+| `get_documentation(topic)` | This documentation (`overview` / `usage` / `architecture`) |
 | `list_perspectives()` | Your local perspectives with their `uuid` and, when shared, `neighbourhood` URL |
 | `describe_perspective(perspective_id)` | Every registered class: properties (name, type, required, cardinality, hints), collections, flows |
 
@@ -117,26 +126,20 @@ operator has to run `agent.unlock` first, otherwise `login_email` and
 
 ## Rules that keep data usable by humans and other agents
 
-1. **Work on classes, not links.** Apps like Flux only see data written
-   through subject classes. `add_link` writes exactly the triple you give it
-   and has no notion of "this one message" versus "this text": two entities
-   with identical content collapse onto one node. Instances are built around
-   a fresh, content-independent `ad4m://obj/<id>` URI, so they stay distinct.
-2. **Discover the schema before writing.** Call `describe_perspective` after
-   joining or creating a perspective; pass a class `name` from its output as
-   `class_name`. Match properties by `name`, not position.
-3. **Pass all properties at creation time — never create, then set.** A
-   follow-up `instance_update` right after `instance_create` races Holochain
-   gossip and can leave the instance looking "uninitialized" to peers.
-4. **`base_uri` is the instance id** on every `instance_*` tool (optional on
-   `instance_create`, generated when omitted). The per-class tools call the
-   same thing `expression_address`; the two surfaces are not interchangeable.
-5. **Perspective UUIDs are local; neighbourhood URLs are global.** A UUID
-   means nothing to anyone else. Share `neighbourhood://…` URLs; map them to
-   your local UUIDs with `list_perspectives`.
-6. **Right after joining, the schema may still be syncing.** If
-   `describe_perspective` shows no classes or a query is empty, wait a few
-   minutes (Holochain gossip) and retry.
+Six rules, in the order they bite. Each one is explained, with the failure it
+prevents, in `get_documentation(topic="usage")`.
+
+1. **Work on classes, not links** — apps only see data written through subject
+   classes, and `add_link` collapses equal content onto one node.
+2. **Discover the schema before writing** — `describe_perspective` first, then
+   pass a class `name` from its output.
+3. **Pass all properties at creation time** — never create, then set.
+4. **`base_uri` is the instance id** on every `instance_*` tool; the per-class
+   tools call the same thing `expression_address`.
+5. **Perspective UUIDs are local; neighbourhood URLs are global** — share the
+   `neighbourhood://…` URL, never the UUID.
+6. **Right after joining, the schema may still be syncing** — an empty result
+   means wait and retry, not that something is broken.
 
 ## Flux data model (the most common neighbourhood app)
 
@@ -151,18 +154,13 @@ Community (ad4m://self)
 
 - A Channel is only visible in Flux when it is a child of `ad4m://self`:
   `instance_create(class_name="Channel", properties={"name": "…"}, parent="ad4m://self")`.
-- **Conversation channels** (`isConversation: true`, always with a
-  `Conversation` child) are ephemeral chat threads; **space channels** (no
-  `Conversation`, `name` shown as the title) are long-lived and can nest.
 - Read a channel with `instance_transcript(class_name="Message", parent=<channel id>)`;
   post with `instance_create(class_name="Message", properties={"body": "…"}, parent=<channel id>)`.
-  Messages are shown verbatim — use HTML tags for formatting.
-- Posts and Tasks are further classes that go into channels. Task ordering
-  (`orderedTaskIds` on TaskColumn, `orderedColumnIds` on TaskBoard) is a
-  **stringified JSON array property, not a collection** — read, modify, write
-  back well-formed JSON.
-- To give humans a chat UI in a channel you created from within another one:
-  `instance_create(class_name="App", properties={"name": "Chat", "icon": "chat", "pkg": "@coasys/flux-chat-view", "type": "flux://has_app"}, parent=<channel id>)`.
+
+`get_documentation(topic="usage")` has the rest of this model: conversation
+channels versus space channels, message HTML formatting, Posts and Tasks
+(including the ordering properties that are stringified JSON, not
+collections), and the recipes for giving humans a usable chat view.
 
 ## Reacting to changes
 
