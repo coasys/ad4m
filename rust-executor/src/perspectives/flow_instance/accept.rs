@@ -19,7 +19,7 @@
 //! already grants them the move; the check that matters is the reviewer's,
 //! and it is the one that runs here.
 
-use super::atom::{TransitionAtom, ACCEPTED_BY_PREDICATE, FLOW_INSTANCE_PREDICATE};
+use super::atom::{signed_by, TransitionAtom, ACCEPTED_BY_PREDICATE, FLOW_INSTANCE_PREDICATE};
 use super::pass::{run_flow_consensus_pass, FireOutcome};
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -106,13 +106,15 @@ pub async fn accept_flow_proposal(
 
     let did = crate::agent::did_for_context(context)
         .map_err(|e| anyhow::anyhow!("accept_flow_proposal: no acting DID: {e:#}"))?;
-    // Authorship-bound, mirroring the fold: a forged `acceptedBy` naming this
-    // DID counts for nothing there, so it must not suppress the genuine
-    // self-authored vote here either.
+    // Authorship-bound through `signed_by`, exactly as the fold counts votes:
+    // a link that merely CLAIMS this DID as its author counts for nothing
+    // there, so it must not suppress the genuine vote here either. Comparing
+    // `l.author` alone would let a peer publish an unverifiable `acceptedBy`
+    // in our name and lock us out of every `{n: 2}` edge.
     let already = links.iter().any(|l| {
         l.data.predicate.as_deref() == Some(ACCEPTED_BY_PREDICATE)
             && l.data.target == did
-            && l.author == did
+            && signed_by(l, &did)
     });
     if already {
         log::debug!("accept_flow_proposal: {proposal_uri} already accepted by {did}");

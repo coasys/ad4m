@@ -422,9 +422,11 @@ async fn n2_second_signer_accept_settles_and_replays() {
     assert!(format!("{err:#}").contains("stale"), "got {err:#}");
 }
 
-/// The read-set is the proof: serialise everything the engine read, fold the
-/// JSON back on a machine with no perspective, and reach the same verdict.
-/// This is what a minted Synergy token would carry as its backing.
+/// The read-set travels: serialise everything the engine read, fold the JSON
+/// back on a machine with no perspective, and reach the same verdict. This is
+/// what a minted Synergy token would carry as its backing — proof for the
+/// signed proposals and votes, an audit record for the role verdicts, which
+/// is why `ReadSet::role_grants` says so on the field.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_serialised_read_set_re_derives_the_same_state() {
     let mut f = seed_satisfied_fixture(None).await;
@@ -551,6 +553,73 @@ async fn removing_a_voters_role_after_settle_unsettles_the_edge() {
 // ---------------------------------------------------------------------------
 // Evidence: checked when I sign, never re-checked afterwards
 // ---------------------------------------------------------------------------
+
+/// A peer publishes an `acceptedBy` that names us as both voter AND author,
+/// carrying a signature that does not verify. The write path's idempotency
+/// check must read it the way the fold does — through `signed_by` — or the
+/// forgery becomes a lockout: our own accept no-ops because "we already
+/// voted", while the fold ignores the unverifiable link, so the edge can
+/// never reach `{n: 2}`. Ported from #967, where comparing `l.author` alone
+/// was the hole.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_vote_claiming_our_authorship_does_not_suppress_our_own() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let proposal = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+    let me = acting_did(&f);
+
+    // The attack: a synced link may claim any author, and the executor keeps
+    // the failed verdict rather than dropping it.
+    f.perspective
+        .add_link_expression(
+            LinkExpression {
+                author: me.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                data: Link {
+                    source: proposal.clone(),
+                    predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+                    target: me.clone(),
+                },
+                proof: crate::types::ExpressionProof {
+                    key: format!("{me}#key"),
+                    signature: "not-a-signature".to_string(),
+                },
+                status: Some(LinkStatus::Shared),
+            },
+            LinkStatus::Shared,
+            None,
+        )
+        .await
+        .expect("sync a forged vote claiming our authorship");
+
+    assert!(
+        consensus_pass(&mut f).await.is_empty(),
+        "the fold does not count the forgery, so Bob's vote is still 1 < n = 2"
+    );
+
+    let fired = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect("our own vote must land despite the forgery");
+    assert_eq!(
+        fired.len(),
+        1,
+        "with a real second signature the edge settles: {fired:?}"
+    );
+    assert!(fired[0].voters.contains(&me));
+    assert_eq!(f.derived().await.state, "scoped");
+
+    assert!(
+        links_of(&f, &proposal).await.iter().any(|l| {
+            l.data.predicate.as_deref() == Some(ACCEPTED_BY_PREDICATE)
+                && l.data.target == me
+                && l.proof.valid == Some(true)
+        }),
+        "a genuinely signed self-authored vote must reach the graph"
+    );
+}
 
 /// Test 13. The cited content changed between mint and vote, so this replica
 /// refuses to co-sign — and writes nothing at all. This is the check that

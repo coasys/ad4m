@@ -14,18 +14,26 @@
 //!   is by an explicit sort key.
 //! - **Re-verifiable off-perspective.** [`fold`] takes plain data and does no
 //!   I/O, so a verifier outside the neighbourhood can re-run it over a
-//!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. That
-//!   is what lets a read-set back a minted token as a proof rather than an
-//!   assertion.
+//!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. How
+//!   much that verdict is worth differs by half: the proposals and votes are
+//!   signed links the verifier re-checks itself, while the `fromRole`
+//!   eligibility is a verdict this replica computed — see
+//!   [`ReadSet`](super::ReadSet).
 //! - **A function of the links present now.** Delete a settled vote and the
 //!   fold recomputes without it, so the flow stands where it stood before
 //!   that vote. The graph is the truth and the state follows it.
 //!
-//! Quorum belongs to an **edge**, not to a proposal. Two bots each minting
-//! their own proposal for `review → approved` under `{n: 2}` is how a bot
-//! flow reaches consensus without a human click: asking "is *this proposal*
-//! settled?" answers no forever, while asking "did the *edge* collect two
-//! distinct voters?" answers yes.
+//! Quorum belongs to an **edge**, not to a proposal. Twin proposals for one
+//! edge arrive whenever two replicas mint concurrently — each dedupes only
+//! against the proposals it has seen — and asking "is *this proposal*
+//! settled?" would strand such a flow at genesis forever, while asking "did
+//! the *edge* collect `n` distinct voters?" resolves it.
+//!
+//! What that is *not*, in this PR: the deliberate two-bot path. The mint pass
+//! dedupes on `(instance, to_state, evidence_hash)` with no proposer
+//! dimension, so a bot that already sees a peer's proposal for the edge
+//! declines to mint a twin and must vote instead — and voting is
+//! [`super::accept`], whose RPC callers land in #968.
 
 use super::atom::{TransitionAtom, Vote};
 use crate::perspectives::shacl_parser::{ConsensusRule, SHACLFlow};

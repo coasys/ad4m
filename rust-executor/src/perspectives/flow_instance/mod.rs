@@ -75,17 +75,29 @@ pub struct ProposalLinks {
 ///
 /// Serialisable on purpose: this is what a minted token carries as its
 /// backing, and [`fold_read_set`] over it reproduces the verdict without a
-/// perspective. Every link in it carries its own author and proof, so a
-/// verifier re-runs the same identity checks the engine ran.
+/// perspective.
+///
+/// The two halves are not worth the same, and the difference matters to
+/// anything that settles value on this:
+///
+/// - `proposals` are **proof**. Every link carries its own author and
+///   signature verdict, so a verifier re-runs the identity checks itself
+///   instead of believing us.
+/// - `role_grants` are an **audit record**, not proof — see the field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadSet {
     pub instance_uri: String,
     /// The state the walk starts from — the flow definition's first state.
     pub genesis: String,
     pub proposals: Vec<ProposalLinks>,
-    /// The `fromRole` verdicts that decided who was eligible, each naming
-    /// the rows it relied on. Present because roles are re-derived live: a
-    /// token's backing must record which role rows its verdict rested on.
+    /// Which voters this replica held eligible, and the role rows it says it
+    /// read. `eligible` is a verdict WE computed: the rows are cited by ID
+    /// and not carried here, so a verifier that folds this set has trusted
+    /// the minter about role membership rather than checked it. Present
+    /// because roles are re-derived live and a token's backing must at least
+    /// record what its verdict rested on. Making this half re-verifiable
+    /// needs the signed role rows themselves — the vote-time snapshot — which
+    /// is platform work this engine does not do yet.
     pub role_grants: Vec<RoleGrant>,
 }
 
