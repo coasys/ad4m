@@ -743,7 +743,7 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
             .get_proposal_links(&LinkQuery {
                 source: Some(proposal_uri.clone()),
                 predicate: Some(
-                    crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE.to_string(),
+                    crate::perspectives::flow_instance::RESOLVED_AS_PREDICATE.to_string(),
                 ),
                 ..Default::default()
             })
@@ -1737,10 +1737,10 @@ mod tests {
             // it must not wedge the remint.
             let mut store = full_candidate_store("did:key:me");
             store.by_predicate.insert(
-                crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE.to_string(),
+                crate::perspectives::flow_instance::RESOLVED_AS_PREDICATE.to_string(),
                 Some(vec![link(
                     "proposal://1",
-                    crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE,
+                    crate::perspectives::flow_instance::RESOLVED_AS_PREDICATE,
                     "literal:string:fired",
                 )]),
             );
@@ -1754,7 +1754,7 @@ mod tests {
         async fn resolved_as_lookup_error_reports_already_proposed() {
             let mut store = full_candidate_store("did:key:me");
             store.by_predicate.insert(
-                crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE.to_string(),
+                crate::perspectives::flow_instance::RESOLVED_AS_PREDICATE.to_string(),
                 None,
             );
             assert!(

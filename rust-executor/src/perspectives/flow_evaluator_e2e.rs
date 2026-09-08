@@ -7,6 +7,7 @@
 
 use super::flow_classes::{mint_flow_instance, write_flow_transition_proposal};
 use super::flow_context::{load_flow_instances, load_shacl_flows, FlowInstanceRecord};
+use super::flow_instance::{AtomBag, DerivedState, FlowInstance};
 use super::flow_evaluator::{
     evaluate_flow_transitions, evidence_hash, run_engine_proposal_pass, SatisfiedTransition,
 };
@@ -16,6 +17,7 @@ use super::interpretation_test_support::{seed_instance, setup_perspective_no_llm
 use super::model_query::types::ModelShape;
 use super::perspective_instance::PerspectiveInstance;
 use super::shacl_parser::parse_flow_to_links;
+use crate::agent::signatures::TestSigner;
 use crate::agent::AgentContext;
 use crate::types::{Link, LinkQuery, LinkStatus};
 use std::collections::HashMap;
@@ -25,14 +27,14 @@ const FLOW_URI: &str = "delivery://DeliveryFlow";
 const BASE_URI: &str = "ad4m://task/onboarding";
 const SCOPE_HINT: &str = "The scope is well-defined and actionable.";
 
-struct Fixture {
-    perspective: PerspectiveInstance,
+pub(super) struct Fixture {
+    pub(super) perspective: PerspectiveInstance,
     task_shape: ModelShape,
-    ctx: AgentContext,
-    instance_uri: String,
+    pub(super) ctx: AgentContext,
+    pub(super) instance_uri: String,
 }
 
-fn literal(s: &str) -> String {
+pub(super) fn literal(s: &str) -> String {
     format!("literal:string:{}", urlencoding::encode(s))
 }
 
@@ -41,7 +43,7 @@ fn literal(s: &str) -> String {
 /// `semanticCheck` hint, plus one FlowInstance sitting in `identified`.
 /// `requires` and `semanticCheck` are declared in the flow JSON so
 /// `parse_flow_to_links` emits the production links.
-async fn seed_fixture(semantic_check: Option<&str>) -> Fixture {
+pub(super) async fn seed_fixture(semantic_check: Option<&str>) -> Fixture {
     seed_fixture_with_requires(
         serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]),
         semantic_check,
@@ -49,7 +51,7 @@ async fn seed_fixture(semantic_check: Option<&str>) -> Fixture {
     .await
 }
 
-async fn seed_fixture_with_requires(
+pub(super) async fn seed_fixture_with_requires(
     requires: serde_json::Value,
     semantic_check: Option<&str>,
 ) -> Fixture {
@@ -102,14 +104,14 @@ async fn seed_fixture_with_requires(
 }
 
 /// Fixture with the guard already satisfied by one Task.
-async fn seed_satisfied_fixture(semantic_check: Option<&str>) -> Fixture {
+pub(super) async fn seed_satisfied_fixture(semantic_check: Option<&str>) -> Fixture {
     let mut f = seed_fixture(semantic_check).await;
     f.seed_task("ad4m://task/1", "Onboard Ana").await;
     f
 }
 
 impl Fixture {
-    async fn seed_task(&mut self, uri: &str, title: &str) {
+    pub(super) async fn seed_task(&mut self, uri: &str, title: &str) {
         seed_instance(
             &mut self.perspective,
             &self.ctx,
@@ -122,7 +124,7 @@ impl Fixture {
 
     /// One `add_link` with the fixture's context, for the many test setups
     /// that bolt a single link onto the seeded graph.
-    async fn link(&mut self, source: &str, predicate: &str, target: &str, status: LinkStatus) {
+    pub(super) async fn link(&mut self, source: &str, predicate: &str, target: &str, status: LinkStatus) {
         self.perspective
             .add_link(
                 Link {
@@ -140,7 +142,7 @@ impl Fixture {
 
     /// `write_flow_transition_proposal` with the fixture's own DID, instance
     /// URI and context filled in.
-    async fn write_proposal(
+    pub(super) async fn write_proposal(
         &mut self,
         proposal_id: &str,
         from_state: &str,
@@ -167,7 +169,30 @@ impl Fixture {
         .unwrap_or_else(|e| panic!("write `{proposal_id}` proposal: {e:#}"))
     }
 
-    async fn instances(&self) -> Vec<FlowInstanceRecord> {
+    /// Every proposal on the fixture's instance, identity-checked into
+    /// atoms — what the engine actually sees, as opposed to what the
+    /// `currentState` link claims.
+    pub(super) async fn atom_bag(&self) -> AtomBag {
+        let flows = load_shacl_flows(&self.perspective).await.expect("flows");
+        let records = self.instances().await;
+        FlowInstance::from_record(&records[0], &flows[FLOW_URI])
+            .load_atoms(&self.perspective)
+            .await
+            .expect("load atoms")
+    }
+
+    /// The DERIVED state of the fixture's instance: the fold over its
+    /// re-verified history, never the cache.
+    pub(super) async fn derived(&self) -> DerivedState {
+        let flows = load_shacl_flows(&self.perspective).await.expect("flows");
+        let records = self.instances().await;
+        FlowInstance::from_record(&records[0], &flows[FLOW_URI])
+            .derive_state(&self.perspective)
+            .await
+            .expect("derive_state")
+    }
+
+    pub(super) async fn instances(&self) -> Vec<FlowInstanceRecord> {
         load_flow_instances(&self.perspective, &[BASE_URI.to_string()])
             .await
             .expect("load_flow_instances")
@@ -175,7 +200,7 @@ impl Fixture {
 
     /// The on-graph `currentState` CACHE of the flow instance anchored on
     /// `BASE_URI` — what the fire path writes through, not the authority.
-    async fn cached_state(&self) -> String {
+    pub(super) async fn cached_state(&self) -> String {
         self.instances().await[0]
             .cached_state
             .clone()
@@ -183,7 +208,7 @@ impl Fixture {
     }
 
     /// One proposal pass that must mint exactly one proposal; its URI.
-    async fn mint_one(&mut self) -> String {
+    pub(super) async fn mint_one(&mut self) -> String {
         let minted = self.run_pass(&[], None).await;
         assert_eq!(minted.len(), 1, "got {minted:?}");
         minted.into_iter().next().unwrap()
@@ -197,7 +222,7 @@ impl Fixture {
         evaluate_flow_transitions(&self.perspective, &records, &flows, "did:key:acting").await
     }
 
-    async fn run_pass(
+    pub(super) async fn run_pass(
         &mut self,
         llm_proposals: &[LlmFlowProposal],
         semantic_check: Option<&dyn SemanticCheckLlm>,
@@ -223,7 +248,7 @@ impl Fixture {
         .await
     }
 
-    async fn links_by_predicate(&self, source: &str) -> HashMap<String, Vec<String>> {
+    pub(super) async fn links_by_predicate(&self, source: &str) -> HashMap<String, Vec<String>> {
         let links = self
             .perspective
             .get_links(&LinkQuery {
@@ -250,7 +275,7 @@ impl Fixture {
     }
 }
 
-fn assert_has_target(by_pred: &HashMap<String, Vec<String>>, pred: &str, want: &str) {
+pub(super) fn assert_has_target(by_pred: &HashMap<String, Vec<String>>, pred: &str, want: &str) {
     let targets = by_pred
         .get(pred)
         .unwrap_or_else(|| panic!("proposal must carry a `{pred}` link"));
@@ -717,10 +742,8 @@ async fn harness_propose_transition_tool_call_routes_rationale_to_graph_e2e() {
 // run_flow_consensus_pass — the firing half, against the live store.
 // ---------------------------------------------------------------------------
 
-use super::flow_consensus::{
-    accept_flow_proposal, load_flow_transition_proposals, reject_flow_proposal,
-    run_flow_consensus_pass, ACCEPTED_BY_PREDICATE,
-};
+use super::flow_consensus::{accept_flow_proposal, reject_flow_proposal, run_flow_consensus_pass};
+use super::flow_instance::ACCEPTED_BY_PREDICATE;
 
 /// Happy path with the default `{ n: 1 }` rule: the pass verifies the
 /// minted proposal's evidence against the live graph, fires the
@@ -746,12 +769,17 @@ async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
     assert_eq!(recs.len(), 1);
     assert_eq!(recs[0].cached_state.as_deref(), Some("scoped"));
 
-    // The fired proposal is KEPT (its links survive, marked `fired`) but no
-    // longer loads as live — the Synergy flow-atom record.
-    let live = load_flow_transition_proposals(&f.perspective, &f.instance_uri)
-        .await
-        .expect("load proposals");
-    assert!(live.is_empty(), "fired proposal must be resolved: {live:?}");
+    // The fired proposal is KEPT (its links survive, marked `fired`) but is
+    // no longer live — it is the Synergy flow-atom record, and the fold
+    // replays it into the state the cache above only mirrors.
+    let bag = f.atom_bag().await;
+    assert_eq!(bag.atoms.len(), 1, "the fired proposal must be kept");
+    assert!(bag.atoms[0].marked_fired, "and marked as history");
+    assert!(
+        bag.frontier("scoped").is_empty(),
+        "no live proposal may remain: {bag:?}"
+    );
+    assert_eq!(f.derived().await.state, "scoped", "the fold is the state");
     let by_pred = f.links_by_predicate(&minted).await;
     assert_has_target(&by_pred, "ad4m://flow/resolved_as", &literal("fired"));
     assert_has_target(&by_pred, "ad4m://flow/instance", &f.instance_uri);
@@ -866,25 +894,58 @@ async fn accept_api_n2_quorum_fires_e2e() {
         "a forged acceptedBy (author != target) must not reach n=2: {fired:?}"
     );
 
-    // A GENUINE second-agent acceptance arrives via sync: the link carries
-    // the foreign author itself, exactly as `diff_from_link_language` would
-    // deliver it. This one counts, quorum is met, the edge fires.
+    // An acceptance that NAMES ITS OWN AUTHOR but whose signature does not
+    // verify: the shape a peer can inject over sync for any DID, since the
+    // Holochain integrity zome validates dependency hashes and never link
+    // signatures. The executor stores it with `proof.valid = Some(false)`,
+    // and before the fold — which reads that verdict — this counted as a
+    // second DID and fired the transition.
+    let unverifiable = "did:key:z6MkfakeUnverifiableSigner";
     f.perspective
         .add_link_expression(
             crate::types::LinkExpression {
-                author: "did:key:other-agent".to_string(),
+                author: unverifiable.to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 data: Link {
                     source: minted.clone(),
                     predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
-                    target: "did:key:other-agent".to_string(),
+                    target: unverifiable.to_string(),
                 },
                 proof: crate::types::ExpressionProof {
-                    key: "did:key:other-agent#key".to_string(),
+                    key: format!("{unverifiable}#key"),
                     signature: "test-signature".to_string(),
                 },
                 status: Some(LinkStatus::Shared),
             },
+            LinkStatus::Shared,
+            None,
+        )
+        .await
+        .expect("unverifiable acceptedBy link");
+    let fired = accept_flow_proposal(&mut f.perspective, &minted, &f.ctx)
+        .await
+        .expect("accept with an unverifiable vote present");
+    assert!(
+        fired.is_empty(),
+        "a vote whose signature does not verify must not reach n=2: {fired:?}"
+    );
+
+    // A GENUINE second-agent acceptance arrives via sync: a real second
+    // keypair signs the link, exactly as `diff_from_link_language` would
+    // deliver it from that agent's replica. This one counts, quorum is met,
+    // the edge fires.
+    let bob = TestSigner::generate();
+    let vote = bob.sign(
+        Link {
+            source: minted.clone(),
+            predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+            target: bob.did.clone(),
+        }
+        .normalize(),
+    );
+    f.perspective
+        .add_link_expression(
+            crate::types::LinkExpression::from(vote),
             LinkStatus::Shared,
             None,
         )
@@ -895,9 +956,7 @@ async fn accept_api_n2_quorum_fires_e2e() {
         .expect("accept with quorum");
     assert_eq!(fired.len(), 1, "n=2 met must fire: {fired:?}");
     assert_eq!(fired[0].fired_by_proposers.len(), 2);
-    assert!(fired[0]
-        .fired_by_proposers
-        .contains(&"did:key:other-agent".to_string()));
+    assert!(fired[0].fired_by_proposers.contains(&bob.did));
     assert!(fired[0].fired_by_proposers.contains(&acting_did));
 
     // Resolved proposals are immutable to the API.
@@ -915,8 +974,6 @@ async fn accept_api_n2_quorum_fires_e2e() {
 /// genuine self-authored vote still lands.
 #[tokio::test(flavor = "multi_thread")]
 async fn forged_accept_naming_acting_did_does_not_suppress_own_vote_e2e() {
-    use super::flow_consensus::{accept_flow_proposal, ACCEPTED_BY_PREDICATE};
-
     let mut f = seed_satisfied_fixture(None).await;
     let minted = f.run_pass(&[], None).await;
     assert_eq!(minted.len(), 1, "got {minted:?}");

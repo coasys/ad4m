@@ -555,6 +555,9 @@ impl<'a> FlowInstance<'a> {
     /// by-id filter; the read surfaces that will call this per instance
     /// (slice 2) should hold the catalogue and the row they already have
     /// and use [`Self::from_record`] instead.
+    // Dead until slice 2 moves MCP / the prompt block / the TS wrapper onto
+    // the fold; the pass has its rows already and uses `from_record`.
+    #[allow(dead_code)]
     pub async fn load(
         perspective: &PerspectiveInstance,
         instance_uri: &str,
@@ -613,6 +616,9 @@ impl<'a> FlowInstance<'a> {
     /// The only function the rest of the engine may call for "what state
     /// is this flow in". `Err` on a store error during role resolution —
     /// callers must then neither fire nor delete (fail closed).
+    // Called by tests and (slice 2) by the read surfaces; the pass needs
+    // the bag as well, so it calls `derive_state_from` directly.
+    #[allow(dead_code)]
     pub async fn derive_state(
         &self,
         perspective: &PerspectiveInstance,
