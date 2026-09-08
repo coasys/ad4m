@@ -3,11 +3,18 @@
  *
  * Bridges AD4M's MCP server into OpenClaw by:
  * 1. Connecting to the AD4M executor's Streamable HTTP MCP endpoint
- * 2. Discovering all available tools (including dynamic SHACL-generated ones)
- * 3. Registering each tool with OpenClaw via api.registerTool()
- * 4. Periodically polling for new dynamic tools as perspectives sync SHACL schemas
- * 5. Embedded waker: subscribes to AD4M perspectives via WebSocket and
+ * 2. Registering the static executor surface at register() time from
+ *    staticToolDefs.ts (OpenClaw 2026.x snapshots session tools from a cold
+ *    register() — late api.registerTool never reaches agent sessions)
+ * 3. Prefixing MCP names with ad4m_ here (the executor has no prefix;
+ *    openclaw.plugin.json contracts.tools is the host allowlist of those
+ *    prefixed names plus plugin-local tools)
+ * 4. Embedded waker: subscribes to AD4M perspectives via WebSocket and
  *    wakes the agent via /hooks/wake when changes are detected
+ *
+ * Per-class SHACL tools ({Class}_create, …) stay on the executor MCP /
+ * in-process harness. They are not this plugin's OpenClaw surface unless
+ * OpenClaw grows late-bind + prefix allowlists.
  */
 
 // ---------------------------------------------------------------------------
@@ -102,7 +109,6 @@ let _wakerClient: any = null;
 let _subscriptionManager: WakerSubscriptionManager | null = null;
 let _sessionId = "";
 let _registeredTools = new Set<string>();
-let _refreshTimer: ReturnType<typeof setInterval> | null = null;
 let _wakerStopped = false;
 let _wakerRetryTimer: ReturnType<typeof setTimeout> | null = null;
 /**
@@ -213,8 +219,6 @@ export function _resetModuleState(): void {
   _subscriptionManager = null;
   _sessionId = "";
   _registeredTools = new Set<string>();
-  if (_refreshTimer) clearInterval(_refreshTimer);
-  _refreshTimer = null;
   _wakerStopped = false;
   if (_wakerRetryTimer) clearTimeout(_wakerRetryTimer);
   _wakerRetryTimer = null;
@@ -377,36 +381,10 @@ export default function ad4mPlugin(api: any) {
     "neighbourhood_publish_from_perspective",
   ]);
 
-  // PR B: only these MCP tools become native OpenClaw tools. Dynamic
-  // per-class tools stay off this surface (see mcp-tool-surface-redesign).
-  const STATIC_MCP_TOOLS = new Set([
-    "get_my_did",
-    "auth_status",
-    "login_email",
-    "signup",
-    "verify_email_code",
-    "set_agent_profile",
-    "list_perspectives",
-    "add_perspective",
-    "add_model",
-    "neighbourhood_join_from_url",
-    "neighbourhood_publish_from_perspective",
-    "list_link_language_templates",
-    "add_link",
-    "query_links",
-    "describe_perspective",
-    "instance_create",
-    "instance_query",
-    "instance_get",
-    "instance_update",
-    "instance_add_to_collection",
-    "instance_remove_from_collection",
-    "instance_remove",
-    "instance_transcript",
-    "add_child",
-    "get_children",
-    "get_documentation",
-  ]);
+  // Executor MCP names this plugin surfaces. Derived from staticToolDefs.ts
+  // so a third handwritten list cannot drift. Per-class SHACL tools are
+  // not in that file and never become OpenClaw tools here.
+  const EXECUTOR_MCP_NAMES = new Set(STATIC_TOOL_DEFS.map((d) => d.name));
 
   /**
    * Extract the perspective UUID from a successful neighbourhood tool result.
@@ -433,7 +411,7 @@ export default function ad4mPlugin(api: any) {
   }
 
   function registerMcpTool(tool: McpTool) {
-    if (!STATIC_MCP_TOOLS.has(tool.name)) return;
+    if (!EXECUTOR_MCP_NAMES.has(tool.name)) return;
     if (_registeredTools.has(tool.name)) return;
 
     const isNeighbourhoodTool = NEIGHBOURHOOD_TOOLS.has(tool.name);
@@ -467,11 +445,11 @@ export default function ad4mPlugin(api: any) {
     _registeredTools.add(tool.name);
   }
 
-  // Register the full static executor surface synchronously. OpenClaw builds
-  // the agent tool surface from a cold load of register() — tools registered
-  // later from the bridge service exist in the gateway but never reach agent
-  // sessions. Definitions are captured schemas (staticToolDefs.ts); execution
-  // still goes through the live MCP bridge via callToolWithRetry.
+  // OpenClaw 2026.x: session tools = this register() snapshot.
+  // Prefix is applied here (`ad4m_${mcpName}`), not by the executor.
+  // contracts.tools in openclaw.plugin.json must list every prefixed name
+  // (plus plugin-local tools registered below); the host rejects undeclared
+  // registerTool. Execution still goes through the live MCP bridge.
   for (const staticDef of STATIC_TOOL_DEFS) {
     _registeredTools.delete(staticDef.name); // survive hot-reload guard
     registerMcpTool(staticDef);
@@ -481,55 +459,42 @@ export default function ad4mPlugin(api: any) {
   );
 
   /**
-   * Fetch tools from MCP and register any new ones.
-   * Automatically re-initializes the session on 4xx errors.
+   * Compare live executor tools/list to staticToolDefs.ts.
+   * Does not register anything: late registerTool never reaches sessions.
+   * Re-initializes the MCP session once on 4xx (same recovery as execute).
    */
-  async function refreshTools(): Promise<number> {
+  async function warnIfExecutorToolSurfaceDrift(): Promise<void> {
+    const check = (tools: McpTool[]) => {
+      const live = new Set(tools.map((t) => t.name));
+      const missing = STATIC_TOOL_DEFS.map((d) => d.name).filter(
+        (n) => !live.has(n),
+      );
+      if (missing.length > 0) {
+        logger.warn(
+          `[ad4m] executor tools/list is missing snapshot names (${missing.join(
+            ", ",
+          )}) — staticToolDefs.ts is stale`,
+        );
+      }
+    };
     try {
       await ensureSession();
       try {
-        const tools = await mcpListTools(endpoint, _sessionId, _authToken);
-        let newCount = 0;
-        for (const tool of tools) {
-          if (!_registeredTools.has(tool.name)) {
-            registerMcpTool(tool);
-            newCount++;
-          }
-        }
-        if (newCount > 0) {
-          logger.info(
-            `[ad4m] Registered ${newCount} new tool(s), total: ${_registeredTools.size}`,
-          );
-        }
-        return newCount;
+        check(await mcpListTools(endpoint, _sessionId, _authToken));
       } catch (err: any) {
-        // Session error -> re-initialize and retry once
         if (err.message && /MCP HTTP 4\d\d/.test(err.message)) {
           logger.info(
             `[ad4m] Session error during tool refresh, re-initializing...`,
           );
           invalidateSession();
           await ensureSession();
-          const tools = await mcpListTools(endpoint, _sessionId, _authToken);
-          let newCount = 0;
-          for (const tool of tools) {
-            if (!_registeredTools.has(tool.name)) {
-              registerMcpTool(tool);
-              newCount++;
-            }
-          }
-          if (newCount > 0) {
-            logger.info(
-              `[ad4m] Registered ${newCount} new tool(s), total: ${_registeredTools.size}`,
-            );
-          }
-          return newCount;
+          check(await mcpListTools(endpoint, _sessionId, _authToken));
+          return;
         }
         throw err;
       }
     } catch (err: any) {
-      logger.warn(`[ad4m] Tool refresh failed: ${err.message}`);
-      return 0;
+      logger.warn(`[ad4m] Executor tool-surface check failed: ${err.message}`);
     }
   }
 
@@ -1210,10 +1175,10 @@ Notes:
       try {
         await ensureSession();
 
-        // One-shot allowlisted MCP tools only (no dynamic class-tool polling).
-        await refreshTools();
+        // Session for execute(); drift warn only — do not registerTool here.
+        await warnIfExecutorToolSurfaceDrift();
         logger.info(
-          `[ad4m] Registered ${_registeredTools.size} static tool(s)`,
+          `[ad4m] Static OpenClaw surface already registered at register() (${_registeredTools.size} executor MCP tools)`,
         );
       } catch (err: any) {
         logger.error(`[ad4m] Failed to connect to AD4M MCP: ${err.message}`);
@@ -1223,10 +1188,6 @@ Notes:
       }
     },
     stop() {
-      if (_refreshTimer) {
-        clearInterval(_refreshTimer);
-        _refreshTimer = null;
-      }
       stopExecutor(logger);
       logger.info("[ad4m] AD4M MCP service stopped");
     },

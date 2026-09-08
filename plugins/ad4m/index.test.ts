@@ -1773,9 +1773,11 @@ describe("ad4mPlugin", () => {
     expect(phantom).toEqual([]);
 
     // Every captured executor def is registered at register() time — with
-    // no executor reachable — and is declared in the manifest. A def that
-    // is missing from STATIC_MCP_TOOLS (index.ts) would silently never
-    // reach agent sessions.
+    // no executor reachable — and is declared in the manifest. The executor
+    // name set in index.ts is derived from STATIC_TOOL_DEFS; contracts.tools
+    // is the OpenClaw allowlist of ad4m_-prefixed names plus plugin-local
+    // tools. The two bidirectional checks above are what keep those from
+    // drifting.
     const unregisteredDefs = STATIC_TOOL_DEFS.map((d) => `ad4m_${d.name}`)
       .filter((n) => !toolNames.includes(n));
     expect(unregisteredDefs).toEqual([]);
@@ -2108,7 +2110,7 @@ describe("ad4mPlugin", () => {
     expect(credMessage).toContain("length: 24");
   }, 10000);
 
-  it("refreshTools recovers from 422 by re-initializing session", async () => {
+  it("executor tool-surface check recovers from 422 by re-initializing session", async () => {
     const registeredTools: Array<{ name: string; execute: Function }> = [];
     const registeredServices: Array<{
       id: string;
@@ -2183,7 +2185,7 @@ describe("ad4mPlugin", () => {
 
     await ad4mPlugin(mockApi);
 
-    // Start the MCP service — ensureSession + refreshTools with 422 recovery
+    // Start the MCP service — ensureSession + drift check with 422 recovery
     const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
     expect(mcpService).toBeDefined();
     await mcpService!.start(makeServiceCtx());

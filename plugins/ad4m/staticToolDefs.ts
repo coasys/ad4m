@@ -1,14 +1,14 @@
-// Static tool definitions for the AD4M executor MCP surface.
-// Captured verbatim from ad4m-executor tools/list (feat/static-instance-tools,
-// dynamicClassTools=false) so the plugin can register all agent tools
-// synchronously at register() time. OpenClaw builds the agent tool surface
-// from a cold load that only runs register(); tools registered later from
-// the bridge service never become visible to sessions.
+// Static tool definitions for the AD4M executor MCP surface (unprefixed MCP names).
+// Captured verbatim from ad4m-executor tools/list (dynamicClassTools=false).
+// OpenClaw 2026.x snapshots session tools from a cold register() — this file
+// is the schema source for that snapshot. index.ts prefixes each name with
+// ad4m_ and openclaw.plugin.json contracts.tools must list those prefixed
+// names (plus plugin-local tools). Late registerTool never reaches sessions.
 //
 // To refresh: run an executor with --enable-mcp true, call tools/list, and
-// paste the name/description/inputSchema of every tool named in
-// STATIC_MCP_TOOLS (index.ts). Keep schemas byte-for-byte as the executor
-// emits them (schemars 1.0, draft 2020-12).
+// paste name/description/inputSchema. Keep schemas byte-for-byte as the
+// executor emits them (schemars 1.0, draft 2020-12). Then add ad4m_<name>
+// to contracts.tools. index.ts derives its executor-name set from this file.
 import type { McpTool } from "./types";
 
 export const STATIC_TOOL_DEFS: McpTool[] = 
