@@ -200,9 +200,9 @@ Registering a class this way is unaffected by the static-tools change — `add_m
 | `name`             | string?      | Property name (derived from `path` if omitted)                         |
 | `datatype`         | string?      | Value type constraint, e.g. `xsd://string`, `xsd://dateTime`           |
 | `min_count`        | number?      | Minimum cardinality. `1` = required on creation                        |
-| `max_count`        | number?      | Maximum cardinality. `1` = scalar property. Omit or `> 1` = collection |
+| `max_count`        | number?      | Maximum cardinality, stored as `sh://maxCount`. On a relation, `1` makes it hydrate as a single value. On an ordinary property it does **not** make the property multi-valued — that is `collection` below |
 | `writable`         | bool?        | Whether the property can be updated after creation                     |
-| `collection`       | bool?        | Explicit collection flag (alternative to omitting `max_count`)         |
+| `collection`       | bool?        | Marks an ordinary property multi-valued. This flag alone is what `describe_perspective` reads back as a collection; `max_count` is not a substitute |
 | `node_kind`        | string?      | `"IRI"` if the value is a URI rather than a literal. **Does not by itself make the property a relation** — see below |
 | `relation_kind`    | string?      | Makes the property a typed relation: `"hasOne"`, `"hasMany"`, `"belongsToOne"`, `"belongsToMany"` (camelCase values, snake_case field) |
 | `target_class_name`| string?      | Bare local name of the class on the other end, e.g. `"Author"` (not the URI)                                        |
