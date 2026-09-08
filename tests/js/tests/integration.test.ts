@@ -7,7 +7,7 @@ import { expect } from "chai";
 import { startExecutor, baseUrl, runHcLocalServices, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { startLinkServer, LinkServerHandle } from "../utils/linkServer";
-import { LinkLangConfig, holochainLinkLang, serverLinkLang, serverLinkLangE2E } from "../utils/linkLangConfig";
+import { LinkLangConfig, holochainLinkLang, serverLinkLang } from "../utils/linkLangConfig";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
@@ -166,7 +166,6 @@ describe("Integration tests", function () {
         // linkLangConfig.buildTemplateParams.
         let linkServer: LinkServerHandle | null = null;
         let serverLinkConfig: LinkLangConfig | null = null;
-        let serverLinkE2EConfig: LinkLangConfig | null = null;
         const holochainConfig: LinkLangConfig = holochainLinkLang(DIFF_SYNC_HASH);
         before(async () => {
           const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
@@ -214,7 +213,6 @@ describe("Integration tests", function () {
           }
           linkServer = await startLinkServer();
           serverLinkConfig = serverLinkLang(SERVER_LINK_HASH, linkServer.url);
-          serverLinkE2EConfig = serverLinkLangE2E(SERVER_LINK_HASH, linkServer.url);
         })
 
         after(async () => {
@@ -237,10 +235,6 @@ describe("Integration tests", function () {
         describe('Neighbourhood [server-link]', neighbourhoodTests(testContext, () => {
             if (!serverLinkConfig) throw new Error("server-link config not initialised — before() didn't run?");
             return serverLinkConfig;
-        }))
-        describe('Neighbourhood [server-link-e2e]', neighbourhoodTests(testContext, () => {
-            if (!serverLinkE2EConfig) throw new Error("server-link-e2e config not initialised — before() didn't run?");
-            return serverLinkE2EConfig;
         }))
         describe('Auto-processor (two executors)', autoProcessorNeighbourhoodTests(testContext))
         describe('Cross-peer SHACL shape sync', crossPeerShapeSyncTests(testContext))

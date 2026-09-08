@@ -52,7 +52,7 @@ Register the language code on the AD4M network. This only needs to happen once �
 ad4m languages publish ./build/bundle.js \
   --name server-link-language \
   --description "Link language syncing through a self-hosted link-server" \
-  --possible-template-params SERVER_URL,ROOM_ID,ENABLE_E2E
+  --possible-template-params SERVER_URL,ROOM_ID
 ```
 
 This returns a **template address** (content hash). Save it — you need it in the next step.
@@ -229,18 +229,15 @@ const SERVER_URL = "<to-be-filled>";  // e.g. "https://my-server.example.com"
 
 //!@ad4m-template-variable
 const ROOM_ID = "<to-be-filled>";     // UUID, set at neighbourhood creation
-
-//!@ad4m-template-variable
-const ENABLE_E2E = "";                // "true" to auto-generate E2E room key on init (admin only)
 ```
 
 Filled in by the executor at publish time. Until then, `init()` runs in an
 inert mode (logs and returns without attempting any network I/O).
 
-When `ENABLE_E2E` equals `"true"`, the admin's language instance generates the
-initial E2E room key during `init()` (calls `performRotation()`). Non-admin
-members receive keys via the automatic `onPeerJoined` grant flow. Leave empty
-or omit for a plaintext room.
+E2E encryption activates automatically — the admin's language instance
+generates the initial room key during `init()` when no E2E exists yet.
+Non-admin members receive keys via the automatic `onPeerJoined` grant flow.
+There is no plaintext mode.
 
 ## Publishing
 
@@ -250,7 +247,7 @@ or omit for a plaintext room.
     "languageMeta": {
         "name": "server-link-language",
         "description": "AD4M link language syncing through a self-hosted link-server",
-        "possibleTemplateParams": ["SERVER_URL", "ROOM_ID", "ENABLE_E2E"],
+        "possibleTemplateParams": ["SERVER_URL", "ROOM_ID"],
         "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/server-link-language"
     }
 }

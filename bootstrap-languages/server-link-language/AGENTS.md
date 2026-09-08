@@ -122,18 +122,18 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   local-only until the server recovers, but a process restart loses the
   queue — a durable pending-commits queue (persisted in the KV store,
   retried by `sync()`) would close this gap.
-- **E2E key rotation requires explicit admin action or `ENABLE_E2E` template
-  param.** `performRotation()` generates a fresh room key client-side, seals it
-  to every ACL member's X25519 public key, and POSTs only sealed envelopes —
-  the server never sees plaintext. It does NOT fire on presence events
-  (`onPeerJoined` is reconnect/wake, not ACL change — rotating there would
-  mint a new version on every reconnect). `onPeerJoined` only calls
-  `performAdminKeyGrants()` to grant historical keys to members who lack them
-  (idempotent). When template param `ENABLE_E2E` equals `"true"`, the admin's
-  language instance auto-generates the initial room key during `init()`. The
-  key ring loads once during `init()`'s `setupKeyRing()` and the `version`
-  field in `KeysResponse` remains unused for mid-session detection — a periodic
-  `/keys` re-fetch or a dedicated WS push message would close that gap.
+- **E2E encryption activates automatically — no plaintext mode.** The admin's
+  language instance generates the initial room key during `init()` when no E2E
+  exists yet. Subsequent rotations require explicit admin action.
+  `performRotation()` generates a fresh room key client-side, seals it to every
+  ACL member's X25519 public key, and POSTs only sealed envelopes — the server
+  never sees plaintext. It does NOT fire on presence events (`onPeerJoined` is
+  reconnect/wake, not ACL change — rotating there would mint a new version on
+  every reconnect). `onPeerJoined` only calls `performAdminKeyGrants()` to
+  grant historical keys to members who lack them (idempotent). The key ring
+  loads once during `init()`'s `setupKeyRing()` and the `version` field in
+  `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
+  re-fetch or a dedicated WS push message would close that gap.
 - **E2E encryption wire format is unified.** Both client and server use
   the same `EncryptedLinkData` shape (`{ciphertext, nonce}`) in the link's
   `data` field for encrypted rooms — no separate `encrypted` field. The
@@ -144,11 +144,10 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   public keys during auth.
 - **E2E integration coverage via test matrix.** The integration suite
   (`tests/js/tests/integration.test.ts`) runs the full neighbourhood test
-  battery for three link-language configurations: `[holochain]`,
-  `[server-link]` (plaintext), and `[server-link-e2e]` (encrypted via
-  `ENABLE_E2E=true` template param). The E2E matrix leg exercises the full
-  init → key generation → encrypt → sync → decrypt → grant pipeline through
-  two real AD4M executors.
+  battery for both `[holochain]` and `[server-link]` link-language
+  configurations. Since E2E activates automatically for every room, the
+  `[server-link]` leg exercises the full init → key generation → encrypt →
+  sync → decrypt → grant pipeline through two real AD4M executors.
 
 ## Testing approach
 
