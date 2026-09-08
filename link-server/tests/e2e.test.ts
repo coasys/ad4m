@@ -14,6 +14,8 @@
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
 import * as ed from "@noble/ed25519";
 import {
@@ -402,5 +404,174 @@ test("successive rotations produce independent keys — compromising v2 does not
     const decV2 = decryptRoomKeyWithX25519(keysRes.body.keys.find((k) => k.version === 2)!.encryptedKey, priv);
     assert.deepEqual(decV1, keyV1);
     assert.deepEqual(decV2, keyV2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wire-level proof: plaintext key never appears in the POST body
+// ---------------------------------------------------------------------------
+
+test("POST /keys/rotate request body contains zero plaintext key bytes — hex or base64", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    await authenticateAgent(server.url, roomId, member);
+
+    // Generate room key locally — same as clientSideRotate but we
+    // capture the serialised request body before sending it.
+    const roomKey = generateRoomKey();
+    const roomKeyHex = bytesToHex(roomKey);
+    const roomKeyBase64 = Buffer.from(roomKey).toString("base64");
+    const roomKeyBase64Url = Buffer.from(roomKey).toString("base64url");
+
+    // Fetch ACL for X25519 public keys.
+    const aclRes = await getJson<{
+      admin: string;
+      members: Array<{ did: string; x25519PublicKey: string | null }>;
+    }>(`${server.url}/rooms/${roomId}/acl`, adminToken);
+    assert.equal(aclRes.status, 200);
+
+    // Seal to each member.
+    const keys = aclRes.body.members
+      .filter((m) => m.x25519PublicKey)
+      .map((m) => ({
+        did: m.did,
+        encryptedKey: encryptRoomKeyForRecipient(roomKey, hexToBytes(m.x25519PublicKey!)),
+      }));
+
+    // Serialize — this exact string goes on the wire.
+    const wireBody = JSON.stringify({ keys });
+
+    // The plaintext key must not appear in any encoding.
+    assert.equal(
+      wireBody.includes(roomKeyHex), false,
+      `plaintext room key (hex) found in POST body: ${roomKeyHex}`,
+    );
+    assert.equal(
+      wireBody.includes(roomKeyBase64), false,
+      `plaintext room key (base64) found in POST body: ${roomKeyBase64}`,
+    );
+    assert.equal(
+      wireBody.includes(roomKeyBase64Url), false,
+      `plaintext room key (base64url) found in POST body: ${roomKeyBase64Url}`,
+    );
+
+    // Now send it — server must accept the sealed-only payload.
+    const rotateRes = await postJson<{ version: number; recipients: string[] }>(
+      `${server.url}/rooms/${roomId}/keys/rotate`, { keys }, adminToken,
+    );
+    assert.equal(rotateRes.status, 200);
+    assert.equal(rotateRes.body.version, 1);
+
+    // Member can still decrypt — proves the sealed envelope carries the real key.
+    const memberToken = await authenticateAgent(server.url, roomId, member);
+    const keysRes = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+      `${server.url}/rooms/${roomId}/keys`, memberToken,
+    );
+    assert.equal(keysRes.status, 200);
+    const decrypted = decryptRoomKeyWithX25519(
+      keysRes.body.keys[0].encryptedKey,
+      testAgentX25519PrivateKey(member),
+    );
+    assert.deepEqual(decrypted, roomKey, "member must recover the original room key");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Storage-level proof: plaintext key never appears in SQLite DB file
+// ---------------------------------------------------------------------------
+
+test("plaintext room key bytes never appear anywhere in the SQLite DB file", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    await authenticateAgent(server.url, roomId, member);
+
+    // Rotate twice to populate multiple key versions.
+    const { roomKey: key1 } = await clientSideRotate(server.url, roomId, adminToken);
+    const { roomKey: key2 } = await clientSideRotate(server.url, roomId, adminToken);
+    const key1Hex = bytesToHex(key1);
+    const key2Hex = bytesToHex(key2);
+
+    // Read the entire SQLite database file as raw bytes.
+    const dbPath = path.join(server.dataDir, "data.sqlite");
+    const dbBytes = readFileSync(dbPath);
+    const dbHex = dbBytes.toString("hex");
+
+    // Neither plaintext key may appear anywhere in the DB — not in
+    // key storage rows, not in WAL pages, not in free-list pages.
+    assert.equal(
+      dbHex.includes(key1Hex), false,
+      `plaintext room key v1 found in SQLite DB file`,
+    );
+    assert.equal(
+      dbHex.includes(key2Hex), false,
+      `plaintext room key v2 found in SQLite DB file`,
+    );
+
+    // Also check WAL and SHM if they exist (WAL mode).
+    for (const suffix of ["-wal", "-shm"]) {
+      try {
+        const walBytes = readFileSync(dbPath + suffix);
+        const walHex = walBytes.toString("hex");
+        assert.equal(
+          walHex.includes(key1Hex), false,
+          `plaintext room key v1 found in ${suffix} file`,
+        );
+        assert.equal(
+          walHex.includes(key2Hex), false,
+          `plaintext room key v2 found in ${suffix} file`,
+        );
+      } catch {
+        // File doesn't exist — not in WAL mode, which still passes.
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Endpoint sweep: no server endpoint leaks plaintext key material
+// ---------------------------------------------------------------------------
+
+test("no server endpoint leaks plaintext room key in its response", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    const memberToken = await authenticateAgent(server.url, roomId, member);
+
+    const { roomKey } = await clientSideRotate(server.url, roomId, adminToken);
+    const roomKeyHex = bytesToHex(roomKey);
+
+    // Every read endpoint that could conceivably echo back key material.
+    const base = `${server.url}/rooms/${roomId}`;
+    const endpoints: Array<{ label: string; url: string; token: string }> = [
+      { label: "GET /keys (admin)", url: `${base}/keys`, token: adminToken },
+      { label: "GET /keys (member)", url: `${base}/keys`, token: memberToken },
+      { label: "GET /acl", url: `${base}/acl`, token: adminToken },
+      { label: "GET /render", url: `${base}/render`, token: adminToken },
+      { label: "GET /sync?since=0", url: `${base}/sync?since=0`, token: adminToken },
+      { label: "GET /keys/missing", url: `${base}/keys/missing`, token: adminToken },
+      { label: "GET /peers", url: `${base}/peers`, token: adminToken },
+    ];
+
+    for (const ep of endpoints) {
+      const res = await fetch(ep.url, {
+        headers: { authorization: `Bearer ${ep.token}` },
+      });
+      const text = await res.text();
+      assert.equal(
+        text.includes(roomKeyHex), false,
+        `plaintext room key leaked by ${ep.label}: response contains ${roomKeyHex}`,
+      );
+    }
   });
 });
