@@ -35,8 +35,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
   link language if `LinkStatus::Shared`. Use the same sequence; a helper `apply_diff` is planned.
 - SHACL triples are the source of truth for shapes. `shape_cache` on the instance is
   invalidated by `add_sdna_inner`. `get_shape(class)` → `Arc<ModelShape>`.
-- `get_subject_data` currently routes through Prolog and returns no properties while Prolog is
-  disabled (spec item 1 fixes it). Prefer `model_query` for reads.
+- `get_subject_data` currently routes through Prolog and, while Prolog is disabled, returns only
+  `author`/`timestamp` with no other properties. Migrating it to `model_query` is planned (spec
+  item 1). Prefer `model_query` for reads.
 - Background loops (`nh_sync_loop`, `pending_diffs_loop`, `fallback_sync_loop`,
   `subscribed_queries_loop`, `notification_check_loop`, auto-processor supervisor) exit on
   `is_teardown`; `teardown_background_tasks` must be called on remove.

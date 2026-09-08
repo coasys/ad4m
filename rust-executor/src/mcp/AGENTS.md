@@ -10,7 +10,7 @@ auth in `server.rs`; `Ad4mMcpHandler` in `tools/mod.rs` implements `list_tools` 
 |---|---|
 | `mod.rs` | `Ad4mMcpHandler`, dispatch, perspective access helpers (`get_readable_perspective`, `get_writable_perspective`), SHACL link helpers |
 | `auth.rs` | login / capability request flow |
-| `perspectives.rs` | perspective + link CRUD, `infer` (Prolog; returns empty while Prolog disabled) |
+| `perspectives.rs` | perspective + link CRUD, `infer` (Prolog; serializes to `"[]"` while Prolog disabled) |
 | `subjects.rs` | static subject CRUD/property/collection tools. **Duplicates `dynamic.rs` and has diverged** (spec item 2: make these delegate) |
 | `dynamic.rs` | Generates one tool per SHACL class (`query_<Class>`, `create_<Class>`, …) from `mcp/shacl.rs`; the canonical implementation of subject ops |
 | `children.rs` | parent/child relationship tools |

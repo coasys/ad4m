@@ -9,7 +9,7 @@ configurable (`Ad4mConfig.prolog_mode` / `AD4M_PROLOG_MODE`).
 
 | Mode | Behaviour |
 |---|---|
-| `Disabled` | no engines; queries return empty/`False`; facts updates no-op |
+| `Disabled` | no engines; regular/context queries return empty matches, subscription queries return `False`; facts updates no-op |
 | `Simple` | one engine per perspective, lazy fact reload on query (`SimpleEngine` in `mod.rs`) |
 | `SdnaOnly` | engine with SDNA facts only, no link data (`sdna_pool.rs`) |
 | `Pooled` | `engine_pool.rs`: N engines round-robin + per-source filtered sub-pools (`filtered_pool.rs`, gated by `FILTERING_THRESHOLD`) + SDNA pool |
