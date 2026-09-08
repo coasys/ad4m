@@ -1,0 +1,28 @@
+[package]
+name = "perspective-diff-types"
+version = "0.1.0"
+edition = "2021"
+authors = ["josh@junto.foundation", "Nicolas Luck <nicolas.luck@coasys.org>"]
+description = "Shared wire types for the p-diff-sync DAG (used by both perspective-diff-algorithm and the integrity zome)"
+license = "CAL-1.0"
+
+[lib]
+name = "perspective_diff_types"
+path = "src/lib.rs"
+
+[dependencies]
+# default-features = false on chrono avoids the wasmbind feature that would
+# drag wasm-bindgen into the integrity-zome WASM (see wake-22 fix).
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "oldtime", "serde"] }
+serde = { version = "1", features = ["derive"] }
+holo_hash = { version = "0.7.0-dev.6", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys" }
+
+# Optional HDI integration: when enabled the integrity-zome derive macros
+# `SerializedBytes` and `app_entry!` are applied to the entry types. Off
+# by default so the algorithm crate can build without HDK.
+hdi = { version = "0.8.0-dev.7", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-dev.16-space-override-coasys", optional = true }
+holochain_serialized_bytes = { version = "=0.0.56", optional = true }
+
+[features]
+default = []
+hdi = ["dep:hdi", "dep:holochain_serialized_bytes"]
