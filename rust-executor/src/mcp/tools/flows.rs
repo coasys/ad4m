@@ -47,6 +47,15 @@ pub struct FlowExprParams {
     pub expression_address: String,
 }
 
+/// Parameters for accepting or rejecting a FlowTransitionProposal
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FlowProposalParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// URI of the FlowTransitionProposal (e.g. "ad4m://flow/proposal/<id>")
+    pub proposal_uri: String,
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -312,13 +321,61 @@ impl Ad4mMcpHandler {
         .unwrap_or_else(|e| format!("Error: {}", e))
     }
 
-    // Flow WRITE surfaces (start / run-action) deliberately do not exist on
-    // this endpoint. With the flow engine, external agents don't write state
-    // transitions directly — they propose them and consensus fires them,
-    // exactly like the internal LLM harness. That propose/accept surface
-    // ships with the firing-engine stack (flow_proposal_accept/reject, plus
-    // a propose tool as follow-up); offering direct-write tools here would
-    // bypass the consensus path.
+    #[tool(
+        description = "Accept a live FlowTransitionProposal on behalf of this agent: adds your DID to the proposal's acceptors (idempotent per DID) and immediately runs the flow consensus pass. When the flow's consensusRule threshold (distinct DIDs) is met, the transition fires and the fired outcomes are returned; otherwise 'fired' is empty and the proposal stays live for further acceptances. Errors on unknown proposal URIs and on already-resolved proposals."
+    )]
+    pub async fn flow_proposal_accept(&self, params: Parameters<FlowProposalParams>) -> String {
+        let p = &params.0;
+
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
+                match crate::perspectives::flow_instance::accept::accept_flow_proposal(
+                    &mut perspective,
+                    &p.proposal_uri,
+                    &agent_context,
+                )
+                .await
+                {
+                    Ok(fired) => serde_json::to_string_pretty(&json!({
+                        "success": true,
+                        "proposal_uri": p.proposal_uri,
+                        "fired": fired,
+                    }))
+                    .unwrap_or_else(|e| format!("Error: {}", e)),
+                    Err(e) => format!("Error accepting proposal: {:#}", e),
+                }
+            }
+            Err(e) => e,
+        }
+    }
+
+    #[tool(
+        description = "Reject a live FlowTransitionProposal: deletes the links you authored on it. Rejected proposals are removed from the flow record; already-fired proposals cannot be rejected. Errors on unknown proposal URIs."
+    )]
+    pub async fn flow_proposal_reject(&self, params: Parameters<FlowProposalParams>) -> String {
+        let p = &params.0;
+
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
+                match crate::perspectives::flow_instance::accept::reject_flow_proposal(
+                    &mut perspective,
+                    &p.proposal_uri,
+                    &agent_context,
+                )
+                .await
+                {
+                    Ok(()) => serde_json::to_string_pretty(&json!({
+                        "success": true,
+                        "proposal_uri": p.proposal_uri,
+                        "deleted": true,
+                    }))
+                    .unwrap_or_else(|e| format!("Error: {}", e)),
+                    Err(e) => format!("Error rejecting proposal: {:#}", e),
+                }
+            }
+            Err(e) => e,
+        }
+    }
 }
 
 #[cfg(test)]
