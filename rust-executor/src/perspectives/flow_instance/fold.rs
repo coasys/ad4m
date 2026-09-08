@@ -101,7 +101,12 @@ pub fn fold(genesis: &str, flow: &SHACLFlow, atoms: &[VouchedAtom]) -> DerivedSt
     DerivedState { state, settled }
 }
 
-/// The first declared edge out of `state` that reached quorum after `after`.
+/// The declared edge out of `state` that settled earliest.
+///
+/// Votes are not filtered by `after`: an edge that was already quorate when
+/// the walk arrived is settled, and `after` only floors the moment it counts
+/// as having settled (see [`settle_edge`]). Ties break by target state, then
+/// by first atom URI, so two replicas choose the same edge.
 fn settle(
     state: &str,
     after: &str,

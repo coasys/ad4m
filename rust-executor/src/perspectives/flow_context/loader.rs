@@ -248,6 +248,13 @@ pub async fn gather_active_flow_contexts(
             return Vec::new();
         }
     };
+    // Prompt the LLM with the DERIVED state, never the `currentState` cache.
+    // A peer can write that link; believing it would steer the model into
+    // proposing along an edge the flow never reached, and every proposal it
+    // then mints is superseded work paid for in tokens.
+    let records =
+        crate::perspectives::flow_instance::derive_states(perspective, &records, &flows_by_uri)
+            .await;
     build_flow_contexts(&records, &flows_by_uri)
 }
 
