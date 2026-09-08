@@ -140,11 +140,6 @@ export async function fetchPeers(config: RoomConfig, token: string): Promise<str
     return res.peers ?? [];
 }
 
-export async function fetchAcl(config: RoomConfig, token: string): Promise<AclResponse> {
-    const res = await request<Partial<AclResponse>>(roomUrl(config, "/acl"), "GET", jsonHeaders(token));
-    return { admin: res.admin ?? "", members: res.members ?? [] };
-}
-
 // ---------------------------------------------------------------------------
 // E2E key rotation (client-side, server never sees plaintext)
 // ---------------------------------------------------------------------------
