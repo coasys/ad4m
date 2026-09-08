@@ -250,21 +250,21 @@ pub async fn fire_flow_consensus(
             fired_tally.to_state,
         ));
     }
-    if fired_tally.from_state != instance.current_state {
+    if fired_tally.from_state != instance.state {
         return Err(anyhow::anyhow!(
             "fire_flow_consensus: stale tally — fromState={} does not match instance.currentState={} (flow already advanced?)",
             fired_tally.from_state,
-            instance.current_state,
+            instance.state,
         ));
     }
-    if fired_tally.to_state == instance.current_state {
+    if fired_tally.to_state == instance.state {
         return Err(anyhow::anyhow!(
             "fire_flow_consensus: refusing to fire a no-op — toState={} equals instance.currentState",
             fired_tally.to_state,
         ));
     }
 
-    let from_state = instance.current_state.clone();
+    let from_state = instance.state.clone();
     let to_state = fired_tally.to_state.clone();
 
     advance_flow_instance_state(
@@ -657,11 +657,11 @@ pub async fn run_flow_consensus_pass(
         // Trigger (a): superseded — the flow moved on under these proposals.
         let (live, superseded): (Vec<_>, Vec<_>) = proposals
             .into_iter()
-            .partition(|p| p.from_state == record.current_state);
+            .partition(|p| p.from_state == record.state);
         for p in &superseded {
             log::debug!(
                 "run_flow_consensus_pass: invalidating superseded proposal {} ({} → {}, instance now at {})",
-                p.uri, p.from_state, p.to_state, record.current_state
+                p.uri, p.from_state, p.to_state, record.state
             );
             invalidate_proposal(perspective, &p.uri).await;
         }
@@ -723,11 +723,11 @@ pub async fn run_flow_consensus_pass(
             let declared = flow
                 .transitions
                 .iter()
-                .any(|t| t.from_state == record.current_state && t.to_state == *to_state);
+                .any(|t| t.from_state == record.state && t.to_state == *to_state);
             if !declared {
                 log::warn!(
                     "run_flow_consensus_pass: no declared transition {} → {to_state} on {}; skipping target",
-                    record.current_state,
+                    record.state,
                     record.flow_uri
                 );
                 continue;
@@ -764,7 +764,7 @@ pub async fn run_flow_consensus_pass(
                     continue;
                 }
             };
-            if let Some(tally) = select_fire_candidate(&record.current_state, &agg) {
+            if let Some(tally) = select_fire_candidate(&record.state, &agg) {
                 let better = match &fire {
                     None => true,
                     Some(best) => tally_ord(tally, best).is_lt(),
@@ -1021,7 +1021,8 @@ mod tests {
                 flow_uri: "delivery://DeliveryFlow".into(),
                 instance_uri: "ad4m://flow/instance/1".into(),
                 subject: "ad4m://task/onboarding".into(),
-                current_state: "review".into(),
+                state: "review".into(),
+                cached_state: Some("review".into()),
                 created_at: None,
             }
         }

@@ -471,7 +471,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
         let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
             continue;
         };
-        for state in reachable_next_states(flow, &record.current_state) {
+        for state in reachable_next_states(flow, &record.state) {
             let requires = state.requires.as_deref().unwrap_or_default();
             if requires.is_empty() {
                 continue;
@@ -482,7 +482,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
-                        from_state: record.current_state.clone(),
+                        from_state: record.state.clone(),
                         to_state: state.name.clone(),
                         evidence_hash: evidence_hash(&class_names, &evidence),
                         evidence_ids,
@@ -869,7 +869,8 @@ mod tests {
             flow_uri: "delivery://DeliveryFlow".into(),
             instance_uri: "ad4m://flow/instance/1".into(),
             subject: "ad4m://task/onboarding".into(),
-            current_state: "identified".into(),
+            state: "identified".into(),
+            cached_state: Some("identified".into()),
             created_at: None,
         }
     }
@@ -1341,7 +1342,8 @@ mod tests {
             flow_uri: flow_uri.into(),
             instance_uri: instance.into(),
             subject: "ad4m://subject".into(),
-            current_state: state.into(),
+            state: state.into(),
+            cached_state: Some(state.into()),
             created_at: None,
         }
     }

@@ -1927,7 +1927,7 @@ mod tests {
         );
         assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
         assert_eq!(
-            live[0].current_state, "identified",
+            live[0].state, "identified",
             "fresh instance starts in the flow's first state by value"
         );
     }

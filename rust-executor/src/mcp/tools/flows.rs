@@ -152,7 +152,7 @@ impl Ad4mMcpHandler {
             Ok(Some(instance)) => serde_json::to_string_pretty(&json!({
                 "expression": p.expression_address,
                 "flow": flow_uri,
-                "state": instance.current_state,
+                "state": instance.state,
                 "instance": instance.instance_uri,
                 "started_at": instance.created_at,
             }))
@@ -293,20 +293,20 @@ impl Ad4mMcpHandler {
             return serde_json::to_string_pretty(&json!({
                 "expression": p.expression_address,
                 "flow": flow_uri,
-                "current_state": instance.current_state,
+                "current_state": instance.state,
                 "available_actions": Vec::<serde_json::Value>::new(),
                 "note": "flow definition not found on this perspective",
             }))
             .unwrap_or_else(|e| format!("Error: {}", e));
         };
 
-        let actions = Self::available_transitions(&flow, &instance.current_state);
+        let actions = Self::available_transitions(&flow, &instance.state);
 
         serde_json::to_string_pretty(&json!({
             "expression": p.expression_address,
             "flow": flow_uri,
             "instance": instance.instance_uri,
-            "current_state": instance.current_state,
+            "current_state": instance.state,
             "available_actions": actions,
         }))
         .unwrap_or_else(|e| format!("Error: {}", e))
@@ -491,7 +491,7 @@ mod tests {
                 .expect("flow_instance_for");
         let found = found.expect("the minted instance must be found");
         assert_eq!(found.instance_uri, inst_uri);
-        assert_eq!(found.current_state, "identified");
+        assert_eq!(found.state, "identified");
         assert_eq!(found.subject, base_uri);
 
         assert!(

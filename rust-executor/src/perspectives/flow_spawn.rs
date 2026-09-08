@@ -371,7 +371,8 @@ mod tests {
             flow_uri: flow_uri.to_string(),
             instance_uri: format!("ad4m://flow/instance/{flow_uri}-{subject}"),
             subject: subject.to_string(),
-            current_state: "identified".to_string(),
+            state: "identified".to_string(),
+            cached_state: Some("identified".to_string()),
             created_at: None,
         }
     }
@@ -714,7 +715,7 @@ mod tests {
             .expect("load_flow_instances");
         assert_eq!(live.len(), 1, "the mint must be readable back");
         assert_eq!(live[0].instance_uri, spawned[0].instance_uri);
-        assert_eq!(live[0].current_state, "identified");
+        assert_eq!(live[0].state, "identified");
         assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
 
         // Running again must not double-spawn — the live instance suppresses

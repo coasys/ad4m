@@ -173,9 +173,13 @@ impl Fixture {
             .expect("load_flow_instances")
     }
 
-    /// `currentState` of the flow instance anchored on `BASE_URI`.
-    async fn current_state(&self) -> String {
-        self.instances().await[0].current_state.clone()
+    /// The on-graph `currentState` CACHE of the flow instance anchored on
+    /// `BASE_URI` — what the fire path writes through, not the authority.
+    async fn cached_state(&self) -> String {
+        self.instances().await[0]
+            .cached_state
+            .clone()
+            .expect("hydrated FlowInstance always carries currentState")
     }
 
     /// One proposal pass that must mint exactly one proposal; its URI.
@@ -740,7 +744,7 @@ async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
     // `currentState` advanced on-graph.
     let recs = f.instances().await;
     assert_eq!(recs.len(), 1);
-    assert_eq!(recs[0].current_state, "scoped");
+    assert_eq!(recs[0].cached_state.as_deref(), Some("scoped"));
 
     // The fired proposal is KEPT (its links survive, marked `fired`) but no
     // longer loads as live — the Synergy flow-atom record.
@@ -802,7 +806,7 @@ async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
     }
 
     // The instance did not move.
-    assert_eq!(f.current_state().await, "identified");
+    assert_eq!(f.cached_state().await, "identified");
 }
 
 /// Accept API + a real `{ n: 2 }` per-state rule: one DID holds, a second
@@ -1038,7 +1042,7 @@ async fn reject_deletes_live_proposal_and_errors_on_missing_e2e() {
         "rejecting a deleted proposal must error"
     );
 
-    assert_eq!(f.current_state().await, "identified");
+    assert_eq!(f.cached_state().await, "identified");
 }
 
 /// Only the DECLARED transition graph may fire (CWE-863 fix): a proposal
@@ -1098,7 +1102,7 @@ async fn consensus_pass_skips_undeclared_transitions_e2e() {
         !f.links_by_predicate(&back).await.is_empty(),
         "undeclared-edge proposal must be kept"
     );
-    assert_eq!(f.current_state().await, "scoped", "instance must not move");
+    assert_eq!(f.cached_state().await, "scoped", "instance must not move");
 }
 
 /// Design principle #5 against the live store: an instance still carrying

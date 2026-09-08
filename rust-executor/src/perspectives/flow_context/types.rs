@@ -86,8 +86,27 @@ pub struct FlowInstanceRecord {
     /// collision that broke `baseExpression` in the reserved-field
     /// rename fix (commit `e6362e5ca`).
     pub subject: String,
-    /// Current state name (matches a `FlowState.name` on the flow).
-    pub current_state: String,
+    /// The `ad4m://flow/current_state` link as hydrated off the graph —
+    /// a **write-through cache, never authority**. Any neighbourhood
+    /// member can write that link, so no engine decision may read it;
+    /// it exists here so the consensus pass can compare it against the
+    /// fold and warn when the two disagree (a cheap tamper alarm).
+    ///
+    /// `None` is unreachable from [`super::loader::parse_flow_instance_from_hydrated`]
+    /// (a `FlowInstance` without `currentState` violates `min_count 1`
+    /// and is skipped); the `Option` exists so a record built from a
+    /// source that has no cache at all can say so.
+    pub cached_state: Option<String>,
+    /// The state the engine acts on: the fold over re-verified,
+    /// marked-fired transition atoms
+    /// ([`crate::perspectives::flow_instance::FlowInstance::derive_state`]).
+    ///
+    /// Seeded from [`Self::cached_state`] at load and **overwritten from
+    /// the fold** by every pass that decides something (consensus,
+    /// proposal mint). Read surfaces that have no perspective at hand
+    /// (MCP, the LLM prompt block, the harness tool) are still fed the
+    /// seeded value in this slice; they move onto the fold in slice 2.
+    pub state: String,
     /// ISO-8601 timestamp the instance was minted at. Sourced from
     /// `Ad4mModel`'s synthesised `createdAt` (earliest link timestamp on
     /// the instance's URI). `None` when hydration didn't produce a
