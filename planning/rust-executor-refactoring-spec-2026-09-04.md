@@ -212,6 +212,18 @@ Steps:
    truth for shapes regardless of Prolog mode). Add a test at the WS level
    (`api/tests/`) that a subject created via `perspective.createSubject` round-trips
    through `perspective.getSubjectData` with its properties.
+
+   **Audit note (2026-09-08, per Nico's PR #980 review comment):** grepped every
+   `prolog_query_with_context`/`prolog_query_subscription*` call site in
+   `perspective_instance.rs` looking for other functions in `get_subject_data`'s
+   position — hard-coded to Prolog, obviously dead, superseded by model_query.
+   `get_subject_data` is currently the only one. The other three call sites
+   (`subscribe_and_query`, `check_subscribed_queries`, `dispose_query_subscription`)
+   implement the live subscribed-query feature — arbitrary logic-query pattern
+   matching that `model_query`'s structured `where` filters cannot express — so
+   they are not candidates for this migration. Re-run this grep before closing
+   item 1, in case new hard-coded-Prolog reads were added since; fold any found
+   into this item's cleanup instead of leaving them behind.
 3. **Explicit errors when Prolog is off.** `prolog_query_with_context`,
    `prolog_query_subscription*`, WS `perspective.queryProlog`, MCP `infer` return
    `Err("Prolog is disabled on this executor (prolog_mode = disabled)")` instead of
