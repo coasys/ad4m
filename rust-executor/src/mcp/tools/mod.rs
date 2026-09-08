@@ -82,9 +82,10 @@ pub(crate) const SERVER_INSTRUCTIONS: &str =
 If you are new to AD4M, call get_documentation(topic=\"overview\") first — it explains the \
 tool surface (describe_perspective + the generic instance_* tools, which take a class_name \
 parameter), the workflow and the rules for writing data that humans and other agents can \
-use; topic=\"usage\" is the working guide (reading and writing instances, the child tree, the \
-Flux data model, authoring subject classes, common traps) and topic=\"architecture\" goes \
-deeper into the data model. Typical flow: authenticate (or \
+use; topic=\"usage\" is the working guide (reading and writing instances, the child tree, \
+common traps), topic=\"flux\" is the Flux data model (channels, messages, posts, tasks), \
+topic=\"models\" teaches authoring your own subject classes with add_model, and \
+topic=\"architecture\" goes deeper into the data model. Typical flow: authenticate (or \
 nothing, if the executor was started with the admin credential for you) -> list_perspectives \
 or neighbourhood_join_from_url -> describe_perspective -> instance_query / instance_transcript \
 to read, instance_create to write.";

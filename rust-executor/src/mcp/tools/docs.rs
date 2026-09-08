@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 const OVERVIEW: &str = include_str!("../docs/overview.md");
 const ARCHITECTURE: &str = include_str!("../docs/architecture.md");
 const USAGE: &str = include_str!("../docs/usage.md");
+const FLUX: &str = include_str!("../docs/flux.md");
+const MODELS: &str = include_str!("../docs/models.md");
 
 /// Which document to return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -28,20 +30,34 @@ pub enum DocTopic {
     /// Perspectives, links, languages, neighbourhoods, and the SHACL subject
     /// class (social DNA) format in detail.
     Architecture,
-    /// How to actually use the tools: reading and writing instances, the tree,
-    /// the Flux data model, authoring subject classes, and the common traps.
+    /// How to actually use the tools: reading and writing instances, the
+    /// `ad4m://has_child` tree, and the common traps.
     Usage,
+    /// The Flux data model — channels, messages, posts and tasks — and the
+    /// recipes for reading and replying in a channel humans can see.
+    Flux,
+    /// Authoring subject classes: when to add one, how to write a shape that
+    /// is writable and findable, and what changing a class does to the
+    /// instances that already exist.
+    Models,
 }
 
 impl DocTopic {
-    pub(crate) const ALL: [DocTopic; 3] =
-        [DocTopic::Overview, DocTopic::Architecture, DocTopic::Usage];
+    pub(crate) const ALL: [DocTopic; 5] = [
+        DocTopic::Overview,
+        DocTopic::Architecture,
+        DocTopic::Usage,
+        DocTopic::Flux,
+        DocTopic::Models,
+    ];
 
     pub(crate) fn text(self) -> &'static str {
         match self {
             DocTopic::Overview => OVERVIEW,
             DocTopic::Architecture => ARCHITECTURE,
             DocTopic::Usage => USAGE,
+            DocTopic::Flux => FLUX,
+            DocTopic::Models => MODELS,
         }
     }
 }
@@ -49,14 +65,15 @@ impl DocTopic {
 /// Parameters for reading the executor's documentation
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GetDocumentationParams {
-    /// Which document: "overview" (start here), "architecture" or "usage"
+    /// Which document: "overview" (start here), "usage", "flux", "models"
+    /// or "architecture"
     pub topic: DocTopic,
 }
 
 impl Ad4mMcpHandler {
     /// Return the executor's documentation for a topic, as markdown.
     #[tool(
-        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the ad4m://has_child tree, the Flux data model (channels, messages, posts, tasks), authoring subject classes with add_model, and the traps that cost the most time. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format in depth. No authentication needed."
+        description = "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use — call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the ad4m://has_child tree, and the traps that cost the most time. topic='flux' is the Flux data model — channels, messages, posts, tasks — and how to read and reply in a channel; read it when the perspective you joined is a Flux space. topic='models' teaches you to author your own subject classes with add_model: when to add one, how to write a shape that is writable and findable, and what changing a class does to existing instances. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format reference in depth. No authentication needed."
     )]
     pub async fn get_documentation(&self, params: Parameters<GetDocumentationParams>) -> String {
         params.0.topic.text().to_string()
@@ -97,23 +114,46 @@ mod tests {
         }
     }
 
-    /// The docs only advertise topics that exist. `setup` was removed: an
-    /// agent that can call this tool is already past setup. Iterating
-    /// `DocTopic::ALL` means every topic added later — `usage` included — is
-    /// covered without touching this test again.
+    /// The wire name of a topic, as `topic="…"` spells it.
+    fn wire_name(topic: DocTopic) -> String {
+        serde_json::to_value(topic)
+            .expect("topic serializes")
+            .as_str()
+            .expect("topic is a string on the wire")
+            .to_string()
+    }
+
+    /// Every `topic="…"` / `topic='…'` a document writes names a topic that is
+    /// actually served. This is how the removed `setup` topic was caught, and
+    /// it generalises: a cross-reference to a topic that was renamed, or never
+    /// added, sends the reader to a tool call that errors.
     #[test]
     fn docs_only_point_at_served_topics() {
-        assert!(
-            DocTopic::ALL.contains(&DocTopic::Usage),
-            "usage must be in ALL so the doc guards actually check it"
-        );
+        let served: Vec<String> = DocTopic::ALL.into_iter().map(wire_name).collect();
+        let mut pointers_found = 0usize;
         for topic in DocTopic::ALL {
             let text = topic.text();
-            assert!(
-                !text.contains("topic=\"setup\"") && !text.contains("topic='setup'"),
-                "{topic:?} still points at the removed setup topic"
-            );
+            for opener in ["topic=\"", "topic='"] {
+                let closer = opener.chars().last().expect("opener ends in a quote");
+                for (idx, _) in text.match_indices(opener) {
+                    let rest = &text[idx + opener.len()..];
+                    let Some(end) = rest.find(closer) else {
+                        continue;
+                    };
+                    let named = &rest[..end];
+                    pointers_found += 1;
+                    assert!(
+                        served.contains(&named.to_string()),
+                        "{topic:?} points at topic={named:?}, which no DocTopic serves"
+                    );
+                }
+            }
         }
+        assert!(
+            pointers_found >= DocTopic::ALL.len(),
+            "found only {pointers_found} topic pointers across the docs — the \
+             cross-references this test guards have gone missing"
+        );
     }
 
     /// `overview` is the entry point a cold agent is told to read first, so a
@@ -127,11 +167,7 @@ mod tests {
             if topic == DocTopic::Overview {
                 continue;
             }
-            let name = serde_json::to_value(topic)
-                .expect("topic serializes")
-                .as_str()
-                .expect("topic is a string on the wire")
-                .to_string();
+            let name = wire_name(topic);
             assert!(
                 overview.contains(&format!("topic=\"{name}\"")),
                 "overview never tells the reader that topic={name:?} exists"
@@ -172,10 +208,11 @@ mod tests {
         }
     }
 
-    /// `usage` carries the general AD4M working knowledge, addressed with bare
-    /// tool names — no host-specific prefix, and nothing about a plugin.
+    /// `usage` names every tool of the general working surface — the vocabulary
+    /// an agent needs before its first write, independent of which app's
+    /// classes the perspective happens to carry.
     #[test]
-    fn usage_teaches_the_working_surface_with_bare_tool_names() {
+    fn usage_names_every_tool_of_the_working_surface() {
         let usage = DocTopic::Usage.text();
         for tool in [
             "instance_create",
@@ -194,16 +231,144 @@ mod tests {
         ] {
             assert!(usage.contains(tool), "usage must mention {tool}");
         }
+    }
+
+    /// Naming a host is `overview`'s job and nobody else's. The overview says
+    /// once that a host may prefix these tools, and names the OpenClaw plugin
+    /// as the example; every other topic is read by clients that prefix
+    /// differently or not at all, so it stays on bare tool names and mentions
+    /// no particular host.
+    #[test]
+    fn only_overview_shows_a_host_prefix_or_names_a_host() {
         assert!(
-            !usage.contains("ad4m_"),
-            "usage must use bare tool names, not a host's prefix"
+            DocTopic::Overview.text().contains("ad4m_"),
+            "overview must be where the ad4m_ prefix is explained, or the \
+             exemption below is guarding nothing"
         );
-        for host_specific in ["contracts.tools", "openclaw", "OpenClaw", "manifest"] {
+        for topic in DocTopic::ALL {
+            if topic == DocTopic::Overview {
+                continue;
+            }
+            let text = topic.text();
             assert!(
-                !usage.contains(host_specific),
-                "usage must stay host-agnostic, found {host_specific}"
+                !text.contains("ad4m_"),
+                "{topic:?} must use bare tool names, not a host's prefix"
+            );
+            for host in ["openclaw", "OpenClaw"] {
+                assert!(
+                    !text.contains(host),
+                    "{topic:?} must stay host-agnostic, found {host}"
+                );
+            }
+        }
+    }
+
+    /// The three how-to-work topics carry no host tool-configuration
+    /// vocabulary. `architecture` is deliberately not in this list: it explains
+    /// why per-class tool generation is off by default, and "plugin manifests"
+    /// is the reason.
+    #[test]
+    fn the_how_to_work_topics_carry_no_host_configuration_vocabulary() {
+        for topic in [DocTopic::Usage, DocTopic::Flux, DocTopic::Models] {
+            let text = topic.text();
+            for host_specific in ["contracts.tools", "manifest"] {
+                assert!(
+                    !text.contains(host_specific),
+                    "{topic:?} must stay host-agnostic, found {host_specific}"
+                );
+            }
+        }
+    }
+
+    /// The Flux material lives in `flux`, not in `usage`. These terms are Flux
+    /// vocabulary and appear nowhere else, so "present in `flux`, absent from
+    /// `usage`" is exactly what it means for the section to have moved rather
+    /// than been copied — and `usage` still points the reader at where it went.
+    #[test]
+    fn flux_vocabulary_is_in_flux_and_gone_from_usage() {
+        let flux = DocTopic::Flux.text();
+        let usage = DocTopic::Usage.text();
+        for term in [
+            "isConversation",
+            "ConversationSubgroup",
+            "orderedTaskIds",
+            "flux-chat-view",
+            "Space channel",
+            "Reply into the same parent",
+        ] {
+            assert!(
+                flux.contains(term),
+                "flux must carry the Flux term {term:?}"
+            );
+            assert!(
+                !usage.contains(term),
+                "usage still carries the Flux term {term:?}"
             );
         }
+        assert!(
+            usage.contains("topic=\"flux\""),
+            "usage must point at the topic its Flux material moved to"
+        );
+    }
+
+    /// Schema *authoring* lives in `models`, not in `usage`. The SHACL fields
+    /// below are what you write when defining a class and never what you pass
+    /// when using one, so `usage` naming any of them means the authoring guide
+    /// leaked back in. `usage` keeps `add_model` only as the pointer.
+    #[test]
+    fn shacl_authoring_fields_are_in_models_and_gone_from_usage() {
+        let models = DocTopic::Models.text();
+        let usage = DocTopic::Usage.text();
+        for field in [
+            "target_class",
+            "constructor_actions",
+            "min_count",
+            "relation_kind",
+            "target_class_name",
+            "has_value",
+            "setter",
+        ] {
+            assert!(
+                models.contains(field),
+                "models must teach the SHACL field {field:?}"
+            );
+            assert!(
+                !usage.contains(field),
+                "usage still teaches schema authoring: {field:?}"
+            );
+        }
+        assert!(
+            usage.contains("topic=\"models\"") && usage.contains("add_model"),
+            "usage must point at the authoring topic and name the tool it covers"
+        );
+    }
+
+    /// `architecture` owns the SHACL wire-format reference; `models` is the
+    /// authoring guide and sends the reader there instead of restating the
+    /// field tables, so the two cannot drift apart.
+    #[test]
+    fn models_defers_to_architecture_for_the_shacl_field_reference() {
+        let architecture = DocTopic::Architecture.text();
+        let models = DocTopic::Models.text();
+        for table in [
+            "PropertyShape Fields",
+            "Top-Level Fields",
+            "AD4MAction Fields",
+        ] {
+            assert!(
+                architecture.contains(table),
+                "architecture must keep the {table:?} reference"
+            );
+            assert!(
+                !models.contains(table),
+                "models restates architecture's {table:?} table instead of \
+                 pointing at it"
+            );
+        }
+        assert!(
+            models.contains("topic=\"architecture\""),
+            "models must send the reader to the field reference"
+        );
     }
 
     /// A cold client learns about the docs from the `initialize` response
@@ -223,10 +388,14 @@ mod tests {
         });
         let instructions = handler.get_info().instructions.expect("instructions set");
         assert!(instructions.contains("get_documentation(topic=\"overview\")"));
-        assert!(instructions.contains("topic=\"usage\""));
-        assert!(instructions.contains("topic=\"architecture\""));
+        for topic in DocTopic::ALL {
+            let name = wire_name(topic);
+            assert!(
+                instructions.contains(&format!("topic=\"{name}\"")),
+                "initialize never tells a cold client that topic={name:?} exists"
+            );
+        }
         assert!(instructions.contains("describe_perspective"));
-        assert!(!instructions.contains("topic=\"setup\""));
         assert!(AUTH_TOOLS.contains(&"get_documentation"));
 
         // The tool itself: unauthenticated handler, still answers.
@@ -261,26 +430,37 @@ mod tests {
             assert!(text.starts_with("# "), "{topic:?} served no markdown title");
             served.push(text);
         }
-        assert_eq!(served.len(), 3, "overview, usage and architecture");
+        assert_eq!(
+            served.len(),
+            DocTopic::ALL.len(),
+            "every topic in ALL must be served"
+        );
         served.sort();
         served.dedup();
-        assert_eq!(served.len(), 3, "two topics served identical text");
+        assert_eq!(
+            served.len(),
+            DocTopic::ALL.len(),
+            "two topics served identical text"
+        );
     }
 
+    /// Every topic round-trips through its lowercase wire name, so the name a
+    /// document prints in `topic="…"` is the one a client can actually send.
     #[test]
-    fn topic_names_are_lowercase_on_the_wire() {
-        assert_eq!(
-            serde_json::to_string(&DocTopic::Architecture).unwrap(),
-            "\"architecture\""
-        );
-        assert_eq!(
-            serde_json::to_string(&DocTopic::Usage).unwrap(),
-            "\"usage\""
-        );
-        let parsed: DocTopic = serde_json::from_str("\"overview\"").unwrap();
-        assert_eq!(parsed, DocTopic::Overview);
-        let parsed: DocTopic = serde_json::from_str("\"usage\"").unwrap();
-        assert_eq!(parsed, DocTopic::Usage);
+    fn every_topic_round_trips_through_its_lowercase_wire_name() {
+        for topic in DocTopic::ALL {
+            let name = wire_name(topic);
+            assert_eq!(
+                name,
+                name.to_lowercase(),
+                "{topic:?} is not lowercase on the wire"
+            );
+            let parsed: DocTopic = serde_json::from_str(&format!("\"{name}\""))
+                .unwrap_or_else(|e| panic!("{topic:?} does not parse back from {name:?}: {e}"));
+            assert_eq!(parsed, topic);
+        }
+        assert_eq!(wire_name(DocTopic::Flux), "flux");
+        assert_eq!(wire_name(DocTopic::Models), "models");
         assert!(
             serde_json::from_str::<DocTopic>("\"setup\"").is_err(),
             "setup is no longer a documentation topic"
