@@ -411,10 +411,16 @@ export class PerspectiveClient {
         )
     }
 
-    async rejectFlowProposal(uuid: string, proposalUri: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+    /**
+     * Withdraw this agent's own links from a proposal. Resolves to how many
+     * were retracted — one for a withdrawn vote, more when retracting a
+     * proposal this agent opened.
+     */
+    async rejectFlowProposal(uuid: string, proposalUri: string): Promise<number> {
+        const result = await this.#apiClient.call<{ retractedLinks: number }>(
             'perspective.rejectFlowProposal', { uuid, proposalUri },
         )
+        return result.retractedLinks
     }
 
     /**

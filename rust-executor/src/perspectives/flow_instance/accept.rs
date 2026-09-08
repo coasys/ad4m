@@ -150,7 +150,7 @@ pub async fn reject_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
     context: &AgentContext,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     use crate::types::LinkExpression;
 
     let links = proposal_links(perspective, proposal_uri).await?;
@@ -170,11 +170,15 @@ pub async fn reject_flow_proposal(
         ));
     }
 
+    // Callers report this rather than a bare "deleted": retracting one vote
+    // and retracting a whole proposal are different events, and the count is
+    // the only thing that distinguishes them at the wire.
+    let retracted = to_remove.len();
     perspective
         .remove_links(to_remove, None)
         .await
         .map_err(|e| anyhow::anyhow!("reject_flow_proposal: remove_links failed: {e:#}"))?;
-    Ok(())
+    Ok(retracted)
 }
 
 /// Every source-link of a proposal. `Err` when the URI carries none —

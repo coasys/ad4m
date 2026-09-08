@@ -2061,14 +2061,16 @@ async fn reject_flow_proposal_handler(
     .map_err(|e| WsRpcError::forbidden(e))?;
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-    crate::perspectives::flow_instance::accept::reject_flow_proposal(
+    let retracted = crate::perspectives::flow_instance::accept::reject_flow_proposal(
         &mut perspective,
         &proposal_uri,
         &agent_context,
     )
     .await
     .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(Value::Bool(true))
+    // How many of OUR links went, not a bare `true`: withdrawing one vote and
+    // retracting a proposal we opened are different events on the same call.
+    Ok(serde_json::json!({ "retractedLinks": retracted }))
 }
 
 // ── SHACL resolution endpoints ──

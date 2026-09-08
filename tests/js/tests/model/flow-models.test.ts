@@ -883,12 +883,16 @@ describe("FlowInstance.acceptProposal / rejectProposal — consensus write API",
     expect(all[0].currentStateName).to.equal("Identified");
   });
 
-  it("rejectProposal hard-deletes a live proposal and errors on unknown URIs", async () => {
+  it("rejectProposal retracts our own links and errors on unknown URIs", async () => {
     await p.addFlow("Delivery", makeDeliveryFlow());
     const instance = await FlowInstance.start(p, "Delivery", "ad4m://task/2");
     const proposal = await seedProposal(instance.uri, "Identified", "InProgress");
 
-    expect(await instance.rejectProposal(proposal)).to.equal(true);
+    // We seeded the proposal, so every link on it is ours: the count is how
+    // many went, not a bare boolean. It must be > 0 or nothing was retracted.
+    const retracted = await instance.rejectProposal(proposal);
+    expect(retracted).to.be.a("number");
+    expect(retracted).to.be.greaterThan(0);
 
     let threw = false;
     try {

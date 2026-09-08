@@ -375,7 +375,8 @@ export class FlowInstance {
     return this.perspective.acceptFlowProposal(uri);
   }
 
-  async rejectProposal(proposal: FlowTransitionProposal | string): Promise<boolean> {
+  /** Withdraw our own links from a proposal; resolves to how many went. */
+  async rejectProposal(proposal: FlowTransitionProposal | string): Promise<number> {
     const uri = typeof proposal === "string" ? proposal : proposal.id;
     return this.perspective.rejectFlowProposal(uri);
   }

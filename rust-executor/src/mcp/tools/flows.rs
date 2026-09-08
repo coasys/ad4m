@@ -350,7 +350,7 @@ impl Ad4mMcpHandler {
     }
 
     #[tool(
-        description = "Withdraw this agent's own contribution to a FlowTransitionProposal: deletes only the links this DID signed — your vote, or your whole proposal if you opened it. It never touches another agent's links, and it does not 'cancel' the proposal for anyone else. Because flow state is recomputed from the links present now, withdrawing a vote that had helped an edge settle moves the flow back to where it stood before that vote. Errors on unknown proposal URIs and when this DID signed nothing on the proposal."
+        description = "Withdraw this agent's own contribution to a FlowTransitionProposal: deletes only the links this DID signed — your vote, or your whole proposal if you opened it. It never touches another agent's links, and it does not 'cancel' the proposal for anyone else. Because flow state is recomputed from the links present now, withdrawing a vote that had helped an edge settle moves the flow back to where it stood before that vote. Returns retracted_links: how many of your links were removed — one for a withdrawn vote, more when you retract a proposal you opened. Errors on unknown proposal URIs and when this DID signed nothing on the proposal."
     )]
     pub async fn flow_proposal_reject(&self, params: Parameters<FlowProposalParams>) -> String {
         let p = &params.0;
@@ -364,10 +364,10 @@ impl Ad4mMcpHandler {
                 )
                 .await
                 {
-                    Ok(()) => serde_json::to_string_pretty(&json!({
+                    Ok(retracted) => serde_json::to_string_pretty(&json!({
                         "success": true,
                         "proposal_uri": p.proposal_uri,
-                        "deleted": true,
+                        "retracted_links": retracted,
                     }))
                     .unwrap_or_else(|e| format!("Error: {}", e)),
                     Err(e) => format!("Error rejecting proposal: {:#}", e),

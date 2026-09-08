@@ -872,7 +872,8 @@ export class PerspectiveProxy {
         return await this.#client.acceptFlowProposal(this.#handle.uuid, proposalUri)
     }
 
-    async rejectFlowProposal(proposalUri: string): Promise<boolean> {
+    /** Withdraw our own links from a proposal; resolves to how many went. */
+    async rejectFlowProposal(proposalUri: string): Promise<number> {
         return await this.#client.rejectFlowProposal(this.#handle.uuid, proposalUri)
     }
 
