@@ -11,9 +11,10 @@
 //! A `requires` guard is an array of `ModelQuery`s with AND semantics.
 //! Each query is translated to a `model_query` input, run against the
 //! perspective and checked against its `count` cardinality. The matched
-//! instance IDs form the proposal's evidence bag, sealed by an
-//! order-independent SHA256 in [`evidence_hash`] so a later verification
-//! can detect evidence that no longer resolves.
+//! instances (IDs + canonicalized content) form the proposal's evidence
+//! bag, sealed by an order-independent SHA256 in [`evidence_hash`] so a
+//! voter can detect evidence that no longer resolves — or was edited —
+//! before co-signing.
 //!
 //! Two optional refinements sit between evaluation and the write:
 //!
@@ -62,9 +63,12 @@ pub struct SatisfiedTransition {
     pub evidence_ids: Vec<String>,
     /// The same instances as `evidence_ids`, hydrated with the JSON
     /// `model_query` returned for each — the semantic check reasons over
-    /// this content, not over bare identifiers. Deliberately NOT part of
-    /// [`evidence_hash`]: the seal stays a function of class names + IDs, so
-    /// a content edit to an already-sealed instance doesn't re-open a guard.
+    /// this content, not over bare identifiers, and its canonicalized form
+    /// is sealed into [`evidence_hash`]. Editing a cited instance therefore
+    /// re-opens the guard under a NEW hash: the mint side misses its dedup
+    /// and mints a fresh proposal for the current evidence, while a voter
+    /// asked to co-sign the stale-sealed one refuses
+    /// (`flow_instance::accept`).
     pub evidence: Vec<EvidenceItem>,
     /// See [`evidence_hash`].
     pub evidence_hash: String,
@@ -86,23 +90,72 @@ pub struct EvidenceItem {
     pub content: String,
 }
 
-/// Order-independent seal over a satisfied guard's evidence: SHA256 of the
-/// class names joined by `|`, a NUL, and the sorted evidence IDs joined by
-/// newlines. Two evaluations of the same guard against the same graph
-/// produce the same hash regardless of result order.
-pub fn evidence_hash(class_names: &[String], evidence_ids: &[String]) -> String {
-    let mut sorted_ids = evidence_ids.to_vec();
-    sorted_ids.sort();
+/// Serialize a JSON value with recursively-sorted object keys — a stable
+/// form independent of the key order `model_query` happens to produce.
+/// Non-JSON content is hashed verbatim rather than dropped.
+fn canonical_json(v: &Value) -> String {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let body: Vec<String> = keys
+                .iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        Value::String((*k).clone()),
+                        canonical_json(&map[*k])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        Value::Array(items) => {
+            let body: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", body.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Order-independent seal over a satisfied guard's evidence: SHA256 over the
+/// class names followed by each evidence item's `(class, id,
+/// canonical-content)` triple, sorted. Every field is length-prefixed before
+/// hashing, so no field's *content* can shift bytes across a boundary.
+///
+/// Two evaluations of the same guard against the same graph produce the same
+/// hash regardless of result order; **editing a cited instance changes the
+/// hash**, which is what lets a voter detect a stale seal before co-signing.
+pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> String {
+    fn frame(hasher: &mut Sha256, field: &str) {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+    let mut items: Vec<(String, String, String)> = evidence
+        .iter()
+        .map(|e| {
+            let canonical = serde_json::from_str::<Value>(&e.content)
+                .map(|v| canonical_json(&v))
+                .unwrap_or_else(|_| e.content.clone());
+            (e.class_name.clone(), e.id.clone(), canonical)
+        })
+        .collect();
+    items.sort();
     let mut hasher = Sha256::new();
-    hasher.update(class_names.join("|"));
-    hasher.update(b"\0");
-    hasher.update(sorted_ids.join("\n"));
+    for name in class_names {
+        frame(&mut hasher, name);
+    }
+    for (class, id, content) in &items {
+        frame(&mut hasher, class);
+        frame(&mut hasher, id);
+        frame(&mut hasher, content);
+    }
     hex::encode(hasher.finalize())
 }
 
 /// `count.{min,max}` check with inclusive bounds. An unset `count` means
 /// "at least one match"; `{ max: 0 }` is a valid negative guard.
-fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool {
+pub(crate) fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool {
     match count {
         None => actual >= 1,
         Some(c) => {
@@ -151,7 +204,7 @@ fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str)
 /// `exists` and `matches` have no `model_query` counterpart yet, so a
 /// guard using them fails translation and is skipped instead of being
 /// evaluated against a wrong query.
-fn requires_query_input(
+pub(crate) fn requires_query_input(
     query: &ModelQuery,
     record: &FlowInstanceRecord,
     acting_did: &str,
@@ -301,7 +354,7 @@ enum RequiresResult {
 /// Run one already-translated guard query. Returns the matched instances,
 /// hydrated with the JSON `model_query` already returned for each (no
 /// second read).
-async fn run_query<Q: RequiresQueryable + ?Sized>(
+pub(crate) async fn run_query<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     class_name: &str,
     input: &Value,
@@ -390,7 +443,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         instance_uri: record.instance_uri.clone(),
                         from_state: record.current_state.clone(),
                         to_state: state.name.clone(),
-                        evidence_hash: evidence_hash(&class_names, &evidence_ids),
+                        evidence_hash: evidence_hash(&class_names, &evidence),
                         evidence_ids,
                         evidence,
                         semantic_check: state.semantic_check.clone(),
@@ -413,6 +466,61 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
         }
     }
     out
+}
+
+/// Re-run one target state's `requires` against the CURRENT graph and return
+/// the freshly-computed evidence hash. Used at **vote time**: a replica
+/// re-checks a proposal's seal on its own graph before co-signing it
+/// (`flow_instance::accept`).
+///
+/// - `Ok(Some(hash))` — guard still satisfied; the caller compares it with
+///   the proposal's sealed hash.
+/// - `Ok(None)` — nothing verifiable remains: the guard no longer holds, or
+///   the flow/state/guard definition changed out from under the proposal.
+/// - `Err` — transient query/store failure.
+///
+/// A caller may only ever refuse its own action on any of these; none of
+/// them is grounds for touching somebody else's proposal.
+///
+/// `acting_did` must be the PROPOSER's DID: `$did`-substituted guards
+/// resolved against the proposer at mint time, so re-verification must
+/// substitute the same identity or the hash could never match.
+pub(crate) async fn recompute_evidence_hash<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    flow: &SHACLFlow,
+    record: &FlowInstanceRecord,
+    to_state: &str,
+    acting_did: &str,
+) -> Result<Option<String>> {
+    let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
+        log::warn!(
+            "recompute_evidence_hash: state `{to_state}` no longer exists on flow `{}`",
+            flow.name
+        );
+        return Ok(None);
+    };
+    let requires = state.requires.as_deref().unwrap_or_default();
+    if requires.is_empty() {
+        log::warn!(
+            "recompute_evidence_hash: `{}.{to_state}` no longer carries a `requires` guard",
+            flow.name
+        );
+        return Ok(None);
+    }
+    match evaluate_requires(perspective, requires, record, acting_did).await {
+        RequiresResult::Satisfied(class_names, evidence) => {
+            Ok(Some(evidence_hash(&class_names, &evidence)))
+        }
+        RequiresResult::Unmet => Ok(None),
+        RequiresResult::Untranslatable(e) => {
+            log::warn!(
+                "recompute_evidence_hash: `{}.{to_state}` became untranslatable: {e:#}",
+                flow.name
+            );
+            Ok(None)
+        }
+        RequiresResult::QueryFailed(e) => Err(e),
+    }
 }
 
 /// Load → evaluate → (confirm) → write, called by the extraction pass once
@@ -456,7 +564,6 @@ pub async fn run_engine_proposal_pass(
             return Vec::new();
         }
     };
-
     let satisfied =
         evaluate_flow_transitions(perspective, &records, &flows_by_uri, &acting_did).await;
 
@@ -698,17 +805,51 @@ mod tests {
         Some(ModelQueryCount { min, max })
     }
 
+    /// Test 18. The seal is order-independent (two evaluations of the same
+    /// guard agree however the store ordered the rows) and
+    /// content-sensitive (an edit that keeps the same IDs changes it) — the
+    /// second half is what lets a voter refuse to co-sign edited evidence.
     #[test]
     fn evidence_hash_is_order_independent_and_content_sensitive() {
         let classes = vec!["ns://A".to_string()];
-        let a = evidence_hash(&classes, &["b".into(), "a".into(), "c".into()]);
-        let b = evidence_hash(&classes, &["c".into(), "a".into(), "b".into()]);
-        assert_eq!(a, b);
+        let item = |id: &str, content: &str| EvidenceItem {
+            id: id.into(),
+            class_name: "ns://A".into(),
+            content: content.into(),
+        };
+        let abc = vec![
+            item("a", r#"{"id":"a","title":"one"}"#),
+            item("b", r#"{"id":"b","title":"two"}"#),
+            item("c", r#"{"id":"c","title":"three"}"#),
+        ];
+        let cab = vec![abc[2].clone(), abc[0].clone(), abc[1].clone()];
+        let a = evidence_hash(&classes, &abc);
+        assert_eq!(a, evidence_hash(&classes, &cab), "order-independent");
         assert_eq!(a.len(), 64, "hex-encoded SHA256");
-        assert_ne!(a, evidence_hash(&classes, &["a".into(), "b".into()]));
+        assert_ne!(a, evidence_hash(&classes, &abc[..2]), "id-set-sensitive");
         assert_ne!(
             a,
-            evidence_hash(&["ns://B".into()], &["a".into(), "b".into(), "c".into()])
+            evidence_hash(&["ns://B".into()], &abc),
+            "class-sensitive"
+        );
+
+        let mut edited = abc.clone();
+        edited[1].content = r#"{"id":"b","title":"two EDITED"}"#.into();
+        assert_ne!(a, evidence_hash(&classes, &edited), "content-sensitive");
+
+        // JSON key order is canonicalized away, so the seal does not drift
+        // with whatever order `model_query` happened to serialise.
+        let mut reordered = abc.clone();
+        reordered[1].content = r#"{"title":"two","id":"b"}"#.into();
+        assert_eq!(a, evidence_hash(&classes, &reordered), "key order ignored");
+    }
+
+    #[test]
+    fn canonical_json_sorts_keys_recursively() {
+        let v: Value = serde_json::from_str(r#"{"b":{"y":2,"x":[{"q":1,"p":0}]},"a":1}"#).unwrap();
+        assert_eq!(
+            canonical_json(&v),
+            r#"{"a":1,"b":{"x":[{"p":0,"q":1}],"y":2}}"#
         );
     }
 
@@ -1054,6 +1195,80 @@ mod tests {
         )])
     }
 
+    /// Test 19. The vote-time check's contract: on an unchanged graph the
+    /// recomputed seal reproduces the minted one exactly, and an edit to the
+    /// cited instance — same ID, different content — produces a different
+    /// one. This is what a voter compares before deciding to co-sign.
+    #[tokio::test]
+    async fn recompute_reproduces_the_minted_hash_and_detects_edits() {
+        // `SHACLFlow` is not `Clone`, so build one and borrow it back out of
+        // the map the evaluator needs rather than constructing it twice.
+        let built = flow(
+            "Delivery",
+            "identified",
+            "scoped",
+            Some(vec![mq("ns://Vote")]),
+        );
+        let flow_uri = built.flow_uri();
+        let flows = HashMap::from([(flow_uri.clone(), built)]);
+        let f = &flows[&flow_uri];
+
+        let stub = StubPerspective::default()
+            .with_instance_objects("ns://Vote", vec![json!({"id": "v1", "value": "yes"})]);
+        let minted = evaluate_flow_transitions(&stub, &[inst()], &flows, "did:key:me").await;
+        assert_eq!(minted.len(), 1);
+
+        let same = recompute_evidence_hash(&stub, f, &inst(), "scoped", "did:key:me")
+            .await
+            .unwrap();
+        assert_eq!(same.as_deref(), Some(minted[0].evidence_hash.as_str()));
+
+        let edited = StubPerspective::default()
+            .with_instance_objects("ns://Vote", vec![json!({"id": "v1", "value": "no"})]);
+        let changed = recompute_evidence_hash(&edited, f, &inst(), "scoped", "did:key:me")
+            .await
+            .unwrap()
+            .expect("guard still satisfied");
+        assert_ne!(changed, minted[0].evidence_hash);
+    }
+
+    /// The two dispositions a voter must tell apart: "nothing verifiable
+    /// remains" (refuse to co-sign) and "the store failed" (try again later).
+    /// Neither is ever grounds for touching the proposal.
+    #[tokio::test]
+    async fn recompute_is_none_when_unverifiable_and_err_on_store_failure() {
+        let f = flow(
+            "Delivery",
+            "identified",
+            "scoped",
+            Some(vec![mq("ns://Vote")]),
+        );
+        let empty = StubPerspective::default().with_instances("ns://Vote", &[]);
+        let unguarded = flow("Delivery", "identified", "scoped", None);
+        #[rustfmt::skip]
+        let unverifiable = [
+            ("guard no longer satisfied", &empty, &f, "scoped"),
+            ("target state vanished from the flow definition", &empty, &f, "shipped"),
+            ("guard-less state: nothing to verify", &empty, &unguarded, "scoped"),
+        ];
+        for (name, store, flow, to_state) in unverifiable {
+            assert_eq!(
+                recompute_evidence_hash(store, flow, &inst(), to_state, "did:key:me")
+                    .await
+                    .unwrap(),
+                None,
+                "{name}"
+            );
+        }
+
+        let broken = StubPerspective::default().with_error("ns://Vote", "store down");
+        assert!(
+            recompute_evidence_hash(&broken, &f, &inst(), "scoped", "did:key:me")
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn satisfied_guard_yields_one_transition_with_sealed_evidence() {
         let mut flows = delivery(vec![mq("ns://Task")]);
@@ -1074,7 +1289,14 @@ mod tests {
                     class_name: "ns://Task".into(),
                     content: json!({ "id": "ad4m://task/1" }).to_string(),
                 }],
-                evidence_hash: evidence_hash(&["ns://Task".into()], &["ad4m://task/1".into()]),
+                evidence_hash: evidence_hash(
+                    &["ns://Task".into()],
+                    &[EvidenceItem {
+                        id: "ad4m://task/1".into(),
+                        class_name: "ns://Task".into(),
+                        content: json!({ "id": "ad4m://task/1" }).to_string(),
+                    }],
+                ),
                 semantic_check: Some("Agreed?".into()),
             }]
         );
@@ -1103,10 +1325,10 @@ mod tests {
         assert!(out[0].evidence[0]
             .content
             .contains("We agreed on the scope."));
-        // Hash contract untouched: still a function of class names + IDs.
+        // The seal covers class names + IDs + canonicalized content.
         assert_eq!(
             out[0].evidence_hash,
-            evidence_hash(&["ns://Task".into()], &["ad4m://task/1".into()])
+            evidence_hash(&["ns://Task".into()], &out[0].evidence)
         );
     }
 
@@ -1153,7 +1375,7 @@ mod tests {
         assert_eq!(out[0].evidence_ids, vec!["x/1", "x/2", "x/3"]);
         assert_eq!(
             out[0].evidence_hash,
-            evidence_hash(&["ns://A".into(), "ns://B".into()], &out[0].evidence_ids)
+            evidence_hash(&["ns://A".into(), "ns://B".into()], &out[0].evidence)
         );
 
         let stub = StubPerspective::default()
