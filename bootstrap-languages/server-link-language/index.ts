@@ -312,17 +312,15 @@ const language = defineLanguage({
                 },
                 onPeerJoined(msg) {
                     telepresenceModule.handlePeerJoined(msg);
-                    if (!isRoomAdmin) return;
-                    // When a new peer joins an E2E room, rotate the key so
-                    // they receive the latest version, then grant any
-                    // historical versions they missed.
-                    if (keyRing && keyRing.size > 0) {
-                        void performRotation()
-                            .then(() => performAdminKeyGrants())
-                            .catch((err) => {
-                                console.error("[server-link-language] peer-joined rotate+grant failed:", err);
-                            });
-                    }
+                    // Grant historical keys to members who lack them.
+                    // Do NOT rotate here — onPeerJoined is a presence
+                    // event (reconnect, second device, wake) not an ACL
+                    // event. Rotating on presence would mint a new version
+                    // on every reconnect. Rotation belongs on ACL changes
+                    // or explicit admin action.
+                    void performAdminKeyGrants().catch((err) => {
+                        console.error("[server-link-language] peer-joined admin grant failed:", err);
+                    });
                 },
                 onPeerLeft(msg) {
                     telepresenceModule.handlePeerLeft(msg);

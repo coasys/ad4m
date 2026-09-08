@@ -122,12 +122,14 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   local-only until the server recovers, but a process restart loses the
   queue — a durable pending-commits queue (persisted in the KV store,
   retried by `sync()`) would close this gap.
-- **E2E key rotation happens on peer-join only.** `performRotation()`
+- **E2E key rotation requires explicit admin action.** `performRotation()`
   generates a fresh room key client-side, seals it to every ACL member's
   X25519 public key, and POSTs only sealed envelopes — the server never
-  sees plaintext. This fires automatically in `onPeerJoined` (followed by
-  `performAdminKeyGrants` for historical versions). However, the key ring
-  still loads once during `init()`'s `setupRoomKey()` and the `version`
+  sees plaintext. It does NOT fire on presence events (`onPeerJoined` is
+  reconnect/wake, not ACL change — rotating there would mint a new version
+  on every reconnect). `onPeerJoined` only calls `performAdminKeyGrants()`
+  to grant historical keys to members who lack them (idempotent). The key
+  ring loads once during `init()`'s `setupRoomKey()` and the `version`
   field in `KeysResponse` remains unused for mid-session detection — a
   periodic `/keys` re-fetch or a dedicated WS push message would close
   that gap.
