@@ -299,7 +299,56 @@ The plugin manages MCP authentication internally — credentials are not sent in
 - Pass the admin credential through `AD4M_ADMIN_CREDENTIAL` (exported from a mode-600 file), not `--admin-credential`: command-line arguments are readable by every user on the host via `ps` and end up in shell history
 - The executor's API endpoint (`--port`, default 12000) should only be accessible to trusted agents
 - Anything that is not loopback goes through an SSH tunnel or TLS (`--tls-cert-file` / `--tls-key-file`, or a reverse proxy as in Scenario 2). There is no case where auth traffic travels over plain HTTP across a network
-- Same rule for multi-user passwords and JWTs: never in logs, chat messages, shared config, or command arguments. See the main skill's Rule 3c for the specific mechanics (file-based secrets, `mcporter`'s `key=@path` argument syntax) rather than shell interpolation.
+- Same rule for multi-user passwords and JWTs: never in logs, chat messages, shared config, or command arguments. Use the file-based mechanics below rather than shell interpolation.
+
+## Calling MCP tools without the plugin
+
+**Read this only if you are actually stuck.** The plugin bridges the executor's tools as
+your own (`ad4m_signup`, `ad4m_login_email`, `ad4m_verify_email_code`, the `instance_*`
+surface, …), and `openclaw ad4m-setup` performs the capability handshake
+(`request_capability` → `generate_jwt`) and writes the token for you. Reaching for an
+external MCP client is a last resort for exactly two situations: an executor
+`ad4m-setup` cannot reach, or a plugin build older than the static tool surface.
+`request_capability` and `generate_jwt` are the only tools with no native equivalent.
+
+Do not use raw `curl`: the MCP server speaks Streamable HTTP and answers with
+`text/event-stream`.
+
+```bash
+mcporter call <mcpEndpoint>.<tool_name> --allow-http key=value ...
+# e.g. the capability handshake ad4m-setup would otherwise do for you
+mcporter call http://host:3001/mcp.request_capability --allow-http \
+  app_name=my-agent app_desc="my agent"
+```
+
+The capability response carries both `request_id` and `code`. Read them from that
+response — the executor redacts raw MCP capability codes from its own logs unless it was
+started with `AD4M_LOG_SECRETS=1`.
+
+**Password and token hygiene — the naive approach is NOT safe:**
+- Generate the password into a file with `chmod 600` (e.g. `openssl rand -base64 24 | tr -d '\n' > ~/.mypw && chmod 600 ~/.mypw`), never as a literal string in a command you type.
+- **Use mcporter's `key=@path` argument syntax** (`password=@~/.mypw`) — mcporter reads the file's content directly as the value. Only the *path* appears in the command and in process argv, never the plaintext password. Verified working (mcporter ≥ 0.13; a globally-installed 0.7.3 does *not* support `@path` — use `npx -y mcporter@0.13.10` if your installed version's `--help` doesn't list `key=@path` under Arguments — pin the version rather than tracking `@latest`, which executes whatever was published most recently).
+- **Do NOT use shell substitution like `"$(cat ~/.mypw)"` for this.** That expands the plaintext into the process's actual argv before exec — `ps` and any process listing on the machine can read it. If a tool genuinely has no file/stdin-reading option for a required secret argument, say so as a known limitation rather than presenting shell substitution as a safe workaround.
+- The same applies to the JWT you get back — capture it straight to a `chmod 600` file, don't echo it to verify.
+- Write the resulting JWT into `plugins.entries.ad4m.config.token` — check your config tool's own file-reading support first; if it only accepts a literal argument, name that as a limitation too.
+
+**Authenticated calls need the header, not just the endpoint.** `signup` and
+`login_email` are unauthenticated, so the plain call above works for them. Everything
+perspective-scoped (`add_model`, `list_perspectives`, `describe_perspective`, …) runs as
+*whoever the call is authenticated as* — a bare call carries no identity and fails with
+misleading errors like `Perspective not found` on a perspective you just created. Pass
+the JWT as an `Authorization` header, referencing an environment variable by name so the
+token never enters argv:
+
+```bash
+export AD4M_JWT="$(cat ~/.ad4m-token)"   # 0600 file, never echoed
+npx -y mcporter@0.13.10 call http://host:3001/mcp.list_perspectives \
+  --allow-http --header "Authorization=\$env:AD4M_JWT"
+```
+
+The JWT goes in **bare — no `Bearer ` prefix**. The `$env:NAME` indirection (and
+`--header`) exist only in newer mcporter; verified against mcporter 0.13.10 via `npx`,
+absent from 0.7.3.
 
 ## WebSocket RPC API (Fallback)
 

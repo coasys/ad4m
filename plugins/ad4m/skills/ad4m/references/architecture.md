@@ -32,7 +32,8 @@ parameter are passed through unchanged.
 The executor exposes more tools than the plugin bridges natively. Whatever is
 not in `contracts.tools` (Rule 0 of the main skill) is real but does not reach
 you as an `ad4m_*` tool — for example `request_capability` and
-`generate_jwt`. Reach those through the `mcporter` fallback in Rule 3c.
+`generate_jwt`. `ad4m-setup` calls both for you; the manual path is in
+`references/setup.md` → "Calling MCP tools without the plugin".
 `add_model` *is* bridged natively (SKILL.md, "Subject Classes (SHACL)"), so authoring a schema needs no
 fallback.
 

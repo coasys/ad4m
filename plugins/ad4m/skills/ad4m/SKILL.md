@@ -35,7 +35,7 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 - `add_model` — register a subject class from SHACL JSON (see "Subject Classes (SHACL)")
 - `list_link_language_templates` — needed before publishing a neighbourhood
 
-**NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). If you need one of these, use the direct-MCP fallback in Rule 3c.
+**NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). `ad4m-setup` already performs the capability handshake, so you should not need the first two by hand; if you genuinely do, see `references/setup.md` → "Calling MCP tools without the plugin".
 
 **Gone from the executor entirely (not just un-bridged):** `get_children_body_parsed`, `infer`, `get_models`, and the whole `*_subject` family (`query_subjects`, `create_subject`, `get_subject_children`, `remove_from_collection`, …). Their jobs moved to `instance_transcript` and the `instance_*` tools; `add_child` / `get_children` kept their names but take `parent` / `child` — there is no `parent_address` anywhere on the static surface. Old memories or notes that mention those names are describing a tool that no longer exists.
 
@@ -90,7 +90,7 @@ openclaw ad4m-setup
 
 **Known limitation, not a safe pattern to copy blindly:** typing the password directly into an interactive `export` command puts it in your shell history and in that process's environment (readable by anything with `/proc/<pid>/environ` access) for as long as the session lives. This is presented here because it's genuinely how `ad4m-setup` reads the variable, not because it's fully safe — if your environment has a secrets manager or a way to source an env file with restricted permissions instead of an interactive `export`, prefer that.
 
-Setup resolves the password (env var → `config.password` → interactive prompt, in that order — never generates one itself, since a random password persisted nowhere means you can never log in again), signs you up, logs you in, and prints a ready `config.token`. **Do not do this by hand via raw MCP calls unless `ad4m-setup` genuinely can't run** — see Rule 3c for that fallback and its safety rules.
+Setup resolves the password (env var → `config.password` → interactive prompt, in that order — never generates one itself, since a random password persisted nowhere means you can never log in again), signs you up, logs you in, and prints a ready `config.token`. **Do not do this by hand via raw MCP calls unless `ad4m-setup` genuinely can't run** — see `references/setup.md` → "Calling MCP tools without the plugin" for that last resort and its safety rules.
 
 Treat provisioning (signup, you're creating a new account) and joining (login, an account already exists for your email) as separate concerns — don't assume you own an email just because you're joining a neighbourhood on someone else's node.
 
@@ -108,51 +108,35 @@ If you switch executors (local → remote, or between remotes), re-run `openclaw
 
 ### 2. Do NOT call the MCP server with curl
 
-The MCP server uses Streamable HTTP transport and always responds with `text/event-stream` — raw curl gets garbled SSE data. This is still true. See Rule 3c for the *correct* way to reach a tool that isn't natively bridged.
+The MCP server uses Streamable HTTP transport and always responds with `text/event-stream` — raw curl gets garbled SSE data. This is still true. Call the tool natively (Rule 0); for the rare tool with no native equivalent see `references/setup.md` → "Calling MCP tools without the plugin".
 
 ### 3. Authentication
 
-**3a. Single-agent capability flow** (you're the only user of this executor, or your human shares their identity with you):
+**The plugin authenticates you. You do not run an authentication protocol by hand.**
 
-1. Call `ad4m_request_capability` with `app_name`, `app_desc` — **not natively bridged by default**, use the Rule 3c fallback.
-2. Read `request_id` **and `code`** straight out of that response — it returns both. Don't go looking for the code in the executor's stdout: the executor's logging contract redacts raw MCP capability codes unless it was started with `AD4M_LOG_SECRETS=1`.
-3. Call `ad4m_generate_jwt` with the `request_id` + `code` from step 2 — same fallback caveat.
-4. You're authenticated for this MCP session.
+**3a. `openclaw ad4m-setup` is the whole flow, both modes.** For a single-agent executor it
+performs the capability handshake for you — `request_capability`, reads back the
+`request_id` and `code`, calls `generate_jwt` — and writes the resulting JWT into
+`plugins.entries.ad4m.config.token`. For a multi-user node it signs you up, logs you in,
+and does the same. One command, either way; see Quick Setup above.
 
-**3b. Multi-user via `openclaw ad4m-setup`** — see Quick Setup above. This is the primary, recommended path. One command.
+**3b. Re-authentication is automatic.** On every gateway start the plugin re-runs
+`login_email` (with signup on "user not found") or the capability handshake, using the
+`AD4M_PASSWORD` → `config.password` resolution. You do not refresh the token yourself. A
+failure shows up only as `[ad4m] Email login failed: …` in the plugin log — see
+Troubleshooting.
 
-**3c. Multi-user (or capability flow) via direct MCP calls** — use this ONLY when `ad4m-setup` can't run, when you need `request_capability`/`generate_jwt` (still not bridged), or when your plugin build predates the static-surface additions:
+**3c. If you must call a tool by hand, prefer your own native tools.** `ad4m_signup`,
+`ad4m_login_email` and `ad4m_verify_email_code` are in your tool surface (Rule 0) — call
+them directly. There is no reason to shell out for those.
 
-```bash
-mcporter call <mcpEndpoint>.<tool_name> --allow-http key=value ...
-# e.g.
-mcporter call http://host:3001/mcp.signup --allow-http email=you@example.com password=@~/.mypw
-```
-
-**Password hygiene — this is not optional, and the naive approach is NOT safe:**
-- Generate the password into a file with `chmod 600` (e.g. `openssl rand -base64 24 | tr -d '\n' > ~/.mypw && chmod 600 ~/.mypw`), never as a literal string in a command you type.
-- **Use mcporter's `key=@path` argument syntax** (`password=@~/.mypw`) — mcporter reads the file's content directly as the value. Only the *path* appears in the command and in process argv, never the plaintext password. Verified working (mcporter ≥ 0.13; the globally-installed version on this box was 0.7.3 and does *not* support `@path` — use `npx -y mcporter@0.13.10` if your installed version's `--help` doesn't list `key=@path` under Arguments — pin the version rather than tracking `@latest`, which executes whatever was published most recently).
-- **Do NOT use shell substitution like `"$(cat ~/.mypw)"` for this.** That expands the plaintext into the process's actual argv before exec — `ps` and any process listing on the machine can read it. It keeps the secret out of your own typed command text, but it does not keep it out of argv, and our standing rule is no secrets in command arguments at all. If a given tool genuinely has no file/stdin-reading option for a required secret argument, say so explicitly as a known limitation rather than presenting shell substitution as a safe workaround.
-- The same applies to the JWT you get back — capture it straight to a file (e.g. pipe `--output json` into a small script that writes the token to a `chmod 600` file), don't echo it to verify.
-- Write the resulting JWT into `plugins.entries.ad4m.config.token` — check your config tool's own file-reading support first; if it only accepts a literal argument, name that as a limitation too rather than routing the secret through shell substitution.
-
-**Authenticated fallback calls need the header, not just the endpoint.** `signup` and
-`login_email` are unauthenticated, so the plain call above works for them. Everything
-perspective-scoped (`add_model`, `list_perspectives`, `describe_perspective`, …) runs as
-*whoever the call is authenticated as* — a bare mcporter call carries no identity and
-fails with misleading errors like `Perspective not found` on a perspective you just
-created. Pass the JWT as an `Authorization` header, referencing an environment variable
-by name so the token never enters argv:
-
-```bash
-export AD4M_JWT="$(cat ~/.ad4m-token)"   # 0600 file, never echoed
-npx -y mcporter@0.13.10 call http://host:3001/mcp.list_perspectives \
-  --allow-http --header "Authorization=\$env:AD4M_JWT"
-```
-
-The JWT goes in **bare — no `Bearer ` prefix**. The `$env:NAME` indirection (and
-`--header`) exist only in newer mcporter; verified against mcporter 0.13.10 via `npx`,
-absent from 0.7.3.
+The only tools with no native equivalent are `request_capability` and `generate_jwt`, and
+`ad4m-setup` already calls both. So the external-CLI path is a genuine last resort: an
+executor `ad4m-setup` cannot reach, or a plugin build older than the static tool surface.
+If you are actually in that case, the `mcporter` recipe, the argument syntax that keeps a
+password out of `argv`, and the `Authorization` header form are in
+`references/setup.md` → "Calling MCP tools without the plugin". Do not use raw `curl`
+(Rule 2), and never put a password or JWT in a command argument.
 
 Some test/dev executors don't enforce email verification even though `signup` says "check your email" — check the `signup`/`login_email` response and your node's actual behavior rather than assuming verification is required.
 
@@ -278,8 +262,8 @@ These are the symptoms specific to the OpenClaw plugin — bridging, the manifes
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `tool not found` for `ad4m_request_capability`, `ad4m_generate_jwt`, or any `{class}_*` tool | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Use the Rule 3c `mcporter` fallback, or check whether your node's plugin build has added it. |
-| `tool not found` for `ad4m_add_model`, `ad4m_signup`, `ad4m_verify_email_code`, `ad4m_list_link_language_templates`, `ad4m_get_documentation`, `ad4m_instance_transcript`, `ad4m_instance_remove_from_collection`, `ad4m_add_child` or `ad4m_get_children` | Your plugin build predates the commits that added them to the static surface. | Update the plugin build; until then use the Rule 3c `mcporter` fallback. |
+| `tool not found` for `ad4m_request_capability`, `ad4m_generate_jwt`, or any `{class}_*` tool | Not in the plugin's `contracts.tools` manifest allowlist (Rule 0) — a real executor tool, just not bridged. | Check whether your node's plugin build has added it; otherwise see `references/setup.md` → "Calling MCP tools without the plugin". |
+| `tool not found` for `ad4m_add_model`, `ad4m_signup`, `ad4m_verify_email_code`, `ad4m_list_link_language_templates`, `ad4m_get_documentation`, `ad4m_instance_transcript`, `ad4m_instance_remove_from_collection`, `ad4m_add_child` or `ad4m_get_children` | Your plugin build predates the commits that added them to the static surface. | Update the plugin build; until then see `references/setup.md` → "Calling MCP tools without the plugin". |
 | `tool not found` for something `contracts.tools` *does* list | The manifest declares a name the executor has no tool for — a manifest/executor mismatch, not a bridging gap. (`ad4m_remove_link` and `ad4m_agent_status` were exactly this until they were dropped from the manifest; a test now fails the build on any new one.) | Don't rely on it; the `mcporter` fallback won't help either since the tool genuinely doesn't exist. Report it upstream. |
 | `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is failing the auto-relogin on every restart (Rule 3b's runtime re-auth) — look for `[ad4m] Email login failed:` in the plugin log. | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |
 | `Failed to get agent: User profile not found for <email>` on `subscribe_to_mentions` | No agent profile set (Rule 12). | Call `ad4m_set_agent_profile` first. |
