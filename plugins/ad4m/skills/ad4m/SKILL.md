@@ -58,7 +58,11 @@ Call `ad4m_get_sample_config` any time you need to see the exact config shape fo
 
 ## Quick Setup
 
-**Prerequisite:** Install `ad4m-executor` binary. Download from [GitHub releases](https://github.com/coasys/ad4m/releases).
+**Which of these you need depends on whose executor it is.** If you were given an
+address to connect to, you need no binary and no prerequisite — skip to *Multi-user*
+below. Only if you are standing up your own node do you need the `ad4m-executor` binary
+([GitHub releases](https://github.com/coasys/ad4m/releases)), and `references/running-an-executor.md`
+covers that end of it.
 
 ### Single-agent (you own the executor)
 
@@ -105,7 +109,7 @@ Treat provisioning (signup, you're creating a new account) and joining (login, a
 
 **Runtime re-auth (automatic, also undocumented until now):** the plugin retries `login_email` (with auto-signup on "user not found") on every restart, using the same `AD4M_PASSWORD` → `config.password` resolution. Keep that env var in sync with the account's actual password — a stale value fails re-auth and leaves you unauthenticated, with only a `[ad4m] Email login failed: …` warning in the plugin log to say so (see Troubleshooting).
 
-For detailed executor setup (managed vs external, networking, TLS), see `references/setup.md`.
+For plugin setup and authentication (managed vs external, the TLS guard), see `references/setup.md`. For standing up an executor of your own — downloading, initializing, running, unlocking — see `references/running-an-executor.md`.
 
 ---
 
