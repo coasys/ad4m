@@ -27,7 +27,7 @@ import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Ad4mClient, Link, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
+import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
 import { FlowInstance, FlowInstanceRecord, FlowTransitionProposal, FlowTransition } from "@coasys/ad4m";
 import { Ad4mModel, Flag, Model, Property } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
@@ -861,22 +861,34 @@ describe("FlowInstance.acceptProposal / rejectProposal — consensus write API",
     return proposal;
   }
 
-  it("acceptProposal counts the vote, and the pass auto-invalidates the unverifiable seal", async () => {
+  // The happy path — a vote that counts and an edge that settles — needs a
+  // proposal whose evidence seal the executor can reproduce, and that seal is
+  // computed inside the executor from the target state's `requires` guard. A
+  // client cannot construct one, so the settle path is covered by the Rust
+  // e2e (`flow_instance_e2e.rs`), which has the seal machinery. What the wire
+  // layer is responsible for, and what this pins, is that a proposal the fold
+  // would never count is refused here too rather than half-accepted.
+  it("acceptProposal refuses a proposal with an empty evidence seal and writes nothing", async () => {
     await p.addFlow("Delivery", makeDeliveryFlow());
     const instance = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
     expect(instance.currentStateName).to.equal("Identified");
     const proposal = await seedProposal(instance.uri, "Identified", "InProgress");
 
-    const fired = await instance.acceptProposal(proposal);
-    expect(fired).to.have.lengthOf(0);
-
-    let threw = false;
+    let message = "";
     try {
       await instance.acceptProposal(proposal);
-    } catch {
-      threw = true;
+    } catch (e: any) {
+      message = String(e?.message ?? e);
     }
-    expect(threw, "accept on an invalidated proposal must error").to.equal(true);
+    expect(message, "accept must refuse a proposal that is not an atom").to.contain(
+      "not engine-visible",
+    );
+
+    // Refused means nothing was written — not our vote, and not a state move.
+    const votes = await p.get(
+      new LinkQuery({ source: proposal, predicate: "ad4m://acceptedBy" }),
+    );
+    expect(votes).to.have.lengthOf(0);
 
     const all = await FlowInstance.findAll(p);
     expect(all).to.have.lengthOf(1);
