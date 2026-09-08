@@ -294,9 +294,7 @@ fn links_on<'l>(
 ///
 /// Self-authorship is the whole point: a proposal that merely *claims* a
 /// proposer is a proposal anyone could have written in that DID's name.
-pub fn self_authored_proposer(
-    links: &[DecoratedLinkExpression],
-) -> Result<String, AtomRejection> {
+pub fn self_authored_proposer(links: &[DecoratedLinkExpression]) -> Result<String, AtomRejection> {
     let mut dids: Vec<String> = links_on(links, PROPOSER_PREDICATE)
         .filter(|l| signed_by(l, &l.data.target))
         .map(|l| l.data.target.clone())
@@ -411,10 +409,12 @@ pub fn declares_edge(flow: &SHACLFlow, from: &str, to: &str) -> bool {
 /// The rule governing a transition INTO `to_state`: the target state's own
 /// `consensusRule` wins, else the flow-level one, else `{ n: 1 }`.
 pub fn rule_for(flow: &SHACLFlow, to_state: &str) -> ConsensusRule {
-    effective_consensus_rule(flow, to_state).cloned().unwrap_or(ConsensusRule {
-        n: 1,
-        from_role: None,
-    })
+    effective_consensus_rule(flow, to_state)
+        .cloned()
+        .unwrap_or(ConsensusRule {
+            n: 1,
+            from_role: None,
+        })
 }
 
 /// The declared rule, without the default. Separate from [`rule_for`]
@@ -599,7 +599,10 @@ impl<'a> FlowInstance<'a> {
             match TransitionAtom::from_links(&self.uri, &uri, &links) {
                 Ok(atom) => bag.atoms.push(atom),
                 Err(reason) => {
-                    log::debug!("flow instance {}: proposal {uri} is not an atom — {reason}", self.uri);
+                    log::debug!(
+                        "flow instance {}: proposal {uri} is not an atom — {reason}",
+                        self.uri
+                    );
                     bag.rejected.push(RejectedProposal {
                         uri,
                         marked_fired: marked_fired(&links),
@@ -859,8 +862,20 @@ mod tests {
     fn only_self_authored_valid_votes_count() {
         let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
         links.push(link(ACCEPTED_BY_PREDICATE, BOB, BOB, true, T2));
-        links.push(link(ACCEPTED_BY_PREDICATE, "did:key:carol", MALLORY, true, T2));
-        links.push(link(ACCEPTED_BY_PREDICATE, "did:key:dave", "did:key:dave", false, T2));
+        links.push(link(
+            ACCEPTED_BY_PREDICATE,
+            "did:key:carol",
+            MALLORY,
+            true,
+            T2,
+        ));
+        links.push(link(
+            ACCEPTED_BY_PREDICATE,
+            "did:key:dave",
+            "did:key:dave",
+            false,
+            T2,
+        ));
         let atom = atom_of(&links).expect("atom");
         assert_eq!(
             atom.acceptors,
@@ -995,7 +1010,10 @@ mod tests {
             .collect();
         assert_eq!(
             walked,
-            vec![("review", "changes_requested"), ("changes_requested", "review")]
+            vec![
+                ("review", "changes_requested"),
+                ("changes_requested", "review")
+            ]
         );
     }
 
@@ -1149,8 +1167,14 @@ mod tests {
         let mut bag = AtomBag {
             atoms: vec![
                 atom_of(&honest_proposal(ALICE, "review", "approved", "h1", T1)).expect("atom"),
-                atom_of(&honest_proposal(BOB, "changes_requested", "review", "h2", T2))
-                    .expect("atom"),
+                atom_of(&honest_proposal(
+                    BOB,
+                    "changes_requested",
+                    "review",
+                    "h2",
+                    T2,
+                ))
+                .expect("atom"),
             ],
             rejected: vec![
                 RejectedProposal {
@@ -1178,7 +1202,10 @@ mod tests {
     fn the_bag_partitions_on_the_derived_state_not_on_the_cache() {
         let bag = bag();
         assert_eq!(
-            bag.frontier("review").iter().map(|a| a.to_state.as_str()).collect::<Vec<_>>(),
+            bag.frontier("review")
+                .iter()
+                .map(|a| a.to_state.as_str())
+                .collect::<Vec<_>>(),
             vec!["approved"]
         );
         assert!(bag.frontier("approved").is_empty());

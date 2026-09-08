@@ -7,10 +7,10 @@
 
 use super::flow_classes::{mint_flow_instance, write_flow_transition_proposal};
 use super::flow_context::{load_flow_instances, load_shacl_flows, FlowInstanceRecord};
-use super::flow_instance::{AtomBag, DerivedState, FlowInstance};
 use super::flow_evaluator::{
     evaluate_flow_transitions, evidence_hash, run_engine_proposal_pass, SatisfiedTransition,
 };
+use super::flow_instance::{AtomBag, DerivedState, FlowInstance};
 use super::flow_semantic_check::SemanticCheckLlm;
 use super::interpretation::LlmFlowProposal;
 use super::interpretation_test_support::{seed_instance, setup_perspective_no_llm, TASK_SDNA};
@@ -32,6 +32,8 @@ pub(super) struct Fixture {
     task_shape: ModelShape,
     pub(super) ctx: AgentContext,
     pub(super) instance_uri: String,
+    /// Canonical URI of the seeded flow definition (`{namespace}{name}Flow`).
+    pub(super) flow_uri: String,
 }
 
 pub(super) fn literal(s: &str) -> String {
@@ -55,27 +57,42 @@ pub(super) async fn seed_fixture_with_requires(
     requires: serde_json::Value,
     semantic_check: Option<&str>,
 ) -> Fixture {
-    let (mut perspective, mut shapes, ctx) =
-        setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
-
     let mut scoped_state =
         serde_json::json!({ "name": "scoped", "value": 0.5, "requires": requires });
     if let Some(hint) = semantic_check {
         scoped_state["semanticCheck"] = serde_json::Value::String(hint.to_string());
     }
-    let flow_json = serde_json::json!({
-        "name": "Delivery",
-        "namespace": "delivery://",
-        "states": [
-            { "name": "identified", "value": 0.0 },
-            scoped_state
-        ],
-        "transitions": [
-            { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
-        ],
-    })
-    .to_string();
-    let links = parse_flow_to_links(&flow_json, "Delivery").expect("parse_flow_to_links");
+    seed_flow(
+        serde_json::json!({
+            "name": "Delivery",
+            "namespace": "delivery://",
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                scoped_state
+            ],
+            "transitions": [
+                { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
+            ],
+        }),
+        "identified",
+    )
+    .await
+}
+
+/// Seed a perspective with one flow definition and one `FlowInstance` of it
+/// on [`BASE_URI`], sitting in `initial_state`. The definition goes in as
+/// production links via `parse_flow_to_links`, so the tests read exactly
+/// the shapes the writer emits.
+pub(super) async fn seed_flow(flow_json: serde_json::Value, initial_state: &str) -> Fixture {
+    let (mut perspective, mut shapes, ctx) =
+        setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+    let name = flow_json["name"].as_str().expect("flow JSON has a name");
+    let flow_uri = format!(
+        "{}{name}Flow",
+        flow_json["namespace"].as_str().expect("namespace")
+    );
+    let links = parse_flow_to_links(&flow_json.to_string(), name).expect("parse_flow_to_links");
     for link in links {
         perspective
             .add_link(link, LinkStatus::Local, None, &ctx)
@@ -85,9 +102,9 @@ pub(super) async fn seed_fixture_with_requires(
 
     let instance_uri = mint_flow_instance(
         &mut perspective,
-        FLOW_URI,
+        &flow_uri,
         BASE_URI,
-        "identified",
+        initial_state,
         "e2e-inst",
         None,
         &ctx,
@@ -100,6 +117,7 @@ pub(super) async fn seed_fixture_with_requires(
         task_shape: shapes.remove(0),
         ctx,
         instance_uri,
+        flow_uri,
     }
 }
 
@@ -124,7 +142,13 @@ impl Fixture {
 
     /// One `add_link` with the fixture's context, for the many test setups
     /// that bolt a single link onto the seeded graph.
-    pub(super) async fn link(&mut self, source: &str, predicate: &str, target: &str, status: LinkStatus) {
+    pub(super) async fn link(
+        &mut self,
+        source: &str,
+        predicate: &str,
+        target: &str,
+        status: LinkStatus,
+    ) {
         self.perspective
             .add_link(
                 Link {
@@ -175,7 +199,7 @@ impl Fixture {
     pub(super) async fn atom_bag(&self) -> AtomBag {
         let flows = load_shacl_flows(&self.perspective).await.expect("flows");
         let records = self.instances().await;
-        FlowInstance::from_record(&records[0], &flows[FLOW_URI])
+        FlowInstance::from_record(&records[0], &flows[&self.flow_uri])
             .load_atoms(&self.perspective)
             .await
             .expect("load atoms")
@@ -186,7 +210,7 @@ impl Fixture {
     pub(super) async fn derived(&self) -> DerivedState {
         let flows = load_shacl_flows(&self.perspective).await.expect("flows");
         let records = self.instances().await;
-        FlowInstance::from_record(&records[0], &flows[FLOW_URI])
+        FlowInstance::from_record(&records[0], &flows[&self.flow_uri])
             .derive_state(&self.perspective)
             .await
             .expect("derive_state")
@@ -791,8 +815,9 @@ async fn consensus_pass_fires_marks_and_is_idempotent_e2e() {
 
 /// Both auto-invalidation triggers, against the live store: a proposal
 /// sealed with a hash the current graph cannot reproduce is deleted
-/// (trigger b), a proposal whose `fromState` the instance already left is
-/// deleted (trigger a), and neither fires the transition.
+/// (trigger b — Clock A, evidence re-run before a fire), a proposal whose
+/// `fromState` is not the DERIVED state is deleted (trigger a), and neither
+/// fires the transition.
 #[tokio::test(flavor = "multi_thread")]
 async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
     let mut f = seed_satisfied_fixture(None).await;
@@ -833,7 +858,8 @@ async fn consensus_pass_invalidates_stale_seal_and_superseded_e2e() {
         );
     }
 
-    // The instance did not move.
+    // The instance did not move — neither the fold nor its cache.
+    assert_eq!(f.derived().await.state, "identified");
     assert_eq!(f.cached_state().await, "identified");
 }
 

@@ -8,8 +8,9 @@
 //! `select_fire_candidate` / `fire_flow_consensus` core survives verbatim
 //! where the semantics didn't change) and adapted to the current stack:
 //!
-//! - `proposed_at` is Ad4mModel's synthesised `createdAt` (the proposal SDNA
-//!   deliberately has no `proposedAt` property).
+//! - What this pass counts is a [`TransitionAtom`], built and re-verified by
+//!   [`super::flow_instance`]; the state it counts them against is the fold
+//!   from that module, never the `currentState` link.
 //! - A DID qualifies toward consensus when it **proposed OR accepted**
 //!   (`ad4m://acceptedBy` links, design §7.2) — the old core counted
 //!   proposers only.
@@ -261,8 +262,10 @@ pub async fn fire_flow_consensus(
 }
 
 /// Mark every contributing proposal of a fired tally as consumed:
-/// `ad4m://flow/resolved_as` → `"fired"`. The loader filters marked
-/// proposals out, so a fired transition's votes can never count twice.
+/// `ad4m://flow/resolved_as` → `"fired"`. Marked proposals leave the
+/// frontier and become the fold's candidate history, so a fired
+/// transition's votes can never count twice — and, because the fold
+/// re-verifies each of them, a mark somebody else wrote buys nothing.
 ///
 /// Keep-and-mark rather than delete (the design-note deviation from §5.4):
 /// a fired proposal is a co-signed flow-atom — the record Synergy's
@@ -310,7 +313,11 @@ fn earliest_proposed_at(bucket: &[TransitionAtom]) -> String {
 /// Smallest proposal URI in a bucket — the last tie-break key, so two
 /// buckets proposed in the same instant still order deterministically.
 fn earliest_uri(bucket: &[TransitionAtom]) -> String {
-    bucket.iter().map(|p| p.uri.clone()).min().unwrap_or_default()
+    bucket
+        .iter()
+        .map(|p| p.uri.clone())
+        .min()
+        .unwrap_or_default()
 }
 
 /// Hard-delete a proposal: every link the proposal authors hangs off its
@@ -1264,5 +1271,4 @@ mod tests {
             assert_eq!(picked, expected, "{name}");
         }
     }
-
 }
