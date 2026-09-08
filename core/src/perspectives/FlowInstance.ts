@@ -17,7 +17,7 @@
  * than the `wrap` escape hatch, which exists for tests that already own
  * a matched (record, shape) pair.
  *
- * # What's here vs. what's coming in §7 / slice 10.6
+ * # What's here, and what is still absent
  *
  * Read surface (implemented today, PR #929):
  * - `uri`, `subject`, `flowName`, `currentStateName`, `startedAtMillis`
@@ -28,9 +28,13 @@
  * - `proposals()` — queries `FlowTransitionProposal` records that
  *   target this instance's URI.
  *
- * - `acceptProposal()` / `rejectProposal()` — the consensus write API
- *   (slice 10.6): accept counts your DID toward the flow's consensusRule
- *   and fires the transition at quorum; reject hard-deletes.
+ * - `acceptProposal()` / `rejectProposal()` — the consensus write API:
+ *   accept counts your DID toward the flow's consensusRule and fires the
+ *   transition at quorum; reject withdraws only the links you signed and
+ *   resolves to how many went. Reject is not a cancel — another agent's
+ *   proposal is theirs, and because state is recomputed from the links
+ *   present now, withdrawing a vote that had settled an edge moves the
+ *   flow back to where it stood before it.
  *
  * Still absent (rather than shipped as `throw new Error("not yet")`
  * stubs): `proposeTransition`, `fireAction`, and the subscriptions
@@ -111,9 +115,12 @@ export class FlowInstance {
    *
    * The returned wrapper carries the parsed `SHACLFlow` alongside the
    * on-graph record, so `currentState` / `availableTransitions` /
-   * `proposals` accessors work without further round-trips. The consensus
-   * engine (slice 10.6) will read the record's `currentState` when it
-   * fires transitions.
+   * `proposals` accessors work without further round-trips.
+   *
+   * `currentState` here is the record's cached value, which the executor
+   * writes and — deliberately — never reads back: the engine derives state
+   * by folding the signed links present now. Treat it as a hint for display,
+   * not as the flow's state.
    *
    * @param perspective - The perspective the flow instance lives on
    * @param flowName - Name of a `SHACLFlow` already registered on the perspective
@@ -361,8 +368,10 @@ export class FlowInstance {
    * for the where-filter — one SPARQL round-trip, no client-side
    * filtering.
    *
-   * Note: the consensus engine (slice 10.6) will start writing these; today
-   * they only exist when a client wrote one directly (or a test seeded one).
+   * These are written by the executor's consensus pass when it mints a
+   * transition, and by clients proposing directly. Superseded proposals are
+   * not swept here — a stale one is simply never counted by the fold, and
+   * accepting it fails with a stale-state error.
    */
   async proposals(): Promise<FlowTransitionProposal[]> {
     return FlowTransitionProposal.findAll(this.perspective, {
