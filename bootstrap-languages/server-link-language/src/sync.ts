@@ -82,10 +82,14 @@ function fromWireLink(wireLink: WireLinkExpression): LinkExpression {
         return decryptLinkFromWire(wireLink, keyRing);
     }
     if (isEncryptedLinkData(wireLink.data) && !keyRing) {
-        throw new Error(
-            "sync: received an encrypted link but no key ring available yet " +
-            "(E2E key fetch may still be in flight, or this instance failed to decrypt it)",
-        );
+        // Throw the same shape as a missing-version error so
+        // fromWireDiff() catches it and skips the link instead of
+        // crashing the entire sync. Recovery happens via the
+        // refreshKeyRing → re-bootstrap path once the admin grants
+        // keys. The version from the wire link (default 1) ensures
+        // the refresh request knows which version(s) to ask for.
+        const v = wireLink.key_version ?? 1;
+        throw new Error(`no key for version ${v} (key ring not yet available)`);
     }
     return {
         author: wireLink.author ?? "",
@@ -113,13 +117,12 @@ interface FromWireDiffResult {
 
 /**
  * Converts a wire diff to a local diff. When a link cannot be decrypted
- * because the key ring lacks that version, the link gets **skipped** (not
- * thrown) and its `key_version` is collected into `missingVersions`. This
- * prevents a single undecryptable link from blocking the entire sync
- * cursor.
- *
- * The "no key ring at all" case still throws — that represents a transient
- * init-order problem (E2E keys not yet fetched), NOT a permanent gap.
+ * — whether the key ring lacks that specific version OR the key ring
+ * has not arrived yet (freshly joined member awaiting grant) — the link
+ * gets **skipped** (not thrown) and its `key_version` is collected into
+ * `missingVersions`. This prevents a single undecryptable link from
+ * blocking the entire sync cursor. Recovery happens via
+ * refreshKeyRing → re-bootstrap once the admin grants keys.
  */
 function fromWireDiff(wire: WirePerspectiveDiff): FromWireDiffResult {
     const missingVersions = new Set<number>();
@@ -133,7 +136,7 @@ function fromWireDiff(wire: WirePerspectiveDiff): FromWireDiffResult {
             if (isMissingVersionError(err)) {
                 missingVersions.add(extractMissingVersion(wireLink));
             } else {
-                throw err; // "no key ring" or non-crypto errors propagate
+                throw err; // non-crypto errors propagate
             }
         }
     }
@@ -504,7 +507,21 @@ export async function bootstrap(): Promise<void> {
     // The render response now includes revision + sequence, so we avoid the
     // extra fetchRevision round-trip that the old code made.
     const rendered = await api.fetchRender(config, token);
-    const additions = rendered.links.map(fromWireLink);
+
+    // Route through fromWireDiff so encrypted links that can't be
+    // decrypted yet (freshly joined member awaiting key grant) get
+    // skipped instead of crashing the entire bootstrap. The
+    // catchUp() → refreshKeyRing → re-bootstrap path recovers them
+    // once the admin grants keys.
+    const renderDiff: WirePerspectiveDiff = { additions: rendered.links, removals: [] };
+    const { diff, missingVersions } = fromWireDiff(renderDiff);
+
+    if (missingVersions.size > 0) {
+        console.warn(
+            `[server-link-language] bootstrap: skipped ${missingVersions.size} undecryptable ` +
+            `key version(s): ${[...missingVersions].join(", ")} — will recover after key grant`,
+        );
+    }
 
     // Replace the local link set atomically: remove any stale links left
     // from a previous session, then apply the authoritative server snapshot.
@@ -512,7 +529,7 @@ export async function bootstrap(): Promise<void> {
     // remain visible locally.
     const existing = store.allLinks();
     store.applyDiff({ additions: [], removals: existing.links });
-    store.applyDiff({ additions, removals: [] });
+    store.applyDiff({ additions: diff.additions, removals: [] });
 
     if (rendered.revision) store.setRevision(rendered.revision);
     if (typeof rendered.sequence === "number") store.setSequence(rendered.sequence);

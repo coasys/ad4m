@@ -147,21 +147,20 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.deepEqual(store.allLinks().links[0], link);
     });
 
-    it("throws on encrypted diff without key ring — no store mutation", () => {
+    it("skips encrypted diff without key ring — reports missing versions, advances cursor", () => {
         const transport = new MockTransport();
         setup(transport);
-        // keyRing stays null
+        // keyRing stays null — simulates a freshly joined member awaiting key grant
         const rk = generateRoomKey();
         const link = makeLink({ source: "encrypted-no-ring" });
         const wireLink = encryptLinkForWire(link, rk, 1);
 
-        assert.throws(
-            () => syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5"),
-            /no key ring available/,
-        );
-        assert.equal(store.allLinks().links.length, 0, "store must remain empty — no partial application");
-        assert.equal(store.getSequence(), 0, "sequence must not advance on failure");
-        assert.equal(emittedDiffs.length, 0, "no diff emitted on failure");
+        const result = syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
+
+        assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
+        assert.equal(store.getSequence(), 5, "sequence must advance — cursor must not get stuck");
+        assert.equal(result.missingVersions.size, 1, "must report the missing version");
+        assert.ok(result.missingVersions.has(1), "must report version 1");
     });
 
     it("skips encrypted diff with missing key version — applies rest, reports missing versions", () => {
