@@ -371,6 +371,90 @@ describe("sync: catchUp / performSync", () => {
         assert.equal(store.getSequence(), 1);
     });
 
+    it("retries refreshKeyRing on subsequent sync when first attempt found no new keys", async () => {
+        // Simulates the CI race condition: Bob's first catchUp encounters an
+        // encrypted diff but refreshKeyRing finds no key yet (admin hasn't
+        // granted). The cursor advances past the diff. On the SECOND catchUp,
+        // the server returns empty diffs — but the persistent missing-versions
+        // set triggers another refreshKeyRing attempt, which now succeeds.
+        const transport = new MockTransport();
+        setup(transport);
+        const rk = generateRoomKey();
+        const link = makeLink({ source: "encrypted-retry" });
+        const wireLink = encryptLinkForWire(link, rk, 1);
+
+        let refreshCallCount = 0;
+
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => {
+                refreshCallCount++;
+                if (refreshCallCount >= 2) {
+                    // Second attempt: admin has granted the key
+                    keyRing = new Map([[1, rk]]);
+                    return true;
+                }
+                // First attempt: no key yet
+                return false;
+            },
+        });
+
+        let syncCallCount = 0;
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => {
+                syncCallCount++;
+                if (syncCallCount === 1) {
+                    // First sync: returns encrypted diff
+                    return {
+                        status: 200, headers: {},
+                        body: JSON.stringify({
+                            diffs: [{ additions: [wireLink], removals: [] }],
+                            revision: "rev-1", sequence: 1,
+                        }),
+                    };
+                }
+                // Second sync: empty — cursor already advanced past the diff
+                return {
+                    status: 200, headers: {},
+                    body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }),
+                };
+            },
+        );
+        // bootstrap(/render) route for re-bootstrap after key ring refresh
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => ({
+                status: 200, headers: {},
+                body: JSON.stringify({ links: [wireLink], revision: "rev-1" }),
+            }),
+        );
+
+        // First catchUp: encrypted diff skipped, refreshKeyRing returns false
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 1, "first catchUp must call refreshKeyRing");
+        assert.equal(emittedDiffs.length, 1, "first catchUp emits (with skipped links)");
+        const firstEmit = emittedDiffs[0];
+        assert.equal(firstEmit.additions.length, 0, "encrypted link must be skipped");
+
+        // Second catchUp: empty diffs, but persistent missing versions
+        // triggers retry — this time refreshKeyRing succeeds → re-bootstrap
+        emittedDiffs = [];
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 2, "second catchUp must retry refreshKeyRing");
+        // Re-bootstrap should have emitted the decrypted link
+        assert.ok(emittedDiffs.length > 0, "re-bootstrap must emit the recovered link");
+        const recoveredLinks = emittedDiffs.flatMap((d) => d.additions);
+        assert.ok(
+            recoveredLinks.some((l) => l.data.source === "encrypted-retry"),
+            "recovered link must have the original plaintext data",
+        );
+    });
+
     it("performSync never throws — logs and reports LinkLanguageInstalledButNotSynced on failure", async () => {
         const transport = new MockTransport();
         setup(transport);

@@ -46,8 +46,22 @@ export interface SyncDeps {
 
 let _deps: SyncDeps | null = null;
 
+/**
+ * Key versions that appeared in a catch-up batch but could not be
+ * decrypted because the key ring lacked them at the time. Persists
+ * across sync cycles: because the sequence cursor advances past
+ * encrypted diffs even when links get skipped, a failed
+ * refreshKeyRing on the FIRST attempt would otherwise leave those
+ * links permanently unreachable — subsequent syncs see empty diffs
+ * (cursor already past) and never trigger another refresh. By
+ * tracking the missing versions here, every subsequent
+ * performSync/catchUp retries the refresh until it succeeds.
+ */
+let _pendingMissingVersions = new Set<number>();
+
 export function initSync(deps: SyncDeps): void {
     _deps = deps;
+    _pendingMissingVersions = new Set();
 }
 
 function deps(): SyncDeps {
@@ -570,19 +584,37 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         store.setSequence(res.sequence);
     }
 
-    // If any links were skipped due to missing key versions, attempt a key
-    // ring refresh. If the refresh yields new versions, re-bootstrap from
-    // the server's full active set to recover the skipped links.
-    if (allMissingVersions.size > 0 && _deps?.refreshKeyRing) {
+    // Merge any newly discovered missing versions into the persistent set.
+    // This set survives across sync cycles so that a failed refreshKeyRing
+    // on one cycle retries on the next — the sequence cursor has already
+    // advanced past the encrypted diffs, so subsequent catchUp() calls
+    // will see empty batches and never re-discover the same versions.
+    for (const v of allMissingVersions) _pendingMissingVersions.add(v);
+
+    // If there are ANY unresolved missing versions — from this cycle or
+    // carried over from a previous one — attempt a key ring refresh.
+    if (_pendingMissingVersions.size > 0 && _deps?.refreshKeyRing) {
+        const isRetry = allMissingVersions.size === 0;
         console.log(
-            `[server-link-language] ${allMissingVersions.size} missing key version(s) ` +
-            `detected — refreshing key ring…`,
+            `[server-link-language] ${_pendingMissingVersions.size} pending missing key version(s)` +
+            `${isRetry ? " (retry from previous cycle)" : ""} — refreshing key ring…`,
         );
         try {
             const gotNew = await _deps.refreshKeyRing();
             if (gotNew) {
                 console.log("[server-link-language] key ring refreshed with new versions — re-bootstrapping");
+                _pendingMissingVersions.clear();
                 await bootstrap();
+                // Emit the full store so the executor's perspective layer
+                // sees the recovered links. bootstrap() itself does not
+                // emit (correct for cold start — the executor queries the
+                // store directly for initial state). The recovery path
+                // here must emit because the executor only surfaces
+                // runtime-added links via emitPerspectiveDiff.
+                const recovered = store.allLinks();
+                if (recovered.links.length > 0) {
+                    deps().emitDiff({ additions: recovered.links, removals: [] });
+                }
             } else {
                 console.warn(
                     "[server-link-language] key ring refresh returned no new versions — " +
