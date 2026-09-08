@@ -125,8 +125,14 @@ impl Ad4mMcpHandler {
     /// was retired from `FlowState` when the model-level guard replaced it
     /// (design §4.1) — nothing emits that predicate any more, so this tool
     /// could only ever answer "not in any state" regardless of the actual
-    /// flow state. State now lives on `FlowInstance.currentState`, which is
-    /// what the engine's proposal and consensus passes read and write.
+    /// flow state.
+    ///
+    /// It reads the `currentState` link, which is a write-through cache and
+    /// no longer the authority: the engine's proposal and consensus passes
+    /// decide on the fold over re-verified transition atoms
+    /// ([`crate::perspectives::flow_instance::FlowInstance::derive_state`]).
+    /// So this tool can still report a state a peer forged. Putting the read
+    /// surfaces on the fold is slice 2, where they get a perspective handle.
     #[tool(
         description = "Get the current state of an expression within a flow (state machine). Returns the flow instance URI and its current state name."
     )]

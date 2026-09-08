@@ -348,9 +348,24 @@ pub fn valid_acceptors(links: &[DecoratedLinkExpression]) -> Vec<String> {
     dids
 }
 
-/// Whether any author marked this proposal as fired.
+/// Whether some agent whose signature verifies marked this proposal as
+/// fired.
+///
+/// The mark is an **index, not a grant of authority**: every other check on
+/// the atom still runs, so a mark cannot make an unqualified proposal fold.
+/// What it can do is bring a *qualified* proposal into history earlier than
+/// the live pass would have — that pass re-checks the cited evidence
+/// (Clock A) before firing, and the fold does not. Requiring the mark's
+/// signature to verify keeps out marks fabricated in another agent's name,
+/// but any member can still write one under their own DID, so the window
+/// stands: mint, edit the cited evidence, mark before the pass runs.
+///
+/// That is the same class as the deletion gap — an index any member may
+/// write — and closing it needs a rule about who may write the mark, which
+/// is a design question beyond this slice.
 pub fn marked_fired(links: &[DecoratedLinkExpression]) -> bool {
-    links_on(links, RESOLVED_AS_PREDICATE).any(|l| field_value(&l.data.target) == FIRED_MARK)
+    links_on(links, RESOLVED_AS_PREDICATE)
+        .any(|l| l.proof.valid == Some(true) && field_value(&l.data.target) == FIRED_MARK)
 }
 
 impl TransitionAtom {

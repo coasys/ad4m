@@ -301,8 +301,13 @@ async fn forged_resolved_as_does_not_make_history() {
 /// every check advances the fold exactly as the engine's own fire would.
 /// The mark is an index, so it cannot be the thing that grants authority —
 /// and it cannot be the thing that withholds it either.
+///
+/// Not the same as harmless, and the name says so: the proposal is
+/// quorate, so a peer marking it early only skips the live pass's
+/// re-check of the cited evidence (Clock A). See [`marked_fired`] for the
+/// window that leaves open and why closing it is a later design question.
 #[tokio::test(flavor = "multi_thread")]
-async fn forged_resolved_as_on_a_valid_proposal_is_harmless() {
+async fn forged_resolved_as_on_a_quorate_proposal_folds_without_clock_a() {
     let mut f = seed_satisfied_fixture(None).await;
     let quorate = propose(&mut f, "quorate", "identified", "scoped").await;
 
