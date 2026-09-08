@@ -46,6 +46,15 @@ export function serverLinkLang(languageHash: string, serverUrl: string): LinkLan
     };
 }
 
+export function serverLinkLangE2E(languageHash: string, serverUrl: string): LinkLangConfig {
+    return {
+        label: "server-link-e2e",
+        languageHash,
+        buildTemplateParams: (name) =>
+            JSON.stringify({ SERVER_URL: serverUrl, ROOM_ID: uuidv4(), ENABLE_E2E: "true", name }),
+    };
+}
+
 /**
  * Template-and-publish the configured link language. Convenience wrapper so
  * tests don't have to know the templateParams shape.

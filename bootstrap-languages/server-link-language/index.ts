@@ -58,6 +58,9 @@ const SERVER_URL = "<to-be-filled>";
 //!@ad4m-template-variable
 const ROOM_ID = "<to-be-filled>";
 
+//!@ad4m-template-variable
+const ENABLE_E2E = "";
+
 // ---------------------------------------------------------------------------
 // Module state (fresh per perspective instance — see language-interface-spec.md §2)
 // ---------------------------------------------------------------------------
@@ -370,6 +373,19 @@ const language = defineLanguage({
             }
 
             await setupKeyRing();
+
+            // If E2E is requested by template config and this agent holds
+            // admin rights but the room has no E2E yet, generate the
+            // initial room key. This is the only auto-trigger for the
+            // first rotation — subsequent rotations require explicit
+            // admin action or ACL changes.
+            if ((ENABLE_E2E as string) === "true" && isRoomAdmin && keyRingStatus === "none") {
+                console.log(
+                    "[server-link-language] ENABLE_E2E=true, admin — generating initial E2E room key",
+                );
+                await performRotation();
+            }
+
             await syncModule.bootstrap();
 
             // If admin and key ring ready, grant historical keys to any
@@ -581,4 +597,4 @@ export default language;
 // Template params metadata (for language.publish / LanguageMeta)
 // ---------------------------------------------------------------------------
 
-export const possibleTemplateParams: string[] = ["SERVER_URL", "ROOM_ID"];
+export const possibleTemplateParams: string[] = ["SERVER_URL", "ROOM_ID", "ENABLE_E2E"];
