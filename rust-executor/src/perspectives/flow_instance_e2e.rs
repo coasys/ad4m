@@ -414,6 +414,21 @@ async fn n2_second_signer_accept_settles_and_replays() {
         "one accept, one vote link"
     );
 
+    // Lock the camelCase wire shape so the TS `FlowFireOutcome` interface
+    // can never drift from what `serde_json::to_value(fired)` produces.
+    let wire = serde_json::to_value(&fired).expect("serialize fired outcomes");
+    let obj = wire[0]
+        .as_object()
+        .expect("outcome must serialize as object");
+    assert_eq!(obj.len(), 5, "unexpected field count on the wire: {obj:?}");
+    assert_eq!(wire[0]["instanceUri"], fired[0].instance_uri.as_str());
+    assert_eq!(wire[0]["fromState"], fired[0].from_state.as_str());
+    assert_eq!(wire[0]["toState"], fired[0].to_state.as_str());
+    assert_eq!(wire[0]["voters"].as_array().map(Vec::len), Some(2));
+    assert!(wire[0]["contributingProposalUris"]
+        .as_array()
+        .is_some_and(|a| a.contains(&serde_json::Value::String(proposal.clone()))));
+
     // Voting again on an edge that has already settled is refused as stale:
     // the proposal leaves `identified` and the instance is in `scoped`.
     let err = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)

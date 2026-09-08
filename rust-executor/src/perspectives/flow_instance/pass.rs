@@ -30,7 +30,8 @@ use crate::types::{Link, LinkStatus};
 
 /// One consensus event this replica recorded for the first time: the atoms
 /// that settled an edge, now marked, with the cache advanced to match.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FireOutcome {
     pub instance_uri: String,
     pub from_state: String,

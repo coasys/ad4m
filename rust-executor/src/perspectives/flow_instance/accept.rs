@@ -37,9 +37,6 @@ use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
 /// evidence seal does not recompute on this replica. Returns whatever
 /// settled as a result, which may be nothing: a vote that does not yet reach
 /// quorum is a landed vote, not a failure.
-// The WS-RPC / MCP / TS surfaces that call this land in the accept-reject PR
-// (#968); in this PR the e2e tests are its only caller.
-#[allow(dead_code)]
 pub async fn accept_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
@@ -134,6 +131,50 @@ pub async fn accept_flow_proposal(
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
     Ok(run_flow_consensus_pass(perspective, None, context, None, Some(&instance_uri)).await)
+}
+
+/// Reject a proposal: delete every link on it that this replica authored.
+///
+/// Invariant: a replica only ever refuses its own action. So we delete only
+/// the links whose author matches the acting DID — another agent's links are
+/// theirs to retract. Already-fired proposals (carrying a `resolved_as →
+/// "fired"` mark) are the kept flow record and are immutable to this API.
+pub async fn reject_flow_proposal(
+    perspective: &mut PerspectiveInstance,
+    proposal_uri: &str,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    use super::atom::marked_fired;
+    use crate::types::LinkExpression;
+
+    let links = proposal_links(perspective, proposal_uri).await?;
+
+    if marked_fired(&links) {
+        return Err(anyhow::anyhow!(
+            "proposal {proposal_uri} is already fired — fired proposals are immutable"
+        ));
+    }
+
+    let did = crate::agent::did_for_context(context)
+        .map_err(|e| anyhow::anyhow!("reject_flow_proposal: no acting DID: {e:#}"))?;
+
+    let to_remove: Vec<LinkExpression> = links
+        .into_iter()
+        .filter(|l| l.author == did)
+        .map(LinkExpression::from)
+        .collect();
+
+    if to_remove.is_empty() {
+        return Err(anyhow::anyhow!(
+            "proposal {proposal_uri} has no links authored by {did} — cannot reject another agent's proposal"
+        ));
+    }
+
+    perspective
+        .remove_links(to_remove, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("reject_flow_proposal: remove_links failed: {e:#}"))?;
+    Ok(())
 }
 
 /// Every source-link of a proposal. `Err` when the URI carries none —
