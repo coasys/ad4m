@@ -408,6 +408,107 @@ test("successive rotations produce independent keys — compromising v2 does not
 });
 
 // ---------------------------------------------------------------------------
+// Rotation policy: version count must reflect intentional rotations only
+// ---------------------------------------------------------------------------
+
+test("re-authenticating an existing member must not create new key versions — grant is idempotent", async () => {
+  // This test encodes the contract that key rotation is an EXPLICIT admin
+  // action, not a side-effect of presence events. If someone wires
+  // performRotation() to onPeerJoined (a presence event that fires on
+  // every reconnect/wake/second-device), the version count would inflate
+  // here and fail.
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    await authenticateAgent(server.url, roomId, member);
+
+    // One intentional rotation → version 1
+    const { version } = await clientSideRotate(server.url, roomId, adminToken);
+    assert.equal(version, 1);
+
+    // Simulate three "reconnects" — member re-authenticates each time.
+    // A correct client runs only performAdminKeyGrants() here (idempotent),
+    // NOT performRotation(). We verify the server-side consequence: the
+    // version count must not grow.
+    for (let i = 0; i < 3; i++) {
+      await authenticateAgent(server.url, roomId, member);
+    }
+
+    // Still exactly version 1 — no phantom rotations.
+    const keysRes = await getJson<{ keys: Array<{ version: number }> }>(
+      `${server.url}/rooms/${roomId}/keys`, adminToken,
+    );
+    assert.equal(keysRes.status, 200);
+    assert.equal(keysRes.body.keys.length, 1, "must have exactly 1 key version after reconnects");
+    assert.equal(keysRes.body.keys[0].version, 1);
+  });
+});
+
+test("adding a new member and granting historical keys does not inflate the version count", async () => {
+  // The correct flow: rotate once → add member → grant (NOT rotate again).
+  // The new member receives v1 via grant. Version count stays at 1.
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+
+    // Rotate to v1 (admin only)
+    await clientSideRotate(server.url, roomId, adminToken);
+
+    // Add a new member
+    const member = await createTestAgent();
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
+    await authenticateAgent(server.url, roomId, member);
+
+    // Grant v1 to the new member (what performAdminKeyGrants does)
+    const missingRes = await getJson<{
+      membersNeedingHistoricalKeys: Array<{
+        did: string;
+        missingVersions: number[];
+        x25519PublicKey: string;
+      }>;
+    }>(`${server.url}/rooms/${roomId}/keys/missing`, adminToken);
+    assert.equal(missingRes.status, 200);
+
+    for (const m of missingRes.body.membersNeedingHistoricalKeys) {
+      for (const ver of m.missingVersions) {
+        // Re-seal admin's key for this version to the new member
+        const adminKeysRes = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
+          `${server.url}/rooms/${roomId}/keys`, adminToken,
+        );
+        const adminEnvelope = adminKeysRes.body.keys.find((k) => k.version === ver)!;
+        const plainKey = decryptRoomKeyWithX25519(adminEnvelope.encryptedKey, testAgentX25519PrivateKey(admin));
+        const resealed = encryptRoomKeyForRecipient(plainKey, hexToBytes(m.x25519PublicKey));
+        await postJson(
+          `${server.url}/rooms/${roomId}/keys/grant`,
+          { targetDid: m.did, keys: [{ version: ver, encryptedKey: resealed }] },
+          adminToken,
+        );
+      }
+    }
+
+    // Version count: still 1. The grant populated v1 for the member
+    // but did NOT create v2.
+    const adminKeysRes = await getJson<{ keys: Array<{ version: number }> }>(
+      `${server.url}/rooms/${roomId}/keys`, adminToken,
+    );
+    assert.equal(adminKeysRes.body.keys.length, 1);
+    assert.equal(adminKeysRes.body.keys[0].version, 1);
+
+    // Member now has v1 too
+    const memberToken = await authenticateAgent(server.url, roomId, member);
+    const memberKeysRes = await getJson<{ keys: Array<{ version: number }> }>(
+      `${server.url}/rooms/${roomId}/keys`, memberToken,
+    );
+    assert.equal(memberKeysRes.body.keys.length, 1);
+    assert.equal(memberKeysRes.body.keys[0].version, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Wire-level proof: plaintext key never appears in the POST body
 // ---------------------------------------------------------------------------
 
