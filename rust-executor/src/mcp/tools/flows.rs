@@ -322,7 +322,7 @@ impl Ad4mMcpHandler {
     }
 
     #[tool(
-        description = "Accept a live FlowTransitionProposal on behalf of this agent: adds your DID to the proposal's acceptors (idempotent per DID) and immediately runs the flow consensus pass. When the flow's consensusRule threshold (distinct DIDs) is met, the transition fires and the fired outcomes are returned; otherwise 'fired' is empty and the proposal stays live for further acceptances. Errors on unknown proposal URIs and on already-resolved proposals."
+        description = "Accept a live FlowTransitionProposal on behalf of this agent: adds your DID to the proposal's acceptors (idempotent per DID) and immediately runs the flow consensus pass. When the flow's consensusRule threshold (distinct DIDs) is met, the transition fires and the fired outcomes are returned; otherwise 'fired' is empty and the proposal stays live for further acceptances. Errors on unknown proposal URIs, on proposals that are not engine-visible, on proposals that leave a state the flow is no longer standing in, and when the cited evidence does not recompute on this replica."
     )]
     pub async fn flow_proposal_accept(&self, params: Parameters<FlowProposalParams>) -> String {
         let p = &params.0;
@@ -350,7 +350,7 @@ impl Ad4mMcpHandler {
     }
 
     #[tool(
-        description = "Reject a live FlowTransitionProposal: deletes the links you authored on it. Rejected proposals are removed from the flow record; already-fired proposals cannot be rejected. Errors on unknown proposal URIs."
+        description = "Withdraw this agent's own contribution to a FlowTransitionProposal: deletes only the links this DID signed — your vote, or your whole proposal if you opened it. It never touches another agent's links, and it does not 'cancel' the proposal for anyone else. Because flow state is recomputed from the links present now, withdrawing a vote that had helped an edge settle moves the flow back to where it stood before that vote. Errors on unknown proposal URIs and when this DID signed nothing on the proposal."
     )]
     pub async fn flow_proposal_reject(&self, params: Parameters<FlowProposalParams>) -> String {
         let p = &params.0;

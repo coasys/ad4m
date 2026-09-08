@@ -133,40 +133,40 @@ pub async fn accept_flow_proposal(
     Ok(run_flow_consensus_pass(perspective, None, context, None, Some(&instance_uri)).await)
 }
 
-/// Reject a proposal: delete every link on it that this replica authored.
+/// Reject a proposal: retract the links on it that this replica signed.
 ///
 /// Invariant: a replica only ever refuses its own action. So we delete only
-/// the links whose author matches the acting DID — another agent's links are
-/// theirs to retract. Already-fired proposals (carrying a `resolved_as →
-/// "fired"` mark) are the kept flow record and are immutable to this API.
+/// the links this DID actually signed — another agent's links are theirs to
+/// retract, and a link that merely *claims* our authorship without a valid
+/// signature is not our action either, so it is left alone.
+///
+/// There is deliberately no "already fired, refuse" guard. A `resolved_as →
+/// "fired"` mark is an index any member may write, not authority, and this
+/// engine reads no mark to decide anything. Retracting a vote that helped
+/// settle an edge therefore does move the flow back — that is the semantics
+/// stated in this module's parent doc, not a hole in this function: state is
+/// a function of the links present now.
 pub async fn reject_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    use super::atom::marked_fired;
     use crate::types::LinkExpression;
 
     let links = proposal_links(perspective, proposal_uri).await?;
-
-    if marked_fired(&links) {
-        return Err(anyhow::anyhow!(
-            "proposal {proposal_uri} is already fired — fired proposals are immutable"
-        ));
-    }
 
     let did = crate::agent::did_for_context(context)
         .map_err(|e| anyhow::anyhow!("reject_flow_proposal: no acting DID: {e:#}"))?;
 
     let to_remove: Vec<LinkExpression> = links
         .into_iter()
-        .filter(|l| l.author == did)
+        .filter(|l| signed_by(l, &did))
         .map(LinkExpression::from)
         .collect();
 
     if to_remove.is_empty() {
         return Err(anyhow::anyhow!(
-            "proposal {proposal_uri} has no links authored by {did} — cannot reject another agent's proposal"
+            "proposal {proposal_uri} carries no link signed by {did} — cannot reject another agent's proposal"
         ));
     }
 
