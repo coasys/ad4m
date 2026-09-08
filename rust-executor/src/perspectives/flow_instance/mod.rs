@@ -24,7 +24,9 @@
 //! Everything else is plumbing whose contract is stated on its module doc,
 //! and none of it makes a decision: [`roles`] resolves who may vote,
 //! [`pass`] writes the cache and the marks, [`accept`] casts this replica's
-//! own vote. Nothing in them can move a state the fold did not derive.
+//! own vote — re-verifying the proposal's evidence seal against our own graph
+//! before signing, and sweeping the instance afterwards so the new vote is
+//! folded. Nothing in them can move a state the fold did not derive.
 //!
 //! # The read-set is the proof
 //!
