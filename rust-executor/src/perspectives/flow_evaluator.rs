@@ -564,6 +564,14 @@ pub async fn run_engine_proposal_pass(
             return Vec::new();
         }
     };
+    // Mint from the DERIVED state, never from the `currentState` cache: a
+    // peer can write that link, and believing it would steer every proposal
+    // this pass mints onto an edge the flow never reached — or, on a
+    // terminal value, suppress them all.
+    let records =
+        crate::perspectives::flow_instance::derive_states(perspective, &records, &flows_by_uri)
+            .await;
+
     let satisfied =
         evaluate_flow_transitions(perspective, &records, &flows_by_uri, &acting_did).await;
 
@@ -685,6 +693,28 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                  ({e:#}); treating as already-proposed (fail-closed, skipping mint)"
             );
         };
+        // A proposal carrying `resolved_as` is the recorded history of a
+        // consensus event, not a live row, and must not suppress a re-mint.
+        // Without this a cyclic flow wedges: same graph → same seal → the
+        // already-settled proposal matches the whole dedup key, so the mint
+        // is skipped and the edge can never fire on the next visit.
+        match store
+            .get_proposal_links(&LinkQuery {
+                source: Some(proposal_uri.clone()),
+                predicate: Some(
+                    crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE.to_string(),
+                ),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => continue,
+            Ok(_) => {}
+            Err(e) => {
+                fail_closed(e);
+                return true;
+            }
+        }
         match links_to("ad4m://flow/instance", transition.instance_uri.clone()).await {
             Ok(false) => continue,
             Ok(true) => {}

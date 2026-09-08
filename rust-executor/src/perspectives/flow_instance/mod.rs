@@ -22,9 +22,9 @@
 //!   link is invisible.
 //!
 //! Everything else is plumbing whose contract is stated on its module doc,
-//! and none of it makes a decision: [`roles`] resolves who may vote, and the
-//! I/O edges that write the cache and cast this replica's own vote follow in
-//! sibling modules. Nothing in them can move a state the fold did not derive.
+//! and none of it makes a decision: [`roles`] resolves who may vote,
+//! [`pass`] writes the cache and the marks, [`accept`] casts this replica's
+//! own vote. Nothing in them can move a state the fold did not derive.
 //!
 //! # The read-set is the proof
 //!
@@ -37,8 +37,10 @@
 //! the same verdict. That is what makes it a proof rather than an assertion,
 //! and it is why the fold stays pure and synchronous.
 
+pub mod accept;
 pub mod atom;
 pub mod fold;
+pub mod pass;
 pub mod roles;
 
 use crate::perspectives::flow_context::FlowInstanceRecord;
