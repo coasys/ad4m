@@ -5,6 +5,7 @@ pub(crate) mod flow_context;
 pub(crate) mod flow_evaluator;
 #[cfg(test)]
 mod flow_evaluator_e2e;
+pub(crate) mod flow_instance;
 pub(crate) mod flow_semantic_check;
 pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
