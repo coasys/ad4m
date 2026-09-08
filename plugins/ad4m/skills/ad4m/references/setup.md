@@ -1,6 +1,8 @@
-# AD4M Executor Setup for AI Agents
+# AD4M Plugin Setup & Authentication for AI Agents
 
-> **Scope.** This file covers what has to happen *before* the MCP tools work: getting, running, unlocking and authenticating against an executor. Once you are connected, the executor documents itself — `ad4m_get_documentation(topic="overview")` (tool surface, workflow, authentication over MCP, data rules) and `topic="architecture"` (data model, SHACL format) need no authentication and are compiled into the binary, so they always describe the node in front of you. Setup is deliberately *not* served there: an agent that can call the tool is already past it, which is why this file lives in the skill.
+> **Scope.** This file covers what has to happen *before* the MCP tools work: installing the plugin, connecting to an executor, and authenticating. Once you are connected, the executor documents itself — `ad4m_get_documentation(topic="overview")` (tool surface, workflow, authentication over MCP, data rules) and `topic="architecture"` (data model, SHACL format) need no authentication and are compiled into the binary, so they always describe the node in front of you. Setup is deliberately *not* served there: an agent that can call the tool is already past it, which is why this file lives in the skill.
+
+If you need to stand up your own executor — downloading, initializing, running, unlocking — see `references/running-an-executor.md`.
 
 ## Installing the plugin itself
 
@@ -32,145 +34,6 @@ whole session, not just the install command — sort out which gateway you will 
 *before* you install. A missing `ad4m_*` tool means you are talking to the wrong gateway.
 It is not a reason to hand-roll an MCP client.
 
-## Getting the Executor
-
-### Option 1: Download from GitHub Releases (Recommended)
-
-Download pre-built binaries from [GitHub Releases](https://github.com/coasys/ad4m/releases):
-
-```bash
-# First, check the latest release version:
-LATEST=$(curl -s https://api.github.com/repos/coasys/ad4m/releases/latest | grep '"tag_name"' | sed 's/.*"tag_name": "//;s/".*//')
-VERSION=${LATEST#v}  # strip leading 'v'
-
-# Linux x64
-curl -L -o ad4m-executor "https://github.com/coasys/ad4m/releases/download/${LATEST}/ad4m-cli-executor-linux-${VERSION}-x64"
-curl -L -o ad4m "https://github.com/coasys/ad4m/releases/download/${LATEST}/ad4m-cli-client-linux-${VERSION}-x64"
-chmod +x ad4m-executor ad4m
-sudo mv ad4m-executor ad4m /usr/local/bin/
-```
-
-> **Always use the latest release.** Check the [releases page](https://github.com/coasys/ad4m/releases) for the most recent version. Pre-release versions (e.g., `-rc1`) may also be available.
-
-Available assets per release:
-- `ad4m-cli-executor-linux-*-x64` — Executor binary (Linux)
-- `ad4m-cli-client-linux-*-x64` — CLI client (Linux)
-- `ADAM.Launcher_*_amd64.AppImage` — Desktop launcher (Linux)
-- `ADAM.Launcher_*_amd64.deb` — Desktop launcher (Debian/Ubuntu)
-- `ADAM_Launcher_*_aarch64.dmg` — Desktop launcher (macOS)
-
-Check the [releases page](https://github.com/coasys/ad4m/releases) for the latest version.
-
-### Option 2: Build from Source
-
-Requires: Rust 1.92+, Deno, Go, `holochain_cli`
-
-```bash
-git clone https://github.com/coasys/ad4m.git
-cd ad4m
-git checkout dev  # or feature branch
-cargo build --release
-```
-
-Produces two binaries in `target/release/`:
-- `ad4m-executor` — the executor (server) and CLI combined
-- `ad4m` — the CLI client
-
-## Setup Sequence
-
-**Critical**: Run `init` before first `run`. The executor panics without the bootstrap seed file.
-
-### Step 1: Initialize
-
-```bash
-ad4m-executor init --data-path /path/to/.ad4m
-```
-
-Creates:
-- `mainnet_seed.seed` — bootstrap configuration (languages, network settings)
-- `last-seen-version` — version tracking
-
-### Step 2: Run Executor
-
-```bash
-# Keep the secret in a mode-600 file and export it. Never pass it as a flag:
-# `--admin-credential <value>` is visible to every user on the host via `ps`
-# and stays in the shell history.
-export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/.ad4m/admin-credential)"
-ad4m-executor run \
-  --app-data-path /path/to/.ad4m \
-  --port 12000 \
-  --enable-mcp true
-```
-
-**Key flags:**
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--app-data-path` | (required) | Data directory |
-| `--port` | 12000 | API port (WebSocket RPC + HTTP) |
-| `AD4M_ADMIN_CREDENTIAL` (env) / `--admin-credential` | (none) | Admin auth token. Set it through the environment variable; the flag form leaks the secret into `ps` output and shell history. Without it, an empty token has admin access |
-| `--enable-mcp` | false | Enable MCP server |
-| `--mcp-port` | 3001 | MCP server port |
-| `--hc-admin-port` | 2000 | Holochain admin port |
-| `--hc-app-port` | 1337 | Holochain app interface port |
-
-**For AI agents**: Always run in a screen session with logging:
-
-```bash
-export AD4M_ADMIN_CREDENTIAL="$(cat ~/.ad4m/admin-credential)"   # screen inherits the exported variable
-screen -dmS ad4m-executor bash -c 'ad4m-executor run --app-data-path ~/.ad4m --port 12000 --enable-mcp true 2>&1 | tee /tmp/ad4m-executor.log'
-```
-
-After startup, **write down** where the admin credential lives (the file path — never the value itself), the screen session name (`ad4m-executor`), log path (`/tmp/ad4m-executor.log`), MCP endpoint, and data path so you and your human can debug later. The executor is now running in the background — don't start another one.
-
-### Step 3: Generate Agent
-
-First run only. Creates cryptographic keys and DID identity.
-
-```bash
-ad4m --executor-url http://localhost:12000 agent generate --passphrase <passphrase>
-```
-
-**There is no REST endpoint for this.** The executor's only HTTP routes are
-`/`, `/health`, `/internal/shutdown` and the binary audio feed — everything
-else, `agent.generate` included, is a WebSocket-RPC method (`api/mod.rs`).
-The CLI above is the WS client; see "WebSocket RPC API" below to call it
-directly.
-
-This triggers Holochain conductor startup and language installation. Takes 30-60 seconds.
-
-### Step 4: Unlock Agent (subsequent starts)
-
-After restarting the executor, unlock the agent:
-
-```bash
-ad4m --executor-url http://localhost:12000 agent unlock --passphrase <passphrase> --holochain true
-```
-
-`--holochain true` starts the Holochain conductor during unlock. Same caveat
-as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.
-
-**Skipping this step is expected to break every other auth path — by design, not by bug.** An executor is only usable once its main operator has unlocked it. The wallet keeps signing keys in memory only; immediately after a restart, before `unlock` runs, the executor holds just the encrypted cipher — it can check that a password/credential is *structurally* valid but cannot actually sign anything, so it fails at key lookup instead. **What's actually wrong here is the error message, not the lockout itself:** a third party trying to authenticate against a not-yet-unlocked node should fail immediately with a clear "this executor hasn't been unlocked yet" message, not a confusing one that reads like a bad credential:
-
-- `login_email` (multi-user) → `User key not found on executor` — reads like a wrong password. It's actually "nobody has unlocked this node yet."
-- `request_capability` → `generate_jwt` (capability flow) → `main key not found` — the capability bootstrap is equally blocked until unlock.
-
-If you're the executor's operator and don't have CLI access handy, the same unlock is available over the WebSocket RPC API (see below): `agent.unlock` with the agent's passphrase. If you're a third party hitting either error, this isn't something to retry your way around — someone with operator access needs to unlock the node first.
-
-**Test-only mode, not a security bug:** on a node with no admin credential configured (neither `AD4M_ADMIN_CREDENTIAL` nor `--admin-credential`), an empty token resolves to full (`ALL_CAPABILITY`) access on the WS-RPC API, including `agent.unlock` — found live 2026-09-06 recovering a test executor. This is intentional, for local/test convenience, not a gap to fix. **Never run a node without an admin credential set except on loopback/local test setups** — on anything reachable by another user or over a network, this means anyone can unlock and fully control the node.
-
-### Step 5: Verify
-
-```bash
-# Is the executor up at all? (this one really is an HTTP route)
-curl -s http://localhost:12000/health          # {"status":"ok"}
-
-# Agent status — WS-RPC `agent.status`, via the CLI
-ad4m --executor-url http://localhost:12000 agent status
-
-# Expected: initialized + unlocked, with the agent's did:key:z6Mk… DID
-```
-
 ## Deployment Scenarios & Networking
 
 ### Scenario 1: Single-user, local (simplest)
@@ -186,52 +49,13 @@ ad4m-executor run --app-data-path ~/.ad4m --port 12000 --enable-mcp true
 
 ### Scenario 2: Agent connects to remote executor
 
-Agent on machine A, executor on machine B (LAN or internet). The executor itself only speaks plain HTTP / WebSocket on its ports, and every request carries a secret — the admin credential, a JWT, or a password on login. **Anything that leaves the machine therefore goes through an SSH tunnel or a TLS proxy. Never point an agent at `http://<remote-host>:3001/mcp` or `http://<remote-host>:12000` across a network.** Flux UI (browser) additionally needs a real TLS certificate for non-localhost connections, because browsers block mixed content.
-
-**Option A: SSH tunnel (encrypted by SSH, no certificate needed — simplest for agents)**
-
-```bash
-# On agent machine — forward both API and MCP ports
-ssh -L 12000:localhost:12000 -L 3001:localhost:3001 user@executor-host
-# Now agent connects to localhost:12000 / localhost:3001 as if local
-```
-
-**Option B: Caddy reverse proxy (auto TLS, needed for Flux UI)**
-
-```bash
-# On executor machine — install Caddy, then one TLS front for BOTH ports
-# (the `caddy reverse-proxy` one-liner only fronts a single upstream):
-cat > Caddyfile <<'EOF'
-ad4m.yourdomain.com {
-    reverse_proxy localhost:12000
-}
-mcp.yourdomain.com {
-    reverse_proxy localhost:3001
-}
-EOF
-caddy run --config Caddyfile
-# Flux connects to https://ad4m.yourdomain.com
-# MCP clients connect to https://mcp.yourdomain.com/mcp
-# Requires: both names pointing to the executor IP, ports 80/443 open
-```
-
-**Option C: Cloudflare Tunnel (no port forwarding, free TLS)**
-
-```bash
-# On executor machine. A quick tunnel exposes ONE local port, so run one per port:
-cloudflared tunnel --url http://localhost:12000   # API + Flux → https://xxx.trycloudflare.com
-cloudflared tunnel --url http://localhost:3001    # MCP        → https://yyy.trycloudflare.com/mcp
-# Each process prints its own https://….trycloudflare.com URL: point Flux at the
-# first and MCP clients at the second (plus /mcp). Exposing only port 12000 gives
-# you the API but no MCP endpoint. For a single hostname that routes both, use a
-# named tunnel with an ingress config (host- or path-based rules) instead.
-```
+The operator networking for Scenario 2 — SSH tunnels, Caddy reverse proxy, Cloudflare Tunnel — is in `references/running-an-executor.md` → "Operator Networking for Remote Executors". What matters on the agent side is the TLS guard below.
 
 #### Where TLS actually comes from, and what `allowInsecureHttp` is for
 
 Two different layers, easy to confuse:
 
-- **The executor has no TLS of its own on the MCP port.** It serves `/mcp` as plain HTTP, so encryption comes from the front you put in front of it — Caddy, Cloudflare Tunnel, or an SSH tunnel (Options A–C above). That is the recommended path for anything off-LAN. (`--tls-cert-file` / `--tls-key-file` cover the API port, not MCP; executor-native TLS for MCP is a separate piece of work.)
+- **The executor has no TLS of its own on the MCP port.** It serves `/mcp` as plain HTTP, so encryption comes from the front the operator puts in front of it — Caddy, Cloudflare Tunnel, or an SSH tunnel (see `references/running-an-executor.md` → "Operator Networking for Remote Executors"). That is the recommended path for anything off-LAN. (`--tls-cert-file` / `--tls-key-file` cover the API port, not MCP; executor-native TLS for MCP is a separate piece of work.)
 - **`allowInsecureHttp` is a client-side guard in the plugin**, not a transport setting. Every MCP call carries the plugin's JWT or admin credential in an `Authorization` header, so the plugin refuses to talk to a non-loopback plaintext `http://` `mcpEndpoint` unless you set the flag. Turning it on does not weaken the executor; it only stops the plugin from refusing.
 
 `https://` endpoints, `http://localhost…`, and anything reached through an SSH tunnel are all allowed with the flag off — so the only case that needs it is a plaintext endpoint on a network path you trust end to end, e.g. `http://marvin.fritz.box:3002/mcp` on your own LAN. For anything leaving that LAN, put a TLS front in front of the executor and use `https://` rather than setting the flag.
@@ -279,7 +103,7 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
 3. `generate_jwt` with `request_id` + `code` → get JWT token
 4. All subsequent requests include the JWT
 
-**Both auth paths require an unlocked wallet** (Step 4) — a freshly-restarted multi-user node with no admin credential configured is fully deadlocked until someone runs `agent.unlock`, since both `login_email` and the capability bootstrap fail with a locked wallet.
+**Both auth paths require the node's operator to have unlocked the wallet** — a freshly-restarted multi-user node with no admin credential configured is fully deadlocked until someone runs `agent.unlock` (see `references/running-an-executor.md` → "Step 4: Unlock Agent"), since both `login_email` and the capability bootstrap fail with a locked wallet.
 
 **Human auth flow (Flux):**
 
@@ -298,22 +122,6 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
 | Multiple users  | Remote       | **Yes** — TLS                       | Caddy + domain + multi-user flag     |
 
 Every remote row above encrypts the whole connection, so admin credentials, JWTs and passwords never cross a network in the clear. Plain HTTP is acceptable on loopback, and — at your own risk, with `allowInsecureHttp` — on a LAN path you fully control; never anywhere else. See "Where TLS actually comes from" above.
-
-## Directory Structure
-
-After init + generate, `--app-data-path` contains:
-
-```
-.ad4m/
-├── ad4m/
-│   ├── h/                    # Holochain data
-│   │   ├── c/                # Conductor (databases, lair keystore, wasm-cache)
-│   │   └── d/                # DNA data
-│   └── languages/            # Installed language bundles
-├── ad4m_db.sqlite            # Agent database
-├── mainnet_seed.seed         # Bootstrap configuration
-└── perspectives/             # Per-perspective SPARQL (Oxigraph) stores
-```
 
 ## Security Considerations
 
@@ -384,7 +192,7 @@ absent from 0.7.3.
 
 ## WebSocket RPC API (Fallback)
 
-**Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging, and — see Step 4 — unlocking a wallet when you lack CLI access).
+**Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging, and unlocking a wallet when you lack CLI access — see `references/running-an-executor.md` → "Step 4: Unlock Agent").
 
 Connect to `ws://localhost:12000/api/v1/ws` (loopback or through an SSH tunnel; `wss://` behind your TLS proxy when remote) and send JSON-RPC messages:
 
@@ -412,7 +220,7 @@ the WebSocket URL:
 ws://localhost:12000/api/v1/ws?token=<admin-credential-or-jwt>
 ```
 
-Remember the test-only behavior from Step 4: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
+Remember the test-only behavior from `references/running-an-executor.md` → "Step 4: Unlock Agent": an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
 **Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`)
 
 ## Troubleshooting
@@ -429,5 +237,5 @@ Remember the test-only behavior from Step 4: an empty token resolves to full acc
 | Waker not firing | WS not accessible or bad query | Check `ws://localhost:12000/api/v1/ws/events` and waker logs |
 | Messages "uninitialized" | Property set after creation (race) | Pass all initial values at creation — `instance_create(..., properties={...})` (static tools) or `{class}_create` with every property up front (legacy dynamic tools). Never a create followed by a separate set call. |
 | Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |
-| `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design** — see Step 4. The node hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: unlock with the agent's passphrase — `ad4m agent unlock` on the CLI, or `agent.unlock` over WS-RPC (there is no REST route for it). If you're a third party: this needs the node's operator, not a client-side retry. |
-| `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or the subscription shows under a **Pending** section in `list_waker_subscriptions` instead of active | Normal during node startup; also correct if the node genuinely hasn't been unlocked yet (row above). From plugin build `ff64207e1`, the plugin retries the registration every 30s automatically rather than pretending to have succeeded. | Nothing to do if Pending clears within a minute or two. If it doesn't clear, the cause is almost always the node not being unlocked — an operator problem, not a client-side one. (Builds before `0ac29fed6` had a worse bug here: a silent false "success" with no Pending state and no retry at all — on an old build, always confirm with `list_waker_subscriptions`.) |
+| `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design** — see `references/running-an-executor.md` → "Step 4: Unlock Agent". The node hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: unlock with the agent's passphrase — `ad4m agent unlock` on the CLI, or `agent.unlock` over WS-RPC (there is no REST route for it). If you're a third party: this needs the node's operator, not a client-side retry. |
+| `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or the subscription shows under a **Pending** section in `list_waker_subscriptions` instead of active | Normal during node startup; also correct if the node genuinely hasn't been unlocked yet (row above). From plugin build `ff64207e1`, the plugin retries the registration every 30s automatically rather than pretending to have succeeded. | Nothing to do if Pending clears within a minute or two. If it doesn't clear, the cause is almost always the node not being unlocked — an operator problem, not a client-side one. |
