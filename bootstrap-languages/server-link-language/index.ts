@@ -493,6 +493,11 @@ const language = defineLanguage({
                 );
             }
 
+            console.log(
+                `[server-link-language] commit: ${diff.additions.length} adds, ` +
+                `${diff.removals.length} removes (keyRingStatus=${keyRingStatus})`,
+            );
+
             // 1. Store links locally (plaintext, always — see src/sync.ts module doc).
             store.applyDiff(diff);
 

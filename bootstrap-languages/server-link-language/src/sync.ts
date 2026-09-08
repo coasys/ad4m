@@ -239,6 +239,10 @@ export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: nu
 export async function commit(diff: PerspectiveDiff): Promise<void> {
     const { config, getToken } = deps();
     const token = await getToken();
+    console.log(
+        `[server-link-language] POST /commit: ${diff.additions.length} adds, ` +
+        `${diff.removals.length} removes → room=${config.roomId}`,
+    );
     await api.commitDiff(config, token, toWireDiff(diff));
     emitSyncStateSafe("Synced");
 }
@@ -569,6 +573,10 @@ export async function catchUp(): Promise<PerspectiveDiff> {
     const token = await getToken();
     const since = store.getSequence();
     const res = await api.fetchSync(config, token, since);
+    console.log(
+        `[server-link-language] catchUp: since=${since}, received ${res.diffs.length} diff(s), ` +
+        `revision=${res.revision}, sequence=${res.sequence}`,
+    );
 
     let last: PerspectiveDiff = { additions: [], removals: [] };
     const allMissingVersions = new Set<number>();
