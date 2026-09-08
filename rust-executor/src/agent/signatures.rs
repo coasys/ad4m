@@ -70,3 +70,54 @@ fn inner_verify(did: &str, message: &[u8], signature: &[u8]) -> bool {
         false
     }
 }
+
+/// A second signing identity for tests: a real `did:key` keypair that signs
+/// the way [`crate::agent::create_signed_expression`] signs for the local
+/// agent, so links it authors verify on the receiving side
+/// (`proof.valid == Some(true)`).
+///
+/// It lives next to [`verify`] deliberately. The flow engine counts a vote
+/// only when the stored signature verdict is valid, so a test can no longer
+/// stand in for a second agent by writing a link with a made-up signature —
+/// it has to hold a key.
+#[cfg(test)]
+pub struct TestSigner {
+    keypair: PatchedKeyPair,
+    /// `did:key:…` — the author of everything this signer signs.
+    pub did: String,
+    /// The verification-method id that goes into `proof.key`.
+    pub key_id: String,
+}
+
+#[cfg(test)]
+impl TestSigner {
+    pub fn generate() -> Self {
+        use did_key::{DIDCore, Ed25519KeyPair};
+        let keypair = did_key::generate::<Ed25519KeyPair>(None);
+        let document = keypair.get_did_document(did_key::Config::default());
+        TestSigner {
+            did: document.id.clone(),
+            key_id: document.verification_method[0].id.clone(),
+            keypair,
+        }
+    }
+
+    /// Sign `data` now, producing the same `Expression` shape the wallet
+    /// path produces.
+    pub fn sign<T: Serialize>(&self, data: T) -> Expression<T> {
+        let timestamp = Utc::now();
+        let signature = hex::encode(
+            self.keypair
+                .sign(&hash_data_and_timestamp(&data, &timestamp)),
+        );
+        Expression {
+            author: self.did.clone(),
+            timestamp: timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
+            data,
+            proof: crate::types::ExpressionProof {
+                key: self.key_id.clone(),
+                signature,
+            },
+        }
+    }
+}

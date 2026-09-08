@@ -36,6 +36,7 @@ use crate::perspectives::flow_classes::write_flow_transition_proposal;
 use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, reachable_next_states, FlowInstanceRecord, FlowTokens,
 };
+use crate::perspectives::flow_instance::FlowInstance;
 use crate::perspectives::flow_semantic_check::{
     build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
 };
@@ -471,7 +472,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
         let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
             continue;
         };
-        for state in reachable_next_states(flow, &record.current_state) {
+        for state in reachable_next_states(flow, &record.state) {
             let requires = state.requires.as_deref().unwrap_or_default();
             if requires.is_empty() {
                 continue;
@@ -482,7 +483,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
-                        from_state: record.current_state.clone(),
+                        from_state: record.state.clone(),
                         to_state: state.name.clone(),
                         evidence_hash: evidence_hash(&class_names, &evidence),
                         evidence_ids,
@@ -604,6 +605,37 @@ pub async fn run_engine_proposal_pass(
             return Vec::new();
         }
     };
+
+    // The state a proposal is minted FROM is the fold over the instance's
+    // re-verified history, never its `currentState` link. Believing the
+    // link let one forged write suppress every mint on an instance (forge a
+    // terminal state: nothing is reachable) or mint along an edge the flow
+    // never reached (forge a state whose successor has a permissive guard).
+    // An instance whose state cannot be derived is skipped, not proposed
+    // for: fail closed.
+    let mut records: Vec<FlowInstanceRecord> = {
+        let mut derived = Vec::with_capacity(records.len());
+        for record in records {
+            let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
+                continue;
+            };
+            match FlowInstance::from_record(&record, flow)
+                .derive_state(perspective)
+                .await
+            {
+                Ok(state) => derived.push(FlowInstanceRecord {
+                    state: state.state,
+                    ..record
+                }),
+                Err(e) => log::warn!(
+                    "run_engine_proposal_pass: deriving the state of {} failed; not proposing for it this pass: {e:#}",
+                    record.instance_uri
+                ),
+            }
+        }
+        derived
+    };
+    records.sort_by(|a, b| a.instance_uri.cmp(&b.instance_uri));
 
     let satisfied =
         evaluate_flow_transitions(perspective, &records, &flows_by_uri, &acting_did).await;
@@ -743,7 +775,7 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
             .get_proposal_links(&LinkQuery {
                 source: Some(proposal_uri.clone()),
                 predicate: Some(
-                    crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE.to_string(),
+                    crate::perspectives::flow_instance::RESOLVED_AS_PREDICATE.to_string(),
                 ),
                 ..Default::default()
             })
@@ -869,7 +901,8 @@ mod tests {
             flow_uri: "delivery://DeliveryFlow".into(),
             instance_uri: "ad4m://flow/instance/1".into(),
             subject: "ad4m://task/onboarding".into(),
-            current_state: "identified".into(),
+            state: "identified".into(),
+            cached_state: Some("identified".into()),
             created_at: None,
         }
     }
@@ -1341,7 +1374,8 @@ mod tests {
             flow_uri: flow_uri.into(),
             instance_uri: instance.into(),
             subject: "ad4m://subject".into(),
-            current_state: state.into(),
+            state: state.into(),
+            cached_state: Some(state.into()),
             created_at: None,
         }
     }
@@ -1735,10 +1769,10 @@ mod tests {
             // it must not wedge the remint.
             let mut store = full_candidate_store("did:key:me");
             store.by_predicate.insert(
-                crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE.to_string(),
+                crate::perspectives::flow_instance::RESOLVED_AS_PREDICATE.to_string(),
                 Some(vec![link(
                     "proposal://1",
-                    crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE,
+                    crate::perspectives::flow_instance::RESOLVED_AS_PREDICATE,
                     "literal:string:fired",
                 )]),
             );
@@ -1752,7 +1786,7 @@ mod tests {
         async fn resolved_as_lookup_error_reports_already_proposed() {
             let mut store = full_candidate_store("did:key:me");
             store.by_predicate.insert(
-                crate::perspectives::flow_consensus::RESOLVED_AS_PREDICATE.to_string(),
+                crate::perspectives::flow_instance::RESOLVED_AS_PREDICATE.to_string(),
                 None,
             );
             assert!(

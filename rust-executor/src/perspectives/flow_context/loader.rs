@@ -39,7 +39,7 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
     // not the bare name (James PR #929 R5).
     let flow_uri = v.get("flowUri").and_then(|x| x.as_str())?.to_string();
     let subject = v.get("subject").and_then(|x| x.as_str())?.to_string();
-    let current_state = v.get("currentState").and_then(|x| x.as_str())?.to_string();
+    let cached_state = v.get("currentState").and_then(|x| x.as_str())?.to_string();
     // Ad4mModel synthesises `createdAt` from the earliest link timestamp
     // on hydration (`rust-executor/src/perspectives/model_query/hydration.rs`).
     // When present it's an RFC3339 string; we keep it opaque here.
@@ -51,7 +51,10 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
         flow_uri,
         instance_uri,
         subject,
-        current_state,
+        // `state` is seeded from the cache and overwritten from the fold
+        // by every engine pass — see `FlowInstanceRecord::state`.
+        state: cached_state.clone(),
+        cached_state: Some(cached_state),
         created_at,
     })
 }
@@ -165,7 +168,7 @@ pub fn build_flow_contexts(
                 flow,
                 r.instance_uri.clone(),
                 r.subject.clone(),
-                r.current_state.clone(),
+                r.state.clone(),
             ))
         })
         .collect()
@@ -513,7 +516,8 @@ mod tests {
         assert_eq!(r.instance_uri, "ad4m://flow/instance/inst-1");
         assert_eq!(r.flow_uri, "coasys://DeliveryFlow");
         assert_eq!(r.subject, "ad4m://task/foo");
-        assert_eq!(r.current_state, "scoped");
+        assert_eq!(r.state, "scoped");
+        assert_eq!(r.cached_state.as_deref(), Some("scoped"));
         assert_eq!(r.created_at.as_deref(), Some("2026-08-26T09:00:00Z"));
     }
 
@@ -536,7 +540,7 @@ mod tests {
         });
         let r = parse_flow_instance_from_hydrated(&v).expect("required scalars present");
         assert_eq!(r.flow_uri, "coasys://DeliberationFlow");
-        assert_eq!(r.current_state, "perspectives");
+        assert_eq!(r.state, "perspectives");
         assert_eq!(r.created_at.as_deref(), Some("2026-08-26T10:00:00Z"));
     }
 
@@ -591,7 +595,8 @@ mod tests {
             flow_uri: flow.to_string(),
             instance_uri: uri.to_string(),
             subject: subject.to_string(),
-            current_state: state.to_string(),
+            state: state.to_string(),
+            cached_state: Some(state.to_string()),
             created_at: Some("2026-08-26T09:00:00Z".to_string()),
         }
     }

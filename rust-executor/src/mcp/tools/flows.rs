@@ -125,8 +125,14 @@ impl Ad4mMcpHandler {
     /// was retired from `FlowState` when the model-level guard replaced it
     /// (design §4.1) — nothing emits that predicate any more, so this tool
     /// could only ever answer "not in any state" regardless of the actual
-    /// flow state. State now lives on `FlowInstance.currentState`, which is
-    /// what the engine's proposal and consensus passes read and write.
+    /// flow state.
+    ///
+    /// It reads the `currentState` link, which is a write-through cache and
+    /// no longer the authority: the engine's proposal and consensus passes
+    /// decide on the fold over re-verified transition atoms
+    /// ([`crate::perspectives::flow_instance::FlowInstance::derive_state`]).
+    /// So this tool can still report a state a peer forged. Putting the read
+    /// surfaces on the fold is slice 2, where they get a perspective handle.
     #[tool(
         description = "Get the current state of an expression within a flow (state machine). Returns the flow instance URI and its current state name."
     )]
@@ -152,7 +158,7 @@ impl Ad4mMcpHandler {
             Ok(Some(instance)) => serde_json::to_string_pretty(&json!({
                 "expression": p.expression_address,
                 "flow": flow_uri,
-                "state": instance.current_state,
+                "state": instance.state,
                 "instance": instance.instance_uri,
                 "started_at": instance.created_at,
             }))
@@ -293,20 +299,20 @@ impl Ad4mMcpHandler {
             return serde_json::to_string_pretty(&json!({
                 "expression": p.expression_address,
                 "flow": flow_uri,
-                "current_state": instance.current_state,
+                "current_state": instance.state,
                 "available_actions": Vec::<serde_json::Value>::new(),
                 "note": "flow definition not found on this perspective",
             }))
             .unwrap_or_else(|e| format!("Error: {}", e));
         };
 
-        let actions = Self::available_transitions(&flow, &instance.current_state);
+        let actions = Self::available_transitions(&flow, &instance.state);
 
         serde_json::to_string_pretty(&json!({
             "expression": p.expression_address,
             "flow": flow_uri,
             "instance": instance.instance_uri,
-            "current_state": instance.current_state,
+            "current_state": instance.state,
             "available_actions": actions,
         }))
         .unwrap_or_else(|e| format!("Error: {}", e))
@@ -491,7 +497,7 @@ mod tests {
                 .expect("flow_instance_for");
         let found = found.expect("the minted instance must be found");
         assert_eq!(found.instance_uri, inst_uri);
-        assert_eq!(found.current_state, "identified");
+        assert_eq!(found.state, "identified");
         assert_eq!(found.subject, base_uri);
 
         assert!(

@@ -8,8 +8,9 @@
 //! `select_fire_candidate` / `fire_flow_consensus` core survives verbatim
 //! where the semantics didn't change) and adapted to the current stack:
 //!
-//! - `proposed_at` is Ad4mModel's synthesised `createdAt` (the proposal SDNA
-//!   deliberately has no `proposedAt` property).
+//! - What this pass counts is a [`TransitionAtom`], built and re-verified by
+//!   [`super::flow_instance`]; the state it counts them against is the fold
+//!   from that module, never the `currentState` link.
 //! - A DID qualifies toward consensus when it **proposed OR accepted**
 //!   (`ad4m://acceptedBy` links, design §7.2) — the old core counted
 //!   proposers only.
@@ -27,9 +28,7 @@
 //! - Weighted / delegation / time-decay consensus (v1.5+).
 
 use crate::agent::AgentContext;
-use crate::perspectives::flow_classes::{
-    advance_flow_instance_state, FLOW_TRANSITION_PROPOSAL_CLASS,
-};
+use crate::perspectives::flow_classes::advance_flow_instance_state;
 use crate::perspectives::flow_context::{
     load_all_flow_instances, load_flow_instances, load_shacl_flows, retain_selected_flows,
     scope_subject, FlowInstanceRecord,
@@ -38,45 +37,15 @@ use crate::perspectives::flow_evaluator::{
     cardinality_satisfied, recompute_evidence_hash, requires_query_input, run_query,
     RequiresQueryable,
 };
+use crate::perspectives::flow_instance::{
+    declares_edge, effective_consensus_rule, FlowInstance, TransitionAtom, ACCEPTED_BY_PREDICATE,
+    FIRED_MARK, FLOW_INSTANCE_PREDICATE, RESOLVED_AS_PREDICATE,
+};
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery, SHACLFlow};
+use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery};
 use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkQuery, LinkStatus};
 use std::collections::{BTreeMap, HashSet};
-
-/// Predicate marking a proposal as consumed by a firing. Absence = live.
-pub const RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
-/// Predicate carrying a proposal's proposer DID (mirrors the
-/// `flow_transition_proposal.json` hardwired-SDNA setter).
-pub const PROPOSER_PREDICATE: &str = "ad4m://flow/proposer";
-/// Predicate for acceptance links: proposal URI → accepting DID (§4.2).
-pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
-
-/// Data mirror of one on-graph `FlowTransitionProposal`, as the consensus
-/// pass consumes it.
-///
-/// `proposed_at` is the hydrated `createdAt` (earliest link timestamp on the
-/// proposal URI — RFC3339, Z-suffix, lex-sortable). `acceptors` are the DIDs
-/// on `ad4m://acceptedBy` links; they qualify toward consensus exactly like
-/// the proposer. `evidence_hash` is carried through for the orchestrator's
-/// pre-fire re-verification; the aggregator itself never reads it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlowTransitionProposalRecord {
-    pub uri: String,
-    pub from_state: String,
-    pub to_state: String,
-    pub proposer: String,
-    pub proposed_at: String,
-    pub acceptors: Vec<String>,
-    pub evidence_hash: String,
-}
-
-impl FlowTransitionProposalRecord {
-    /// Every DID vouching for this proposal: proposer + acceptors.
-    fn qualifying_dids(&self) -> impl Iterator<Item = &String> {
-        std::iter::once(&self.proposer).chain(self.acceptors.iter())
-    }
-}
 
 /// Per-target result: one row per `(from_state, to_state)` that appears in
 /// the input bag, whether it fires or not.
@@ -94,8 +63,8 @@ pub struct FlowVoteTally {
     pub required_count: u32,
     /// `eligible_proposers.len() as u32 >= required_count`.
     pub consensus_reached: bool,
-    /// The subset of input proposals targeting this pair, input order.
-    pub contributing: Vec<FlowTransitionProposalRecord>,
+    /// The subset of input atoms targeting this pair, input order.
+    pub contributing: Vec<TransitionAtom>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,13 +77,17 @@ pub struct AggregateFlowVotesResult {
     pub fires: Option<FlowVoteTally>,
 }
 
-/// Canonical three-key ordering for `fires` selection: earliest `proposed_at`
-/// first, then lex `(from_state, to_state)` to break ties deterministically.
+/// Canonical four-key ordering for `fires` selection: earliest
+/// `proposed_at` first, then lex `(from_state, to_state, uri)`. The same
+/// keys, in the same order, that
+/// [`crate::perspectives::flow_instance::fold`] replays history with, so
+/// the live choice and the replay of that choice agree.
 fn tally_ord(a: &FlowVoteTally, b: &FlowVoteTally) -> std::cmp::Ordering {
     earliest_proposed_at(&a.contributing)
         .cmp(&earliest_proposed_at(&b.contributing))
         .then_with(|| a.from_state.cmp(&b.from_state))
         .then_with(|| a.to_state.cmp(&b.to_state))
+        .then_with(|| earliest_uri(&a.contributing).cmp(&earliest_uri(&b.contributing)))
 }
 
 /// Pure aggregation entry point.
@@ -125,7 +98,7 @@ fn tally_ord(a: &FlowVoteTally, b: &FlowVoteTally) -> std::cmp::Ordering {
 /// - `eligible_dids`: pre-resolved `from_role` result set. Required when
 ///   the rule carries `from_role`.
 pub fn aggregate_flow_votes(
-    proposals: &[FlowTransitionProposalRecord],
+    proposals: &[TransitionAtom],
     consensus_rule: Option<&ConsensusRule>,
     eligible_dids: Option<&HashSet<String>>,
 ) -> anyhow::Result<AggregateFlowVotesResult> {
@@ -146,8 +119,7 @@ pub fn aggregate_flow_votes(
     }
 
     // BTreeMap so bucket iteration is already lex-sorted by key.
-    let mut buckets: BTreeMap<(String, String), Vec<FlowTransitionProposalRecord>> =
-        BTreeMap::new();
+    let mut buckets: BTreeMap<(String, String), Vec<TransitionAtom>> = BTreeMap::new();
     for p in proposals {
         buckets
             .entry((p.from_state.clone(), p.to_state.clone()))
@@ -229,14 +201,19 @@ pub fn select_fire_candidate<'a>(
 
 /// Advance an on-graph `FlowInstance` to `fired_tally.to_state`.
 ///
+/// `derived_state` is the state the fold puts this instance in — the
+/// argument is the state, not the instance row, precisely so no caller can
+/// accidentally hand this the `currentState` cache any peer can write.
+///
 /// Preconditions (all enforced — a violation returns `Err` before touching
-/// the perspective): consensus reached, `from_state` matches the live
-/// snapshot, and the transition is not a no-op. The caller owns id-gen /
+/// the perspective): consensus reached, `from_state` matches the derived
+/// state, and the transition is not a no-op. The caller owns id-gen /
 /// batching so the fire can bundle with follow-on writes (proposal
 /// resolution, a future audit event) into one commit.
 pub async fn fire_flow_consensus(
     perspective: &mut PerspectiveInstance,
-    instance: &FlowInstanceRecord,
+    instance_uri: &str,
+    derived_state: &str,
     fired_tally: &FlowVoteTally,
     batch_id: Option<String>,
     context: &AgentContext,
@@ -250,34 +227,29 @@ pub async fn fire_flow_consensus(
             fired_tally.to_state,
         ));
     }
-    if fired_tally.from_state != instance.current_state {
+    if fired_tally.from_state != derived_state {
         return Err(anyhow::anyhow!(
-            "fire_flow_consensus: stale tally — fromState={} does not match instance.currentState={} (flow already advanced?)",
+            "fire_flow_consensus: stale tally — fromState={} does not match the derived state {derived_state} (flow already advanced?)",
             fired_tally.from_state,
-            instance.current_state,
         ));
     }
-    if fired_tally.to_state == instance.current_state {
+    if fired_tally.to_state == derived_state {
         return Err(anyhow::anyhow!(
-            "fire_flow_consensus: refusing to fire a no-op — toState={} equals instance.currentState",
+            "fire_flow_consensus: refusing to fire a no-op — toState={} equals the derived state",
             fired_tally.to_state,
         ));
     }
 
-    let from_state = instance.current_state.clone();
+    let from_state = derived_state.to_string();
     let to_state = fired_tally.to_state.clone();
 
-    advance_flow_instance_state(
-        perspective,
-        &instance.instance_uri,
-        &to_state,
-        batch_id,
-        context,
-    )
-    .await?;
+    // The `currentState` link is written through as a CACHE: it keeps the
+    // SHACL `min_count 1` satisfied and lets a reader see the fold's answer
+    // without walking the atoms. Nothing reads it back as authority.
+    advance_flow_instance_state(perspective, instance_uri, &to_state, batch_id, context).await?;
 
     Ok(FireOutcome {
-        instance_uri: instance.instance_uri.clone(),
+        instance_uri: instance_uri.to_string(),
         from_state,
         to_state,
         fired_by_proposers: fired_tally.eligible_proposers.clone(),
@@ -290,8 +262,10 @@ pub async fn fire_flow_consensus(
 }
 
 /// Mark every contributing proposal of a fired tally as consumed:
-/// `ad4m://flow/resolved_as` → `"fired"`. The loader filters marked
-/// proposals out, so a fired transition's votes can never count twice.
+/// `ad4m://flow/resolved_as` → `"fired"`. Marked proposals leave the
+/// frontier and become the fold's candidate history, so a fired
+/// transition's votes can never count twice — and, because the fold
+/// re-verifies each of them, a mark somebody else wrote buys nothing.
 ///
 /// Keep-and-mark rather than delete (the design-note deviation from §5.4):
 /// a fired proposal is a co-signed flow-atom — the record Synergy's
@@ -310,7 +284,7 @@ pub async fn resolve_proposals_fired(
                 Link {
                     source: uri.clone(),
                     predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
-                    target: format!("literal:string:{}", urlencoding::encode("fired")),
+                    target: format!("literal:string:{}", urlencoding::encode(FIRED_MARK)),
                 },
                 LinkStatus::Shared,
                 batch_id.clone(),
@@ -324,176 +298,24 @@ pub async fn resolve_proposals_fired(
     Ok(())
 }
 
-/// Load every **live** `FlowTransitionProposal` targeting a
-/// `FlowInstance` URI: hydrated via `model_query`, then joined with
-/// `ad4m://acceptedBy` acceptance links and filtered of
-/// already-resolved proposals.
-///
-/// Silently returns `Ok(vec![])` when the proposal class hasn't been
-/// registered on this perspective yet — a fresh perspective has no
-/// proposals, and erroring would break the consensus pass on every call
-/// before the first proposal lands. Same policy (and same message match)
-/// as [`super::flow_context::load_flow_instances`].
-pub async fn load_flow_transition_proposals(
-    perspective: &PerspectiveInstance,
-    flow_instance_uri: &str,
-) -> anyhow::Result<Vec<FlowTransitionProposalRecord>> {
-    if flow_instance_uri.is_empty() {
-        return Err(anyhow::anyhow!(
-            "load_flow_transition_proposals: flow_instance_uri must not be empty (raw model_query would return every proposal on the perspective)"
-        ));
-    }
-    let query = serde_json::json!({ "where": { "flowInstance": flow_instance_uri } });
-    let json = match perspective
-        .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query.to_string())
-        .await
-    {
-        Ok(j) => j,
-        Err(e) => {
-            let msg = format!("{e:#}");
-            if msg.to_lowercase().contains("no shacl shape stored") {
-                return Ok(vec![]);
-            }
-            return Err(anyhow::anyhow!(
-                "load_flow_transition_proposals: model_query failed: {msg}"
-            ));
-        }
-    };
-    let parsed: serde_json::Value = serde_json::from_str(&json)
-        .map_err(|e| anyhow::anyhow!("load_flow_transition_proposals: response not JSON: {e:#}"))?;
-    let instances = parsed
-        .get("instances")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let mut records = Vec::new();
-    for v in &instances {
-        let Some(mut record) = parse_flow_transition_proposal_from_hydrated(v) else {
-            continue;
-        };
-        // Resolution + acceptance ride as raw links, not model properties —
-        // one bounded link query per proposal for each.
-        let resolved = source_links(
-            perspective,
-            &record.uri,
-            Some(RESOLVED_AS_PREDICATE),
-            &format!(
-                "load_flow_transition_proposals: resolved-as lookup on {} failed",
-                record.uri
-            ),
-        )
-        .await?;
-        if !resolved.is_empty() {
-            continue;
-        }
-        // `proposer` above is a hydrated model property — writer-chosen
-        // data. Locally minted proposals are honest (the write path passes
-        // `acting_did`), but this pass deliberately counts proposals that
-        // arrived by sync, where the property is unverified input: a replica
-        // could sync in three proposals "from" three DIDs it controls none
-        // of, each with a valid content seal (seals cover graph state, not
-        // identity). Require a proposer link whose signed author IS the DID
-        // it claims; a proposal lying about its proposer is dropped, not
-        // counted at reduced weight.
-        let proposer_links = source_links(
-            perspective,
-            &record.uri,
-            Some(PROPOSER_PREDICATE),
-            &format!(
-                "load_flow_transition_proposals: proposer lookup on {} failed",
-                record.uri
-            ),
-        )
-        .await?;
-        if !proposer_links
-            .iter()
-            .any(|l| l.data.target == record.proposer && l.author == record.proposer)
-        {
-            log::warn!(
-                "load_flow_transition_proposals: dropping proposal {} — no proposer link authored by its claimed proposer {} (identity unverified)",
-                record.uri,
-                record.proposer
-            );
-            continue;
-        }
-        let acceptances = source_links(
-            perspective,
-            &record.uri,
-            Some(ACCEPTED_BY_PREDICATE),
-            &format!(
-                "load_flow_transition_proposals: acceptedBy lookup on {} failed",
-                record.uri
-            ),
-        )
-        .await?;
-        // A vote is an *authorship* claim, not a data claim: the link's
-        // signed author must be the DID it names as acceptor, otherwise any
-        // agent could write `acceptedBy → did:key:X` links for DIDs it does
-        // not control and clear an `{n}` quorum alone. Signature validity is
-        // the sync layer's job; identity binding is ours.
-        let mut acceptors: Vec<String> = acceptances
-            .iter()
-            .filter(|l| {
-                let ok = l.author == l.data.target;
-                if !ok {
-                    log::warn!(
-                        "load_flow_transition_proposals: dropping acceptedBy on {} naming {} but authored by {} (vote forgery shape)",
-                        record.uri, l.data.target, l.author
-                    );
-                }
-                ok
-            })
-            .map(|l| l.data.target.clone())
-            .collect();
-        acceptors.sort();
-        acceptors.dedup();
-        record.acceptors = acceptors;
-        records.push(record);
-    }
-    Ok(records)
-}
-
-/// Parse one hydrated `FlowTransitionProposal` JSON object into a record.
-///
-/// Returns `None` when `id` / `fromState` / `toState` / `proposer` /
-/// `createdAt` is missing — an untyped or half-written proposal is
-/// silently skipped rather than failing the whole pass. `evidenceHashes`
-/// defaults to empty (the orchestrator treats a hash-less proposal as
-/// unverifiable and skips it, fail-closed, at fire time). `acceptors`
-/// start empty; [`load_flow_transition_proposals`] fills them from links.
-pub fn parse_flow_transition_proposal_from_hydrated(
-    v: &serde_json::Value,
-) -> Option<FlowTransitionProposalRecord> {
-    let uri = v.get("id").and_then(|x| x.as_str())?.to_string();
-    let from_state = v.get("fromState").and_then(|x| x.as_str())?.to_string();
-    let to_state = v.get("toState").and_then(|x| x.as_str())?.to_string();
-    let proposer = v.get("proposer").and_then(|x| x.as_str())?.to_string();
-    let proposed_at = v.get("createdAt").and_then(|x| x.as_str())?.to_string();
-    let evidence_hash = v
-        .get("evidenceHashes")
-        .and_then(|x| x.as_str())
-        .unwrap_or_default()
-        .to_string();
-    Some(FlowTransitionProposalRecord {
-        uri,
-        from_state,
-        to_state,
-        proposer,
-        proposed_at,
-        acceptors: Vec::new(),
-        evidence_hash,
-    })
-}
-
 /// Smallest `proposed_at` in a non-empty bucket. RFC3339 Z-suffix
 /// timestamps sort lexicographically. An empty string sorts before any
 /// real value — a de-facto tie-breaker winner, the safest failure mode
 /// (fires first, exposes the bug).
-fn earliest_proposed_at(bucket: &[FlowTransitionProposalRecord]) -> String {
+fn earliest_proposed_at(bucket: &[TransitionAtom]) -> String {
     bucket
         .iter()
         .map(|p| p.proposed_at.clone())
+        .min()
+        .unwrap_or_default()
+}
+
+/// Smallest proposal URI in a bucket — the last tie-break key, so two
+/// buckets proposed in the same instant still order deterministically.
+fn earliest_uri(bucket: &[TransitionAtom]) -> String {
+    bucket
+        .iter()
+        .map(|p| p.uri.clone())
         .min()
         .unwrap_or_default()
 }
@@ -552,27 +374,22 @@ async fn source_links(
         .map_err(|e| anyhow::anyhow!("{what}: {e:#}"))
 }
 
-/// The rule governing a transition INTO `to_state`: the target state's own
-/// `consensusRule` wins, else the flow-level one, else `None` (which
-/// [`aggregate_flow_votes`] defaults to `{ n: 1 }`, §7.1).
-fn effective_consensus_rule<'a>(flow: &'a SHACLFlow, to_state: &str) -> Option<&'a ConsensusRule> {
-    flow.states
-        .iter()
-        .find(|s| s.name == to_state)
-        .and_then(|s| s.consensus_rule.as_ref())
-        .or(flow.consensus_rule.as_ref())
-}
-
 /// One consensus sweep over the `FlowInstance`s in scope — firing-engine
 /// design §2, the pass that CONSUMES proposals. Called from the
 /// auto-processor after the proposal pass and from the accept/reject API
 /// (so a human click resolves immediately).
 ///
 /// Per instance (processed in sorted-URI order, at most ONE firing each —
-/// a fire changes `currentState`, so sibling groups re-validate next pass
-/// instead of firing on stale state):
+/// a fire changes the state, so sibling groups re-validate next pass
+/// instead of firing on a stale one):
 ///
-/// 1. superseded proposals (`fromState` ≠ live `currentState`) are deleted
+/// 0. the instance's state S is DERIVED
+///    ([`FlowInstance::derive_state_from`]) by folding its re-verified,
+///    marked-fired atoms. Every step below partitions against S, never
+///    against the `currentState` link — that link is a cache any peer can
+///    write, and believing it let one forged link wipe an honest frontier
+///    as "superseded" or steer a fire onto an edge the flow never reached;
+/// 1. superseded proposals (`fromState` ≠ S) are deleted
 ///    (auto-invalidation trigger a);
 /// 2. each sealed proposal's evidence is re-verified via
 ///    [`recompute_evidence_hash`] with the PROPOSER's DID — hash mismatch or
@@ -638,10 +455,12 @@ pub async fn run_flow_consensus_pass(
         let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
             continue;
         };
-        let proposals = match load_flow_transition_proposals(perspective, &record.instance_uri)
-            .await
-        {
-            Ok(p) => p,
+        let instance = FlowInstance::from_record(record, flow);
+
+        // One load of every proposal on this instance; the fold, the
+        // frontier and the superseded set are all views on the same bag.
+        let bag = match instance.load_atoms(perspective).await {
+            Ok(bag) => bag,
             Err(e) => {
                 log::warn!(
                     "run_flow_consensus_pass: proposal load for {} failed; skipping instance: {e:#}",
@@ -650,40 +469,57 @@ pub async fn run_flow_consensus_pass(
                 continue;
             }
         };
-        if proposals.is_empty() {
+        let state = match instance.derive_state_from(perspective, &bag).await {
+            Ok(derived) => derived.state,
+            Err(e) => {
+                log::warn!(
+                    "run_flow_consensus_pass: deriving the state of {} failed; skipping instance this pass: {e:#}",
+                    record.instance_uri
+                );
+                continue;
+            }
+        };
+        // Everything downstream — guard translation, role resolution, the
+        // fire guard — reads the derived state off this row, so no cached
+        // value can reach them.
+        let record = FlowInstanceRecord {
+            state: state.clone(),
+            ..record.clone()
+        };
+
+        // Trigger (a): superseded — the flow moved on under these proposals.
+        for atom in bag.superseded(&state) {
+            log::debug!(
+                "run_flow_consensus_pass: invalidating superseded proposal {} ({} → {}, instance now at {state})",
+                atom.uri, atom.from_state, atom.to_state
+            );
+            invalidate_proposal(perspective, &atom.uri).await;
+        }
+        // An empty seal is unverifiable and would count toward quorum with
+        // zero evidence — any replica could sync such a proposal in
+        // (CodeRabbit #967 CWE-345). Manual proposals get real seals through
+        // the server-side evidence-collection path (design §4, Nico's
+        // requirement), so nothing legitimate writes an empty one.
+        for uri in bag.unsealed_live() {
+            log::warn!(
+                "run_flow_consensus_pass: proposal {uri} carries an empty evidence seal; invalidating"
+            );
+            invalidate_proposal(perspective, uri).await;
+        }
+
+        let frontier = bag.frontier(&state);
+        if frontier.is_empty() {
             continue;
         }
 
-        // Trigger (a): superseded — the flow moved on under these proposals.
-        let (live, superseded): (Vec<_>, Vec<_>) = proposals
-            .into_iter()
-            .partition(|p| p.from_state == record.current_state);
-        for p in &superseded {
-            log::debug!(
-                "run_flow_consensus_pass: invalidating superseded proposal {} ({} → {}, instance now at {})",
-                p.uri, p.from_state, p.to_state, record.current_state
-            );
-            invalidate_proposal(perspective, &p.uri).await;
-        }
-
-        // Trigger (b): stale seals.
-        let mut verified: Vec<FlowTransitionProposalRecord> = Vec::with_capacity(live.len());
-        for p in live {
-            if p.evidence_hash.is_empty() {
-                // An empty seal is unverifiable and would count toward quorum
-                // with zero evidence — any replica could sync such a proposal
-                // in (CodeRabbit #967 CWE-345). Manual proposals get real
-                // seals through the server-side evidence-collection path
-                // (design §4, Nico's requirement), so nothing legitimate
-                // writes an empty one.
-                log::warn!(
-                    "run_flow_consensus_pass: proposal {} carries an empty evidence seal; invalidating",
-                    p.uri
-                );
-                invalidate_proposal(perspective, &p.uri).await;
-                continue;
-            }
-            match recompute_evidence_hash(perspective, flow, record, &p.to_state, &p.proposer).await
+        // Trigger (b): stale seals. Clock A — evidence is re-run against the
+        // live graph for the FRONTIER only. History is never re-run, or
+        // editing a task cited by a long-finished transition would unwind
+        // the flow that consumed it.
+        let mut verified: Vec<TransitionAtom> = Vec::with_capacity(frontier.len());
+        for p in frontier {
+            match recompute_evidence_hash(perspective, flow, &record, &p.to_state, &p.proposer)
+                .await
             {
                 Ok(Some(h)) if h == p.evidence_hash => verified.push(p),
                 Ok(_) => {
@@ -708,7 +544,7 @@ pub async fn run_flow_consensus_pass(
 
         // Group by target state — each may carry its own rule — and pick
         // the earliest-proposed fire candidate across groups.
-        let mut groups: BTreeMap<String, Vec<FlowTransitionProposalRecord>> = BTreeMap::new();
+        let mut groups: BTreeMap<String, Vec<TransitionAtom>> = BTreeMap::new();
         for p in verified {
             groups.entry(p.to_state.clone()).or_default().push(p);
         }
@@ -720,14 +556,9 @@ pub async fn run_flow_consensus_pass(
             // proposals that arrived any other way. The group is skipped,
             // not invalidated — a flow definition may legitimately gain the
             // edge later.
-            let declared = flow
-                .transitions
-                .iter()
-                .any(|t| t.from_state == record.current_state && t.to_state == *to_state);
-            if !declared {
+            if !declares_edge(flow, &state, to_state) {
                 log::warn!(
-                    "run_flow_consensus_pass: no declared transition {} → {to_state} on {}; skipping target",
-                    record.current_state,
+                    "run_flow_consensus_pass: no declared transition {state} → {to_state} on {}; skipping target",
                     record.flow_uri
                 );
                 continue;
@@ -741,7 +572,7 @@ pub async fn run_flow_consensus_pass(
                         .collect();
                     candidates.sort();
                     candidates.dedup();
-                    match resolve_role_dids(&*perspective, role, record, &candidates).await {
+                    match resolve_role_dids(&*perspective, role, &record, &candidates).await {
                         Ok(set) => Some(set),
                         Err(e) => {
                             log::warn!(
@@ -764,7 +595,7 @@ pub async fn run_flow_consensus_pass(
                     continue;
                 }
             };
-            if let Some(tally) = select_fire_candidate(&record.current_state, &agg) {
+            if let Some(tally) = select_fire_candidate(&state, &agg) {
                 let better = match &fire {
                     None => true,
                     Some(best) => tally_ord(tally, best).is_lt(),
@@ -785,9 +616,15 @@ pub async fn run_flow_consensus_pass(
         // back and re-validates next pass.
         let batch_id = perspective.create_batch().await;
         let fired = async {
-            let outcome =
-                fire_flow_consensus(perspective, record, &tally, Some(batch_id.clone()), context)
-                    .await?;
+            let outcome = fire_flow_consensus(
+                perspective,
+                &record.instance_uri,
+                &state,
+                &tally,
+                Some(batch_id.clone()),
+                context,
+            )
+            .await?;
             resolve_proposals_fired(
                 perspective,
                 &outcome.contributing_proposal_uris,
@@ -866,17 +703,16 @@ async fn live_proposal_links(
 /// The immediate pass is scoped to the proposal's own `FlowInstance` — one
 /// accept must not sweep every instance on the perspective.
 ///
-/// Errors when the proposal is not ENGINE-VISIBLE — i.e. not returned by
-/// [`load_flow_transition_proposals`] (unparseable, or its proposer link is
-/// absent / not self-authored). The pass only ever counts loader-visible
-/// proposals, so accepting an invisible one would write a vote that can
-/// never count and return the same empty `Vec<FireOutcome>` as the
-/// legitimate "counted, quorum not yet met" result — a silent no-op the
-/// client cannot distinguish from a landed vote. The gate runs BEFORE the
-/// `acceptedBy` write so no stray vote link reaches the shared graph. The
-/// proposal itself is deliberately left in place: a mid-sync proposer link
-/// may still arrive and make it acceptable, and a genuinely forged one
-/// stays rejectable noise (`reject_flow_proposal` is not gated).
+/// Errors when the proposal is not ENGINE-VISIBLE — i.e. not an identity-
+/// checked, sealed [`TransitionAtom`]. The pass only ever counts atoms, so
+/// accepting a non-atom would write a vote that can never count and return
+/// the same empty `Vec<FireOutcome>` as the legitimate "counted, quorum not
+/// yet met" result — a silent no-op the client cannot distinguish from a
+/// landed vote. The gate runs BEFORE the `acceptedBy` write so no stray
+/// vote link reaches the shared graph. The proposal itself is deliberately
+/// left in place: a mid-sync proposer link may still arrive and make it
+/// acceptable, and a genuinely forged one stays rejectable noise
+/// (`reject_flow_proposal` is not gated).
 ///
 /// Returns whatever fired (possibly nothing, e.g. n not yet met).
 pub async fn accept_flow_proposal(
@@ -886,22 +722,20 @@ pub async fn accept_flow_proposal(
 ) -> anyhow::Result<Vec<FireOutcome>> {
     let links = live_proposal_links(perspective, proposal_uri).await?;
     let Some(instance_uri) = links.iter().find_map(|l| {
-        (l.data.predicate.as_deref() == Some("ad4m://flow/instance")).then(|| l.data.target.clone())
+        (l.data.predicate.as_deref() == Some(FLOW_INSTANCE_PREDICATE))
+            .then(|| l.data.target.clone())
     }) else {
         return Err(anyhow::anyhow!(
-            "proposal {proposal_uri} carries no ad4m://flow/instance link — not engine-visible, accept not recorded"
+            "proposal {proposal_uri} carries no {FLOW_INSTANCE_PREDICATE} link — not engine-visible, accept not recorded"
         ));
     };
-    let visible = load_flow_transition_proposals(perspective, &instance_uri)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("accept_flow_proposal: engine-visibility check failed: {e:#}")
-        })?;
-    if !visible.iter().any(|p| p.uri == proposal_uri) {
-        return Err(anyhow::anyhow!(
-            "proposal {proposal_uri} is not engine-visible (identity unverified: proposer link absent or not self-authored — may be mid-sync) — accept not recorded"
-        ));
-    }
+    // The visibility gate IS the atom check, so what the client may vote on
+    // and what the engine may count are one rule.
+    TransitionAtom::from_links(&instance_uri, proposal_uri, &links).map_err(|reason| {
+        anyhow::anyhow!(
+            "proposal {proposal_uri} is not engine-visible ({reason} — a mid-sync proposal may still complete) — accept not recorded"
+        )
+    })?;
     let did = crate::agent::did_for_context(context)
         .map_err(|e| anyhow::anyhow!("accept_flow_proposal: no acting DID: {e:#}"))?;
     // Authorship-bound, mirroring the loader: a forged `acceptedBy` naming
@@ -1021,7 +855,8 @@ mod tests {
                 flow_uri: "delivery://DeliveryFlow".into(),
                 instance_uri: "ad4m://flow/instance/1".into(),
                 subject: "ad4m://task/onboarding".into(),
-                current_state: "review".into(),
+                state: "review".into(),
+                cached_state: Some("review".into()),
                 created_at: None,
             }
         }
@@ -1163,7 +998,7 @@ mod tests {
         to_state: &str,
         proposer: &str,
         proposed_at: &str,
-    ) -> FlowTransitionProposalRecord {
+    ) -> TransitionAtom {
         proposal_with_uri(
             "ad4m://flow/proposal/p",
             from_state,
@@ -1179,8 +1014,8 @@ mod tests {
         to_state: &str,
         proposer: &str,
         proposed_at: &str,
-    ) -> FlowTransitionProposalRecord {
-        FlowTransitionProposalRecord {
+    ) -> TransitionAtom {
+        TransitionAtom {
             uri: uri.to_string(),
             from_state: from_state.to_string(),
             to_state: to_state.to_string(),
@@ -1188,6 +1023,7 @@ mod tests {
             proposed_at: proposed_at.to_string(),
             acceptors: Vec::new(),
             evidence_hash: "hash".to_string(),
+            marked_fired: false,
         }
     }
 
@@ -1212,10 +1048,7 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
-    fn accepted(
-        mut p: FlowTransitionProposalRecord,
-        acceptors: &[&str],
-    ) -> FlowTransitionProposalRecord {
+    fn accepted(mut p: TransitionAtom, acceptors: &[&str]) -> TransitionAtom {
         p.acceptors = acceptors.iter().map(|s| s.to_string()).collect();
         p
     }
@@ -1248,7 +1081,7 @@ mod tests {
     /// after `tally_count` are read off `tallies[0]`.
     type TallyCase = (
         &'static str,
-        Vec<FlowTransitionProposalRecord>,
+        Vec<TransitionAtom>,
         Option<ConsensusRule>,
         Option<HashSet<String>>,
         usize,
@@ -1384,7 +1217,7 @@ mod tests {
     #[test]
     #[rustfmt::skip]
     fn fires_picks_earliest_then_lex_lowest_reached_tally() {
-        let cases: Vec<(&str, Vec<FlowTransitionProposalRecord>, u32, Option<(&str, &str)>)> = vec![
+        let cases: Vec<(&str, Vec<TransitionAtom>, u32, Option<(&str, &str)>)> = vec![
             ("earliest proposed_at across tallies wins",
              vec![proposal("a", "c", "did:bob", "2026-01-05T00:00:00Z"),
                   proposal("a", "b", "did:alice", T1)], 1, Some(("a", "b"))),
@@ -1423,61 +1256,19 @@ mod tests {
 
     #[test]
     #[rustfmt::skip]
-    fn select_fire_candidate_gates_on_the_instance_current_state() {
+    fn select_fire_candidate_gates_on_the_derived_state() {
         let no_fires = aggregate_flow_votes(&[], Some(&rule(1)), None).unwrap();
         let firing = aggregate_firing("a", "b");
         let cases = [
             ("the aggregate has no fires", "a", &no_fires, None),
-            ("instance already advanced past `a` — votes are stale", "b", &firing, None),
-            ("from_state matches the instance's current state", "a", &firing, Some(("a", "b"))),
+            ("flow already advanced past `a` — votes are stale", "b", &firing, None),
+            ("from_state matches the derived state", "a", &firing, Some(("a", "b"))),
         ];
 
-        for (name, current_state, out, expected) in cases {
-            let picked = select_fire_candidate(current_state, out)
+        for (name, derived_state, out, expected) in cases {
+            let picked = select_fire_candidate(derived_state, out)
                 .map(|t| (t.from_state.as_str(), t.to_state.as_str()));
             assert_eq!(picked, expected, "{name}");
-        }
-    }
-
-    // ---- parse_flow_transition_proposal_from_hydrated -------------------
-
-    /// Rows are `(name, hydrated JSON, Some((proposed_at, evidence_hash)))`,
-    /// or `None` when the record must be skipped entirely.
-    #[test]
-    #[rustfmt::skip]
-    fn parse_flow_transition_proposal_from_hydrated_cases() {
-        let cases: Vec<(&str, serde_json::Value, Option<(&str, &str)>)> = vec![
-            // The proposal SDNA has no `proposedAt` — Ad4mModel's synthesised
-            // `createdAt` is the propose time. This is the one field-mapping
-            // difference from the pre-restructure port source.
-            ("createdAt is read as proposed_at",
-             serde_json::json!({ "id": "ad4m://flow/proposal/p1", "fromState": "identified",
-                 "toState": "scoped", "proposer": "did:key:alice",
-                 "createdAt": "2026-09-04T00:00:00Z", "evidenceHashes": "abc123" }),
-             Some(("2026-09-04T00:00:00Z", "abc123"))),
-            ("a half-written proposal missing createdAt is skipped",
-             serde_json::json!({ "id": "ad4m://flow/proposal/p1", "fromState": "identified",
-                 "toState": "scoped", "proposer": "did:key:alice" }),
-             None),
-            // Unverifiable ≠ unparseable: the orchestrator decides what to do
-            // with a hash-less proposal (skip at fire time, fail-closed).
-            ("missing evidenceHashes defaults to empty, not skip",
-             serde_json::json!({ "id": "ad4m://flow/proposal/p1", "fromState": "a",
-                 "toState": "b", "proposer": "did:key:alice",
-                 "createdAt": "2026-09-04T00:00:00Z" }),
-             Some(("2026-09-04T00:00:00Z", ""))),
-        ];
-
-        for (name, v, expected) in cases {
-            match (parse_flow_transition_proposal_from_hydrated(&v), expected) {
-                (None, None) => {}
-                (Some(r), Some((proposed_at, evidence_hash))) => {
-                    assert_eq!(r.proposed_at, proposed_at, "{name}");
-                    assert_eq!(r.evidence_hash, evidence_hash, "{name}");
-                    assert!(r.acceptors.is_empty(), "{name}: acceptors come from links, not hydration");
-                }
-                (got, want) => panic!("{name}: expected {want:?}, got {got:?}"),
-            }
         }
     }
 }
