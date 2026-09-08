@@ -7,19 +7,30 @@
 From a packed tarball:
 
 ```bash
-openclaw plugins install /path/to/coasys-openclaw-ad4m-<version>.tgz --accept-capabilities
+openclaw plugins install /path/to/coasys-openclaw-ad4m-<version>.tgz \
+  --accept-capabilities --force
 ```
 
-`--accept-capabilities` is required for a tarball, because it is outside ClawHub's
-trust metadata; without it the install aborts asking for consent.
+**Both flags, and the error only names one at a time.** A local archive is outside
+ClawHub's trust metadata, so the install stops twice: without `--accept-capabilities`
+it asks for capability consent, and without `--force` it prints *"Install cancelled;
+rerun with --force after reviewing the source."* Passing only the flag the first error
+named leaves you stuck on the second.
 
-**The profile trap.** `ad4m_*` tools are served by the gateway that loaded the plugin.
-Installing into a *different* profile (`openclaw --profile foo plugins install …`) does
-not give your current session those tools — you would have to run that profile's gateway
-and work inside it. If you have been asked to keep the default profile untouched, that
-constraint applies to the whole session, not just the install step; do not treat a missing
-`ad4m_*` tool as a reason to write your own MCP client. Restart the gateway after
-installing: plugins load at start.
+Restart the gateway after installing — plugins load at start.
+
+**Install into the profile whose gateway you actually run.** `ad4m_*` tools are served
+by the gateway that loaded the plugin, so installing into a side profile
+(`openclaw --profile foo plugins install …`) does *not* give your session those tools.
+Running that profile's own gateway and driving it from outside is an OpenClaw
+concern this skill does not cover, and agents reliably lose time there: `openclaw agent`
+targets the default gateway regardless of `--profile`, and pointing it elsewhere needs
+credentials that a freshly started gateway has not got.
+
+If you were told to leave an existing profile untouched, that constraint governs the
+whole session, not just the install command — sort out which gateway you will be running
+*before* you install. A missing `ad4m_*` tool means you are talking to the wrong gateway.
+It is not a reason to hand-roll an MCP client.
 
 ## Getting the Executor
 
