@@ -38,6 +38,10 @@ export interface SyncDeps {
     /** Re-fetches the key ring from the server. Returns true if new versions
      *  were obtained (callers should re-bootstrap to recover skipped links). */
     refreshKeyRing?: () => Promise<boolean>;
+    /** Called after every successful sync cycle. The admin uses this to grant
+     *  historical keys to members who joined while WS was down — the periodic
+     *  HTTP sync is the fallback discovery path when onPeerJoined never fires. */
+    onPostSync?: () => Promise<void>;
 }
 
 let _deps: SyncDeps | null = null;
@@ -599,7 +603,19 @@ export async function catchUp(): Promise<PerspectiveDiff> {
  * the runtime's polling loop. */
 export async function performSync(): Promise<PerspectiveDiff> {
     try {
-        return await catchUp();
+        const result = await catchUp();
+        // Post-sync admin duties: grant historical keys to members who
+        // joined while the WebSocket was down. Without this, key grants
+        // depend entirely on the WS `peer-joined` event, which may
+        // never fire if the WebSocket can't connect (CI, firewalls,
+        // transient outages). Running here makes every successful HTTP
+        // sync a fallback discovery path for new members.
+        if (_deps?.onPostSync) {
+            void _deps.onPostSync().catch((err) => {
+                console.error("[server-link-language] post-sync callback failed:", err);
+            });
+        }
+        return result;
     } catch (err) {
         console.error("[server-link-language] sync failed:", err);
         // See index.ts comment on the same value — must be a valid

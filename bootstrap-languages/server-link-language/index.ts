@@ -283,6 +283,11 @@ const language = defineLanguage({
                 await setupKeyRing();
                 return (keyRing?.size ?? 0) > prevSize;
             },
+            // Periodic admin key grants — fallback for when the WS
+            // `peer-joined` event never fires (WS down, CI, firewalls).
+            // Each successful HTTP sync triggers a check so the admin
+            // discovers new members who need historical keys.
+            onPostSync: () => performAdminKeyGrants(),
         });
 
         wsClient = new WsClient({
@@ -382,6 +387,25 @@ const language = defineLanguage({
             }
 
             await syncModule.bootstrap();
+
+            // E2E timing fix: if keyRingStatus is still "pending" after
+            // bootstrap, the admin may have granted keys between our
+            // setupKeyRing() call and now. Retry once — if keys arrived,
+            // re-bootstrap so any encrypted links in the room's history
+            // get picked up immediately instead of waiting for the next
+            // sync cycle.
+            // Cast needed: setupKeyRing() mutates the module-level
+            // keyRingStatus across an await boundary; TS literal
+            // narrowing doesn't track that.
+            if ((keyRingStatus as KeyRingStatus) === "pending") {
+                await setupKeyRing();
+                if ((keyRingStatus as KeyRingStatus) === "ready") {
+                    console.log(
+                        "[server-link-language] keys acquired after init grant — re-bootstrapping",
+                    );
+                    await syncModule.bootstrap();
+                }
+            }
 
             // If admin and key ring ready, grant historical keys to any
             // members who joined while we were offline.
