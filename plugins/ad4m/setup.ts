@@ -710,10 +710,67 @@ function printConfigSnippet(
   }
 
   logger.info(`[ad4m-setup]`);
-  logger.info(`[ad4m-setup] one line for copy&paste: ${JSON.stringify(config)}`);
+
+  // The token is a live credential, so OpenClaw's logger elides it — what you
+  // read above is `"eyJ0eX…kf94"`, not a usable JWT. Printing it unredacted
+  // would only move a credential into terminal scrollback, so the copyable
+  // copy goes to a 0600 file instead and we print the path.
+  if (config.token) {
+    const written = writeConfigSnippetFile(config);
+    if (written) {
+      logger.info(
+        `[ad4m-setup] The token above is elided by the logger. The full config ` +
+          `is in ${written} (mode 0600).`,
+      );
+      logger.info(
+        `[ad4m-setup] Copy its contents into openclaw.json under ` +
+          `plugins.entries["ad4m"].config, then delete the file.`,
+      );
+    } else {
+      logger.warn(
+        `[ad4m-setup] The token above is elided by the logger and the full ` +
+          `config could not be written to disk. Re-run with OPENCLAW_CONFIG_PATH ` +
+          `set, or obtain a JWT from the executor yourself.`,
+      );
+    }
+  } else {
+    logger.info(
+      `[ad4m-setup] one line for copy&paste: ${JSON.stringify(config)}`,
+    );
+  }
+
   logger.info(`[ad4m-setup]`);
   logger.info(
     `[ad4m-setup] After adding the config, restart OpenClaw to activate the plugin.`,
   );
   logger.info(`[ad4m-setup] ${SEPARATOR}`);
+}
+
+/**
+ * Write the full config snippet — token included — to a 0600 file beside the
+ * OpenClaw config this run belongs to, and return its path.
+ *
+ * Returns null rather than throwing: a setup run that produced a working token
+ * should not fail because a directory was not writable.
+ */
+function writeConfigSnippetFile(config: Record<string, any>): string | null {
+  const configPath = process.env.OPENCLAW_CONFIG_PATH;
+  const dir =
+    (configPath && path.dirname(configPath)) ||
+    process.env.OPENCLAW_HOME ||
+    path.join(process.env.HOME || process.env.USERPROFILE || "", ".openclaw");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, "ad4m-setup-config.json");
+    fs.writeFileSync(filePath, JSON.stringify(config, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+    // writeFileSync's mode is only applied when creating the file; an existing
+    // file from an earlier run keeps its old mode, so set it explicitly.
+    fs.chmodSync(filePath, 0o600);
+    return filePath;
+  } catch {
+    return null;
+  }
 }

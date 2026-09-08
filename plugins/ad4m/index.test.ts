@@ -2816,6 +2816,11 @@ describe("ad4mPlugin", () => {
     const registeredClis: any[] = [];
     const registeredServices: any[] = [];
 
+    // Point the snippet file at a throwaway dir rather than the real profile.
+    const snippetDir = fs.mkdtempSync(path.join(os.tmpdir(), "ad4m-setup-"));
+    const prevConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+    process.env.OPENCLAW_CONFIG_PATH = path.join(snippetDir, "openclaw.json");
+
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
       const body = JSON.parse((opts as any).body as string);
       if (body.method === "initialize") {
@@ -2891,12 +2896,29 @@ describe("ad4mPlugin", () => {
     expect(allMsgs.some((m: string) => m.includes("jwt-secret"))).toBe(true);
     expect(allMsgs.some((m: string) => m.includes("bot@test.local"))).toBe(true);
 
-    // But MUST NOT contain the plaintext password
-    const snippetLines = allMsgs.filter((m: string) => m.includes("one line for copy"));
-    expect(snippetLines.length).toBeGreaterThan(0);
-    for (const line of snippetLines) {
+    // The copyable config goes to a file, because the real OpenClaw logger
+    // elides the token in every line it prints. The file is the thing a user
+    // actually pastes from, so the password guard has to hold there too.
+    const snippetPath = path.join(snippetDir, "ad4m-setup-config.json");
+    expect(fs.existsSync(snippetPath)).toBe(true);
+    const written = fs.readFileSync(snippetPath, "utf-8");
+    expect(written).toContain("jwt-secret");
+    expect(written).toContain("bot@test.local");
+    expect(written).not.toContain("super-secret-pass");
+    // Owner-only: it holds a live JWT.
+    expect(fs.statSync(snippetPath).mode & 0o777).toBe(0o600);
+
+    // And MUST NOT appear in any logged line either
+    for (const line of allMsgs) {
       expect(line).not.toContain("super-secret-pass");
     }
+
+    if (prevConfigPath === undefined) {
+      delete process.env.OPENCLAW_CONFIG_PATH;
+    } else {
+      process.env.OPENCLAW_CONFIG_PATH = prevConfigPath;
+    }
+    fs.rmSync(snippetDir, { recursive: true, force: true });
 
     vi.restoreAllMocks();
   });

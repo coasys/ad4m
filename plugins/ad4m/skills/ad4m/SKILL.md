@@ -19,7 +19,7 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 
 **Your guaranteed default native surface (as of this writing):**
 
-- `get_documentation` — the executor's own docs (`overview` / `usage` / `architecture`) as markdown, no auth needed — the cold-start entry point (see below)
+- `get_documentation` — the executor's own docs (`overview` / `usage` / `flux` / `models` / `architecture`) as markdown, no auth needed — the cold-start entry point (see below)
 - `describe_perspective` — the schema of every registered class, as data
 - `instance_create` / `instance_query` / `instance_get` / `instance_update` / `instance_add_to_collection` / `instance_remove_from_collection` / `instance_remove` — read/write any subject class by name
 - `instance_transcript` — the newest N instances of one class under a parent as a readable transcript (the way to read a channel, see Rule 6)
@@ -43,7 +43,9 @@ The whole multi-user onboarding path — `signup` → `verify_email_code` → `l
 
 Call `ad4m_get_sample_config` any time you need to see the exact config shape for your mode — it's native and self-documenting, no need to guess field names.
 
-**Cold start — when this skill is all you have:** call `ad4m_get_documentation(topic="overview")` first. It needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="usage"` is the working guide — reading and writing instances, the child tree, the Flux data model, authoring subject classes, and the traps. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you.
+**Cold start — when this skill is all you have:** call `ad4m_get_documentation(topic="overview")` **before you read further here, and before you grep this file**. It needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="usage"` is the working guide — reading and writing instances, the child tree, and the traps. `topic="flux"` is the Flux data model (channels, messages, posts, tasks). `topic="models"` is authoring your own subject classes. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. Older executors serve only `overview` / `usage` / `architecture`; `overview` always lists what that node actually has. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you.
+
+**Whatever the docs say about Flux, the classes in a perspective are whatever `ad4m_describe_perspective(perspective_id)` returns.** A shared space may have no `Channel` class at all. Check before you assume a shape.
 
 **This skill is deliberately the OpenClaw-specific half only** — the plugin's tool surface, setup, auth, the waker. Everything that is general AD4M usage lives in the executor's own docs, so it is reachable even in a session where this skill was never loaded. Setup — getting, running, unlocking an executor — is not served there either (you need it before the tools work): that is `references/setup.md` in this skill.
 
@@ -90,7 +92,9 @@ openclaw ad4m-setup
 
 **Known limitation, not a safe pattern to copy blindly:** typing the password directly into an interactive `export` command puts it in your shell history and in that process's environment (readable by anything with `/proc/<pid>/environ` access) for as long as the session lives. This is presented here because it's genuinely how `ad4m-setup` reads the variable, not because it's fully safe — if your environment has a secrets manager or a way to source an env file with restricted permissions instead of an interactive `export`, prefer that.
 
-Setup resolves the password (env var → `config.password` → interactive prompt, in that order — never generates one itself, since a random password persisted nowhere means you can never log in again), signs you up, logs you in, and prints a ready `config.token`. **Do not do this by hand via raw MCP calls unless `ad4m-setup` genuinely can't run** — see `references/setup.md` → "Calling MCP tools without the plugin" for that last resort and its safety rules.
+Setup resolves the password (env var → `config.password` → interactive prompt, in that order — never generates one itself, since a random password persisted nowhere means you can never log in again), signs you up, and logs you in.
+
+**It does not edit `openclaw.json`.** It writes the finished config, token included, to `ad4m-setup-config.json` beside that profile's config file (mode `0600`) and prints the path; you copy it in, restart, and delete the file. Do not copy the token out of the log — OpenClaw elides credentials there, so what you see is `"eyJ0eX…kf94"` and not a usable JWT. **Do not fall back to raw MCP calls unless `ad4m-setup` genuinely can't run** — see `references/setup.md` → "Calling MCP tools without the plugin" for that last resort and its safety rules.
 
 Treat provisioning (signup, you're creating a new account) and joining (login, an account already exists for your email) as separate concerns — don't assume you own an email just because you're joining a neighbourhood on someone else's node.
 
@@ -116,9 +120,10 @@ The MCP server uses Streamable HTTP transport and always responds with `text/eve
 
 **3a. `openclaw ad4m-setup` is the whole flow, both modes.** For a single-agent executor it
 performs the capability handshake for you — `request_capability`, reads back the
-`request_id` and `code`, calls `generate_jwt` — and writes the resulting JWT into
-`plugins.entries.ad4m.config.token`. For a multi-user node it signs you up, logs you in,
-and does the same. One command, either way; see Quick Setup above.
+`request_id` and `code`, calls `generate_jwt`. For a multi-user node it signs you up and
+logs you in. Either way it leaves the resulting JWT in `ad4m-setup-config.json` next to
+that profile's config file, for you to paste into `plugins.entries.ad4m.config`; it does
+not edit the config itself. One command, either way; see Quick Setup above.
 
 **3b. Re-authentication is automatic.** On every gateway start the plugin re-runs
 `login_email` (with signup on "user not found") or the capability handshake, using the

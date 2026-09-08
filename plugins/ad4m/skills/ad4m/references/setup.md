@@ -2,6 +2,25 @@
 
 > **Scope.** This file covers what has to happen *before* the MCP tools work: getting, running, unlocking and authenticating against an executor. Once you are connected, the executor documents itself — `ad4m_get_documentation(topic="overview")` (tool surface, workflow, authentication over MCP, data rules) and `topic="architecture"` (data model, SHACL format) need no authentication and are compiled into the binary, so they always describe the node in front of you. Setup is deliberately *not* served there: an agent that can call the tool is already past it, which is why this file lives in the skill.
 
+## Installing the plugin itself
+
+From a packed tarball:
+
+```bash
+openclaw plugins install /path/to/coasys-openclaw-ad4m-<version>.tgz --accept-capabilities
+```
+
+`--accept-capabilities` is required for a tarball, because it is outside ClawHub's
+trust metadata; without it the install aborts asking for consent.
+
+**The profile trap.** `ad4m_*` tools are served by the gateway that loaded the plugin.
+Installing into a *different* profile (`openclaw --profile foo plugins install …`) does
+not give your current session those tools — you would have to run that profile's gateway
+and work inside it. If you have been asked to keep the default profile untouched, that
+constraint applies to the whole session, not just the install step; do not treat a missing
+`ad4m_*` tool as a reason to write your own MCP client. Restart the gateway after
+installing: plugins load at start.
+
 ## Getting the Executor
 
 ### Option 1: Download from GitHub Releases (Recommended)
@@ -225,7 +244,9 @@ ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
 
 **Agent provisioning + auth flow (recommended, one command):**
 
-If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser: true` and `email` in `plugins.entries.ad4m.config`, export `AD4M_PASSWORD`, and run `openclaw ad4m-setup` — it resolves the password (env var → `config.password` → interactive prompt), calls `signup`, calls `login_email`, and writes a working `config.token`. The plugin also auto-retries this on every subsequent restart using the same password resolution. Full detail and password-hygiene rules in the main skill, Rules 3b/3c.
+If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser: true` and `email` in `plugins.entries.ad4m.config`, export `AD4M_PASSWORD`, and run `openclaw ad4m-setup` — it resolves the password (env var → `config.password` → interactive prompt), calls `signup`, and calls `login_email`.
+
+**It does not edit `openclaw.json` for you.** It writes the finished config — token included — to `ad4m-setup-config.json` beside the config file of the profile it ran against, mode `0600`, and prints that path. Copy the contents into `plugins.entries.ad4m.config`, restart the gateway, then delete the file. The token in the *log output* is elided (`"eyJ0eX…kf94"`), because OpenClaw redacts credentials in logs — copying the snippet out of the terminal gives you a broken token. That is the single most common reason people end up hand-rolling MCP calls they never needed. The plugin auto-retries login on every subsequent restart using the same password resolution. Full detail and password-hygiene rules in the main skill, Rules 3b/3c.
 
 **Agent provisioning + auth flow (manual, MCP tool calls — only if you're not using the OpenClaw plugin or `ad4m-setup` can't run):**
 
