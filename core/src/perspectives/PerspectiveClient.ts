@@ -13,6 +13,16 @@ import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
+/** One fired flow transition, as returned by `perspective.acceptFlowProposal`
+ *  (and, engine-side, by every consensus pass). */
+export interface FlowFireOutcome {
+    instanceUri: string;
+    fromState: string;
+    toState: string;
+    voters: string[];
+    contributingProposalUris: string[];
+}
+
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
@@ -392,6 +402,18 @@ export class PerspectiveClient {
     async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
             'perspective.rejectInterpretation', { uuid, base, property },
+        )
+    }
+
+    async acceptFlowProposal(uuid: string, proposalUri: string): Promise<FlowFireOutcome[]> {
+        return this.#apiClient.call<FlowFireOutcome[]>(
+            'perspective.acceptFlowProposal', { uuid, proposalUri },
+        )
+    }
+
+    async rejectFlowProposal(uuid: string, proposalUri: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>(
+            'perspective.rejectFlowProposal', { uuid, proposalUri },
         )
     }
 

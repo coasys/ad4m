@@ -807,3 +807,98 @@ describe("PerspectiveProxy.availableFlows — concrete-type matching", function 
     expect(found).to.deep.equal([]);
   });
 });
+
+describe("FlowInstance.acceptProposal / rejectProposal — consensus write API", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+  let myDid: string;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-accept-reject");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+    myDid = (await ad4m.agent.me()).did;
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-accept-reject-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    const identified: FlowState = { name: "Identified", value: 0 };
+    const inProgress: FlowState = { name: "InProgress", value: 1 };
+    flow.addState(identified);
+    flow.addState(inProgress);
+    return flow;
+  }
+
+  async function seedProposal(instanceUri: string, fromState: string, toState: string): Promise<string> {
+    const proposal = `ad4m://flow/proposal/js-test-${Math.random().toString(36).slice(2)}`;
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/instance", target: instanceUri }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/from_state", target: `literal:string:${fromState}` }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/to_state", target: `literal:string:${toState}` }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/proposer", target: myDid }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/evidence_hashes", target: "literal:string:" }));
+    return proposal;
+  }
+
+  it("acceptProposal counts the vote, and the pass auto-invalidates the unverifiable seal", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
+    expect(instance.currentStateName).to.equal("Identified");
+    const proposal = await seedProposal(instance.uri, "Identified", "InProgress");
+
+    const fired = await instance.acceptProposal(proposal);
+    expect(fired).to.have.lengthOf(0);
+
+    let threw = false;
+    try {
+      await instance.acceptProposal(proposal);
+    } catch {
+      threw = true;
+    }
+    expect(threw, "accept on an invalidated proposal must error").to.equal(true);
+
+    const all = await FlowInstance.findAll(p);
+    expect(all).to.have.lengthOf(1);
+    expect(all[0].currentStateName).to.equal("Identified");
+  });
+
+  it("rejectProposal hard-deletes a live proposal and errors on unknown URIs", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await FlowInstance.start(p, "Delivery", "ad4m://task/2");
+    const proposal = await seedProposal(instance.uri, "Identified", "InProgress");
+
+    expect(await instance.rejectProposal(proposal)).to.equal(true);
+
+    let threw = false;
+    try {
+      await instance.rejectProposal(proposal);
+    } catch {
+      threw = true;
+    }
+    expect(threw, "reject on a deleted proposal must error").to.equal(true);
+
+    const all = await FlowInstance.findAll(p);
+    expect(all[0].currentStateName).to.equal("Identified");
+  });
+});
