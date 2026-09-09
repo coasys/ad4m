@@ -7,6 +7,17 @@
 //! trusts that sentence never has to open this file; [`fold`](super::fold)
 //! is where the decisions live.
 //!
+//! **A [`TransitionAtom`] carries no eligibility verdict.** It records every
+//! vote that carries a valid self-signature — it does not know, and does not
+//! ask, whether those voters were eligible to vote under the rule's `fromRole`
+//! gate. That check happens in [`super::roles::resolve_role_grants`], called
+//! from [`super::FlowInstance::read_set`], and the result lands in
+//! [`super::ReadSet::role_grants`]. [`Vote`] is the struct that carries a
+//! timestamp; it is not an eligibility claim.  Reviewers who expect to find
+//! the role gate inside `TransitionAtom` or `from_links` will not find it —
+//! and that is by design: keeping the two concerns separate is what lets the
+//! fold be pure.
+//!
 //! Two rules do all the work:
 //!
 //! - **Identity is a signature check.** [`signed_by`] is the only place in
@@ -20,6 +31,7 @@
 //!   invisible, so a peer cannot re-point someone else's proposal by
 //!   appending a later value — the trick model hydration would fall for.
 
+use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedLinkExpression, LinkQuery};
@@ -281,9 +293,42 @@ fn earliest_proposer_timestamp(links: &[DecoratedLinkExpression], proposer: &str
 
 /// Enumerate one instance's proposals and read each one's links.
 ///
-/// One `get_links` to find the proposals, then one per proposal for all of
-/// its links from every author — the identity checks above need the
-/// third-party links precisely so they can ignore them.
+/// **The dividing principle.** The halves split exactly where hydration starts
+/// destroying what the caller needs. Half 1 only has to know that a proposal
+/// *exists* and belongs to this instance — a fact the model layer preserves
+/// exactly, so discovery belongs there. Half 2 has to know *who wrote each
+/// individual field, and whether that link's signature verified* — per-link
+/// facts hydration collapses away, so field-reading has to stay on raw links.
+///
+/// **Half 1 — class query (this PR's change):** a `model_query` over the
+/// hard-wired `FlowTransitionProposal` subject class, filtered by
+/// `flowInstance == instance_uri`, yields the URIs of every proposal that
+/// belongs to this instance. Using the class query rather than a raw
+/// `get_links` scopes the result to properly-typed proposals and reuses the
+/// machinery already validated by `flow_evaluator`'s `run_query`.
+///
+/// This narrows the *pointer* set, not the atom set. Class conformance emits a
+/// triple per required property, so a half-written proposal carrying only
+/// `flowInstance` is no longer discovered — but [`TransitionAtom::from_links`]
+/// already rejected that shape with `MissingField`, so the fold never saw it
+/// either way. The `where` is exists-style (`?source <ad4m://flow/instance>
+/// …`) and this function reads only `instances[].id`, never the hydrated
+/// `flowInstance` value, so a third-party re-point cannot drop a real proposal
+/// from discovery — that is the same attack half 2 refuses to hydrate.
+///
+/// **Half 2 — raw `get_links` per proposal (must stay raw):** model_query
+/// hydration collapses each instance to a single `author` field (the earliest
+/// author across all links, `model_query/hydration.rs:171-183,350`) and
+/// carries no per-link signature verdict — its row is
+/// `(predicate, target, author, timestamp)`, and `proof.valid` is never in it.
+/// Both identity checks below run through [`signed_by`], which needs both
+/// dropped fields at once: `l.author == did` **and** `proof.valid ==
+/// Some(true)`. Worse than lossy, hydrating would *invert* [`unique_field`]:
+/// scalar properties last-write-win on timestamp with no author filter, so a
+/// later third-party `to_state` becomes the hydrated value while `author`
+/// stays the earliest DID — the forgery would be served back as the
+/// proposer's own word. This half cannot go away until instances carry
+/// per-property `(author, proof.valid)`.
 pub async fn load_proposal_links(
     perspective: &PerspectiveInstance,
     instance_uri: &str,
@@ -293,19 +338,35 @@ pub async fn load_proposal_links(
             "load_proposal_links: instance_uri must not be empty"
         ));
     }
-    let pointers = perspective
-        .get_links(&LinkQuery {
-            predicate: Some(FLOW_INSTANCE_PREDICATE.to_string()),
-            target: Some(instance_uri.to_string()),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("load_proposal_links: proposal lookup failed: {e:#}"))?;
 
-    let mut uris: Vec<String> = pointers.into_iter().map(|l| l.data.source).collect();
+    // Half 1: discover which FlowTransitionProposal instances belong to this
+    // flow instance via the subject-class query layer.
+    let query_json = serde_json::json!({ "where": { "flowInstance": instance_uri } }).to_string();
+    let raw = perspective
+        .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query_json)
+        .await
+        .map_err(|e| anyhow::anyhow!("load_proposal_links: model_query failed: {e:#}"))?;
+    let result: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        anyhow::anyhow!("load_proposal_links: model_query returned invalid JSON: {e:#}")
+    })?;
+    let mut uris: Vec<String> = result
+        .get("instances")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            anyhow::anyhow!("load_proposal_links: model_query returned no `instances` array")
+        })?
+        .iter()
+        .filter_map(|inst| {
+            inst.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
     uris.sort();
     uris.dedup();
 
+    // Half 2: raw get_links per proposal — see doc comment for why this half
+    // must stay raw rather than using model_query hydration.
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
         let links = perspective

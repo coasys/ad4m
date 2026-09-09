@@ -14,6 +14,40 @@
 //! without it: remove a settled vote and the flow stands where it stood
 //! before that vote. That is the semantics, not a failure mode.
 //!
+//! # Pipeline
+//!
+//! ```text
+//! links in perspective
+//!   │
+//!   ▼ load_proposal_links  (atom.rs)
+//!      ├─ Half 1: model_query(FlowTransitionProposal, where flowInstance=uri)
+//!      │          → proposal URIs scoped to this instance
+//!      └─ Half 2: get_links(source=uri) per proposal (raw; signature verdicts intact)
+//!   │
+//!   ▼ TransitionAtom::from_links  (atom.rs)
+//!      Answers: "is this a proposal, and whose words are in it?"
+//!      Checks: proposer self-signed; all fields from proposer only; non-empty seal.
+//!      Carries NO eligibility verdict — that is decided in read_set, never here.
+//!   │
+//!   ▼ FlowInstance::read_set  ← ONLY store access in a state read
+//!      ├─ proposals (TransitionAtoms from above)
+//!      └─ resolve_role_grants per gated target state  (roles.rs)
+//!         ▲ ROLE ELIGIBILITY IS DECIDED HERE. The fold does no role work.
+//!   │
+//!   ▼ fold_read_set
+//!      Calls eligible_votes per atom (roles.rs, pure) → VouchedAtom with
+//!      pre-filtered votes. No store. No role queries.
+//!   │
+//!   ▼ fold  (fold.rs — pure, no I/O)
+//!      Walks from genesis taking the earliest-settled declared edge per state.
+//!      "Earliest" is each voter's own claimed clock. Can back-dating a vote
+//!      manufacture a quorum, or win a race it should have lost? No to the
+//!      first; the second has one residual case. See fold.rs § Ordering and
+//!      time — four properties and the RESIDUAL, each with a code pointer.
+//!   │
+//!   ▼ DerivedState { state, settled }
+//! ```
+//!
 //! # Where to read
 //!
 //! - [`fold`] — the algorithm, and the engine's entire belief system. Thirty
@@ -135,8 +169,15 @@ impl ReadSet {
     }
 }
 
-/// The state of a flow, re-derived from a read-set. **Pure** — this is the
-/// function an off-perspective verifier re-runs over a minted token's proof.
+/// The state of a flow, re-derived from a read-set. **Pure** — no store
+/// access, no role queries. Calls [`eligible_votes`] per atom to pre-filter
+/// each atom's votes by the [`RoleGrant`]s that `read_set` already resolved,
+/// then hands the fold [`VouchedAtom`]s whose `eligible_votes` contain only
+/// the votes the rule admits. The fold itself does no role work; every
+/// eligibility decision is visible in the read-set before this function runs.
+///
+/// This is the function an off-perspective verifier re-runs over a minted
+/// token's proof to reach the same verdict independently.
 pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> DerivedState {
     let vouched: Vec<VouchedAtom> = read_set
         .atoms()
@@ -182,13 +223,16 @@ impl<'a> FlowInstance<'a> {
         }
     }
 
-    /// Read everything the fold needs, and nothing else: this instance's
-    /// proposal links, and one `fromRole` verdict per (target state, voter)
-    /// the rules actually gate.
+    /// All I/O for a state read. Returns the proposal links of every
+    /// [`TransitionAtom`] on this instance, plus one [`RoleGrant`] verdict per
+    /// `(target_state, candidate_DID)` pair where the rule's `fromRole` gates
+    /// that state. That is two classes of store query and no others; the fold
+    /// that follows is pure over this value.
     ///
-    /// All of the engine's I/O for a state read happens here. `Err` on a
-    /// store error or an undeterminable role query — the caller must then
-    /// abandon the read rather than act on a wrong eligible set.
+    /// Fails closed: `Err` propagates on any store error **and** on any role
+    /// query that cannot discriminate between DIDs. The caller must abandon the
+    /// read and leave the state unknown, rather than fold over an incomplete
+    /// eligible set and derive a wrong answer.
     pub async fn read_set(&self, perspective: &PerspectiveInstance) -> anyhow::Result<ReadSet> {
         let genesis = self.genesis().ok_or_else(|| {
             anyhow::anyhow!(
@@ -234,8 +278,9 @@ impl<'a> FlowInstance<'a> {
         Ok(read_set)
     }
 
-    /// The state of this flow: read, then fold. The only function the rest of
-    /// the engine may call for "what state is this flow in".
+    /// The authoritative state of this flow: calls `read_set` (all I/O), then
+    /// `fold_read_set` (pure). The single entry point the rest of the engine
+    /// uses for "what state is this flow in" — nothing else is authoritative.
     pub async fn derive_state(
         &self,
         perspective: &PerspectiveInstance,
@@ -244,11 +289,14 @@ impl<'a> FlowInstance<'a> {
     }
 }
 
-/// Replace each record's `currentState` cache with the fold's answer, so
-/// every downstream reader in one pass acts on the derived state.
+/// Derive the current state of every record in one pass, replacing each
+/// `currentState` cache with the fold's answer so downstream readers act on
+/// the live derived state.
 ///
-/// Records whose flow is not in the catalogue, or whose read fails, are
-/// dropped — a pass must not act on an instance it could not derive.
+/// Records are dropped — never acted on — when their flow is absent from the
+/// catalogue or when `derive_state` returns `Err` (store error, undeterminable
+/// role query, or zero-state flow). A pass that cannot derive a state must not
+/// guess it.
 pub async fn derive_states(
     perspective: &PerspectiveInstance,
     records: &[FlowInstanceRecord],

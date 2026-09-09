@@ -34,6 +34,62 @@
 //! dimension, so a bot that already sees a peer's proposal for the edge
 //! declines to mint a twin and must vote instead — and voting is
 //! [`super::accept`], whose RPC callers land in #968.
+//!
+//! ## Ordering and time
+//!
+//! Each of these properties is a direct consequence of the code; reviewers who
+//! want to verify them should start at [`settle_edge`].
+//!
+//! **An agent can only back-date their own vote's timestamp.** [`Vote::at`] for
+//! the proposer comes from the earliest timestamp among the proposer's own
+//! signed links ([`super::atom::earliest_proposer_timestamp`]). For subsequent
+//! voters, it is the `timestamp` field of the `acceptedBy` link they
+//! themselves signed ([`super::atom::valid_votes`]). A link only contributes a
+//! timestamp to the DID that signed it.
+//!
+//! **Settlement time is the n-th distinct eligible voter's timestamp.** Votes
+//! are sorted `(at, did, uri)` ascending and counted until the n-th distinct
+//! DID; that voter's `at` becomes `nth_at`. A single colluding voter can shift
+//! `nth_at` earlier by back-dating their own vote far enough to change their
+//! position in the sort — moving to an earlier slot makes a different (later)
+//! voter land at position n, pulling `nth_at` down. The floor below is
+//! `after` (see next property).
+//!
+//! **`settled_at = nth_at.max(after)` floors every edge *after the first* at
+//! the moment the walk arrived at its `from_state`.** `after` is the
+//! `settled_at` of the most recently taken edge. Once that is a real
+//! timestamp, a vote back-dated to 1970 settles the edge at the walk's
+//! arrival, not at 1970 — the earliest any such edge can settle is when the
+//! walk came to its starting state.
+//!
+//! **The floor is vacuous at genesis, and that is a hole.** `after` is `""`
+//! on the first edge, and `""` is a sort sentinel, not an arrival time: every
+//! non-empty string wins the `max`. A genesis vote back-dated to 1970 settles
+//! at 1970. Nothing bounds the first edge backward, which is what makes the
+//! residual below unbounded rather than merely narrow.
+//!
+//! **Back-dating cannot manufacture a quorum.** Quorum is a count of distinct
+//! eligible DIDs, determined by deduplication in [`settle_edge`]. Timestamps
+//! affect `settled_at` only; the question "did n distinct eligible voters
+//! sign?" is timestamp-independent.
+//!
+//! **RESIDUAL — collusion can win a same-state race.** When two edges out of
+//! the same state both reach quorum, [`settle`] picks the one whose
+//! `settled_at` is smallest. A quorum that coordinates their votes cannot
+//! *undercut* the floor — `max` forbids `settled_at < after` — but it can
+//! *meet* it, and an honest quorum whose `nth_at` is later than arrival then
+//! loses the race. At genesis, where the floor is vacuous, meeting it means
+//! "any timestamp at all": a colluding quorum, or a lone proposer under an
+//! `{n:1}` rule, back-dates to 1970 and beats every wall-clock vote out of the
+//! starting state. This is a known residual; the engine makes no attempt to
+//! close it.
+//!
+//! **DEFERRED — a causal floor would bound collusion without clocks.** If a
+//! proposal were required to cite the settled-edge atoms it observed at mint
+//! time, back-dating past a known-later event would be self-contradicting
+//! (Lamport-style: "I saw atom A, but I voted before A existed"). This would
+//! make the collusion window above much narrower without requiring wall-clock
+//! trust. It is not implemented; its absence means the residual above stands.
 
 use super::atom::{TransitionAtom, Vote};
 use crate::perspectives::shacl_parser::{ConsensusRule, SHACLFlow};
