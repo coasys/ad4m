@@ -214,6 +214,51 @@ pub(crate) async fn write_flow_transition_proposal(
     Ok(uri)
 }
 
+/// Write a `FlowInstance`'s `currentState` link — the engine's **cache** of
+/// what [`crate::perspectives::flow_instance::fold_read_set`] derived.
+///
+/// Nothing reads it back as authority; it exists so the SHACL `min_count=1`
+/// constraint stays satisfied and so a reader without a perspective (a UI, a
+/// prompt block) can see the fold's answer without walking the atoms. A peer
+/// overwriting it moves nothing.
+///
+/// An empty `to_state` is rejected up front: it would violate that same
+/// `min_count=1` constraint on write.
+pub(crate) async fn advance_flow_instance_state(
+    perspective: &mut PerspectiveInstance,
+    flow_instance_uri: &str,
+    to_state: &str,
+    batch_id: Option<String>,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    if to_state.is_empty() {
+        return Err(anyhow::anyhow!(
+            "advance_flow_instance_state: to_state must not be empty (would violate FlowInstance.currentState min_count=1)"
+        ));
+    }
+    ensure_flow_model_classes(perspective, context).await?;
+
+    // Property key must exactly match the SDNA `name` field (`currentState`,
+    // not `current_state`).
+    let values = serde_json::json!({ "currentState": to_state });
+    perspective
+        .update_subject(
+            SubjectClassOption {
+                class_name: Some(FLOW_INSTANCE_CLASS.to_string()),
+                query: None,
+            },
+            flow_instance_uri.to_string(),
+            values,
+            batch_id,
+            context,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("advance_flow_instance_state: update_subject failed: {e:#}")
+        })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
