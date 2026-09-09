@@ -19,6 +19,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+pub mod anthropic;
 pub mod openai;
 
 /// Who is speaking in one turn of a conversation.

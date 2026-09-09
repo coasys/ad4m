@@ -710,6 +710,10 @@ impl AIService {
                 &api.api_key,
                 api.base_url,
             )),
+            ModelApiType::Anthropic => Box::new(providers::anthropic::AnthropicChat::new(
+                &api.api_key,
+                api.base_url,
+            )),
         };
         publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
         client
