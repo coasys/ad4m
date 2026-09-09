@@ -29,7 +29,7 @@ mod error;
 pub mod harness;
 pub mod providers;
 use log::error;
-use providers::{ChatRequest, ChatTurn, RemoteChat};
+use providers::{ChatReply, ChatRequest, ChatTurn, RemoteChat, ToolSpec};
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
@@ -213,11 +213,25 @@ impl std::fmt::Debug for LLMTaskPromptStreamRequest {
     }
 }
 
+/// A prompt sent as a complete turn list, with tools handed over as
+/// definitions rather than rendered into the text.
+///
+/// Distinct from [`LLMTaskPromptRequest`] because it needs no ephemeral task:
+/// the turns are already the whole conversation, so there is no system prompt
+/// or example list for the worker to assemble one from.
+#[derive(Debug)]
+struct LLMTaskPromptTurnsRequest {
+    pub turns: Vec<ChatTurn>,
+    pub tools: Vec<ToolSpec>,
+    pub result_sender: oneshot::Sender<Result<ChatReply>>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug)]
 enum LLMTaskRequest {
     Spawn(LLMTaskSpawnRequest),
     Prompt(LLMTaskPromptRequest),
+    PromptTurns(LLMTaskPromptTurnsRequest),
     PromptStream(LLMTaskPromptStreamRequest),
     Remove(LLMTaskRemoveRequest),
     Shutdown(LLMTaskShutdownRequest),
@@ -856,6 +870,29 @@ impl AIService {
                                 }
                             },
 
+                            LLMTaskRequest::PromptTurns(turns_request) => match model {
+                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
+                                    let request =
+                                        ChatRequest::new(model_string.clone(), turns_request.turns)
+                                            .with_tools(turns_request.tools);
+
+                                    let result = rt.block_on(remote_client.chat(request));
+                                    let _ = turns_request.result_sender.send(result);
+                                }
+                                LlmModel::Local(_) => {
+                                    // Unreachable in practice: the caller
+                                    // checks `api_type_supports_native_tools`
+                                    // first, and no local model answers true.
+                                    // Refuse loudly rather than silently
+                                    // dropping the tools if that check is ever
+                                    // got wrong.
+                                    let _ = turns_request.result_sender.send(Err(anyhow!(
+                                        "Model {} is local; native tool calling needs a provider whose wire format carries tools",
+                                        model_config.id
+                                    )));
+                                }
+                            },
+
                             LLMTaskRequest::Prompt(prompt_request) => match model {
                                 LlmModel::Remote((ref mut remote_client, ref model_string)) => {
                                     if let Some(task) =
@@ -1355,6 +1392,96 @@ impl AIService {
             completion_tokens,
             model_id: resolved,
         })
+    }
+
+    /// Whether this model's provider carries tools as definitions rather than
+    /// as text rendered into the prompt.
+    ///
+    /// Asked of the stored config rather than of a built client, because the
+    /// caller has to decide how to render tools before anything reaches a
+    /// worker thread. Local models are always false — they have no wire format
+    /// to carry a tool in.
+    pub fn model_supports_native_tools(model_id: &str) -> bool {
+        let resolved = match Self::replace_model_variables(&model_id.to_string()) {
+            Ok(resolved) => resolved,
+            Err(_) => return false,
+        };
+
+        Ad4mDb::with_global_instance(|db| db.get_model(resolved))
+            .ok()
+            .flatten()
+            .and_then(|model| model.api)
+            .map(|api| providers::api_type_supports_native_tools(&api.api_type))
+            .unwrap_or(false)
+    }
+
+    /// Prompt a model with a complete turn list and tool definitions, getting
+    /// back whatever text it wrote and any calls it wants dispatched.
+    ///
+    /// The counterpart of [`Self::prompt_messages`] for providers whose wire
+    /// format carries tools. Gate it on [`Self::model_supports_native_tools`]:
+    /// a model that does not will refuse rather than silently drop the tools.
+    ///
+    /// No ephemeral task is spawned. `prompt_messages` needs one because it
+    /// has to reassemble a system prompt and examples out of a flattened
+    /// message list; here the turns *are* the conversation, so there is
+    /// nothing to rebuild and nothing to clean up afterwards.
+    pub async fn prompt_with_tools(
+        &self,
+        model_id: String,
+        turns: Vec<ChatTurn>,
+        tools: Vec<ToolSpec>,
+        auth_token: Option<String>,
+    ) -> Result<ChatReply> {
+        let resolved = Self::replace_model_variables(&model_id)?;
+
+        let (result_tx, result_rx) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::PromptTurns(LLMTaskPromptTurnsRequest {
+                turns: turns.clone(),
+                tools,
+                result_sender: result_tx,
+            }))?;
+        }
+
+        // Billed on the whole conversation, not just the last turn: the
+        // provider is sent every turn on every call, and the caller is charged
+        // for every one of them.
+        let prompt_tokens: usize = turns
+            .iter()
+            .map(|turn| estimate_token_count(&turn.content))
+            .sum();
+
+        let reply = result_rx.await??;
+
+        // A tool call is output the model generated and the caller pays for,
+        // so its arguments count towards completion tokens alongside the text.
+        let completion_tokens = estimate_token_count(&reply.text)
+            + reply
+                .tool_calls
+                .iter()
+                .map(|call| estimate_token_count(&call.arguments.to_string()))
+                .sum::<usize>();
+
+        log::debug!(
+            "🤖 prompt_with_tools model={} text={:?} calls={}",
+            resolved,
+            truncate_for_log(&reply.text),
+            reply.tool_calls.len()
+        );
+
+        Self::bill_prompt_if_authed(
+            auth_token.as_deref(),
+            &resolved,
+            prompt_tokens,
+            completion_tokens,
+        );
+
+        Ok(reply)
     }
 
     /// Streaming variant of [`Self::prompt_messages`].  Returns a token

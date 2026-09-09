@@ -67,6 +67,22 @@ pub(crate) fn model_ids_from_data(json: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether a wire protocol can carry tool definitions and return tool calls
+/// as structured data.
+///
+/// The same fact as [`RemoteChat::supports_native_tools`], asked of a model
+/// config rather than of a built client — the harness has to decide how to
+/// render tools *before* anything reaches a worker thread, so it cannot ask
+/// the instance. Kept beside the trait, and covered by a test asserting the
+/// two agree, because two answers drifting apart would route a model down a
+/// path its provider cannot serve.
+pub fn api_type_supports_native_tools(api_type: &crate::types::ModelApiType) -> bool {
+    match api_type {
+        crate::types::ModelApiType::Anthropic => true,
+        crate::types::ModelApiType::OpenAi => false,
+    }
+}
+
 /// Who is speaking in one turn of a conversation.
 ///
 /// Smaller than either provider's role set, because a tool result is not a
@@ -255,6 +271,31 @@ mod tests {
 
     fn url(s: &str) -> url::Url {
         url::Url::parse(s).expect("test URL parses")
+    }
+
+    #[test]
+    fn the_two_answers_about_native_tools_agree() {
+        // `api_type_supports_native_tools` decides how the harness renders
+        // tools; the trait method describes the built client. If they ever
+        // disagree, a model is handed tools its provider will not send, or
+        // has them injected into a prompt when it could have had the real
+        // thing.
+        use crate::types::ModelApiType;
+        let base = url("https://example.test");
+
+        for api_type in [ModelApiType::OpenAi, ModelApiType::Anthropic] {
+            let client: Box<dyn RemoteChat> = match api_type {
+                ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new("k", base.clone())),
+                ModelApiType::Anthropic => {
+                    Box::new(anthropic::AnthropicChat::new("k", base.clone()))
+                }
+            };
+            assert_eq!(
+                api_type_supports_native_tools(&api_type),
+                client.supports_native_tools(),
+                "disagreement for {api_type:?}"
+            );
+        }
     }
 
     #[test]
