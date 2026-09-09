@@ -20,6 +20,7 @@
 //!   invisible, so a peer cannot re-point someone else's proposal by
 //!   appending a later value — the trick model hydration would fall for.
 
+use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedLinkExpression, LinkQuery};
@@ -281,9 +282,24 @@ fn earliest_proposer_timestamp(links: &[DecoratedLinkExpression], proposer: &str
 
 /// Enumerate one instance's proposals and read each one's links.
 ///
-/// One `get_links` to find the proposals, then one per proposal for all of
-/// its links from every author — the identity checks above need the
-/// third-party links precisely so they can ignore them.
+/// **Half 1 — class query (this PR's change):** a `model_query` over the
+/// hard-wired `FlowTransitionProposal` subject class, filtered by
+/// `flowInstance == instance_uri`, yields the URIs of every proposal that
+/// belongs to this instance. Using the class query rather than a raw
+/// `get_links` scopes the result to properly-typed proposals and reuses the
+/// machinery already validated by `flow_evaluator`'s `run_query`.
+///
+/// **Half 2 — raw `get_links` per proposal (must stay raw):** model_query
+/// hydration collapses each instance to a single `author` field (the earliest
+/// author across all links, `model_query/hydration.rs:171-183,350`) and
+/// carries no per-link signature verdict. The identity checks below need
+/// exactly those two fields on every individual link: `signed_by` requires
+/// `proof.valid == Some(true)`, and `unique_field` reads only links where
+/// `l.author == proposer`. Hydrating the proposals would silently break both
+/// checks — a third-party forgery that model_query would collapse into the
+/// proposer's own hydrated value would pass undetected. This half cannot go
+/// away until the fold is rewritten to work on hydrated instances rather than
+/// raw link-level proofs.
 pub async fn load_proposal_links(
     perspective: &PerspectiveInstance,
     instance_uri: &str,
@@ -293,19 +309,35 @@ pub async fn load_proposal_links(
             "load_proposal_links: instance_uri must not be empty"
         ));
     }
-    let pointers = perspective
-        .get_links(&LinkQuery {
-            predicate: Some(FLOW_INSTANCE_PREDICATE.to_string()),
-            target: Some(instance_uri.to_string()),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("load_proposal_links: proposal lookup failed: {e:#}"))?;
 
-    let mut uris: Vec<String> = pointers.into_iter().map(|l| l.data.source).collect();
+    // Half 1: discover which FlowTransitionProposal instances belong to this
+    // flow instance via the subject-class query layer.
+    let query_json = serde_json::json!({ "where": { "flowInstance": instance_uri } }).to_string();
+    let raw = perspective
+        .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query_json)
+        .await
+        .map_err(|e| anyhow::anyhow!("load_proposal_links: model_query failed: {e:#}"))?;
+    let result: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+        anyhow::anyhow!("load_proposal_links: model_query returned invalid JSON: {e:#}")
+    })?;
+    let mut uris: Vec<String> = result
+        .get("instances")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            anyhow::anyhow!("load_proposal_links: model_query returned no `instances` array")
+        })?
+        .iter()
+        .filter_map(|inst| {
+            inst.get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
     uris.sort();
     uris.dedup();
 
+    // Half 2: raw get_links per proposal — see doc comment for why this half
+    // must stay raw rather than using model_query hydration.
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
         let links = perspective
