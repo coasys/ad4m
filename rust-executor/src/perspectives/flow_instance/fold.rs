@@ -5,7 +5,9 @@
 //! from the signed links that exist on the graph right now: walk from the
 //! flow definition's first state and take, out of each state, whichever
 //! declared edge reached quorum earliest; where no edge out of a state has
-//! settled, the walk stops and that state is the answer.
+//! settled, the walk stops and that state is the answer. It also stops without
+//! choosing when the earliest edge would foreclose another that is equally
+//! settled — see *Ordering and time*.
 //!
 //! Three properties follow, and they are the reason this file is pure:
 //!
@@ -73,23 +75,42 @@
 //! affect `settled_at` only; the question "did n distinct eligible voters
 //! sign?" is timestamp-independent.
 //!
-//! **RESIDUAL — collusion can win a same-state race.** When two edges out of
-//! the same state both reach quorum, [`settle`] picks the one whose
-//! `settled_at` is smallest. A quorum that coordinates their votes cannot
-//! *undercut* the floor — `max` forbids `settled_at < after` — but it can
-//! *meet* it, and an honest quorum whose `nth_at` is later than arrival then
-//! loses the race. At genesis, where the floor is vacuous, meeting it means
-//! "any timestamp at all": a colluding quorum, or a lone proposer under an
-//! `{n:1}` rule, back-dates to 1970 and beats every wall-clock vote out of the
-//! starting state. This is a known residual; the engine makes no attempt to
-//! close it.
+//! **An irreversible race is refused, not won.** Back-dating cannot *undercut*
+//! the floor — `max` forbids `settled_at < after` — but it can *meet* it, and
+//! at genesis, where the floor is vacuous, meeting it means "any timestamp at
+//! all". So a colluding quorum, or a lone proposer under an `{n:1}` rule, could
+//! beat every honest wall-clock vote out of the starting state. Rather than
+//! trust the clock there, [`settle`] stops the walk and reports [`Contention`].
+//!
+//! It does so **only when the earliest edge forecloses the others** — when a
+//! losing target is no longer reachable from the winner's target in the
+//! declared transition graph. Where the loser stays reachable, as in any cycle,
+//! the timestamp decided *order* and not *outcome*: the losing edge fires on a
+//! later visit exactly as it always did, so there is nothing to refuse. A
+//! branch into two terminal states contends; `review ⇄ changes_requested` with
+//! a later `approved` does not.
+//!
+//! **RESIDUAL — a stall is still an outcome an attacker can choose.** On a
+//! genuinely irreversible branch, an agent eligible under the rule can hold the
+//! flow there by making a second edge quorate; under `{n:1}` one agent
+//! suffices. Denial is a weaker win than steering — it is inert until someone
+//! resolves it, and the [`Contention`] names the atoms and voters that caused
+//! it — but it is not nothing, and no part of the engine prevents it.
+//!
+//! **Flows can avoid the branch problem by construction**, which is cheaper
+//! than anything the engine can do: never branch at the genesis state (one
+//! non-branching step gives every later branch a real floor); prefer branches
+//! gated on data over branches decided by competing votes; and where competing
+//! votes are the point, draw both edges from the same role with `n` over half
+//! its members, so any two quorums intersect and a contested branch is provable
+//! equivocation rather than a race.
 //!
 //! **DEFERRED — a causal floor would bound collusion without clocks.** If a
 //! proposal were required to cite the settled-edge atoms it observed at mint
 //! time, back-dating past a known-later event would be self-contradicting
-//! (Lamport-style: "I saw atom A, but I voted before A existed"). This would
-//! make the collusion window above much narrower without requiring wall-clock
-//! trust. It is not implemented; its absence means the residual above stands.
+//! (Lamport-style: "I saw atom A, but I voted before A existed"). With
+//! contention refused this no longer guards the choice of edge, but it would
+//! narrow the stall above by making a back-dated second proposal detectable.
 
 use super::atom::{TransitionAtom, Vote};
 use crate::perspectives::shacl_parser::{ConsensusRule, SHACLFlow};
@@ -118,11 +139,49 @@ pub struct SettledEdge {
     pub voters: Vec<String>,
 }
 
+/// Why a walk stopped without taking an edge it could have taken.
+///
+/// More than one declared edge out of the same state reached quorum. Which of
+/// them "happened first" is decided by [`SettledEdge::settled_at`], and that is
+/// a self-asserted timestamp — see the residual under *Ordering and time*. So
+/// the one case where the clock decides an outcome is the one case where the
+/// engine declines to use it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contention {
+    /// The state the walk stopped in. Equal to [`DerivedState::state`].
+    pub from_state: String,
+    /// Every settled edge out of `from_state`, ranked as the earliest-wins rule
+    /// would have ranked them: `candidates[0]` is the edge that would have been
+    /// taken, so a human resolving this by hand sees both the choice that was
+    /// declined and what it beat.
+    pub candidates: Vec<SettledEdge>,
+}
+
 /// The authoritative state of a flow instance, and the chain that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DerivedState {
     pub state: String,
     pub settled: Vec<SettledEdge>,
+    /// Set when the walk stopped because `state` had more than one settled edge
+    /// out of it; `None` when it stopped for the ordinary reason — no edge out
+    /// of `state` has reached quorum yet.
+    ///
+    /// A caller that reads a stalled flow as "waiting for votes" has to check
+    /// this. A contested flow is not waiting for anything: more votes cannot
+    /// move it, because the obstacle is that two edges already carry a quorum.
+    /// Anything that pays out on a completed flow must refuse a derivation with
+    /// `contested.is_some()`.
+    pub contested: Option<Contention>,
+}
+
+/// What one visit to a state found.
+enum Settlement {
+    /// No edge out of this state has reached quorum. The walk ends normally.
+    None,
+    /// Exactly one edge has settled. The walk takes it.
+    One(Box<SettledEdge>),
+    /// More than one has settled. The walk stops without choosing.
+    Contested(Contention),
 }
 
 /// The rule governing entry INTO `to_state`: the target state's own
@@ -147,8 +206,9 @@ pub fn quorum(rule: &ConsensusRule, distinct_voters: usize) -> bool {
     rule.n > 0 && distinct_voters as u32 >= rule.n
 }
 
-/// The state of a flow: walk from `genesis`, taking the earliest-settled
-/// declared edge out of each state, until no edge out of it has settled.
+/// The state of a flow: walk from `genesis`, taking the one settled declared
+/// edge out of each state, until no edge out of it has settled — or until a
+/// state has more than one, which stops the walk without choosing.
 ///
 /// Terminates because every settled edge consumes at least one atom (a
 /// quorum needs at least one voter, and a voter needs an atom to vote on)
@@ -157,38 +217,115 @@ pub fn fold(genesis: &str, flow: &SHACLFlow, atoms: &[VouchedAtom]) -> DerivedSt
     let mut state = genesis.to_string();
     let mut settled_at = String::new(); // "" sorts before every timestamp
     let mut settled: Vec<SettledEdge> = Vec::new();
-    while let Some(edge) = settle(&state, &settled_at, flow, atoms, &settled) {
-        state = edge.to_state.clone();
-        settled_at = edge.settled_at.clone();
-        settled.push(edge);
+    let mut contested = None;
+    loop {
+        match settle(&state, &settled_at, flow, atoms, &settled) {
+            Settlement::None => break,
+            Settlement::One(edge) => {
+                state = edge.to_state.clone();
+                settled_at = edge.settled_at.clone();
+                settled.push(*edge);
+            }
+            Settlement::Contested(contention) => {
+                contested = Some(contention);
+                break;
+            }
+        }
     }
-    DerivedState { state, settled }
+    DerivedState {
+        state,
+        settled,
+        contested,
+    }
 }
 
-/// The declared edge out of `state` that settled earliest.
+/// The one declared edge out of `state` that has settled — or the fact that
+/// several have.
 ///
 /// Votes are not filtered by `after`: an edge that was already quorate when
 /// the walk arrived is settled, and `after` only floors the moment it counts
-/// as having settled (see [`settle_edge`]). Ties break by target state, then
-/// by first atom URI, so two replicas choose the same edge.
+/// as having settled (see [`settle_edge`]). Candidates are ranked earliest
+/// first, ties broken by target state and then by first atom URI, so two
+/// replicas agree on both the ranking and on whether the state is contested.
+///
+/// **Several settled edges stop the walk only when the choice is
+/// irreversible.** The earliest-wins rule reads `settled_at`, which an agent
+/// asserts about its own vote, so under a branch a colluding quorum could
+/// back-date its way past an honest one. But refusing on *any* second quorate
+/// edge would break ordinary flows: in `review ⇄ changes_requested` with a
+/// third edge to `approved`, a request and an approval are both quorate at the
+/// first visit, and the walk is supposed to take the request now and the
+/// approval after the cycle returns.
+///
+/// The distinction is whether taking the earliest edge **forecloses** the
+/// others. If every losing target is still reachable from the winner's target
+/// in the declared transition graph, the loser is not denied — it fires on a
+/// later visit, exactly as before, and the timestamp decided order rather than
+/// outcome. If a losing target is *not* reachable, the clock is picking a
+/// branch nothing can undo, and that is the case this engine refuses.
+///
+/// So `{approved, rejected}` out of one state contends, while a cycle that
+/// comes back around does not. The residual is that an attacker can still
+/// force a stall on a genuinely irreversible branch — see *Ordering and time*.
 fn settle(
     state: &str,
     after: &str,
     flow: &SHACLFlow,
     atoms: &[VouchedAtom],
     consumed: &[SettledEdge],
-) -> Option<SettledEdge> {
-    flow.transitions
+) -> Settlement {
+    let mut candidates: Vec<SettledEdge> = flow
+        .transitions
         .iter()
         .filter(|t| t.from_state == state)
         .filter_map(|t| settle_edge(state, &t.to_state, after, flow, atoms, consumed))
-        .min_by_key(|e| {
-            (
-                e.settled_at.clone(),
-                e.to_state.clone(),
-                e.atom_uris.first().cloned().unwrap_or_default(),
-            )
+        .collect();
+    candidates.sort_by_key(|e| {
+        (
+            e.settled_at.clone(),
+            e.to_state.clone(),
+            e.atom_uris.first().cloned().unwrap_or_default(),
+        )
+    });
+    if candidates.is_empty() {
+        return Settlement::None;
+    }
+    let winner_target = candidates[0].to_state.clone();
+    let forecloses = candidates[1..]
+        .iter()
+        .any(|loser| !reachable(flow, &winner_target, &loser.to_state));
+    if forecloses {
+        Settlement::Contested(Contention {
+            from_state: state.to_string(),
+            candidates,
         })
+    } else {
+        Settlement::One(Box::new(candidates.remove(0)))
+    }
+}
+
+/// Whether `to` can still be entered once the flow is in `from`, following
+/// declared transitions only.
+///
+/// This asks about the flow's shape, not about votes: an edge that is quorate
+/// now but loses a race is only *denied* if the state it leads to drops out of
+/// the graph reachable from the winner. A state is reachable from itself, so
+/// two transitions sharing a target never contend.
+fn reachable(flow: &SHACLFlow, from: &str, to: &str) -> bool {
+    let mut seen = vec![from.to_string()];
+    let mut frontier = vec![from.to_string()];
+    while let Some(state) = frontier.pop() {
+        if state == to {
+            return true;
+        }
+        for t in flow.transitions.iter().filter(|t| t.from_state == state) {
+            if !seen.iter().any(|s| s == &t.to_state) {
+                seen.push(t.to_state.clone());
+                frontier.push(t.to_state.clone());
+            }
+        }
+    }
+    false
 }
 
 /// One edge: pool the eligible votes of every not-yet-consumed atom on
@@ -500,6 +637,133 @@ mod tests {
             rule_for(&flow, "changes_requested").n,
             1,
             "a state without one inherits the flow's"
+        );
+    }
+
+    /// `triage → approved | rejected`, both terminal: the shape where a
+    /// clock-decided winner cannot be undone.
+    fn terminal_branch_flow() -> SHACLFlow {
+        serde_json::from_value(serde_json::json!({
+            "name": "Triage",
+            "namespace": "triage://",
+            "states": [
+                { "name": "triage", "value": 0.0 },
+                { "name": "approved", "value": 1.0 },
+                { "name": "rejected", "value": 0.0 },
+            ],
+            "transitions": [
+                { "action_name": "Approve", "from_state": "triage", "to_state": "approved", "actions": [] },
+                { "action_name": "Reject", "from_state": "triage", "to_state": "rejected", "actions": [] },
+            ],
+        }))
+        .expect("fixture flow parses")
+    }
+
+    /// Two quorate edges into states that cannot reach each other: taking the
+    /// earliest would let a self-asserted timestamp decide an outcome nothing
+    /// can undo, so the walk stops instead.
+    #[test]
+    fn an_irreversible_branch_stops_the_walk_without_choosing() {
+        let flow = terminal_branch_flow();
+        let atoms = vec![
+            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
+            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
+        ];
+
+        let derived = fold("triage", &flow, &atoms);
+
+        assert_eq!(derived.state, "triage", "the walk must not leave the state");
+        assert!(derived.settled.is_empty(), "and must take no edge");
+        let contention = derived.contested.expect("contested branch is reported");
+        assert_eq!(contention.from_state, "triage");
+        // Ranked earliest-first, so a reader sees what would have been taken.
+        let targets: Vec<&str> = contention
+            .candidates
+            .iter()
+            .map(|e| e.to_state.as_str())
+            .collect();
+        assert_eq!(targets, vec!["approved", "rejected"]);
+        assert_eq!(
+            contention.candidates[0].voters,
+            vec![ALICE.to_string()],
+            "each candidate still carries the quorum that made it"
+        );
+    }
+
+    /// The same two proposals in a flow where the loser stays reachable are
+    /// not contention: the walk takes the earliest now and the other later, so
+    /// the timestamp ordered the edges without denying either.
+    #[test]
+    fn a_race_the_walk_can_come_back_from_is_not_contention() {
+        let flow = review_flow(Some(1));
+        let atoms = vec![
+            vouched("p1", "review", "changes_requested", &[(ALICE, T1)]),
+            vouched("p3", "review", "approved", &[(ALICE, T2)]),
+            vouched("p2", "changes_requested", "review", &[(ALICE, T3)]),
+        ];
+
+        let derived = fold("review", &flow, &atoms);
+
+        assert!(
+            derived.contested.is_none(),
+            "approved is reachable via the cycle"
+        );
+        assert_eq!(derived.state, "approved");
+    }
+
+    /// Refusal is scoped to a genuine race: one quorate edge alongside an edge
+    /// with votes but not enough of them is not contention.
+    #[test]
+    fn a_branch_with_only_one_quorate_edge_is_not_contested() {
+        let mut flow = terminal_branch_flow();
+        // `approved` needs two voters; only Alice signed it.
+        flow.states
+            .iter_mut()
+            .find(|s| s.name == "approved")
+            .expect("fixture has approved")
+            .consensus_rule = Some(ConsensusRule {
+            n: 2,
+            from_role: None,
+        });
+        let atoms = vec![
+            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
+            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
+        ];
+
+        let derived = fold("triage", &flow, &atoms);
+
+        assert_eq!(derived.state, "rejected");
+        assert!(derived.contested.is_none(), "one candidate is not a race");
+    }
+
+    /// An uncontested walk reports no contention, so `contested.is_some()` is a
+    /// safe test for "do not pay out on this".
+    #[test]
+    fn an_ordinary_stall_is_not_contention() {
+        let derived = fold("review", &review_flow(None), &[]);
+        assert_eq!(derived.state, "review");
+        assert!(derived.contested.is_none());
+    }
+
+    #[test]
+    fn reachability_follows_declared_transitions_only() {
+        let review = review_flow(None);
+        assert!(
+            reachable(&review, "changes_requested", "approved"),
+            "via the cycle"
+        );
+        assert!(
+            reachable(&review, "approved", "approved"),
+            "a state reaches itself"
+        );
+        assert!(
+            !reachable(&review, "approved", "review"),
+            "approved is terminal"
+        );
+        let triage = terminal_branch_flow();
+        assert!(
+            !reachable(&triage, "approved", "rejected"),
+            "terminal siblings"
         );
     }
 }
