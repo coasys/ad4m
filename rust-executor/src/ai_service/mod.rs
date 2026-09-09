@@ -244,6 +244,38 @@ enum LlmModel {
     Remote((Box<dyn RemoteChat>, String)),
 }
 
+/// Every part of one turn that reaches the wire.
+///
+/// A turn is not only its text. An assistant turn that called something also
+/// carries the call's id, name and arguments, and a tool result carries the id
+/// it answers. The Anthropic provider serialises all of that into content
+/// blocks, so the caller pays for it.
+///
+/// It compounds. Tool definitions are sent once per request, but the calls in
+/// the history are resent on every turn of an agentic loop, and their arguments
+/// are the payload rather than a label — a schema patch, a query, a document.
+/// Counting only `content` under-bills a long tool conversation by more than it
+/// under-bills a short one.
+fn estimate_turn_tokens(turn: &ChatTurn) -> usize {
+    let calls: usize = turn
+        .tool_calls
+        .iter()
+        .map(|call| {
+            estimate_token_count(&call.id)
+                + estimate_token_count(&call.name)
+                + estimate_token_count(&call.arguments.to_string())
+        })
+        .sum();
+
+    let answered_call = turn
+        .tool_result_for
+        .as_deref()
+        .map(estimate_token_count)
+        .unwrap_or(0);
+
+    estimate_token_count(&turn.content) + calls + answered_call
+}
+
 /// The turn list for a task-shaped prompt: the task's system prompt, its
 /// examples as alternating user/assistant turns, then the live prompt.
 ///
@@ -1435,15 +1467,13 @@ impl AIService {
     ) -> Result<ChatReply> {
         let resolved = Self::replace_model_variables(&model_id)?;
 
-        // Estimated before the turns are handed over, because the tool
-        // schemas go on the wire too and the caller is charged for them. They
-        // are not small: a schema with nested objects and descriptions can
-        // outweigh the conversation. Counting only `content` under-bills every
-        // authenticated native-tool call, and `ChatReply.usage` does not
-        // replace the estimate — billing still runs on this number.
+        // Estimated before the turns are handed over, because everything below
+        // goes on the wire and the caller is charged for all of it. Billing
+        // runs on this number: `ChatReply.usage` reports the provider's exact
+        // counts but does not replace the estimate.
         let prompt_tokens: usize = turns
             .iter()
-            .map(|turn| estimate_token_count(&turn.content))
+            .map(estimate_turn_tokens)
             .chain(tools.iter().map(|tool| {
                 estimate_token_count(&tool.name)
                     + estimate_token_count(&tool.description)
@@ -2533,6 +2563,68 @@ impl AIService {
 
 #[cfg(test)]
 mod tests {
+    use super::providers::{ChatTurn, ToolCall};
+
+    fn call(arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "toolu_01Eg163G7WZHsU3H4jik7nNC".to_string(),
+            name: "update_schema".to_string(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn a_turn_with_no_tool_metadata_is_estimated_from_its_text() {
+        let turn = ChatTurn::user("hello there");
+        assert_eq!(
+            estimate_turn_tokens(&turn),
+            estimate_token_count("hello there")
+        );
+    }
+
+    #[test]
+    fn a_calls_arguments_are_billed_not_just_its_text() {
+        // The arguments are the payload in an agentic loop — a schema patch, a
+        // query, a document — and they dwarf whatever the model said alongside.
+        let patch = serde_json::json!({
+            "patches": [{ "targetId": "root", "node": { "type": "Column", "props": {
+                "gap": "400", "p": "500", "bg": "surface", "r": "400"
+            }}}]
+        });
+
+        let plain = ChatTurn::assistant("Applying that now.");
+        let calling = ChatTurn::assistant_calling("Applying that now.", vec![call(patch)]);
+
+        assert!(
+            estimate_turn_tokens(&calling) > estimate_turn_tokens(&plain) + 20,
+            "the call should add far more than its name, got {} vs {}",
+            estimate_turn_tokens(&calling),
+            estimate_turn_tokens(&plain)
+        );
+    }
+
+    #[test]
+    fn a_tool_result_is_billed_for_the_id_it_answers() {
+        let bare = ChatTurn::user("42");
+        let answering = ChatTurn::tool_result("toolu_01Eg163G7WZHsU3H4jik7nNC", "42");
+
+        assert!(estimate_turn_tokens(&answering) > estimate_turn_tokens(&bare));
+    }
+
+    #[test]
+    fn several_calls_in_one_turn_each_count() {
+        let one = ChatTurn::assistant_calling("", vec![call(serde_json::json!({ "a": 1 }))]);
+        let two = ChatTurn::assistant_calling(
+            "",
+            vec![
+                call(serde_json::json!({ "a": 1 })),
+                call(serde_json::json!({ "a": 1 })),
+            ],
+        );
+
+        assert_eq!(estimate_turn_tokens(&two), estimate_turn_tokens(&one) * 2);
+    }
+
     use super::*;
     use crate::types::{AIPromptExamplesInput, LocalModelInput};
     use tokio::time::{sleep, Duration};
