@@ -182,6 +182,21 @@ fn substitute_tokens(s: &str, record: &FlowInstanceRecord, acting_did: &str) -> 
     tokens.substitute(s)
 }
 
+/// Substitute tokens everywhere a string can appear in a condition value.
+///
+/// Objects are recursed into, not cloned. `WhereCondition` admits object
+/// shapes — `Ops` (`{"not": …}`, `{"contains": …}`) and `SubClause` — so a
+/// rule may legitimately carry `$did` inside one, e.g.
+/// `{"members": {"equals": {"not": "$did"}}}`. Cloning such an object left
+/// the literal `"$did"` in the query handed to `model_query`, which produces
+/// the **same** query for every candidate: the role then stops discriminating
+/// between DIDs. Under a negating operator that fails *open* — no instance
+/// has a property equal to the literal `"$did"`, so `not` matches everyone
+/// and every candidate is granted the role.
+///
+/// The `did_dependent` guard in `resolve_role_grants` does not catch this:
+/// it tests the serialised *rule* for `$did`, which is present, rather than
+/// the generated *input*, where it was never resolved.
 fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str) -> Value {
     match value {
         Value::String(s) => Value::String(substitute_tokens(s, record, acting_did)),
@@ -191,7 +206,27 @@ fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str)
                 .map(|v| substitute_json(v, record, acting_did))
                 .collect(),
         ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| (k.clone(), substitute_json(v, record, acting_did)))
+                .collect(),
+        ),
         other => other.clone(),
+    }
+}
+
+/// Whether any string anywhere in `value` still contains an unresolved
+/// `$`-token. Used as a post-substitution assertion: substitution is total
+/// over the JSON tree, so a surviving token means a shape it does not know
+/// how to walk, and a query that cannot discriminate must fail closed rather
+/// than run.
+fn has_unresolved_token(value: &Value) -> bool {
+    match value {
+        Value::String(s) => FlowTokens::contains_token(s),
+        Value::Array(items) => items.iter().any(has_unresolved_token),
+        Value::Object(fields) => fields.values().any(has_unresolved_token),
+        _ => false,
     }
 }
 
@@ -220,6 +255,16 @@ pub(crate) fn requires_query_input(
     let out = Value::Object(out);
     serde_json::from_value::<ModelQueryInput>(out.clone())
         .map_err(|e| anyhow!("translated query is not a valid ModelQueryInput: {e}"))?;
+    // Substitution is total over the JSON tree, so a surviving token means a
+    // shape it could not walk. Refuse rather than run: a role query still
+    // carrying `$did` is byte-identical for every candidate, and under a
+    // negating operator it matches all of them.
+    if has_unresolved_token(&out) {
+        bail!(
+            "translated query still contains an unresolved token — it would be identical for \
+             every candidate and cannot discriminate between DIDs: {out}"
+        );
+    }
     Ok(out)
 }
 
@@ -983,6 +1028,76 @@ mod tests {
             )],
         );
         assert!(requires_query_input(&matches, &inst(), "did:key:x").is_err());
+    }
+
+    /// A `$did` inside an **object**-valued condition must be substituted like
+    /// one inside a string or an array. `WhereCondition` admits object shapes
+    /// (`Ops`, `SubClause`), so this is a legal rule — and before the fix
+    /// `substitute_json` cloned objects wholesale, leaving the literal
+    /// `"$did"` in the query. Every candidate then received a byte-identical
+    /// query, so the role stopped discriminating between DIDs.
+    #[test]
+    fn query_input_substitutes_did_inside_an_object_valued_condition() {
+        let q = with_where(
+            mq("ns://Member"),
+            vec![(
+                "holder",
+                PropertyCondition::Equals {
+                    equals: json!({ "not": "$did" }),
+                },
+            )],
+        );
+        let out = qin(&q, "did:key:alice");
+        assert_eq!(
+            out,
+            json!({ "where": { "holder": { "not": "did:key:alice" } } }),
+            "object-valued conditions must be substituted, not cloned: {out}"
+        );
+
+        // Two different candidates must get two different queries — the
+        // property the role gate depends on.
+        assert_ne!(qin(&q, "did:key:alice"), qin(&q, "did:key:bob"));
+    }
+
+    /// Nested one level deeper, to pin that the walk is recursive rather than
+    /// a single-level special case.
+    #[test]
+    fn query_input_substitutes_did_nested_in_arrays_inside_objects() {
+        let q = with_where(
+            mq("ns://Member"),
+            vec![(
+                "holder",
+                PropertyCondition::Equals {
+                    equals: json!({ "not": { "OR": [{ "did": "$did" }] } }),
+                },
+            )],
+        );
+        let out = qin(&q, "did:key:alice");
+        assert!(
+            !serde_json::to_string(&out).unwrap().contains("$did"),
+            "no token may survive at any depth: {out}"
+        );
+    }
+
+    /// Fail-closed backstop: if substitution ever misses a shape, the query
+    /// must be refused rather than run. A role query that still carries a
+    /// token is identical for every candidate, and under a negating operator
+    /// it matches all of them — the failure direction is *open*, which is why
+    /// this is an error rather than a warning.
+    #[test]
+    fn query_input_refuses_a_query_with_an_unresolved_token() {
+        // An empty acting DID makes `FlowTokens::substitute` a deliberate
+        // no-op for `$did` (empty field = "not set"), which is the cheapest
+        // way to reach the post-substitution assertion.
+        let q = with_where(
+            mq("ns://Member"),
+            vec![("holder", PropertyCondition::Str("$did".into()))],
+        );
+        let err = requires_query_input(&q, &inst(), "")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unresolved token"), "{err}");
+        assert!(err.contains("cannot discriminate"), "{err}");
     }
 
     #[test]
