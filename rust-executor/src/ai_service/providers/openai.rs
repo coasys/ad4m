@@ -42,6 +42,43 @@ impl OpenAiChat {
     }
 }
 
+/// Ask an endpoint which models it serves — `GET {base}/v1/models`.
+///
+/// Standalone rather than a trait method because discovery happens *before*
+/// a model exists: an operator is filling in a form and wants to know what
+/// they can pick, so there is no configured model and no worker thread to
+/// route through.
+///
+/// Doubles as a credential check. A wrong key fails here with the provider's
+/// own 401 instead of surfacing as a puzzling failure on the first real
+/// completion, which is where it used to surface.
+pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
+    let endpoint = super::models_endpoint(base_url);
+
+    let mut request = reqwest::Client::new().get(&endpoint);
+    if !api_key.is_empty() {
+        request = request.bearer_auth(api_key);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| anyhow!("Could not reach {endpoint}: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Model listing failed ({status}): {body}"));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| anyhow!("Could not read the model list: {e}"))?;
+
+    Ok(super::model_ids_from_data(&json))
+}
+
 fn to_wire_role(role: ChatRole) -> Role {
     match role {
         ChatRole::System => Role::System,

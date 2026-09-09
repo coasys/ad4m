@@ -47,6 +47,45 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(models)?)
 }
 
+/// `ai.discoverModels` — what does this endpoint serve, and does this key work?
+///
+/// Takes the credentials of a model that does not exist yet: an operator is
+/// filling in the form and wants the list to pick from, before there is
+/// anything to list. Answers the provider's own model ids.
+///
+/// Gated on AI_CREATE rather than AI_READ. It reads nothing of this node's,
+/// but it makes an outbound request to an arbitrary URL with an
+/// arbitrary key, which is the same authority adding a model carries and more
+/// than reading the models already configured.
+async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let base_url = params.require_str("baseUrl")?;
+    let base_url = url::Url::parse(&base_url)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid baseUrl: {e}")))?;
+
+    // Defaults to OpenAI, which is what every endpoint that is not Anthropic
+    // speaks, and what the field meant before there was a choice.
+    let api_type = match params.get("apiType").and_then(|v| v.as_str()) {
+        Some(raw) => raw
+            .parse::<crate::types::ModelApiType>()
+            .map_err(WsRpcError::bad_request)?,
+        None => crate::types::ModelApiType::OpenAi,
+    };
+
+    let api_key = params
+        .get("apiKey")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    let models = crate::ai_service::providers::list_models(&api_type, api_key, base_url)
+        .await
+        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+
+    Ok(serde_json::to_value(models)?)
+}
+
 async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
@@ -334,6 +373,7 @@ async fn close_transcription_stream(
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("ai.models", list_models);
+    map.register("ai.discoverModels", discover_models);
     map.register("ai.addModel", add_model);
     map.register("ai.updateModel", update_model);
     map.register("ai.removeModel", remove_model);

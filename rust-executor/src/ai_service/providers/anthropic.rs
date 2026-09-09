@@ -86,6 +86,36 @@ fn messages_endpoint(base_url: Url) -> String {
     format!("{root}/v1/messages")
 }
 
+/// Ask Anthropic which models this key can reach — `GET {base}/v1/models`.
+///
+/// Same role as the OpenAI listing (see that module for why it is standalone),
+/// with different auth: an `x-api-key` header and the pinned wire version
+/// rather than a bearer token.
+pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
+    let endpoint = super::models_endpoint(base_url);
+
+    let response = reqwest::Client::new()
+        .get(&endpoint)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Could not reach {endpoint}: {e}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Model listing failed ({status}): {body}"));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| anyhow!("Could not read the model list: {e}"))?;
+
+    Ok(super::model_ids_from_data(&json))
+}
+
 // ---------------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------------

@@ -12,11 +12,15 @@ through here — `LlmModel::Local` is a different thing entirely.
 
 ## Entry points
 
-- `OpenAiChat::new(api_key, base_url)` — built once per model by
-  `ai_service::AIService::build_remote_client`, then owned by that model's
-  worker thread for its lifetime.
-- `RemoteChat::chat(request)` — called from the `LLMTaskRequest::Prompt` and
-  `PromptStream` arms of that thread's loop.
+- `OpenAiChat::new(api_key, base_url)` / `AnthropicChat::new(..)` — built once
+  per model by `ai_service::AIService::build_remote_client`, then owned by that
+  model's worker thread for its lifetime.
+- `RemoteChat::chat` / `chat_stream` — called from the `LLMTaskRequest::Prompt`
+  and `PromptStream` arms of that thread's loop. `chat_stream` has a default
+  that answers in one chunk; override it only where the upstream really streams.
+- `list_models(api_type, api_key, base_url)` — free function, not a trait
+  method, because discovery happens *before* a model is configured: there is no
+  instance and no worker thread. Reached over WS as `ai.discoverModels`.
 
 ## Invariants
 
