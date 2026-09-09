@@ -3651,4 +3651,27 @@ describe("hasLiveCredential", () => {
     expect(hasLiveCredential({ agentPassphrase: "" })).toBe(false);
     expect(hasLiveCredential({ mode: "managed", ad4mBinaryPath: "/usr/bin/ad4m-executor" })).toBe(false);
   });
+
+  it("agrees with the manifest about which fields are secret", () => {
+    // Two lists answer "what is secret here": hasLiveCredential, which decides
+    // whether a snippet may be printed, and uiHints.sensitive, which decides
+    // whether a UI masks the field. They drifted once — `password` was in the
+    // first and missing from the second. This fails if they drift again.
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "openclaw.plugin.json"), "utf8"),
+    );
+    for (const field of ["token", "wakeToken", "password", "agentPassphrase"]) {
+      expect(hasLiveCredential({ [field]: "a-real-value" })).toBe(true);
+      expect(manifest.uiHints?.[field]?.sensitive, `uiHints.${field}.sensitive`).toBe(true);
+    }
+  });
+
+  it("treats a bracket-wrapped real passphrase as live, not as a placeholder", () => {
+    // The placeholders are bracket-styled, so keeping the brackets while
+    // substituting a real passphrase is a natural mistake. A shape test would
+    // have classified these as instructions and printed them.
+    expect(hasLiveCredential({ agentPassphrase: "<aRealGeneratedPassphrase>" })).toBe(true);
+    expect(hasLiveCredential({ agentPassphrase: "<enter-your-existing-passphrase> hunter2" })).toBe(true);
+    expect(hasLiveCredential({ agentPassphrase: "<>" })).toBe(true);
+  });
 });

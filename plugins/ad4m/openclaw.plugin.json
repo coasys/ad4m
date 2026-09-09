@@ -155,6 +155,10 @@
     "wakeToken": {
       "label": "Wake Token",
       "sensitive": true
+    },
+    "password": {
+      "label": "Account Password",
+      "sensitive": true
     }
   }
 }

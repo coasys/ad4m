@@ -760,14 +760,23 @@ function printConfigSnippet(
 }
 
 /**
+ * The exact strings managed mode writes into `agentPassphrase` when it has no
+ * real passphrase to give. They are instructions, not secrets, and printing
+ * them is the point.
+ *
+ * Kept as literals rather than a bracket-shaped pattern deliberately. The
+ * placeholders are bracket-styled, so a user substituting their own passphrase
+ * may well keep the brackets — a shape test would then classify a real secret
+ * as a placeholder and print it. Only these two exact strings are safe.
+ */
+const PASSPHRASE_PLACEHOLDERS = [
+  "<enter-your-existing-passphrase>",
+  "<run setup again after fixing executor>",
+] as const;
+
+/**
  * Whether a config snippet carries a value that must not reach terminal
  * scrollback.
- *
- * `agentPassphrase` is the awkward one: managed mode fills it with a
- * placeholder (`<enter-your-existing-passphrase>`, `<run setup again …>`) when
- * it has no real passphrase to give, and those are instructions, not secrets.
- * Anything in angle brackets is a placeholder; anything else is treated as
- * live.
  */
 export function hasLiveCredential(config: Record<string, any>): boolean {
   if (config.token || config.wakeToken || config.password) return true;
@@ -775,7 +784,7 @@ export function hasLiveCredential(config: Record<string, any>): boolean {
   return (
     typeof passphrase === "string" &&
     passphrase.length > 0 &&
-    !/^<.*>$/.test(passphrase)
+    !PASSPHRASE_PLACEHOLDERS.includes(passphrase as any)
   );
 }
 
