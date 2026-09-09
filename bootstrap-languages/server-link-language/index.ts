@@ -24,6 +24,7 @@ import { WsClient } from "./src/ws-client.js";
 import {
     buildKeyRing,
     deriveX25519KeyPair,
+    generateRoomKey,
     hexToBytes,
     sealRoomKeyForRecipient,
     type KeyRing,
@@ -144,7 +145,17 @@ async function refreshKeyRingIfNeeded(): Promise<boolean> {
     await setupKeyRing();
     const newSize = keyRing?.size ?? 0;
     if (newSize > prevSize) {
+        console.log("[server-link-language] key ring refreshed — re-bootstrapping");
         await syncModule.bootstrap();
+        // bootstrap() replaces the store but does not emit (by design —
+        // cold-start callers query the store directly).  Recovery callers
+        // must emit so the executor's perspective layer surfaces the
+        // recovered links.
+        const recovered = syncModule.render();
+        if (recovered.links.length > 0) {
+            getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
+        }
+        syncModule.clearPendingMissingVersions();
         return true;
     }
     return false;
@@ -193,6 +204,50 @@ async function performAdminKeyGrants(): Promise<void> {
     }
 }
 
+/**
+ * Client-side key rotation — generates the room key locally, seals it to
+ * every ACL member's X25519 public key, and sends only the sealed
+ * envelopes to the server. The server never touches plaintext key
+ * material. Exposed for programmatic use but currently called from the
+ * language's init flow or admin tooling.
+ */
+async function performRotation(): Promise<void> {
+    if (!isRoomAdmin) return;
+    const config = getConfig();
+    try {
+        const token = await auth.getValidToken();
+        const aclRes = await api.fetchAclInfo(config, token);
+
+        const roomKey = generateRoomKey();
+
+        const sealedKeys: api.RotateKeyEntry[] = [];
+        for (const member of aclRes.members) {
+            if (!member.x25519PublicKey) continue;
+            const recipientPub = hexToBytes(member.x25519PublicKey);
+            sealedKeys.push({
+                did: member.did,
+                encryptedKey: sealRoomKeyForRecipient(roomKey, recipientPub),
+            });
+        }
+
+        if (sealedKeys.length === 0) {
+            console.log("[server-link-language] no members with X25519 keys — skipping rotation");
+            return;
+        }
+
+        const result = await api.rotateKeys(config, token, sealedKeys);
+        console.log(
+            `[server-link-language] client-side key rotation complete: version ${result.version}, ` +
+            `${result.recipients.length} recipient(s)`,
+        );
+
+        await setupKeyRing();
+    } catch (err) {
+        console.error("[server-link-language] key rotation failed:", err);
+        throw err;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Language definition
 // ---------------------------------------------------------------------------
@@ -238,6 +293,11 @@ const language = defineLanguage({
                 await setupKeyRing();
                 return (keyRing?.size ?? 0) > prevSize;
             },
+            // Periodic admin key grants — fallback for when the WS
+            // `peer-joined` event never fires (WS down, CI, firewalls).
+            // Each successful HTTP sync triggers a check so the admin
+            // discovers new members who need historical keys.
+            onPostSync: () => performAdminKeyGrants(),
         });
 
         wsClient = new WsClient({
@@ -247,8 +307,11 @@ const language = defineLanguage({
                 onDiff(msg) {
                     const result = syncModule.applyInboundWireDiff(msg.payload, msg.sequence, msg.revision);
                     // If the live push contained links we couldn't decrypt,
-                    // kick off a background key ring refresh + re-bootstrap.
+                    // bridge the missing versions into the HTTP-sync retry
+                    // set so `catchUp()` retries on the next cycle, then
+                    // kick off an immediate background refresh attempt.
                     if (result.missingVersions.size > 0) {
+                        syncModule.trackMissingKeyVersions(result.missingVersions);
                         void refreshKeyRingIfNeeded().catch((err) => {
                             console.error("[server-link-language] WS diff key ring refresh failed:", err);
                         });
@@ -267,9 +330,12 @@ const language = defineLanguage({
                 },
                 onPeerJoined(msg) {
                     telepresenceModule.handlePeerJoined(msg);
-                    // When a new peer joins, if we hold admin rights and
-                    // the key ring has keys, check for and grant missing keys
-                    // so the new member can decrypt the room's history.
+                    // Grant historical keys to members who lack them.
+                    // Do NOT rotate here — onPeerJoined is a presence
+                    // event (reconnect, second device, wake) not an ACL
+                    // event. Rotating on presence would mint a new version
+                    // on every reconnect. Rotation belongs on ACL changes
+                    // or explicit admin action.
                     void performAdminKeyGrants().catch((err) => {
                         console.error("[server-link-language] peer-joined admin grant failed:", err);
                     });
@@ -322,7 +388,37 @@ const language = defineLanguage({
             }
 
             await setupKeyRing();
+
+            // E2E is mandatory — if admin and no E2E exists yet,
+            // generate the initial room key. Every room gets encrypted
+            // automatically; there is no plaintext mode.
+            if (isRoomAdmin && keyRingStatus === "none") {
+                console.log(
+                    "[server-link-language] admin, no E2E yet — generating initial room key",
+                );
+                await performRotation();
+            }
+
             await syncModule.bootstrap();
+
+            // E2E timing fix: if keyRingStatus is still "pending" after
+            // bootstrap, the admin may have granted keys between our
+            // setupKeyRing() call and now. Retry once — if keys arrived,
+            // re-bootstrap so any encrypted links in the room's history
+            // get picked up immediately instead of waiting for the next
+            // sync cycle.
+            // Cast needed: setupKeyRing() mutates the module-level
+            // keyRingStatus across an await boundary; TS literal
+            // narrowing doesn't track that.
+            if ((keyRingStatus as KeyRingStatus) === "pending") {
+                await setupKeyRing();
+                if ((keyRingStatus as KeyRingStatus) === "ready") {
+                    console.log(
+                        "[server-link-language] keys acquired after init grant — re-bootstrapping",
+                    );
+                    await syncModule.bootstrap();
+                }
+            }
 
             // If admin and key ring ready, grant historical keys to any
             // members who joined while we were offline.
@@ -348,9 +444,9 @@ const language = defineLanguage({
 
     async teardown() {
         // Drain any pending batched commits BEFORE we tear down auth/adapters.
-        // enqueueCommitBatched schedules a microtask flush that reads `deps()`
-        // (auth token, transport) at flush time — if teardown resets those
-        // first, the pending flush's POST fails and flushBatch drops the batch.
+        // The main commit path now awaits the POST directly, but the batch
+        // infrastructure still exists (used by unit tests, retry timers) and
+        // may hold stale segments from a failed flush cycle.
         try {
             await syncModule.drainCommitBatch();
         } catch (err) {
@@ -410,17 +506,40 @@ const language = defineLanguage({
                 );
             }
 
+            // E2E is mandatory — if admin and keyRingStatus is still
+            // "none" (init's performRotation failed or was skipped),
+            // retry rotation before committing. Non-admin "none" means
+            // the room genuinely has no E2E yet — plaintext is correct
+            // for the first commit that triggers the admin flow.
+            if (isRoomAdmin && keyRingStatus === "none") {
+                console.log(
+                    "[server-link-language] admin with keyRingStatus=none — retrying rotation before commit",
+                );
+                await performRotation();
+                // performRotation throws on server/auth failure →
+                // executor keeps the diff for retry. If it returns
+                // (success or no-op), keyRingStatus may now be "ready"
+                // or still "none" (no members with X25519 keys yet).
+            }
+
+            console.log(
+                `[server-link-language] commit: ${diff.additions.length} adds, ` +
+                `${diff.removals.length} removes (keyRingStatus=${keyRingStatus})`,
+            );
+
             // 1. Store links locally (plaintext, always — see src/sync.ts module doc).
             store.applyDiff(diff);
 
-            // 2. Queue the push to the server. `enqueueCommitBatched` returns
-            //    immediately after appending to the batch; the actual POST
-            //    happens on a microtask flush, so a tight loop of addLink()
-            //    calls collapses into one POST (see the batching block in
-            //    sync.ts for why).
-            syncModule.enqueueCommitBatched(diff);
+            // 2. Push the diff to the server. Awaiting the POST ensures
+            //    the executor only clears its pending-diff DB entry AFTER
+            //    the server accepted the commit. The executor's own
+            //    batching (pending_diffs_loop: 1s inactivity / 3s max /
+            //    150 max count) handles coalescence for burst scenarios
+            //    — the language-level fire-and-forget batch is no longer
+            //    needed on this path.
+            await syncModule.commit(diff);
 
-            // 3. Emit so local subscribers see it immediately.
+            // 3. Emit so local subscribers see it after the POST landed.
             getRuntime().emitPerspectiveDiff(diff);
 
             return "";

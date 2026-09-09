@@ -234,6 +234,11 @@ const ROOM_ID = "<to-be-filled>";     // UUID, set at neighbourhood creation
 Filled in by the executor at publish time. Until then, `init()` runs in an
 inert mode (logs and returns without attempting any network I/O).
 
+E2E encryption activates automatically — the admin's language instance
+generates the initial room key during `init()` when no E2E exists yet.
+Non-admin members receive keys via the automatic `onPeerJoined` grant flow.
+There is no plaintext mode.
+
 ## Publishing
 
 ```json

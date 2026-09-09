@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import {
   authenticateAgent,
+  clientSideRotate,
   createSignedLink,
   createTestAgent,
   getJson,
@@ -15,7 +16,6 @@ import {
   decryptRoomKeyWithX25519,
   encryptRoomKeyForRecipient,
   type EncryptedKeyPayload,
-  type MemberMissingKeys,
 } from "../src/encryption.js";
 import type { EncryptedLinkData, LinkExpression } from "../src/types.js";
 
@@ -28,7 +28,7 @@ async function withServer(fn: (server: TestServerHandle) => Promise<void>): Prom
   }
 }
 
-test("rotate generates a room key sealed to every current ACL member", async () => {
+test("client-side rotate seals the room key to every current ACL member", async () => {
   await withServer(async (server) => {
     const roomId = randomUUID();
     const admin = await createTestAgent();
@@ -37,14 +37,9 @@ test("rotate generates a room key sealed to every current ACL member", async () 
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     const memberToken = await authenticateAgent(server.url, roomId, member);
 
-    const rotateRes = await postJson<{ version: number; recipients: string[] }>(
-      `${server.url}/rooms/${roomId}/keys/rotate`,
-      {},
-      adminToken
-    );
-    assert.equal(rotateRes.status, 200);
-    assert.equal(rotateRes.body.version, 1);
-    assert.deepEqual(new Set(rotateRes.body.recipients), new Set([admin.did, member.did]));
+    const { version, recipients, roomKey } = await clientSideRotate(server.url, roomId, adminToken);
+    assert.equal(version, 1);
+    assert.deepEqual(new Set(recipients), new Set([admin.did, member.did]));
 
     const adminKeys = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`,
@@ -64,6 +59,7 @@ test("rotate generates a room key sealed to every current ACL member", async () 
     const adminRoomKey = decryptRoomKeyWithX25519(adminKeys.body.keys[0].encryptedKey, testAgentX25519PrivateKey(admin));
     const memberRoomKey = decryptRoomKeyWithX25519(memberKeys.body.keys[0].encryptedKey, testAgentX25519PrivateKey(member));
     assert.deepEqual(adminRoomKey, memberRoomKey, "both members recover the same underlying room key");
+    assert.deepEqual(adminRoomKey, roomKey, "decrypted key matches the locally-generated key");
   });
 });
 
@@ -76,9 +72,11 @@ test("only the admin can rotate the room key", async () => {
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
     const memberToken = await authenticateAgent(server.url, roomId, member);
 
+    // Body content doesn't matter — preHandler rejects non-admin before
+    // the route handler inspects the body.
     const res = await postJson<{ error: string }>(
       `${server.url}/rooms/${roomId}/keys/rotate`,
-      {},
+      { keys: [] },
       memberToken
     );
     assert.equal(res.status, 403);
@@ -103,7 +101,7 @@ test("member added after a rotation has no key until the next rotation", async (
     const lateMember = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    await clientSideRotate(server.url, roomId, adminToken);
 
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: lateMember.did }, adminToken);
     const lateToken = await authenticateAgent(server.url, roomId, lateMember);
@@ -117,7 +115,7 @@ test("member added after a rotation has no key until the next rotation", async (
     assert.equal(before.body.keys.length, 0, "late member has no keys before next rotation");
     assert.equal(before.body.e2e_enabled, true);
 
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    await clientSideRotate(server.url, roomId, adminToken);
     const after = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
       `${server.url}/rooms/${roomId}/keys`,
       lateToken
@@ -332,7 +330,7 @@ test("rotate response reports members missing historical key versions", async ()
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
     // Version 1 — only admin present
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    await clientSideRotate(server.url, roomId, adminToken);
 
     // Add a late member
     const lateMember = await createTestAgent();
@@ -340,18 +338,14 @@ test("rotate response reports members missing historical key versions", async ()
     await authenticateAgent(server.url, roomId, lateMember);
 
     // Version 2 — late member now in ACL, gets version 2 but lacks version 1
-    const rotateRes = await postJson<{
-      version: number;
-      recipients: string[];
-      membersNeedingHistoricalKeys: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string }>;
-    }>(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    const rotateRes = await clientSideRotate(server.url, roomId, adminToken);
 
-    assert.equal(rotateRes.status, 200);
-    assert.equal(rotateRes.body.version, 2);
-    assert.equal(rotateRes.body.membersNeedingHistoricalKeys.length, 1);
-    assert.equal(rotateRes.body.membersNeedingHistoricalKeys[0].did, lateMember.did);
-    assert.deepEqual(rotateRes.body.membersNeedingHistoricalKeys[0].missingVersions, [1]);
-    assert.equal(typeof rotateRes.body.membersNeedingHistoricalKeys[0].x25519PublicKey, "string");
+    assert.equal(rotateRes.version, 2);
+    assert.ok(rotateRes.membersNeedingHistoricalKeys);
+    assert.equal(rotateRes.membersNeedingHistoricalKeys!.length, 1);
+    assert.equal(rotateRes.membersNeedingHistoricalKeys![0].did, lateMember.did);
+    assert.deepEqual(rotateRes.membersNeedingHistoricalKeys![0].missingVersions, [1]);
+    assert.equal(typeof rotateRes.membersNeedingHistoricalKeys![0].x25519PublicKey, "string");
   });
 });
 
@@ -363,8 +357,8 @@ test("admin can grant historical key versions to a late member", async () => {
     const admin = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
-    // Rotate once (version 1)
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    // Rotate once (version 1) — clientSideRotate returns the plaintext roomKey
+    const { roomKey: roomKeyV1 } = await clientSideRotate(server.url, roomId, adminToken);
 
     // Add late member
     const lateMember = await createTestAgent();
@@ -372,21 +366,12 @@ test("admin can grant historical key versions to a late member", async () => {
     const lateToken = await authenticateAgent(server.url, roomId, lateMember);
 
     // Rotate again (version 2) — late member gets version 2
-    const rotateRes = await postJson<{
-      membersNeedingHistoricalKeys: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string }>;
-    }>(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    const rotateRes = await clientSideRotate(server.url, roomId, adminToken);
+    assert.ok(rotateRes.membersNeedingHistoricalKeys);
 
-    // Admin re-seals version 1 for the late member
-    const adminKeys = await getJson<{ keys: Array<{ encryptedKey: EncryptedKeyPayload; version: number }> }>(
-      `${server.url}/rooms/${roomId}/keys`,
-      adminToken
-    );
-    const adminV1 = adminKeys.body.keys.find((k) => k.version === 1)!;
-    const adminPriv = testAgentX25519PrivateKey(admin);
-    const roomKeyV1 = decryptRoomKeyWithX25519(adminV1.encryptedKey, adminPriv);
-
-    const missingKeys = rotateRes.body.membersNeedingHistoricalKeys[0];
+    // Admin re-seals version 1 for the late member using the returned roomKey
     const { hexToBytes } = await import("@noble/ed25519").then((m) => m.etc);
+    const missingKeys = rotateRes.membersNeedingHistoricalKeys![0];
     const latePub = hexToBytes(missingKeys.x25519PublicKey);
     const resealedV1 = encryptRoomKeyForRecipient(roomKeyV1, latePub);
 
@@ -407,16 +392,12 @@ test("admin can grant historical key versions to a late member", async () => {
     const versions = lateKeys.body.keys.map((k) => k.version).sort();
     assert.deepEqual(versions, [1, 2]);
 
-    // Verify the late member can decrypt both and they match the admin's
+    // Verify the late member can decrypt both
     const latePriv = testAgentX25519PrivateKey(lateMember);
     const lateV1 = decryptRoomKeyWithX25519(lateKeys.body.keys.find((k) => k.version === 1)!.encryptedKey, latePriv);
     const lateV2 = decryptRoomKeyWithX25519(lateKeys.body.keys.find((k) => k.version === 2)!.encryptedKey, latePriv);
-    const adminV2Key = decryptRoomKeyWithX25519(
-      adminKeys.body.keys.find((k) => k.version === 2)!.encryptedKey,
-      adminPriv
-    );
-    assert.deepEqual(lateV1, roomKeyV1, "late member's decrypted v1 must match admin's v1");
-    assert.deepEqual(lateV2, adminV2Key, "late member's decrypted v2 must match admin's v2");
+    assert.deepEqual(lateV1, roomKeyV1, "late member's decrypted v1 must match the original");
+    assert.deepEqual(lateV2, rotateRes.roomKey, "late member's decrypted v2 must match v2's key");
   });
 });
 
@@ -444,7 +425,7 @@ test("grant rejects when target is not a room member", async () => {
     const admin = await createTestAgent();
     const outsider = await createTestAgent();
     const adminToken = await authenticateAgent(server.url, roomId, admin);
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    await clientSideRotate(server.url, roomId, adminToken);
 
     const res = await postJson<{ error: string }>(
       `${server.url}/rooms/${roomId}/keys/grant`,
@@ -466,7 +447,7 @@ test("grant is idempotent — already-stored versions are skipped", async () => 
     await authenticateAgent(server.url, roomId, member);
 
     // Rotate — both get version 1
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    await clientSideRotate(server.url, roomId, adminToken);
 
     // Grant version 1 for member again (already stored)
     const fakeKey = { ephemeralPublicKey: "aa".repeat(32), nonce: "bb".repeat(12), ciphertext: "cc".repeat(24) };
@@ -488,8 +469,8 @@ test("commit rejects plaintext links in an E2E-enabled room", async () => {
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
-    // Enable E2E
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, token);
+    // Enable E2E via client-side rotation
+    await clientSideRotate(server.url, roomId, token);
 
     // Attempt a plaintext commit — must fail
     const link = await createSignedLink(agent, { source: "s", predicate: "p", target: "t" });
@@ -509,8 +490,8 @@ test("commit accepts encrypted links in an E2E-enabled room", async () => {
     const agent = await createTestAgent();
     const token = await authenticateAgent(server.url, roomId, agent);
 
-    // Enable E2E
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, token);
+    // Enable E2E via client-side rotation
+    await clientSideRotate(server.url, roomId, token);
 
     // Encrypted commit — must succeed
     const wireLink = {
@@ -554,7 +535,7 @@ test("GET /keys returns e2e_enabled: true with empty keys for late member", asyn
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
     // Enable E2E (only admin gets key version 1)
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    await clientSideRotate(server.url, roomId, adminToken);
 
     // Add member after rotation
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
@@ -590,7 +571,7 @@ test("GET /keys/missing returns members missing historical key versions", async 
     const adminToken = await authenticateAgent(server.url, roomId, admin);
 
     // Version 1 — admin only
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    await clientSideRotate(server.url, roomId, adminToken);
 
     // Add late member
     const lateMember = await createTestAgent();
@@ -598,7 +579,7 @@ test("GET /keys/missing returns members missing historical key versions", async 
     await authenticateAgent(server.url, roomId, lateMember);
 
     // Version 2 — late member gets version 2 but lacks version 1
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    await clientSideRotate(server.url, roomId, adminToken);
 
     const res = await getJson<{
       membersNeedingHistoricalKeys: Array<{ did: string; missingVersions: number[] }>;
@@ -635,7 +616,7 @@ test("GET /keys/missing returns empty when no members have missing keys", async 
     await authenticateAgent(server.url, roomId, member);
 
     // Both present before rotation — both get version 1
-    await postJson(`${server.url}/rooms/${roomId}/keys/rotate`, {}, adminToken);
+    await clientSideRotate(server.url, roomId, adminToken);
 
     const res = await getJson<{
       membersNeedingHistoricalKeys: unknown[];

@@ -122,24 +122,32 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   local-only until the server recovers, but a process restart loses the
   queue — a durable pending-commits queue (persisted in the KV store,
   retried by `sync()`) would close this gap.
-- **No E2E key rotation handling.** The room key is fetched once during
-  `init()`'s `setupRoomKey()` and held for the perspective's lifetime. The
-  `version` field in `KeysResponse` is captured but unused — a real
-  rotation flow would need to detect a version bump (e.g. periodic
-  `/keys` re-fetch, or a dedicated WS push message not in the current
-  server API) and re-key in place.
+- **E2E encryption activates automatically — no plaintext mode.** The admin's
+  language instance generates the initial room key during `init()` when no E2E
+  exists yet. Subsequent rotations require explicit admin action.
+  `performRotation()` generates a fresh room key client-side, seals it to every
+  ACL member's X25519 public key, and POSTs only sealed envelopes — the server
+  never sees plaintext. It does NOT fire on presence events (`onPeerJoined` is
+  reconnect/wake, not ACL change — rotating there would mint a new version on
+  every reconnect). `onPeerJoined` only calls `performAdminKeyGrants()` to
+  grant historical keys to members who lack them (idempotent). The key ring
+  loads once during `init()`'s `setupKeyRing()` and the `version` field in
+  `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
+  re-fetch or a dedicated WS push message would close that gap.
 - **E2E encryption wire format is unified.** Both client and server use
   the same `EncryptedLinkData` shape (`{ciphertext, nonce}`) in the link's
   `data` field for encrypted rooms — no separate `encrypted` field. The
-  server treats link data as opaque (no E2E validation at commit time),
-  uses HKDF-SHA256 for key sealing (matching the client's KDF), returns
-  the `encryptedKey` envelope as a typed `SealedRoomKeyEnvelope` object,
-  and accepts client-registered X25519 public keys during auth.
-- **`peers.remote()` and E2E setup are not covered by the automated test
-  suite directly** (only indirectly, through `api.ts`/`encryption.ts` unit
-  tests) — there's no `index.ts`-level integration test because `index.ts`
-  requires the Deno `ad4m:host` bootstrap to exercise for real. Verify
-  those paths against a running `link-server` once one exists.
+  server treats link data as opaque (no E2E validation at commit time)
+  and stores only sealed `encryptedKey` envelopes (ECIES: ephemeral X25519
+  ECDH + HKDF-SHA256 + AES-256-GCM). Key generation and sealing happen
+  exclusively client-side. The server accepts client-registered X25519
+  public keys during auth.
+- **E2E integration coverage via test matrix.** The integration suite
+  (`tests/js/tests/integration.test.ts`) runs the full neighbourhood test
+  battery for both `[holochain]` and `[server-link]` link-language
+  configurations. Since E2E activates automatically for every room, the
+  `[server-link]` leg exercises the full init → key generation → encrypt →
+  sync → decrypt → grant pipeline through two real AD4M executors.
 
 ## Testing approach
 

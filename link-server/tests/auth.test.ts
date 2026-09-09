@@ -39,13 +39,14 @@ test("first agent to auth becomes room admin and receives a JWT", async () => {
     assert.equal(typeof verifyRes.body.token, "string");
     assert.equal(typeof verifyRes.body.expiresAt, "string");
 
-    const acl = await getJson<{ admin: string; members: string[] }>(
+    const acl = await getJson<{ admin: string; members: Array<{ did: string; x25519PublicKey: string | null }> }>(
       `${server.url}/rooms/${roomId}/acl`,
       verifyRes.body.token
     );
     assert.equal(acl.status, 200);
     assert.equal(acl.body.admin, agent.did);
-    assert.deepEqual(acl.body.members, [agent.did]);
+    assert.equal(acl.body.members.length, 1);
+    assert.equal(acl.body.members[0].did, agent.did);
   });
 });
 

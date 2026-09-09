@@ -167,9 +167,14 @@ export interface PeersResponse {
     peers: DID[];
 }
 
+export interface AclMember {
+    did: DID;
+    x25519PublicKey: string | null;
+}
+
 export interface AclResponse {
     admin: DID;
-    members: DID[];
+    members: AclMember[];
 }
 
 export interface KeysResponseEntry {

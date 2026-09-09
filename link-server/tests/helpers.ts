@@ -6,6 +6,11 @@ import * as ed from "@noble/ed25519";
 import WebSocket from "ws";
 import { edwardsToMontgomeryPriv, edwardsToMontgomeryPub } from "@noble/curves/ed25519";
 import { hashMessageForVerify, publicKeyToDid, signHex } from "../src/auth.js";
+import {
+  encryptRoomKeyForRecipient,
+  generateRoomKey,
+  type EncryptedKeyPayload,
+} from "../src/encryption.js";
 import { buildServer, type ServerOptions } from "../src/server.js";
 import {
   canonicalLinkPayload,
@@ -14,6 +19,8 @@ import {
   type LinkData,
   type LinkExpression,
 } from "../src/types.js";
+
+const { hexToBytes } = ed.etc;
 
 /** Everything needed to act as an AD4M agent in tests: identity + signing key. */
 export interface TestAgent {
@@ -247,5 +254,72 @@ export function collectMessages(socket: WebSocket): MessageCollector {
       await waitFor(() => messages.some((m) => m.type === type), timeoutMs);
       return messages.find((m) => m.type === type)!;
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Client-side E2E key rotation — mirrors production performRotation() flow
+// ---------------------------------------------------------------------------
+
+export interface ClientRotateResult {
+  version: number;
+  recipients: string[];
+  roomKey: Uint8Array;
+  membersNeedingHistoricalKeys?: Array<{
+    did: string;
+    missingVersions: number[];
+    x25519PublicKey: string;
+  }>;
+}
+
+/**
+ * Performs a client-side key rotation: generates the room key locally,
+ * fetches the ACL for X25519 public keys, seals the key to every member,
+ * and POSTs only the sealed envelopes. The plaintext room key never
+ * leaves this function's scope (returned for test assertions only).
+ */
+export async function clientSideRotate(
+  serverUrl: string,
+  roomId: string,
+  adminToken: string,
+): Promise<ClientRotateResult> {
+  const roomKey = generateRoomKey();
+
+  // Fetch ACL to get member X25519 public keys.
+  const aclRes = await getJson<{
+    admin: string;
+    members: Array<{ did: string; x25519PublicKey: string | null }>;
+  }>(`${serverUrl}/rooms/${roomId}/acl`, adminToken);
+  if (aclRes.status !== 200) {
+    throw new Error(`ACL fetch failed: ${aclRes.status} ${JSON.stringify(aclRes.body)}`);
+  }
+
+  // Seal the room key to each member with a registered X25519 public key.
+  const keys = aclRes.body.members
+    .filter((m) => m.x25519PublicKey)
+    .map((m) => ({
+      did: m.did,
+      encryptedKey: encryptRoomKeyForRecipient(roomKey, hexToBytes(m.x25519PublicKey!)),
+    }));
+
+  const rotateRes = await postJson<{
+    version: number;
+    recipients: string[];
+    membersNeedingHistoricalKeys?: Array<{
+      did: string;
+      missingVersions: number[];
+      x25519PublicKey: string;
+    }>;
+  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys }, adminToken);
+
+  if (rotateRes.status !== 200) {
+    throw new Error(`rotate failed: ${rotateRes.status} ${JSON.stringify(rotateRes.body)}`);
+  }
+
+  return {
+    version: rotateRes.body.version,
+    recipients: rotateRes.body.recipients,
+    roomKey,
+    membersNeedingHistoricalKeys: rotateRes.body.membersNeedingHistoricalKeys,
   };
 }

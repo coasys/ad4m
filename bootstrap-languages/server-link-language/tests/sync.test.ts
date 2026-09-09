@@ -147,21 +147,20 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.deepEqual(store.allLinks().links[0], link);
     });
 
-    it("throws on encrypted diff without key ring — no store mutation", () => {
+    it("skips encrypted diff without key ring — reports missing versions, advances cursor", () => {
         const transport = new MockTransport();
         setup(transport);
-        // keyRing stays null
+        // keyRing stays null — simulates a freshly joined member awaiting key grant
         const rk = generateRoomKey();
         const link = makeLink({ source: "encrypted-no-ring" });
         const wireLink = encryptLinkForWire(link, rk, 1);
 
-        assert.throws(
-            () => syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5"),
-            /no key ring available/,
-        );
-        assert.equal(store.allLinks().links.length, 0, "store must remain empty — no partial application");
-        assert.equal(store.getSequence(), 0, "sequence must not advance on failure");
-        assert.equal(emittedDiffs.length, 0, "no diff emitted on failure");
+        const result = syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
+
+        assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
+        assert.equal(store.getSequence(), 5, "sequence must advance — cursor must not get stuck");
+        assert.equal(result.missingVersions.size, 1, "must report the missing version");
+        assert.ok(result.missingVersions.has(1), "must report version 1");
     });
 
     it("skips encrypted diff with missing key version — applies rest, reports missing versions", () => {
@@ -370,6 +369,185 @@ describe("sync: catchUp / performSync", () => {
         assert.equal(emittedDiffs.length, 1);
         assert.deepEqual(emittedDiffs[0].additions[0].data, link.data);
         assert.equal(store.getSequence(), 1);
+    });
+
+    it("retries refreshKeyRing on subsequent sync when first attempt found no new keys", async () => {
+        // Simulates the CI race condition: Bob's first catchUp encounters an
+        // encrypted diff but refreshKeyRing finds no key yet (admin hasn't
+        // granted). The cursor advances past the diff. On the SECOND catchUp,
+        // the server returns empty diffs — but the persistent missing-versions
+        // set triggers another refreshKeyRing attempt, which now succeeds.
+        const transport = new MockTransport();
+        setup(transport);
+        const rk = generateRoomKey();
+        const link = makeLink({ source: "encrypted-retry" });
+        const wireLink = encryptLinkForWire(link, rk, 1);
+
+        let refreshCallCount = 0;
+
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => {
+                refreshCallCount++;
+                if (refreshCallCount >= 2) {
+                    // Second attempt: admin has granted the key
+                    keyRing = new Map([[1, rk]]);
+                    return true;
+                }
+                // First attempt: no key yet
+                return false;
+            },
+        });
+
+        let syncCallCount = 0;
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => {
+                syncCallCount++;
+                if (syncCallCount === 1) {
+                    // First sync: returns encrypted diff
+                    return {
+                        status: 200, headers: {},
+                        body: JSON.stringify({
+                            diffs: [{ additions: [wireLink], removals: [] }],
+                            revision: "rev-1", sequence: 1,
+                        }),
+                    };
+                }
+                // Second sync: empty — cursor already advanced past the diff
+                return {
+                    status: 200, headers: {},
+                    body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }),
+                };
+            },
+        );
+        // bootstrap(/render) route for re-bootstrap after key ring refresh
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => ({
+                status: 200, headers: {},
+                body: JSON.stringify({ links: [wireLink], revision: "rev-1" }),
+            }),
+        );
+
+        // First catchUp: encrypted diff skipped, refreshKeyRing returns false
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 1, "first catchUp must call refreshKeyRing");
+        assert.equal(emittedDiffs.length, 1, "first catchUp emits (with skipped links)");
+        const firstEmit = emittedDiffs[0];
+        assert.equal(firstEmit.additions.length, 0, "encrypted link must be skipped");
+
+        // Second catchUp: empty diffs, but persistent missing versions
+        // triggers retry — this time refreshKeyRing succeeds → re-bootstrap
+        emittedDiffs = [];
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 2, "second catchUp must retry refreshKeyRing");
+        // Re-bootstrap should have emitted the decrypted link
+        assert.ok(emittedDiffs.length > 0, "re-bootstrap must emit the recovered link");
+        const recoveredLinks = emittedDiffs.flatMap((d) => d.additions);
+        assert.ok(
+            recoveredLinks.some((l) => l.data.source === "encrypted-retry"),
+            "recovered link must have the original plaintext data",
+        );
+    });
+
+    it("trackMissingKeyVersions bridges WS-path misses into the HTTP-sync retry set", async () => {
+        // Simulates the real-world flow: Bob receives an encrypted diff via
+        // WebSocket (applyInboundWireDiff called OUTSIDE catchUp), can't
+        // decrypt it, and calls trackMissingKeyVersions. The next catchUp
+        // sees _pendingMissingVersions > 0 even though the HTTP response
+        // has 0 diffs (cursor already advanced by applyInboundWireDiff).
+        const transport = new MockTransport();
+        setup(transport);
+        const rk = generateRoomKey();
+        const link = makeLink({ source: "ws-recovery" });
+        const wireLink = encryptLinkForWire(link, rk, 1);
+
+        let refreshCallCount = 0;
+
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => {
+                refreshCallCount++;
+                // First call (from catchUp): grant the key
+                keyRing = new Map([[1, rk]]);
+                return true;
+            },
+        });
+
+        // Step 1: Simulate WS onDiff — applyInboundWireDiff outside catchUp.
+        // This advances the sequence cursor but can't decrypt.
+        const wsResult = syncModule.applyInboundWireDiff(
+            { additions: [wireLink], removals: [] }, 1, "rev-1",
+        );
+        assert.equal(wsResult.missingVersions.size, 1, "WS diff must report missing version");
+        assert.equal(emittedDiffs.length, 1, "WS diff must emit (with skipped links)");
+        assert.equal(emittedDiffs[0].additions.length, 0, "encrypted link must be skipped");
+
+        // Step 2: Bridge the missing versions — this is what index.ts does
+        syncModule.trackMissingKeyVersions(wsResult.missingVersions);
+
+        // Step 3: HTTP catchUp — server returns empty (cursor already past)
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => ({
+                status: 200, headers: {},
+                body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }),
+            }),
+        );
+        // bootstrap route for re-bootstrap after key ring refresh
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => ({
+                status: 200, headers: {},
+                body: JSON.stringify({ links: [wireLink], revision: "rev-1" }),
+            }),
+        );
+
+        emittedDiffs = [];
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 1, "catchUp must call refreshKeyRing from pending set");
+        assert.ok(emittedDiffs.length > 0, "re-bootstrap must emit the recovered link");
+        const recoveredLinks = emittedDiffs.flatMap((d) => d.additions);
+        assert.ok(
+            recoveredLinks.some((l) => l.data.source === "ws-recovery"),
+            "recovered link must have the original plaintext data",
+        );
+    });
+
+    it("clearPendingMissingVersions prevents redundant retries", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+
+        // Populate and then clear
+        syncModule.trackMissingKeyVersions(new Set([1, 2, 3]));
+        syncModule.clearPendingMissingVersions();
+
+        let refreshCalled = false;
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => { refreshCalled = true; return false; },
+        });
+
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 0 }) }),
+        );
+
+        await syncModule.catchUp();
+        assert.equal(refreshCalled, false, "refreshKeyRing must not be called after clear");
     });
 
     it("performSync never throws — logs and reports LinkLanguageInstalledButNotSynced on failure", async () => {

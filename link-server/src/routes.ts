@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { didToPublicKey, hashMessageForVerify, verifyHex, type AuthManager, type ChallengeStore } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
-import { rotateRoomKey, type EncryptedKeyPayload } from "./encryption.js";
+import type { EncryptedKeyPayload } from "./encryption.js";
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import {
@@ -331,7 +331,13 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const claims = request.authClaims!;
       const room = ctx.db.getRoom(claims.roomId)!;
       const acl = ctx.db.getAcl(claims.roomId);
-      return reply.send({ admin: room.admin_did, members: acl.map((a) => a.did) });
+      return reply.send({
+        admin: room.admin_did,
+        members: acl.map((a) => ({
+          did: a.did,
+          x25519PublicKey: a.x25519_public_key ?? null,
+        })),
+      });
     }
   );
 
@@ -364,12 +370,81 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const result = rotateRoomKey(ctx.db, claims.roomId);
-      return reply.send({
-        version: result.version,
-        recipients: result.recipients,
-        membersNeedingHistoricalKeys: result.membersNeedingHistoricalKeys,
-      });
+      const body = request.body as {
+        keys?: Array<{ did: string; encryptedKey: unknown }>;
+      } | null;
+
+      if (!body || !Array.isArray(body.keys) || body.keys.length === 0) {
+        return reply.code(400).send({
+          error: "keys array is required and must not be empty — " +
+                 "generate the room key client-side and seal it to each member",
+        });
+      }
+
+      // Validate each entry: DID must exist in the room's ACL, encryptedKey
+      // must have the expected shape.
+      const aclDids = new Set(ctx.db.getAcl(claims.roomId).map((a) => a.did));
+      for (const entry of body.keys) {
+        if (!entry || typeof entry !== "object") {
+          return reply.code(400).send({ error: "each key entry must be a non-null object" });
+        }
+        if (typeof entry.did !== "string" || !aclDids.has(entry.did)) {
+          return reply.code(400).send({
+            error: `DID ${entry.did ?? "(missing)"} is not in this room's ACL`,
+          });
+        }
+        const ek = entry.encryptedKey as Partial<EncryptedKeyPayload> | null;
+        if (
+          !ek ||
+          typeof ek.ephemeralPublicKey !== "string" ||
+          typeof ek.nonce !== "string" ||
+          typeof ek.ciphertext !== "string"
+        ) {
+          return reply.code(400).send({
+            error: `malformed encryptedKey for DID ${entry.did}`,
+          });
+        }
+      }
+
+      const version = ctx.db.getLatestKeyVersion(claims.roomId) + 1;
+      const recipients: string[] = [];
+      for (const entry of body.keys) {
+        ctx.db.addRoomKey(
+          claims.roomId,
+          entry.did,
+          version,
+          JSON.stringify(entry.encryptedKey),
+        );
+        recipients.push(entry.did);
+      }
+      ctx.db.setE2eEnabled(claims.roomId, true);
+
+      // Detect members missing historical key versions so the admin can
+      // grant them (same logic as the old server-side rotate).
+      const membersNeedingHistoricalKeys: Array<{
+        did: string;
+        missingVersions: number[];
+        x25519PublicKey: string;
+      }> = [];
+      if (version > 1) {
+        const allAcl = ctx.db.getAcl(claims.roomId);
+        const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
+        const expected = Array.from({ length: version }, (_, i) => i + 1);
+        for (const row of allAcl) {
+          if (!row.x25519_public_key) continue;
+          const has = new Set(allVersions.get(row.did) ?? []);
+          const missing = expected.filter((v) => !has.has(v));
+          if (missing.length > 0) {
+            membersNeedingHistoricalKeys.push({
+              did: row.did,
+              missingVersions: missing,
+              x25519PublicKey: row.x25519_public_key,
+            });
+          }
+        }
+      }
+
+      return reply.send({ version, recipients, membersNeedingHistoricalKeys });
     }
   );
 

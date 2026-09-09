@@ -97,11 +97,28 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 await testContext.makeAllNodesKnown()
                 expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
 
-                await sleep(1000)
+                // Wait for Alice's link language to be wired.
+                // publishFromPerspective sets state=NeighbourhoodCreationInitiated.
+                // ensure_link_language (5s-interval background task) detects
+                // the neighbourhood, wires self.link_language, and sets state
+                // to LinkLanguageInstalledButNotSynced. Wait for any state
+                // past NeighboudhoodCreationInitiated (note: enum member has
+                // typo) — that guarantees the language runtime exists and
+                // addLink won't hit "LinkLanguage not available".
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired" });
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
-                await sleep(1000)
+                // Give time for the commit POST to reach the server, and for
+                // Bob's sync cycle to pick up the (possibly encrypted) diff.
+                // With E2E, Bob may need an extra refreshKeyRing round to
+                // decrypt — 5 s covers the typical WS + HTTP sync cadence.
+                await sleep(5000)
 
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
@@ -162,12 +179,19 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 await testContext.makeAllNodesKnown()
 
-                await sleep(1000)
+                // Wait for Alice's link language to be wired (see simple
+                // test comment for rationale).
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired (stress)" });
 
-                // Create 1500 links as fast as possible — the batching system
-                // (enqueueCommitBatched → coalesceDiffs) coalesces the burst
-                // into a small number of POSTs. No artificial throttling: this
-                // exercises the continuous-burst path end-to-end.
+                // Create 1500 links as fast as possible — the executor's own
+                // pending_diffs_loop batches them (1s inactivity / 3s max /
+                // 150 max count). No artificial throttling: this exercises
+                // the continuous-burst path end-to-end.
                 for(let i = 0; i < 1500; i++) {
                     console.log("Alice adding link ", i)
                     const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: `test://test/${i}`})
