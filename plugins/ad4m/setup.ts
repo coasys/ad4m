@@ -36,8 +36,17 @@ const SEPARATOR = "════════════════════�
  * problem. `auth_status` already reports `executor_locked` in every branch, so
  * the cause is one call away — this function only decides what to say about it.
  *
+ * A third case is not a cause but an absence: `auth_status` may itself have
+ * failed, in which case we do not know whether the node is locked. That is
+ * reported as its own line rather than folded into the not-locked branch —
+ * "we checked and you are fine" and "we could not check" must not read alike.
+ *
  * Pure so it can be tested without a node: callers pass what the two tools
- * returned, and get back the lines to print in order.
+ * returned, and get back the lines to print and the placeholder the config
+ * snippet should carry. The placeholder is part of the same decision: printing
+ * `<paste-your-jwt-here>` directly under "a JWT will not help" contradicts the
+ * warning, and skimming past the warning is exactly how this failure was
+ * reached in the first place.
  *
  * @param capData    - `request_capability` result, or undefined if it failed.
  * @param statusData - `auth_status` result, or undefined if that call failed too.
@@ -45,24 +54,29 @@ const SEPARATOR = "════════════════════�
 export function explainCapabilityFailure(input: {
   capData?: any;
   statusData?: any;
-}): string[] {
+}): { lines: string[]; tokenPlaceholder: string } {
   const { capData, statusData } = input;
 
   if (statusData?.executor_locked === true) {
-    return [
-      "Could not complete auth: the executor is LOCKED, not misconfigured.",
-      statusData.message ??
-        "No login can succeed until the executor's operator calls unlockAgent.",
-      // The action is stated here, not borrowed from `statusData.message`: an
-      // older executor may answer with a terser message, and the operator
-      // still has to be told which call unlocks the node.
-      "A JWT will not help here — a locked node rejects it too. Have the " +
-        "executor's operator call unlockAgent, then run `openclaw ad4m-setup` " +
-        "again.",
-    ];
+    return {
+      lines: [
+        "Could not complete auth: the executor is LOCKED, not misconfigured.",
+        statusData.message ??
+          "No login can succeed until the executor's operator calls unlockAgent.",
+        // The action is stated here, not borrowed from `statusData.message`: an
+        // older executor may answer with a terser message, and the operator
+        // still has to be told which call unlocks the node.
+        "A JWT will not help here — a locked node rejects it too. Have the " +
+          "executor's operator call unlockAgent, then run `openclaw ad4m-setup` " +
+          "again.",
+      ],
+      // Not a JWT prompt: the snippet is still worth printing for its shape,
+      // but the field the reader copies must not invite the wrong remedy.
+      tokenPlaceholder: "<unlock the executor first, then re-run ad4m-setup>",
+    };
   }
 
-  // Not locked (or the node did not say). The handshake itself is the suspect.
+  // Not locked, or we could not find out. The handshake itself is the suspect.
   const lines = [
     capData?.request_id
       ? "Could not complete auth: the capability request was issued but never " +
@@ -72,11 +86,18 @@ export function explainCapabilityFailure(input: {
   if (typeof capData?.error === "string") {
     lines.push(`Executor said: ${capData.error}`);
   }
+  if (statusData === undefined || statusData === null) {
+    lines.push(
+      "Note: `auth_status` did not answer either, so the executor's lock state " +
+        "is unknown. If it is locked, no token will work until its operator " +
+        "calls unlockAgent — check that before pasting anything.",
+    );
+  }
   lines.push(
     "Confirm the verification code in your AD4M executor and re-run " +
       "`openclaw ad4m-setup`, or paste a JWT obtained from the executor below.",
   );
-  return lines;
+  return { lines, tokenPlaceholder: "<paste-your-jwt-here>" };
 }
 
 /**
@@ -447,12 +468,13 @@ async function setupExternalMode(
     const statusData = extractMcpResultData(
       await mcpCallTool(endpoint, "auth_status", {}, initResp.sessionId),
     );
-    for (const line of explainCapabilityFailure({ capData, statusData })) {
+    const failure = explainCapabilityFailure({ capData, statusData });
+    for (const line of failure.lines) {
       logger.warn(`[ad4m-setup] ${line}`);
     }
     printConfigSnippet(logger, "external", {
       mcpEndpoint: endpoint,
-      token: "<paste-your-jwt-here>",
+      token: failure.tokenPlaceholder,
       wakeToken,
     });
   } catch (e: any) {

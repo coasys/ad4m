@@ -3641,7 +3641,7 @@ describe("explainCapabilityFailure", () => {
   // operator hand-edited a JWT into the config chasing a cause that was not
   // the token.
   it("names the lock, and says a JWT will not help, when the node is locked", () => {
-    const lines = explainCapabilityFailure({
+    const { lines } = explainCapabilityFailure({
       capData: { request_id: "req-1", code: "123456" },
       // Deliberately terser than the executor's real message: the action has
       // to come from our own line, not from whatever the node happened to say.
@@ -3659,15 +3659,33 @@ describe("explainCapabilityFailure", () => {
     expect(text).toContain("ad4m-setup");
   });
 
+  it("does not print a JWT prompt under a warning that a JWT will not help", () => {
+    // The snippet is still printed — its shape is what the operator needs
+    // after unlocking — but the field they copy must not contradict the
+    // warning directly above it. Skimming past that warning is how this
+    // failure was reached.
+    const locked = explainCapabilityFailure({
+      statusData: { executor_locked: true },
+    });
+    expect(locked.tokenPlaceholder).not.toContain("paste-your-jwt");
+    expect(locked.tokenPlaceholder).toContain("unlock");
+
+    const unlocked = explainCapabilityFailure({
+      capData: { request_id: "req-1" },
+      statusData: { executor_locked: false },
+    });
+    expect(unlocked.tokenPlaceholder).toBe("<paste-your-jwt-here>");
+  });
+
   it("passes the executor's own lock message through rather than paraphrasing it", () => {
-    const lines = explainCapabilityFailure({
+    const { lines } = explainCapabilityFailure({
       statusData: { executor_locked: true, message: "Ask the operator, then retry." },
     });
     expect(lines).toContain("Ask the operator, then retry.");
   });
 
   it("blames the unconfirmed handshake, not the lock, on an unlocked node", () => {
-    const lines = explainCapabilityFailure({
+    const { lines } = explainCapabilityFailure({
       capData: { request_id: "req-1", code: "123456" },
       statusData: { authenticated: false, executor_locked: false },
     });
@@ -3676,10 +3694,12 @@ describe("explainCapabilityFailure", () => {
     expect(text).not.toContain("LOCKED");
     // Here a manually obtained JWT genuinely is a remedy.
     expect(text).toContain("JWT");
+    // We checked and the node is fine — do not hedge about the lock state.
+    expect(text).not.toContain("lock state is unknown");
   });
 
   it("reports the executor's error when the capability request itself failed", () => {
-    const lines = explainCapabilityFailure({
+    const { lines } = explainCapabilityFailure({
       capData: { error: "capability request rejected" },
       statusData: { executor_locked: false },
     });
@@ -3688,13 +3708,15 @@ describe("explainCapabilityFailure", () => {
     expect(text).toContain("capability request rejected");
   });
 
-  it("falls back to the handshake explanation when auth_status itself failed", () => {
-    // statusData undefined = the auth_status call errored too. Absence of a
-    // lock signal must not be read as "not locked and definitely fine"; the
-    // generic branch still names an action the operator can take.
-    const lines = explainCapabilityFailure({ capData: { request_id: "req-1" } });
-    expect(lines.length).toBeGreaterThan(0);
-    expect(lines.join(" ")).toContain("ad4m-setup");
+  it("says the lock state is unknown when auth_status itself failed", () => {
+    // "We checked, you are fine" and "we could not check" must not read
+    // alike: undefined statusData used to produce a message word-for-word
+    // identical to the confirmed-unlocked case.
+    const { lines } = explainCapabilityFailure({ capData: { request_id: "req-1" } });
+    const text = lines.join(" ");
+    expect(text).toContain("lock state is unknown");
+    expect(text).toContain("unlockAgent");
+    expect(text).toContain("ad4m-setup");
   });
 });
 

@@ -292,7 +292,12 @@ executor's operator call unlockAgent, then run `openclaw ad4m-setup` again.
 
 **Pasting a JWT is not the remedy** — a locked node rejects a valid token exactly as it
 rejects the handshake. Unlock the executor first (`unlockAgent`, or the launcher's
-passphrase prompt), then re-run setup.
+passphrase prompt), then re-run setup. The config snippet printed below the warning says
+the same thing in the field you would otherwise fill:
+`"token": "<unlock the executor first, then re-run ad4m-setup>"`.
+
+If `auth_status` cannot be reached either, setup says the lock state is **unknown** rather
+than implying the node is fine — check it before pasting anything.
 
 `ad4m_auth_status` answers the same question at any time: `executor_locked: true`
 alongside `authenticated: true` means your credential is fine and the node is not ready.
