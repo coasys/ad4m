@@ -112,8 +112,10 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
                     readyTries++;
                 }
+                console.log(`[TEST-DIAG] Alice perspective state after poll: ${aliceReady?.state} (tries=${readyTries})`);
 
-                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                const addResult = await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
+                console.log(`[TEST-DIAG] addLink returned:`, JSON.stringify(addResult?.data))
 
                 await sleep(1000)
 
