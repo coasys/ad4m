@@ -34,6 +34,23 @@ whole session, not just the install command — sort out which gateway you will 
 *before* you install. A missing `ad4m_*` tool means you are talking to the wrong gateway.
 It is not a reason to hand-roll an MCP client.
 
+**Check which build actually loaded, every time.** `openclaw plugins list --json` reports
+`origin`, `source` and `status` for `ad4m`. A plugin selected by config (a
+`plugins.entries` path, or an entry in `plugins.load.paths`) silently overrides a globally
+installed one of the same id, so the tool surface you get may come from a checkout you did
+not install. Wrong tool names, or a tool count that disagrees with `contracts.tools` in
+`openclaw.plugin.json`, is that — not a broken bridge.
+
+Two consequences worth knowing before you touch an install:
+
+- `openclaw plugins uninstall ad4m` owns registry installs only. Against a config-selected
+  plugin it fails with *"no authoritative package-owner metadata"*, which does not say
+  what is actually wrong. Remove that kind by deleting the path from `plugins.load.paths`
+  (and `plugins.entries.ad4m` if you want the credentials gone — back it up, it holds
+  your JWT), then restart.
+- Removing the config entry can *reveal* an older global install rather than remove the
+  plugin. Re-check `source` after the restart before concluding anything.
+
 ## Deployment Scenarios & Networking
 
 ### Scenario 1: Single-user, local (simplest)
