@@ -861,10 +861,10 @@ impl AIService {
                                     if let Some(task) =
                                         task_descriptions.get(&prompt_request.task_id)
                                     {
-                                        let request = ChatRequest {
-                                            model: model_string.clone(),
-                                            messages: turns_for_task(task, prompt_request.prompt),
-                                        };
+                                        let request = ChatRequest::new(
+                                            model_string.clone(),
+                                            turns_for_task(task, prompt_request.prompt),
+                                        );
 
                                         let result = rt
                                             .block_on(remote_client.chat(request))
@@ -944,10 +944,10 @@ impl AIService {
                                         task_descriptions.get(&stream_request.task_id)
                                     {
                                         let prompt_clone = stream_request.prompt.clone();
-                                        let request = ChatRequest {
-                                            model: model_string.clone(),
-                                            messages: turns_for_task(task, prompt_clone.clone()),
-                                        };
+                                        let request = ChatRequest::new(
+                                            model_string.clone(),
+                                            turns_for_task(task, prompt_clone.clone()),
+                                        );
                                         let token_sender = stream_request.token_sender.clone();
                                         match rt.block_on(
                                             remote_client.chat_stream(request, token_sender),

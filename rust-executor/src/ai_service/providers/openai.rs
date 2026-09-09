@@ -115,6 +115,11 @@ impl RemoteChat for OpenAiChat {
             .map(|choice| choice.message.content.clone())
             .ok_or_else(|| anyhow!("Got response with no choice"))?;
 
-        Ok(ChatReply { text })
+        // No native tool support: a caller wanting tools rendered them into
+        // the prompt and will recover the calls from this text itself.
+        Ok(ChatReply {
+            text,
+            tool_calls: Vec::new(),
+        })
     }
 }

@@ -33,7 +33,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use url::Url;
 
-use super::{ChatReply, ChatRequest, ChatRole, RemoteChat};
+use super::{ChatReply, ChatRequest, ChatRole, ChatTurn, RemoteChat, ToolCall, ToolSpec};
 
 /// Wire version. Anthropic requires it on every request and treats it as the
 /// contract: pinning it is what stops a server-side change reshaping our
@@ -129,6 +129,10 @@ struct MessagesRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     system: Vec<SystemBlock>,
     messages: Vec<WireMessage>,
+    /// Omitted when empty, so a request without tools is byte-identical to
+    /// what it was before tools existed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireTool>,
     /// Omitted entirely rather than sent as `false`, so the non-streaming
     /// request stays byte-identical to what it was before streaming existed.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -150,10 +154,22 @@ struct CacheControl {
     kind: &'static str,
 }
 
+/// A turn on the wire. `content` is either a plain string or a list of
+/// content blocks — the API accepts both, and a turn only needs blocks when it
+/// carries a tool call or a tool result.
 #[derive(Serialize)]
 struct WireMessage {
     role: &'static str,
-    content: String,
+    content: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct WireTool {
+    name: String,
+    description: String,
+    /// Anthropic's name for the JSON Schema every other provider calls
+    /// `parameters`. Same document, different key.
+    input_schema: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +184,13 @@ struct ContentBlock {
     kind: String,
     #[serde(default)]
     text: String,
+    // --- present on `tool_use` blocks only ---
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    input: serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -188,16 +211,64 @@ fn split_system(request: &ChatRequest) -> (Vec<String>, Vec<WireMessage>) {
             ChatRole::System => system.push(turn.content.clone()),
             ChatRole::User => messages.push(WireMessage {
                 role: "user",
-                content: turn.content.clone(),
+                content: user_content(turn),
             }),
             ChatRole::Assistant => messages.push(WireMessage {
                 role: "assistant",
-                content: turn.content.clone(),
+                content: assistant_content(turn),
             }),
         }
     }
 
     (system, messages)
+}
+
+fn to_wire_tool(spec: &ToolSpec) -> WireTool {
+    WireTool {
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        input_schema: spec.parameters.clone(),
+    }
+}
+
+/// A user turn is plain text unless it is answering a tool call, in which case
+/// it is a single `tool_result` block naming the call it answers.
+fn user_content(turn: &ChatTurn) -> serde_json::Value {
+    match &turn.tool_result_for {
+        Some(call_id) => serde_json::json!([{
+            "type": "tool_result",
+            "tool_use_id": call_id,
+            "content": turn.content,
+        }]),
+        None => serde_json::Value::String(turn.content.clone()),
+    }
+}
+
+/// An assistant turn is plain text unless it made tool calls, in which case it
+/// is any text it wrote followed by one `tool_use` block per call.
+///
+/// The text is kept rather than dropped: models routinely write a sentence of
+/// intent before calling something, and losing it leaves the next turn's
+/// prompt with an unexplained call in the history.
+fn assistant_content(turn: &ChatTurn) -> serde_json::Value {
+    if turn.tool_calls.is_empty() {
+        return serde_json::Value::String(turn.content.clone());
+    }
+
+    let mut blocks = Vec::with_capacity(turn.tool_calls.len() + 1);
+    if !turn.content.is_empty() {
+        blocks.push(serde_json::json!({ "type": "text", "text": turn.content }));
+    }
+    for call in &turn.tool_calls {
+        blocks.push(serde_json::json!({
+            "type": "tool_use",
+            "id": call.id,
+            "name": call.name,
+            "input": call.arguments,
+        }));
+    }
+
+    serde_json::Value::Array(blocks)
 }
 
 impl AnthropicChat {
@@ -207,6 +278,7 @@ impl AnthropicChat {
     /// forget in the other.
     fn build_body(&self, request: ChatRequest, stream: bool) -> MessagesRequest {
         let (system_parts, messages) = split_system(&request);
+        let tools: Vec<WireTool> = request.tools.iter().map(to_wire_tool).collect();
 
         let system = if system_parts.is_empty() {
             Vec::new()
@@ -223,6 +295,7 @@ impl AnthropicChat {
             max_tokens: DEFAULT_MAX_TOKENS,
             system,
             messages,
+            tools,
             stream,
         }
     }
@@ -252,8 +325,40 @@ impl AnthropicChat {
     }
 }
 
+/// Read a reply's content blocks into text and tool calls.
+///
+/// The two are separated rather than concatenated: a `tool_use` block is data,
+/// and stringifying it into the answer is exactly the confusion that
+/// text-extracted tool calling has to live with and native tool calling exists
+/// to avoid.
+fn read_content(blocks: &[ContentBlock]) -> (String, Vec<ToolCall>) {
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+
+    for block in blocks {
+        match block.kind.as_str() {
+            "text" => text.push_str(&block.text),
+            "tool_use" => tool_calls.push(ToolCall {
+                id: block.id.clone(),
+                name: block.name.clone(),
+                arguments: block.input.clone(),
+            }),
+            // A block type we do not know about is skipped rather than
+            // guessed at — a future one appearing in the answer should not
+            // corrupt the text or invent a call.
+            _ => {}
+        }
+    }
+
+    (text, tool_calls)
+}
+
 #[async_trait]
 impl RemoteChat for AnthropicChat {
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
         let body = self.build_body(request, false);
         let response = self.send(&body).await?;
@@ -263,18 +368,9 @@ impl RemoteChat for AnthropicChat {
             .await
             .map_err(|e| anyhow!("Could not read Anthropic response: {:?}", e))?;
 
-        // A reply is a list of blocks; the text ones concatenate. Anything
-        // else (a tool_use block, once tools are passed natively) is not this
-        // method's business and is skipped rather than stringified.
-        let text = parsed
-            .content
-            .iter()
-            .filter(|b| b.kind == "text")
-            .map(|b| b.text.as_str())
-            .collect::<Vec<_>>()
-            .join("");
+        let (text, tool_calls) = read_content(&parsed.content);
 
-        Ok(ChatReply { text })
+        Ok(ChatReply { text, tool_calls })
     }
 
     async fn chat_stream(
@@ -305,13 +401,19 @@ impl RemoteChat for AnthropicChat {
                     if tokens.send(delta).is_err() {
                         // Consumer hung up. Stop reading rather than
                         // draining a response nobody will see.
-                        return Ok(ChatReply { text });
+                        return Ok(ChatReply {
+                            text,
+                            tool_calls: Vec::new(),
+                        });
                     }
                 }
             }
         }
 
-        Ok(ChatReply { text })
+        Ok(ChatReply {
+            text,
+            tool_calls: Vec::new(),
+        })
     }
 }
 
@@ -386,15 +488,15 @@ mod tests {
 
     #[test]
     fn system_turns_are_hoisted_out_of_the_conversation() {
-        let request = ChatRequest {
-            model: "claude-opus-5".to_string(),
-            messages: vec![
+        let request = ChatRequest::new(
+            "claude-opus-5",
+            vec![
                 super::super::ChatTurn::system("be terse"),
                 super::super::ChatTurn::user("hello"),
                 super::super::ChatTurn::assistant("hi"),
                 super::super::ChatTurn::user("again"),
             ],
-        };
+        );
 
         let (system, messages) = split_system(&request);
 
@@ -407,14 +509,14 @@ mod tests {
 
     #[test]
     fn several_system_turns_concatenate() {
-        let request = ChatRequest {
-            model: "claude-opus-5".to_string(),
-            messages: vec![
+        let request = ChatRequest::new(
+            "claude-opus-5",
+            vec![
                 super::super::ChatTurn::system("first"),
                 super::super::ChatTurn::system("second"),
                 super::super::ChatTurn::user("go"),
             ],
-        };
+        );
 
         let (system, _) = split_system(&request);
         assert_eq!(system.join("\n"), "first\nsecond");
@@ -431,6 +533,7 @@ mod tests {
                 cache_control: Some(CacheControl { kind: "ephemeral" }),
             }],
             messages: vec![],
+            tools: vec![],
             stream: false,
         };
 
@@ -485,6 +588,139 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_result_turn_becomes_a_tool_result_block() {
+        let turn = ChatTurn::tool_result("toolu_1", "42");
+        let content = user_content(&turn);
+
+        assert_eq!(content[0]["type"], "tool_result");
+        assert_eq!(content[0]["tool_use_id"], "toolu_1");
+        assert_eq!(content[0]["content"], "42");
+    }
+
+    #[test]
+    fn an_ordinary_user_turn_stays_a_plain_string() {
+        let content = user_content(&ChatTurn::user("hello"));
+        assert_eq!(content, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn an_assistant_turn_with_calls_carries_its_text_and_every_call() {
+        // Models routinely write a sentence of intent before calling
+        // something; dropping it leaves an unexplained call in the history.
+        let turn = ChatTurn::assistant_calling(
+            "Looking that up.",
+            vec![
+                ToolCall {
+                    id: "toolu_1".into(),
+                    name: "search".into(),
+                    arguments: serde_json::json!({ "q": "x" }),
+                },
+                ToolCall {
+                    id: "toolu_2".into(),
+                    name: "count".into(),
+                    arguments: serde_json::json!({}),
+                },
+            ],
+        );
+
+        let content = assistant_content(&turn);
+
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Looking that up.");
+        assert_eq!(content[1]["type"], "tool_use");
+        assert_eq!(content[1]["id"], "toolu_1");
+        assert_eq!(content[1]["input"]["q"], "x");
+        assert_eq!(content[2]["id"], "toolu_2");
+    }
+
+    #[test]
+    fn an_assistant_turn_that_only_called_omits_the_empty_text_block() {
+        let turn = ChatTurn::assistant_calling(
+            "",
+            vec![ToolCall {
+                id: "toolu_1".into(),
+                name: "search".into(),
+                arguments: serde_json::json!({}),
+            }],
+        );
+
+        let content = assistant_content(&turn);
+        assert_eq!(content.as_array().map(|a| a.len()), Some(1));
+        assert_eq!(content[0]["type"], "tool_use");
+    }
+
+    #[test]
+    fn an_assistant_turn_without_calls_stays_a_plain_string() {
+        let content = assistant_content(&ChatTurn::assistant("just talking"));
+        assert_eq!(content, serde_json::json!("just talking"));
+    }
+
+    #[test]
+    fn a_tool_schema_is_sent_as_input_schema() {
+        let wire = to_wire_tool(&ToolSpec {
+            name: "search".into(),
+            description: "find things".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+        });
+
+        let json = serde_json::to_value(&wire).expect("tool serialises");
+        assert_eq!(json["name"], "search");
+        assert_eq!(json["input_schema"]["type"], "object");
+        assert!(json.get("parameters").is_none());
+    }
+
+    #[test]
+    fn text_and_tool_calls_are_read_apart_rather_than_concatenated() {
+        let blocks = vec![
+            ContentBlock {
+                kind: "text".into(),
+                text: "one moment".into(),
+                id: String::new(),
+                name: String::new(),
+                input: serde_json::Value::Null,
+            },
+            ContentBlock {
+                kind: "tool_use".into(),
+                text: String::new(),
+                id: "toolu_9".into(),
+                name: "search".into(),
+                input: serde_json::json!({ "q": "y" }),
+            },
+        ];
+
+        let (text, calls) = read_content(&blocks);
+
+        assert_eq!(text, "one moment");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "toolu_9");
+        assert_eq!(calls[0].arguments["q"], "y");
+    }
+
+    #[test]
+    fn an_unknown_block_type_is_skipped_rather_than_guessed_at() {
+        let blocks = vec![ContentBlock {
+            kind: "something_new".into(),
+            text: "should not appear".into(),
+            id: String::new(),
+            name: String::new(),
+            input: serde_json::Value::Null,
+        }];
+
+        let (text, calls) = read_content(&blocks);
+        assert_eq!(text, "");
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn this_provider_advertises_native_tool_support() {
+        // The harness branches on this to decide between handing tools over
+        // and rendering them into the prompt; answering it wrongly sends a
+        // model down a path its wire format cannot serve.
+        let client = AnthropicChat::new("k", url("https://api.anthropic.com"));
+        assert!(client.supports_native_tools());
+    }
+
+    #[test]
     fn an_absent_system_prompt_is_omitted_rather_than_sent_empty() {
         let body = MessagesRequest {
             model: "claude-opus-5".to_string(),
@@ -492,8 +728,9 @@ mod tests {
             system: vec![],
             messages: vec![WireMessage {
                 role: "user",
-                content: "go".to_string(),
+                content: serde_json::Value::String("go".to_string()),
             }],
+            tools: vec![],
             stream: false,
         };
 

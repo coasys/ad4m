@@ -69,11 +69,10 @@ pub(crate) fn model_ids_from_data(json: &serde_json::Value) -> Vec<String> {
 
 /// Who is speaking in one turn of a conversation.
 ///
-/// Deliberately smaller than either provider's role set: tool results and
-/// tool calls reach us already rendered into text by the callers in
-/// `api::openai_compat` (see `flatten_message` there), so a provider that
-/// cannot express a tool role never has to invent one. A provider that *can*
-/// express one reconstructs it from the rendered form.
+/// Smaller than either provider's role set, because a tool result is not a
+/// fourth speaker: it is something said back to the model, which both wire
+/// formats express as a user turn carrying a marker. That marker is
+/// [`ChatTurn::tool_result_for`] rather than a role of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatRole {
     System,
@@ -81,32 +80,83 @@ pub enum ChatRole {
     Assistant,
 }
 
+/// A tool the model may call.
+///
+/// `parameters` is a JSON Schema object. Providers rename the field to suit
+/// their wire format — Anthropic calls it `input_schema` — but none of them
+/// reinterpret it.
+#[derive(Debug, Clone)]
+pub struct ToolSpec {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// A call the model asked for.
+///
+/// `arguments` is a parsed object, not the JSON string OpenAI puts on the
+/// wire: every caller wants the object, and parsing it once here means a
+/// malformed one is caught in the provider rather than three layers up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
 /// One turn of a conversation, as the providers see it.
 #[derive(Debug, Clone)]
 pub struct ChatTurn {
     pub role: ChatRole,
     pub content: String,
+    /// Tool calls this assistant turn made. Empty on every other turn.
+    ///
+    /// Carried so the model sees its own prior invocations on the next turn,
+    /// which is what lets it correlate them with the results that follow.
+    pub tool_calls: Vec<ToolCall>,
+    /// Set when this turn is a tool *result*, naming the call it answers.
+    ///
+    /// Providers that express tool results structurally use the id; the ones
+    /// that do not ignore it, because their callers rendered the result into
+    /// `content` before it ever got here.
+    pub tool_result_for: Option<String>,
 }
 
 impl ChatTurn {
-    pub fn system(content: impl Into<String>) -> Self {
+    fn new(role: ChatRole, content: impl Into<String>) -> Self {
         Self {
-            role: ChatRole::System,
+            role,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_result_for: None,
         }
+    }
+
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new(ChatRole::System, content)
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self {
-            role: ChatRole::User,
-            content: content.into(),
-        }
+        Self::new(ChatRole::User, content)
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new(ChatRole::Assistant, content)
+    }
+
+    /// An assistant turn that called tools.
+    pub fn assistant_calling(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
-            role: ChatRole::Assistant,
-            content: content.into(),
+            tool_calls,
+            ..Self::new(ChatRole::Assistant, content)
+        }
+    }
+
+    /// The result of one tool call, going back to the model.
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            tool_result_for: Some(call_id.into()),
+            ..Self::new(ChatRole::User, content)
         }
     }
 }
@@ -120,12 +170,35 @@ impl ChatTurn {
 pub struct ChatRequest {
     pub model: String,
     pub messages: Vec<ChatTurn>,
+    /// Tools to advertise. Only ever non-empty for a provider whose
+    /// [`RemoteChat::supports_native_tools`] is true — everything else has its
+    /// tools rendered into the prompt before the request is built.
+    pub tools: Vec<ToolSpec>,
+}
+
+impl ChatRequest {
+    pub fn new(model: impl Into<String>, messages: Vec<ChatTurn>) -> Self {
+        Self {
+            model: model.into(),
+            messages,
+            tools: Vec::new(),
+        }
+    }
+
+    pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
+        self.tools = tools;
+        self
+    }
 }
 
 /// What a provider answered.
 #[derive(Debug, Clone, Default)]
 pub struct ChatReply {
     pub text: String,
+    /// Tool calls the model wants dispatched. Always empty from a provider
+    /// without native tool support — there, calls are recovered from `text` by
+    /// the caller that rendered the tools in.
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// A remote chat endpoint.
@@ -136,6 +209,22 @@ pub struct ChatReply {
 /// state.
 #[async_trait]
 pub trait RemoteChat: Send + Sync {
+    /// Whether tools can be handed to this provider as structured
+    /// definitions, and calls read back as structured blocks.
+    ///
+    /// False — the default — means the caller must render tool definitions
+    /// into the prompt and recover calls by parsing the reply text, which is
+    /// the uniform path in `openai_compat::harness_bridge` and works against
+    /// any model at all. True is strictly better where it is available: the
+    /// model is handed a schema instead of a description of one, and the calls
+    /// come back as data rather than as text that happens to look like data.
+    ///
+    /// Answering this wrongly is the one way a provider can break a caller, so
+    /// it is a plain fact about the wire format, never a preference.
+    fn supports_native_tools(&self) -> bool {
+        false
+    }
+
     /// Send a conversation, get the assistant's reply.
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply>;
 
