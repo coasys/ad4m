@@ -1372,7 +1372,10 @@ mod tests {
         let err = parse_shacl_to_links(shacl_json, "Post").unwrap_err();
         let message = format!("{err}");
         assert!(message.contains("author"), "{message}");
-        assert!(message.contains("hydration"), "{message}");
+        // Asserting on "overwrite" rather than a specific word like "hydration":
+        // that's the actual claim this error makes and the one worth keeping
+        // stable, not the exact phrasing around it.
+        assert!(message.contains("overwrit"), "{message}");
     }
 
     /// Every synthetic key `hydrate_one` writes, checked one at a time so a
