@@ -7,6 +7,17 @@
 //! trusts that sentence never has to open this file; [`fold`](super::fold)
 //! is where the decisions live.
 //!
+//! **A [`TransitionAtom`] carries no eligibility verdict.** It records every
+//! vote that carries a valid self-signature — it does not know, and does not
+//! ask, whether those voters were eligible to vote under the rule's `fromRole`
+//! gate. That check happens in [`super::roles::resolve_role_grants`], called
+//! from [`super::FlowInstance::read_set`], and the result lands in
+//! [`super::ReadSet::role_grants`]. [`Vote`] is the struct that carries a
+//! timestamp; it is not an eligibility claim.  Reviewers who expect to find
+//! the role gate inside `TransitionAtom` or `from_links` will not find it —
+//! and that is by design: keeping the two concerns separate is what lets the
+//! fold be pure.
+//!
 //! Two rules do all the work:
 //!
 //! - **Identity is a signature check.** [`signed_by`] is the only place in
