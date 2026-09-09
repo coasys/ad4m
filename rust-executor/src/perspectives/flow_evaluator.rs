@@ -436,12 +436,14 @@ pub async fn run_engine_proposal_pass(
     context: &AgentContext,
     llm_proposals: &[LlmFlowProposal],
     semantic_check: Option<&dyn SemanticCheckLlm>,
+    flow_filter: Option<&[String]>,
 ) -> Vec<String> {
     if subjects.is_empty() {
         return Vec::new();
     }
     let loaded = async {
-        let flows_by_uri = load_shacl_flows(perspective).await?;
+        let mut flows_by_uri = load_shacl_flows(perspective).await?;
+        crate::perspectives::flow_context::retain_selected_flows(&mut flows_by_uri, flow_filter);
         let records = load_flow_instances(perspective, subjects).await?;
         let acting_did = crate::agent::did_for_context(context)?;
         anyhow::Ok((flows_by_uri, records, acting_did))
