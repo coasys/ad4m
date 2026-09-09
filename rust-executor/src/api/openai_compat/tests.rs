@@ -1210,3 +1210,39 @@ fn tool_result_with_an_empty_id_renders_the_bare_tag() {
     assert!(text.contains("<tool_response>"), "got: {text}");
     assert!(!text.contains("id="), "got: {text}");
 }
+
+// ---------------------------------------------------------------------------
+// ai.discoverModels — a credential must not travel in the clear
+// ---------------------------------------------------------------------------
+
+fn safe(url: &str) -> bool {
+    super::super::ai_ws::is_transport_safe(&url::Url::parse(url).expect("parses"))
+}
+
+#[test]
+fn https_may_carry_a_credential_anywhere() {
+    assert!(safe("https://api.openai.com/v1"));
+    assert!(safe("https://gateway.internal/openai/v1"));
+}
+
+#[test]
+fn plain_http_on_loopback_may_carry_a_credential() {
+    // A local Ollama, vLLM or gateway is reached over http by design, and
+    // nothing leaves the machine.
+    assert!(safe("http://localhost:11434"));
+    assert!(safe("http://127.0.0.1:12000/api/v1"));
+    assert!(safe("http://[::1]:11434"));
+}
+
+#[test]
+fn plain_http_to_a_remote_host_may_not() {
+    assert!(!safe("http://api.openai.com/v1"));
+    assert!(!safe("http://192.168.1.10:11434"));
+}
+
+#[test]
+fn a_hostname_that_merely_looks_local_is_not_loopback() {
+    // `localhost.example.com` resolves wherever its owner points it.
+    assert!(!safe("http://localhost.example.com/v1"));
+    assert!(!safe("http://notlocalhost/v1"));
+}

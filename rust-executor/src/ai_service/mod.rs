@@ -1435,6 +1435,22 @@ impl AIService {
     ) -> Result<ChatReply> {
         let resolved = Self::replace_model_variables(&model_id)?;
 
+        // Estimated before the turns are handed over, because the tool
+        // schemas go on the wire too and the caller is charged for them. They
+        // are not small: a schema with nested objects and descriptions can
+        // outweigh the conversation. Counting only `content` under-bills every
+        // authenticated native-tool call, and `ChatReply.usage` does not
+        // replace the estimate — billing still runs on this number.
+        let prompt_tokens: usize = turns
+            .iter()
+            .map(|turn| estimate_token_count(&turn.content))
+            .chain(tools.iter().map(|tool| {
+                estimate_token_count(&tool.name)
+                    + estimate_token_count(&tool.description)
+                    + estimate_token_count(&tool.parameters.to_string())
+            }))
+            .sum();
+
         let (result_tx, result_rx) = oneshot::channel();
         {
             let llm_channel = self.llm_channel.lock().await;
@@ -1442,19 +1458,11 @@ impl AIService {
                 .get(&resolved)
                 .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
             sender.send(LLMTaskRequest::PromptTurns(LLMTaskPromptTurnsRequest {
-                turns: turns.clone(),
+                turns,
                 tools,
                 result_sender: result_tx,
             }))?;
         }
-
-        // Billed on the whole conversation, not just the last turn: the
-        // provider is sent every turn on every call, and the caller is charged
-        // for every one of them.
-        let prompt_tokens: usize = turns
-            .iter()
-            .map(|turn| estimate_token_count(&turn.content))
-            .sum();
 
         let reply = result_rx.await??;
 

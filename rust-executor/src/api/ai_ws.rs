@@ -79,11 +79,43 @@ async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
         .and_then(|v| v.as_str())
         .unwrap_or_default();
 
+    // A key sent over plain HTTP crosses the network in the clear, and the
+    // OpenAI path sends it as a bearer token. Refuse that rather than leak it
+    // on the operator's behalf.
+    //
+    // Loopback is exempt, because a local Ollama, vLLM or gateway is reached
+    // over http by design and nothing leaves the machine. Keyless discovery
+    // against any host stays available, which is the case that made this
+    // endpoint worth having.
+    if !api_key.is_empty() && !is_transport_safe(&base_url) {
+        return Err(WsRpcError::bad_request(
+            "Refusing to send an API key over plain HTTP. Use https, or omit the key.",
+        ));
+    }
+
     let models = crate::ai_service::providers::list_models(&api_type, api_key, base_url)
         .await
         .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
 
     Ok(serde_json::to_value(models)?)
+}
+
+/// Whether a credential may be sent to this URL.
+///
+/// True for https anywhere, and for http on loopback only. A hostname that
+/// merely looks local is not enough: `localhost.example.com` resolves
+/// wherever its owner points it.
+pub(super) fn is_transport_safe(url: &url::Url) -> bool {
+    if url.scheme() == "https" {
+        return true;
+    }
+
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+        None => false,
+    }
 }
 
 async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
