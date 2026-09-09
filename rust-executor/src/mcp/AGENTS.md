@@ -11,7 +11,7 @@ auth in `server.rs`; `Ad4mMcpHandler` in `tools/mod.rs` implements `list_tools` 
 | `mod.rs` | `Ad4mMcpHandler`, dispatch, perspective access helpers (`get_readable_perspective`, `get_writable_perspective`), SHACL link helpers |
 | `auth.rs` | login / capability request flow |
 | `perspectives.rs` | perspective + link CRUD |
-| `instances/` | the static instance surface: `instance_query` / `_get` / `_create` / `_update` / `_remove`, `instance_add_to_collection` / `_remove_from_collection`, `instance_transcript`, child links, and `describe_perspective`. Class-agnostic — the class is a parameter, not a tool name |
+| `instances/` | the static instance surface: `instance_query` / `_get` / `_create` / `_update` / `_remove`, `instance_add_to_collection` / `_remove_from_collection`, `instance_transcript`, child links, and `describe_perspective`. Class-agnostic — the class is a parameter, not a tool name. Also `execute_commands` (`commands.rs`), the deliberate raw-SDNA escape hatch: it runs actions directly and does **not** go through the class's SHACL validation, so it is the one tool here that can write a shape the model would reject |
 | `dynamic.rs` | Generates one tool per SHACL class (`query_<Class>`, `create_<Class>`, …) from `mcp/shacl.rs`. Exposed over MCP **only** with `dynamicClassTools` (off by default); always merged into the in-process harness surface |
 | `docs.rs` | `get_documentation` — the executor's own agent docs, one `DocTopic` per markdown file, compiled in via `include_str!` |
 | `flows.rs` | SHACLFlow state/transition tools |
