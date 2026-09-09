@@ -23,6 +23,9 @@ use tokio::sync::mpsc;
 pub mod anthropic;
 pub mod openai;
 
+#[cfg(test)]
+mod anthropic_e2e;
+
 /// Ask a configured endpoint which models it serves, before any model has
 /// been registered against it.
 ///
@@ -207,6 +210,24 @@ impl ChatRequest {
     }
 }
 
+/// What a provider reported about token use.
+///
+/// Every field is optional because not every protocol reports it. The counts
+/// this executor bills on are still estimated from character length — these
+/// are the exact numbers, carried so a caller can check them and so billing
+/// can move onto them later.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChatUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    /// Tokens served from the prompt cache. Zero means the breakpoint did not
+    /// land, which is otherwise invisible: caching fails silently and the only
+    /// symptom is a larger bill.
+    pub cache_read_tokens: Option<u64>,
+    /// Tokens written to the cache on this call.
+    pub cache_write_tokens: Option<u64>,
+}
+
 /// What a provider answered.
 #[derive(Debug, Clone, Default)]
 pub struct ChatReply {
@@ -215,6 +236,9 @@ pub struct ChatReply {
     /// without native tool support — there, calls are recovered from `text` by
     /// the caller that rendered the tools in.
     pub tool_calls: Vec<ToolCall>,
+    /// What the provider reported about token use. Empty when it reported
+    /// nothing.
+    pub usage: ChatUsage,
 }
 
 /// A remote chat endpoint.

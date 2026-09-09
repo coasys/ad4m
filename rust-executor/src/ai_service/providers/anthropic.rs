@@ -33,7 +33,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use url::Url;
 
-use super::{ChatReply, ChatRequest, ChatRole, ChatTurn, RemoteChat, ToolCall, ToolSpec};
+use super::{
+    ChatReply, ChatRequest, ChatRole, ChatTurn, ChatUsage, RemoteChat, ToolCall, ToolSpec,
+};
 
 /// Wire version. Anthropic requires it on every request and treats it as the
 /// contract: pinning it is what stops a server-side change reshaping our
@@ -176,6 +178,48 @@ struct WireTool {
 struct MessagesResponse {
     #[serde(default)]
     content: Vec<ContentBlock>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
+    /// Why generation ended. `refusal` arrives with HTTP 200 and empty
+    /// content, so a caller that reads `content` without checking this sees a
+    /// successful empty answer.
+    #[serde(default)]
+    stop_reason: Option<String>,
+    #[serde(default)]
+    stop_details: Option<StopDetails>,
+}
+
+#[derive(Deserialize)]
+struct StopDetails {
+    #[serde(default)]
+    category: Option<String>,
+}
+
+/// Anthropic's own token counts. Absent on an older wire version, so every
+/// field is optional and a missing block reports nothing rather than zero —
+/// "not told" and "none" are different answers, and a cache assertion turns
+/// on which one it got.
+#[derive(Default, Deserialize)]
+struct WireUsage {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+}
+
+impl From<WireUsage> for ChatUsage {
+    fn from(w: WireUsage) -> Self {
+        ChatUsage {
+            input_tokens: w.input_tokens,
+            output_tokens: w.output_tokens,
+            cache_read_tokens: w.cache_read_input_tokens,
+            cache_write_tokens: w.cache_creation_input_tokens,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -368,9 +412,27 @@ impl RemoteChat for AnthropicChat {
             .await
             .map_err(|e| anyhow!("Could not read Anthropic response: {:?}", e))?;
 
+        // A refusal is HTTP 200 with no content. Reporting it as an empty
+        // success would bill the caller for an answer they did not get, and
+        // hand a silent empty string to whatever asked. This is the same
+        // failure the OpenAI arm used to have with `unwrap_or_default`.
+        if parsed.stop_reason.as_deref() == Some("refusal") {
+            let category = parsed
+                .stop_details
+                .and_then(|d| d.category)
+                .unwrap_or_else(|| "unspecified".to_string());
+            return Err(anyhow!(
+                "Anthropic declined this request (category: {category}). No content was returned."
+            ));
+        }
+
         let (text, tool_calls) = read_content(&parsed.content);
 
-        Ok(ChatReply { text, tool_calls })
+        Ok(ChatReply {
+            text,
+            tool_calls,
+            usage: parsed.usage.map(ChatUsage::from).unwrap_or_default(),
+        })
     }
 
     async fn chat_stream(
@@ -404,15 +466,19 @@ impl RemoteChat for AnthropicChat {
                         return Ok(ChatReply {
                             text,
                             tool_calls: Vec::new(),
+                            usage: ChatUsage::default(),
                         });
                     }
                 }
             }
         }
 
+        // A streamed reply reports its usage in `message_delta` events, which
+        // this reader does not decode. Left empty rather than guessed at.
         Ok(ChatReply {
             text,
             tool_calls: Vec::new(),
+            usage: ChatUsage::default(),
         })
     }
 }

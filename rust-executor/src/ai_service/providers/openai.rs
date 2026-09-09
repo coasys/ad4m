@@ -120,6 +120,8 @@ impl RemoteChat for OpenAiChat {
         Ok(ChatReply {
             text,
             tool_calls: Vec::new(),
+            // `chat_gpt_lib_rs` does not surface the usage block.
+            usage: Default::default(),
         })
     }
 }
