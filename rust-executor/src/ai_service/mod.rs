@@ -933,13 +933,13 @@ impl AIService {
 
                             LLMTaskRequest::PromptStream(stream_request) => match model {
                                 LlmModel::Remote((ref mut remote_client, ref model_string)) => {
-                                    // Remote upstreams use the non-streaming
-                                    // chat call today; we deliver the full
-                                    // response as a single token chunk so
-                                    // SSE consumers still see the "stream"
-                                    // protocol (one delta + final usage).
-                                    // A native streaming upstream client is
-                                    // a follow-up.
+                                    // Whether this really streams is the
+                                    // provider's business: one that can
+                                    // pushes text as the model writes it,
+                                    // one that cannot answers in a single
+                                    // chunk through the trait's default. The
+                                    // SSE consumer sees the same protocol
+                                    // either way.
                                     if let Some(task) =
                                         task_descriptions.get(&stream_request.task_id)
                                     {
@@ -948,14 +948,20 @@ impl AIService {
                                             model: model_string.clone(),
                                             messages: turns_for_task(task, prompt_clone.clone()),
                                         };
-                                        match rt.block_on(remote_client.chat(request)) {
+                                        let token_sender = stream_request.token_sender.clone();
+                                        match rt.block_on(
+                                            remote_client.chat_stream(request, token_sender),
+                                        ) {
                                             Err(e) => {
                                                 let _ = stream_request.done_sender.send(Err(e));
                                             }
                                             Ok(reply) => {
+                                                // Tokens have already gone out
+                                                // through `token_sender`; the
+                                                // reply is here only so the
+                                                // closing usage event can be
+                                                // billed on the whole text.
                                                 let text = reply.text;
-                                                let _ =
-                                                    stream_request.token_sender.send(text.clone());
                                                 let prompt_tokens =
                                                     estimate_token_count(&prompt_clone);
                                                 let completion_tokens = estimate_token_count(&text);

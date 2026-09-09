@@ -18,6 +18,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 pub mod anthropic;
 pub mod openai;
@@ -93,4 +94,24 @@ pub struct ChatReply {
 pub trait RemoteChat: Send + Sync {
     /// Send a conversation, get the assistant's reply.
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply>;
+
+    /// The same, pushing each piece of text through `tokens` as it arrives.
+    ///
+    /// The default answers the whole reply as one chunk, which is what the
+    /// non-streaming providers have always done: an SSE consumer still sees
+    /// the streaming protocol, it just sees one delta. Override it where the
+    /// upstream can genuinely stream, and the caller gets text as the model
+    /// writes it with no change on its side.
+    ///
+    /// The returned [`ChatReply`] always carries the complete text whether or
+    /// not it streamed, because the caller bills on it.
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        tokens: mpsc::UnboundedSender<String>,
+    ) -> Result<ChatReply> {
+        let reply = self.chat(request).await?;
+        let _ = tokens.send(reply.text.clone());
+        Ok(reply)
+    }
 }

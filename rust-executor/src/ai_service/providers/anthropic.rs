@@ -30,6 +30,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio::sync::mpsc;
 use url::Url;
 
 use super::{ChatReply, ChatRequest, ChatRole, RemoteChat};
@@ -98,6 +99,10 @@ struct MessagesRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     system: Vec<SystemBlock>,
     messages: Vec<WireMessage>,
+    /// Omitted entirely rather than sent as `false`, so the non-streaming
+    /// request stays byte-identical to what it was before streaming existed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -165,9 +170,12 @@ fn split_system(request: &ChatRequest) -> (Vec<String>, Vec<WireMessage>) {
     (system, messages)
 }
 
-#[async_trait]
-impl RemoteChat for AnthropicChat {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
+impl AnthropicChat {
+    /// Assemble the wire request. Shared by both entry points so the streaming
+    /// and non-streaming calls cannot drift in what they send — including the
+    /// cache breakpoint, which would otherwise be easy to set in one and
+    /// forget in the other.
+    fn build_body(&self, request: ChatRequest, stream: bool) -> MessagesRequest {
         let (system_parts, messages) = split_system(&request);
 
         let system = if system_parts.is_empty() {
@@ -180,19 +188,23 @@ impl RemoteChat for AnthropicChat {
             }]
         };
 
-        let body = MessagesRequest {
+        MessagesRequest {
             model: request.model,
             max_tokens: DEFAULT_MAX_TOKENS,
             system,
             messages,
-        };
+            stream,
+        }
+    }
 
+    /// POST the body, returning the response only if the status was a success.
+    async fn send(&self, body: &MessagesRequest) -> Result<reqwest::Response> {
         let response = self
             .http
             .post(&self.endpoint)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
+            .json(body)
             .send()
             .await
             .map_err(|e| anyhow!("Error connecting to remote LLM API: {:?}", e))?;
@@ -205,6 +217,16 @@ impl RemoteChat for AnthropicChat {
             let body = response.text().await.unwrap_or_default();
             return Err(anyhow!("Anthropic API error {}: {}", status, body));
         }
+
+        Ok(response)
+    }
+}
+
+#[async_trait]
+impl RemoteChat for AnthropicChat {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
+        let body = self.build_body(request, false);
+        let response = self.send(&body).await?;
 
         let parsed: MessagesResponse = response
             .json()
@@ -224,6 +246,69 @@ impl RemoteChat for AnthropicChat {
 
         Ok(ChatReply { text })
     }
+
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        tokens: mpsc::UnboundedSender<String>,
+    ) -> Result<ChatReply> {
+        use futures::StreamExt;
+
+        let body = self.build_body(request, true);
+        let response = self.send(&body).await?;
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut text = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| anyhow!("Anthropic stream failed: {:?}", e))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // An SSE event ends at a newline, but a chunk can split one
+            // anywhere — including mid-UTF-8 — so only whole lines are
+            // consumed and the remainder is carried into the next chunk.
+            while let Some(newline) = buffer.find('\n') {
+                let line: String = buffer.drain(..=newline).collect();
+                if let Some(delta) = text_delta(line.trim_end()) {
+                    text.push_str(&delta);
+                    if tokens.send(delta).is_err() {
+                        // Consumer hung up. Stop reading rather than
+                        // draining a response nobody will see.
+                        return Ok(ChatReply { text });
+                    }
+                }
+            }
+        }
+
+        Ok(ChatReply { text })
+    }
+}
+
+/// Pull the text out of one SSE line, if it carries any.
+///
+/// Only `content_block_delta` events with a `text_delta` matter here. The
+/// lifecycle events (`message_start`, `content_block_start`, `ping`,
+/// `message_stop`) and the `event:` lines carry no text, and a `tool_use`
+/// block's `input_json_delta` is not text either — it is partial JSON that
+/// would corrupt the reply if concatenated into it.
+fn text_delta(line: &str) -> Option<String> {
+    let payload = line.strip_prefix("data:")?.trim();
+    if payload.is_empty() {
+        return None;
+    }
+
+    let event: serde_json::Value = serde_json::from_str(payload).ok()?;
+    if event.get("type")?.as_str()? != "content_block_delta" {
+        return None;
+    }
+
+    let delta = event.get("delta")?;
+    if delta.get("type")?.as_str()? != "text_delta" {
+        return None;
+    }
+
+    Some(delta.get("text")?.as_str()?.to_string())
 }
 
 #[cfg(test)]
@@ -316,10 +401,57 @@ mod tests {
                 cache_control: Some(CacheControl { kind: "ephemeral" }),
             }],
             messages: vec![],
+            stream: false,
         };
 
         let json = serde_json::to_value(&body).expect("request serialises");
         assert_eq!(json["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn a_text_delta_yields_its_text() {
+        let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        assert_eq!(text_delta(line), Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn a_data_line_without_a_space_after_the_colon_still_parses() {
+        // The spec allows `data:{...}`; Anthropic sends `data: {...}`. Accept
+        // both rather than depending on which one the far end chose.
+        let line =
+            r#"data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}"#;
+        assert_eq!(text_delta(line), Some("x".to_string()));
+    }
+
+    #[test]
+    fn lifecycle_events_carry_no_text() {
+        for line in [
+            "event: message_start",
+            r#"data: {"type":"message_start","message":{"id":"msg_1"}}"#,
+            r#"data: {"type":"content_block_start","index":0}"#,
+            r#"data: {"type":"message_stop"}"#,
+            r#"data: {"type":"ping"}"#,
+            "",
+            "data:",
+        ] {
+            assert_eq!(text_delta(line), None, "expected no text from {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_tool_use_json_delta_is_not_treated_as_text() {
+        // `input_json_delta` carries partial JSON for a tool call's arguments.
+        // Concatenating it into the reply would corrupt the visible answer
+        // with fragments of a structure that belongs somewhere else.
+        let line = r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"a\":"}}"#;
+        assert_eq!(text_delta(line), None);
+    }
+
+    #[test]
+    fn a_malformed_event_is_skipped_rather_than_failing_the_stream() {
+        // A half-written line can reach us if the upstream truncates; losing
+        // one delta beats aborting a completion the caller is paying for.
+        assert_eq!(text_delta(r#"data: {"type":"content_bl"#), None);
     }
 
     #[test]
@@ -332,6 +464,7 @@ mod tests {
                 role: "user",
                 content: "go".to_string(),
             }],
+            stream: false,
         };
 
         let json = serde_json::to_value(&body).expect("request serialises");
