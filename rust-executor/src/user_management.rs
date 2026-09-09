@@ -377,7 +377,22 @@ mod tests {
         // Act: call create_user while the executor is locked.
         let result = create_user(email, "any-password");
 
-        // The call must fail with the operator-facing locked-executor message.
+        // The row is checked FIRST, before the return value, on purpose. The row
+        // is the damage #982 describes; the Err is only how the caller learns of
+        // it. Asserting the return value first would panic before this line in a
+        // run where the guard is missing, so the test would report a wrong return
+        // value and never observe the row that actually bricks the account. In
+        // that order it also stays a real guard if a future refactor moves the
+        // check somewhere that still returns Err but writes the row anyway.
+        let row_written = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+        assert!(
+            !row_written,
+            "create_user must not write a user row when the executor is locked — \
+             a row here bricks the account: the wallet was never saved, and the \
+             email can never be registered again"
+        );
+
+        // And the caller must be told, with the operator-facing locked message.
         assert!(
             result.is_err(),
             "create_user must return Err when the executor is locked"
@@ -386,13 +401,6 @@ mod tests {
         assert!(
             err.contains("Executor is locked"),
             "error must mention 'Executor is locked'; got: {err}"
-        );
-
-        // No user row must have been written — a row here bricks the account forever.
-        let row_written = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
-        assert!(
-            !row_written,
-            "create_user must not write a user row when the executor is locked"
         );
 
         // Restore wallet state so subsequent tests are not affected.
