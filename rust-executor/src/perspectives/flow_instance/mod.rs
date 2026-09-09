@@ -42,10 +42,11 @@
 //!      Walks from genesis taking the earliest-settled declared edge per state.
 //!      "Earliest" is each voter's own claimed clock. Can back-dating a vote
 //!      manufacture a quorum, or win a race it should have lost? No to the
-//!      first; the second has one residual case. See fold.rs § Ordering and
-//!      time — four properties and the RESIDUAL, each with a code pointer.
+//!      first; the second is refused rather than decided, where the race is
+//!      irreversible. See fold.rs § Ordering and time — the properties and the
+//!      RESIDUAL, each with a code pointer.
 //!   │
-//!   ▼ DerivedState { state, settled }
+//!   ▼ DerivedState { state, settled, contested }
 //! ```
 //!
 //! # Where to read
