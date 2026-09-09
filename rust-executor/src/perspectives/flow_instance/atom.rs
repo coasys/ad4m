@@ -293,6 +293,13 @@ fn earliest_proposer_timestamp(links: &[DecoratedLinkExpression], proposer: &str
 
 /// Enumerate one instance's proposals and read each one's links.
 ///
+/// **The dividing principle.** The halves split exactly where hydration starts
+/// destroying what the caller needs. Half 1 only has to know that a proposal
+/// *exists* and belongs to this instance — a fact the model layer preserves
+/// exactly, so discovery belongs there. Half 2 has to know *who wrote each
+/// individual field, and whether that link's signature verified* — per-link
+/// facts hydration collapses away, so field-reading has to stay on raw links.
+///
 /// **Half 1 — class query (this PR's change):** a `model_query` over the
 /// hard-wired `FlowTransitionProposal` subject class, filtered by
 /// `flowInstance == instance_uri`, yields the URIs of every proposal that
