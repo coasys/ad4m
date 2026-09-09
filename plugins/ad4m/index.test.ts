@@ -58,6 +58,7 @@ import {
   closeWakerClient,
   hasLiveCredential,
   isLoopbackEndpoint,
+  explainCapabilityFailure,
 } from "./index";
 
 import ad4mPlugin, { _resetModuleState } from "./index";
@@ -3630,6 +3631,70 @@ describe("isLoopbackEndpoint", () => {
     ]) {
       expect(isLoopbackEndpoint(url), url).toBe(false);
     }
+  });
+});
+
+describe("explainCapabilityFailure", () => {
+  // Regression: against a LOCKED executor, setup used to say "obtain a JWT
+  // token manually" — naming the one remedy that cannot work, since a locked
+  // node rejects a pasted token too. Observed on Marvin 2026-09-09: the
+  // operator hand-edited a JWT into the config chasing a cause that was not
+  // the token.
+  it("names the lock, and says a JWT will not help, when the node is locked", () => {
+    const lines = explainCapabilityFailure({
+      capData: { request_id: "req-1", code: "123456" },
+      // Deliberately terser than the executor's real message: the action has
+      // to come from our own line, not from whatever the node happened to say.
+      statusData: {
+        authenticated: false,
+        executor_locked: true,
+        message: "Executor is locked.",
+      },
+    });
+    const text = lines.join(" ");
+    expect(text).toContain("LOCKED");
+    expect(text).toContain("unlockAgent");
+    // The remedy must not be the one that cannot work.
+    expect(text).toContain("will not help");
+    expect(text).toContain("ad4m-setup");
+  });
+
+  it("passes the executor's own lock message through rather than paraphrasing it", () => {
+    const lines = explainCapabilityFailure({
+      statusData: { executor_locked: true, message: "Ask the operator, then retry." },
+    });
+    expect(lines).toContain("Ask the operator, then retry.");
+  });
+
+  it("blames the unconfirmed handshake, not the lock, on an unlocked node", () => {
+    const lines = explainCapabilityFailure({
+      capData: { request_id: "req-1", code: "123456" },
+      statusData: { authenticated: false, executor_locked: false },
+    });
+    const text = lines.join(" ");
+    expect(text).toContain("never confirmed");
+    expect(text).not.toContain("LOCKED");
+    // Here a manually obtained JWT genuinely is a remedy.
+    expect(text).toContain("JWT");
+  });
+
+  it("reports the executor's error when the capability request itself failed", () => {
+    const lines = explainCapabilityFailure({
+      capData: { error: "capability request rejected" },
+      statusData: { executor_locked: false },
+    });
+    const text = lines.join(" ");
+    expect(text).toContain("did not issue a capability request");
+    expect(text).toContain("capability request rejected");
+  });
+
+  it("falls back to the handshake explanation when auth_status itself failed", () => {
+    // statusData undefined = the auth_status call errored too. Absence of a
+    // lock signal must not be read as "not locked and definitely fine"; the
+    // generic branch still names an action the operator can take.
+    const lines = explainCapabilityFailure({ capData: { request_id: "req-1" } });
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.join(" ")).toContain("ad4m-setup");
   });
 });
 

@@ -18,6 +18,68 @@ import {
 const SEPARATOR = "══════════════════════════════════════════";
 
 /**
+ * Explain why the capability handshake produced no JWT.
+ *
+ * Two causes reach the same code path and need opposite actions from the
+ * operator, so the message has to distinguish them:
+ *
+ * - **The executor is locked.** Its keys live in memory only, so this is the
+ *   normal state after every restart. `request_capability` cannot be confirmed
+ *   and no login of any kind can succeed until someone calls `unlockAgent`.
+ *   Pasting a JWT does not help — the node would reject it too.
+ * - **The handshake ran but was not confirmed**, or the node refused it. Here
+ *   a manually obtained JWT *is* the fix.
+ *
+ * The observed failure (Marvin, 2026-09-09) was the first case reported as the
+ * second: setup said "obtain a JWT token manually" against a locked node, the
+ * operator hand-edited a token into the config, and the token was not the
+ * problem. `auth_status` already reports `executor_locked` in every branch, so
+ * the cause is one call away — this function only decides what to say about it.
+ *
+ * Pure so it can be tested without a node: callers pass what the two tools
+ * returned, and get back the lines to print in order.
+ *
+ * @param capData    - `request_capability` result, or undefined if it failed.
+ * @param statusData - `auth_status` result, or undefined if that call failed too.
+ */
+export function explainCapabilityFailure(input: {
+  capData?: any;
+  statusData?: any;
+}): string[] {
+  const { capData, statusData } = input;
+
+  if (statusData?.executor_locked === true) {
+    return [
+      "Could not complete auth: the executor is LOCKED, not misconfigured.",
+      statusData.message ??
+        "No login can succeed until the executor's operator calls unlockAgent.",
+      // The action is stated here, not borrowed from `statusData.message`: an
+      // older executor may answer with a terser message, and the operator
+      // still has to be told which call unlocks the node.
+      "A JWT will not help here — a locked node rejects it too. Have the " +
+        "executor's operator call unlockAgent, then run `openclaw ad4m-setup` " +
+        "again.",
+    ];
+  }
+
+  // Not locked (or the node did not say). The handshake itself is the suspect.
+  const lines = [
+    capData?.request_id
+      ? "Could not complete auth: the capability request was issued but never " +
+        "confirmed on the executor."
+      : "Could not complete auth: the executor did not issue a capability request.",
+  ];
+  if (typeof capData?.error === "string") {
+    lines.push(`Executor said: ${capData.error}`);
+  }
+  lines.push(
+    "Confirm the verification code in your AD4M executor and re-run " +
+      "`openclaw ad4m-setup`, or paste a JWT obtained from the executor below.",
+  );
+  return lines;
+}
+
+/**
  * First-run setup flow.
  *
  * Invoked via the `openclaw ad4m-setup` CLI command (registered through
@@ -380,11 +442,14 @@ async function setupExternalMode(
       }
     }
 
-    // JWT auth failed
-    logger.warn(
-      "[ad4m-setup] Could not complete auth automatically. " +
-        "Please obtain a JWT token manually from your executor.",
+    // JWT auth failed. Ask the node why before telling the operator what to do:
+    // the two causes need opposite actions, and the old message named neither.
+    const statusData = extractMcpResultData(
+      await mcpCallTool(endpoint, "auth_status", {}, initResp.sessionId),
     );
+    for (const line of explainCapabilityFailure({ capData, statusData })) {
+      logger.warn(`[ad4m-setup] ${line}`);
+    }
     printConfigSnippet(logger, "external", {
       mcpEndpoint: endpoint,
       token: "<paste-your-jwt-here>",

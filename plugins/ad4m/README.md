@@ -275,6 +275,28 @@ hand:
    the block up first, it holds your JWT.
 3. Restart the gateway and re-check `openclaw plugins list --json`.
 
+### Setup cannot authenticate, and the executor is locked
+
+An AD4M executor holds its keys in memory only, so it comes back **locked** after every
+restart — including one it did not choose, such as a gateway restart that took the
+executor down with it. While it is locked, `request_capability` cannot be confirmed and
+no login of any kind succeeds.
+
+Setup names this case rather than blaming the token:
+
+```
+[ad4m-setup] Could not complete auth: the executor is LOCKED, not misconfigured.
+[ad4m-setup] A JWT will not help here — a locked node rejects it too. Have the
+executor's operator call unlockAgent, then run `openclaw ad4m-setup` again.
+```
+
+**Pasting a JWT is not the remedy** — a locked node rejects a valid token exactly as it
+rejects the handshake. Unlock the executor first (`unlockAgent`, or the launcher's
+passphrase prompt), then re-run setup.
+
+`ad4m_auth_status` answers the same question at any time: `executor_locked: true`
+alongside `authenticated: true` means your credential is fine and the node is not ready.
+
 ## Plugin structure
 
 ```
@@ -315,6 +337,10 @@ plugins/ad4m/
 - **Setup warns instead of falling back silently.** An `--endpoint` that does not answer
   used to drop to managed mode without a word, downloading an executor and returning a
   localhost config for a remote node you named.
+- **Setup names a locked executor as the cause when auth fails.** It used to answer every
+  failed handshake with "obtain a JWT token manually" — the one remedy that cannot work
+  against a locked node, which rejects a pasted token too. Setup now asks `auth_status`
+  before it advises, and points at `unlockAgent` when the node is locked.
 
 ### 0.0.2
 
