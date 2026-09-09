@@ -5,11 +5,10 @@ use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
 use crate::types::ModelInput;
 #[allow(unused_imports)]
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
-use crate::types::{AITask, LocalModel, Model, ModelType};
+use crate::types::{AITask, LocalModel, Model, ModelApi, ModelApiType, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use candle_core::Device;
-use chat_gpt_lib_rs::{ChatGPTClient, ChatInput, Message, Role};
 use deno_core::error::AnyError;
 use futures::{FutureExt, SinkExt};
 use holochain::test_utils::itertools::Itertools;
@@ -28,7 +27,9 @@ use tokio::time::sleep;
 
 mod error;
 pub mod harness;
+pub mod providers;
 use log::error;
+use providers::{ChatRequest, ChatTurn, RemoteChat};
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
@@ -224,7 +225,27 @@ enum LLMTaskRequest {
 
 enum LlmModel {
     Local(Llama),
-    Remote((ChatGPTClient, String)),
+    /// A remote endpoint and the model string to ask it for. Which wire
+    /// protocol is behind the trait — see `ai_service::providers`.
+    Remote((Box<dyn RemoteChat>, String)),
+}
+
+/// The turn list for a task-shaped prompt: the task's system prompt, its
+/// examples as alternating user/assistant turns, then the live prompt.
+///
+/// Local models get this shape from kalosm's own task builder
+/// (`llama.task(system).with_examples(..)`); remote ones have to be handed
+/// it explicitly, which is what this builds. Shared by the `Prompt` and
+/// `PromptStream` remote arms, which differ only in how the reply comes back.
+fn turns_for_task(task: &AITask, prompt: String) -> Vec<ChatTurn> {
+    let mut turns = Vec::with_capacity(2 + task.prompt_examples.len() * 2);
+    turns.push(ChatTurn::system(task.system_prompt.clone()));
+    for example in task.prompt_examples.iter() {
+        turns.push(ChatTurn::user(example.input.clone()));
+        turns.push(ChatTurn::assistant(example.output.clone()));
+    }
+    turns.push(ChatTurn::user(prompt));
+    turns
 }
 
 async fn publish_model_status(
@@ -677,19 +698,19 @@ impl AIService {
         Ok(llama)
     }
 
-    async fn build_remote_client(
-        model_id: String,
-        api_key: String,
-        base_url: Url,
-    ) -> ChatGPTClient {
-        let mut url = base_url;
-        if let Some(segments) = url.path_segments() {
-            if segments.clone().next() == Some("v1") {
-                url.set_path(&segments.skip(1).collect::<Vec<_>>().join("/"));
-            }
-        }
+    /// Build the provider client for a remote model.
+    ///
+    /// Which protocol is spoken is decided here, once, from the model's
+    /// `api_type` — everything downstream holds a `dyn RemoteChat` and does
+    /// not know or care. See `ai_service::providers`.
+    async fn build_remote_client(model_id: String, api: ModelApi) -> Box<dyn RemoteChat> {
         publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
-        let client = ChatGPTClient::new(&api_key, url.as_ref());
+        let client: Box<dyn RemoteChat> = match api.api_type {
+            ModelApiType::OpenAi => Box::new(providers::openai::OpenAiChat::new(
+                &api.api_key,
+                api.base_url,
+            )),
+        };
         publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
         client
     }
@@ -729,9 +750,10 @@ impl AIService {
                                 .await
                                 .map(LlmModel::Local)
                         } else if let Some(api) = model_config.api {
+                            let model_string = api.model.clone();
                             Ok(LlmModel::Remote((
-                                Self::build_remote_client(model_id, api.api_key, api.base_url).await,
-                                api.model
+                                Self::build_remote_client(model_id, api).await,
+                                model_string
                             )))
                         } else {
                             Err(anyhow!("AI model definition {} doesn't have a body, and this error should have been caught above", model_config.name))
@@ -835,57 +857,16 @@ impl AIService {
                                     if let Some(task) =
                                         task_descriptions.get(&prompt_request.task_id)
                                     {
-                                        // System prompt
-                                        let mut messages = vec![Message {
-                                            role: Role::System,
-                                            content: task.system_prompt.clone(),
-                                        }];
-
-                                        // Examples
-                                        for example in task.prompt_examples.iter() {
-                                            messages.push(Message {
-                                                role: Role::User,
-                                                content: example.input.clone(),
-                                            });
-                                            messages.push(Message {
-                                                role: Role::Assistant,
-                                                content: example.output.clone(),
-                                            })
-                                        }
-
-                                        // Prompt
-                                        messages.push(Message {
-                                            role: Role::User,
-                                            content: prompt_request.prompt,
-                                        });
-
-                                        let chat_input = ChatInput {
-                                            model: chat_gpt_lib_rs::Model::Custom(
-                                                model_string.clone(),
-                                            ),
-                                            messages,
-                                            ..Default::default()
+                                        let request = ChatRequest {
+                                            model: model_string.clone(),
+                                            messages: turns_for_task(task, prompt_request.prompt),
                                         };
 
-                                        match rt.block_on(remote_client.chat(chat_input)) {
-                                            Err(e) => {
-                                                let _ = prompt_request.result_sender.send(Err(
-                                                    anyhow!(
-                                                        "Error connecting to remote LLM API: {:?}",
-                                                        e
-                                                    ),
-                                                ));
-                                            }
-                                            Ok(response) => {
-                                                let result = response
-                                                    .choices
-                                                    .first()
-                                                    .map(|choice| choice.message.content.clone())
-                                                    .ok_or(anyhow!("Got response with no choice"));
+                                        let result = rt
+                                            .block_on(remote_client.chat(request))
+                                            .map(|reply| reply.text);
 
-                                                let _ = prompt_request.result_sender.send(result);
-                                            }
-                                        }
+                                        let _ = prompt_request.result_sender.send(result);
                                     } else {
                                         let _ = prompt_request.result_sender.send(Err(anyhow!(
                                             "Task with ID {} not spawned",
@@ -958,46 +939,17 @@ impl AIService {
                                     if let Some(task) =
                                         task_descriptions.get(&stream_request.task_id)
                                     {
-                                        let mut messages = vec![Message {
-                                            role: Role::System,
-                                            content: task.system_prompt.clone(),
-                                        }];
-                                        for example in task.prompt_examples.iter() {
-                                            messages.push(Message {
-                                                role: Role::User,
-                                                content: example.input.clone(),
-                                            });
-                                            messages.push(Message {
-                                                role: Role::Assistant,
-                                                content: example.output.clone(),
-                                            });
-                                        }
                                         let prompt_clone = stream_request.prompt.clone();
-                                        messages.push(Message {
-                                            role: Role::User,
-                                            content: prompt_clone.clone(),
-                                        });
-                                        let chat_input = ChatInput {
-                                            model: chat_gpt_lib_rs::Model::Custom(
-                                                model_string.clone(),
-                                            ),
-                                            messages,
-                                            ..Default::default()
+                                        let request = ChatRequest {
+                                            model: model_string.clone(),
+                                            messages: turns_for_task(task, prompt_clone.clone()),
                                         };
-                                        match rt.block_on(remote_client.chat(chat_input)) {
+                                        match rt.block_on(remote_client.chat(request)) {
                                             Err(e) => {
-                                                let _ =
-                                                    stream_request.done_sender.send(Err(anyhow!(
-                                                        "Error connecting to remote LLM API: {:?}",
-                                                        e
-                                                    )));
+                                                let _ = stream_request.done_sender.send(Err(e));
                                             }
-                                            Ok(response) => {
-                                                let text = response
-                                                    .choices
-                                                    .first()
-                                                    .map(|c| c.message.content.clone())
-                                                    .unwrap_or_default();
+                                            Ok(reply) => {
+                                                let text = reply.text;
                                                 let _ =
                                                     stream_request.token_sender.send(text.clone());
                                                 let prompt_tokens =
