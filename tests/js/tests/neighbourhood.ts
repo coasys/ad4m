@@ -109,7 +109,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 // failed") in CI, so Synced may never be reached.
                 let aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
                 let readyTries = 0;
-                while (aliceReady?.state === PerspectiveState.NeighbourhoodCreationInitiated
+                while (aliceReady?.state === PerspectiveState.NeighboudhoodCreationInitiated
                     && readyTries < 60) {
                     await sleep(500);
                     aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
@@ -185,7 +185,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 // test comment for rationale).
                 let aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
                 let readyTries = 0;
-                while (aliceReady?.state === PerspectiveState.NeighbourhoodCreationInitiated
+                while (aliceReady?.state === PerspectiveState.NeighboudhoodCreationInitiated
                     && readyTries < 60) {
                     await sleep(500);
                     aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
