@@ -68,24 +68,9 @@ impl AnthropicChat {
                 .build()
                 .unwrap_or_default(),
             api_key: api_key.to_string(),
-            endpoint: messages_endpoint(base_url),
+            endpoint: super::versioned_endpoint(base_url, "messages"),
         }
     }
-}
-
-/// Resolve a configured base URL to the messages endpoint.
-///
-/// Accepts both `https://api.anthropic.com` and `https://api.anthropic.com/v1`
-/// because both appear in Anthropic's own documentation, so both are what
-/// people paste into a model form. Normalising here rather than demanding one
-/// spelling keeps a wrong-looking-but-reasonable URL from 404ing.
-fn messages_endpoint(base_url: Url) -> String {
-    let trimmed = base_url.as_str().trim_end_matches('/').to_string();
-    let root = trimmed
-        .strip_suffix("/v1")
-        .map(|s| s.to_string())
-        .unwrap_or(trimmed);
-    format!("{root}/v1/messages")
 }
 
 /// Ask Anthropic which models this key can reach — `GET {base}/v1/models`.
@@ -94,7 +79,7 @@ fn messages_endpoint(base_url: Url) -> String {
 /// with different auth: an `x-api-key` header and the pinned wire version
 /// rather than a bearer token.
 pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
-    let endpoint = super::models_endpoint(base_url);
+    let endpoint = super::versioned_endpoint(base_url, "models");
 
     let response = reqwest::Client::new()
         .get(&endpoint)
@@ -515,41 +500,6 @@ mod tests {
 
     fn url(s: &str) -> Url {
         Url::parse(s).expect("test URL parses")
-    }
-
-    #[test]
-    fn endpoint_accepts_a_bare_host() {
-        assert_eq!(
-            messages_endpoint(url("https://api.anthropic.com")),
-            "https://api.anthropic.com/v1/messages"
-        );
-    }
-
-    #[test]
-    fn endpoint_accepts_a_host_already_carrying_v1() {
-        assert_eq!(
-            messages_endpoint(url("https://api.anthropic.com/v1")),
-            "https://api.anthropic.com/v1/messages"
-        );
-    }
-
-    #[test]
-    fn endpoint_tolerates_a_trailing_slash() {
-        assert_eq!(
-            messages_endpoint(url("https://api.anthropic.com/v1/")),
-            "https://api.anthropic.com/v1/messages"
-        );
-    }
-
-    #[test]
-    fn endpoint_keeps_a_proxy_path_prefix() {
-        // A gateway in front of Anthropic may mount it under a path; that
-        // prefix has to survive, which is why this appends rather than
-        // rewriting the whole path.
-        assert_eq!(
-            messages_endpoint(url("https://gateway.internal/anthropic")),
-            "https://gateway.internal/anthropic/v1/messages"
-        );
     }
 
     #[test]

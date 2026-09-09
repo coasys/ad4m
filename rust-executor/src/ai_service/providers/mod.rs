@@ -43,16 +43,21 @@ pub async fn list_models(
     }
 }
 
-/// Resolve a base URL to a `/v1/models` endpoint, accepting the URL with or
-/// without a `/v1` already on it. Both spellings appear in provider docs, so
-/// both are what ends up pasted into a form.
-pub(crate) fn models_endpoint(base_url: url::Url) -> String {
+/// Resolve a configured base URL to a versioned endpoint, e.g.
+/// `https://api.anthropic.com` plus `messages` gives
+/// `https://api.anthropic.com/v1/messages`.
+///
+/// Accepts the base URL with or without a `/v1` already on it, because both
+/// spellings appear in provider documentation and therefore both are what gets
+/// pasted into a model form. A path prefix survives, so a gateway that mounts a
+/// provider under one keeps working.
+pub(crate) fn versioned_endpoint(base_url: url::Url, path: &str) -> String {
     let trimmed = base_url.as_str().trim_end_matches('/').to_string();
     let root = trimmed
         .strip_suffix("/v1")
         .map(|s| s.to_string())
         .unwrap_or(trimmed);
-    format!("{root}/v1/models")
+    format!("{root}/v1/{path}")
 }
 
 /// Both providers answer a model listing as `{"data": [{"id": …}, …]}`.
@@ -116,6 +121,13 @@ pub struct ToolSpec {
 /// `arguments` is a parsed object, not the JSON string OpenAI puts on the
 /// wire: every caller wants the object, and parsing it once here means a
 /// malformed one is caught in the provider rather than three layers up.
+///
+/// Field-for-field the same as `harness::HarnessToolCall`, and deliberately
+/// not shared with it. `harness` sits above this module and already carries an
+/// import cycle its own guide asks nobody to widen. A provider reaching up
+/// into it to save one struct would buy four lines and cost the layering.
+/// `openai_compat::harness_bridge` owns the conversion, because it is the one
+/// place that legitimately sees both.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCall {
     pub id: String,
@@ -323,18 +335,44 @@ mod tests {
     }
 
     #[test]
-    fn models_endpoint_accepts_a_bare_host() {
+    fn an_endpoint_is_built_from_a_bare_host() {
         assert_eq!(
-            models_endpoint(url("https://api.openai.com")),
+            versioned_endpoint(url("https://api.anthropic.com"), "messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            versioned_endpoint(url("https://api.openai.com"), "models"),
             "https://api.openai.com/v1/models"
         );
     }
 
     #[test]
-    fn models_endpoint_accepts_a_host_already_carrying_v1() {
+    fn a_base_url_already_carrying_v1_does_not_get_a_second_one() {
         assert_eq!(
-            models_endpoint(url("https://api.groq.com/openai/v1")),
+            versioned_endpoint(url("https://api.anthropic.com/v1"), "messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            versioned_endpoint(url("https://api.groq.com/openai/v1"), "models"),
             "https://api.groq.com/openai/v1/models"
+        );
+    }
+
+    #[test]
+    fn a_trailing_slash_is_tolerated() {
+        assert_eq!(
+            versioned_endpoint(url("https://api.anthropic.com/v1/"), "messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn a_proxy_path_prefix_survives() {
+        // A gateway may mount a provider under a path. That prefix has to
+        // survive, which is why this appends rather than rewriting the path.
+        assert_eq!(
+            versioned_endpoint(url("https://gateway.internal/anthropic"), "messages"),
+            "https://gateway.internal/anthropic/v1/messages"
         );
     }
 

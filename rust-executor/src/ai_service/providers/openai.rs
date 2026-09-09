@@ -53,7 +53,7 @@ impl OpenAiChat {
 /// own 401 instead of surfacing as a puzzling failure on the first real
 /// completion, which is where it used to surface.
 pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
-    let endpoint = super::models_endpoint(base_url);
+    let endpoint = super::versioned_endpoint(base_url, "models");
 
     let mut request = reqwest::Client::new().get(&endpoint);
     if !api_key.is_empty() {
