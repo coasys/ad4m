@@ -1890,3 +1890,171 @@ async fn instance_query_clamps_an_oversized_limit_without_hiding_the_total() {
     );
     assert_eq!(defaulted["total_count"].as_u64().unwrap(), total as u64);
 }
+
+// ============================================================================
+// #981 — a staged-subject write failure must leave nothing behind
+// ============================================================================
+//
+// `instance_create`/`instance_update`/`instance_add_to_collection` stage
+// their writes in a batch and call `discard_batch` on every pre-commit error
+// path — asserted only by reading the code until now. `PerspectiveInstance`'s
+// `fail_next_add_link` (test-only, #981) forces the Nth `add_link_expression`
+// call to fail so these tests exercise the real discard path instead of
+// trusting it.
+
+/// `instance_create`'s two discard_batch call sites are create_subject
+/// failing outright, and a collection-link failing after the subject is
+/// already staged (create.rs). This hits the second one: Channel's
+/// create_subject issues exactly three `add_link_expression` calls for this
+/// input — the two constructor actions (`flux://entry_type`, `rdf://type`)
+/// plus one `SetSingleTarget` for `name` — so letting three through and
+/// failing the fourth fails the first collection-link add, after the subject
+/// itself has already landed in the batch's diff.
+#[tokio::test(flavor = "multi_thread")]
+async fn create_failing_after_the_subject_is_staged_leaves_no_instance() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).expect("perspective");
+    perspective.fail_next_add_link(3);
+
+    let result = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[
+                    ("name", json!("General")),
+                    ("messages", json!(["ad4m://obj/somemessage"])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert!(
+        result["error"].is_string(),
+        "the induced fault must surface as an error, not a false success: {result}"
+    );
+
+    let found = parse(
+        &handler
+            .instance_query(Parameters(InstanceQueryParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                filter: None,
+                parent: None,
+                limit: None,
+                offset: None,
+            }))
+            .await,
+    );
+    assert_eq!(
+        found["total_count"], 0,
+        "a batch that failed after staging the subject must leave no instance behind: {found}"
+    );
+}
+
+/// `instance_update` has one discard_batch call site. `update_subject`'s
+/// `SetSingleTarget` for a changed scalar removes the old link (no
+/// `add_link_expression` call — removal is a different code path) then adds
+/// the new one, so failing the very first `add_link_expression` call fails
+/// that single write.
+#[tokio::test(flavor = "multi_thread")]
+async fn update_failing_mid_batch_leaves_the_old_value_in_place() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("Original"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let base_uri = created["base_uri"].as_str().unwrap().to_string();
+
+    let perspective = crate::perspectives::get_perspective(&uuid).expect("perspective");
+    perspective.fail_next_add_link(0);
+
+    let updated = parse(
+        &handler
+            .instance_update(Parameters(InstanceUpdateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: base_uri.clone(),
+                properties: props(&[("name", json!("Renamed"))]),
+            }))
+            .await,
+    );
+    assert!(updated["error"].is_string(), "{updated}");
+
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri,
+            }))
+            .await,
+    );
+    assert_eq!(
+        got["name"], "Original",
+        "a failed update must not leave a partially-applied value: {got}"
+    );
+}
+
+/// `instance_add_to_collection` writes exactly one link — the membership
+/// link itself — so failing the first `add_link_expression` call fails the
+/// whole operation before anything lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn add_to_collection_failing_leaves_the_collection_unchanged() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("General"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    assert_eq!(created["created"], true, "{created}");
+    let base_uri = created["base_uri"].as_str().unwrap().to_string();
+
+    let perspective = crate::perspectives::get_perspective(&uuid).expect("perspective");
+    perspective.fail_next_add_link(0);
+
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: base_uri.clone(),
+                collection: "messages".into(),
+                item_uri: "ad4m://obj/somemessage".into(),
+            }))
+            .await,
+    );
+    assert!(added["error"].is_string(), "{added}");
+
+    let got = parse(
+        &handler
+            .instance_get(Parameters(InstanceGetParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri,
+            }))
+            .await,
+    );
+    let messages = got["messages"].as_array();
+    assert!(
+        messages.is_none_or(|m| m.is_empty()),
+        "a failed add_to_collection must not leave the item linked: {got}"
+    );
+}
