@@ -431,19 +431,41 @@ impl RemoteChat for AnthropicChat {
         let response = self.send(&body).await?;
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        // Raw bytes, not a String. A chunk boundary can fall inside a
+        // multi-byte character, and decoding per chunk would replace both
+        // halves with U+FFFD before the line buffer ever sees them — the
+        // corruption would already have happened. Bytes accumulate here and
+        // only a complete line is decoded, which is always valid UTF-8.
+        let mut buffer: Vec<u8> = Vec::new();
         let mut text = String::new();
+        let mut usage = ChatUsage::default();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| anyhow!("Anthropic stream failed: {:?}", e))?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.extend_from_slice(&chunk);
 
-            // An SSE event ends at a newline, but a chunk can split one
-            // anywhere — including mid-UTF-8 — so only whole lines are
-            // consumed and the remainder is carried into the next chunk.
-            while let Some(newline) = buffer.find('\n') {
-                let line: String = buffer.drain(..=newline).collect();
-                if let Some(delta) = text_delta(line.trim_end()) {
+            while let Some(newline) = buffer.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=newline).collect();
+                let line = String::from_utf8_lossy(&line);
+                let line = line.trim_end();
+
+                // A refusal arrives mid-stream as a stop reason on a
+                // `message_delta`, not as a status code. Without this the
+                // caller receives whatever text arrived before the refusal,
+                // reads it as a finished answer, and is billed for it — the
+                // same failure the non-streaming path had.
+                if let Some(category) = refusal_category(line) {
+                    return Err(anyhow!(
+                        "Anthropic declined this request (category: {category}). \
+                         The stream ended without a complete answer."
+                    ));
+                }
+
+                if let Some(reported) = usage_from_event(line) {
+                    usage = merge_usage(usage, reported);
+                }
+
+                if let Some(delta) = text_delta(line) {
                     text.push_str(&delta);
                     if tokens.send(delta).is_err() {
                         // Consumer hung up. Stop reading rather than
@@ -451,21 +473,73 @@ impl RemoteChat for AnthropicChat {
                         return Ok(ChatReply {
                             text,
                             tool_calls: Vec::new(),
-                            usage: ChatUsage::default(),
+                            usage,
                         });
                     }
                 }
             }
         }
 
-        // A streamed reply reports its usage in `message_delta` events, which
-        // this reader does not decode. Left empty rather than guessed at.
         Ok(ChatReply {
             text,
             tool_calls: Vec::new(),
-            usage: ChatUsage::default(),
+            usage,
         })
     }
+}
+
+/// The refusal category carried by a `message_delta`, if this line is one.
+///
+/// Streaming reports a refusal as a stop reason rather than a status, so it is
+/// invisible to the error handling around the request itself.
+fn refusal_category(line: &str) -> Option<String> {
+    let event = sse_event(line)?;
+    let delta = event.get("delta")?;
+    if delta.get("stop_reason")?.as_str()? != "refusal" {
+        return None;
+    }
+    Some(
+        delta
+            .get("stop_details")
+            .and_then(|d| d.get("category"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("unspecified")
+            .to_string(),
+    )
+}
+
+/// Token counts carried by a streamed event.
+///
+/// They arrive in pieces: `message_start` reports the input side, including
+/// what was read from or written to the cache, and `message_delta` reports the
+/// output side as it grows.
+fn usage_from_event(line: &str) -> Option<ChatUsage> {
+    let event = sse_event(line)?;
+    let usage = event
+        .get("usage")
+        .or_else(|| event.get("message").and_then(|m| m.get("usage")))?;
+    let wire: WireUsage = serde_json::from_value(usage.clone()).ok()?;
+    Some(ChatUsage::from(wire))
+}
+
+/// Later reports override earlier ones, field by field. A `message_delta`
+/// carries only what changed, so a blanket replace would drop the input and
+/// cache counts that arrived with `message_start`.
+fn merge_usage(mut into: ChatUsage, from: ChatUsage) -> ChatUsage {
+    into.input_tokens = from.input_tokens.or(into.input_tokens);
+    into.output_tokens = from.output_tokens.or(into.output_tokens);
+    into.cache_read_tokens = from.cache_read_tokens.or(into.cache_read_tokens);
+    into.cache_write_tokens = from.cache_write_tokens.or(into.cache_write_tokens);
+    into
+}
+
+/// The JSON carried by one `data:` line, if it carries any.
+fn sse_event(line: &str) -> Option<serde_json::Value> {
+    let payload = line.strip_prefix("data:")?.trim();
+    if payload.is_empty() {
+        return None;
+    }
+    serde_json::from_str(payload).ok()
 }
 
 /// Pull the text out of one SSE line, if it carries any.
@@ -476,12 +550,7 @@ impl RemoteChat for AnthropicChat {
 /// block's `input_json_delta` is not text either — it is partial JSON that
 /// would corrupt the reply if concatenated into it.
 fn text_delta(line: &str) -> Option<String> {
-    let payload = line.strip_prefix("data:")?.trim();
-    if payload.is_empty() {
-        return None;
-    }
-
-    let event: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let event = sse_event(line)?;
     if event.get("type")?.as_str()? != "content_block_delta" {
         return None;
     }
@@ -737,6 +806,64 @@ mod tests {
     }
 
     #[test]
+    fn a_streamed_refusal_is_recognised_with_its_category() {
+        let line = r#"data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"category":"cyber"}}}"#;
+        assert_eq!(refusal_category(line), Some("cyber".to_string()));
+    }
+
+    #[test]
+    fn a_streamed_refusal_without_a_category_still_reports_one() {
+        let line = r#"data: {"type":"message_delta","delta":{"stop_reason":"refusal"}}"#;
+        assert_eq!(refusal_category(line), Some("unspecified".to_string()));
+    }
+
+    #[test]
+    fn an_ordinary_stop_reason_is_not_a_refusal() {
+        for line in [
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}"#,
+        ] {
+            assert_eq!(refusal_category(line), None, "for {line}");
+        }
+    }
+
+    #[test]
+    fn message_start_carries_the_input_and_cache_counts() {
+        let line = r#"data: {"type":"message_start","message":{"usage":{"input_tokens":12,"cache_read_input_tokens":900}}}"#;
+        let usage = usage_from_event(line).expect("usage is present");
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(usage.cache_read_tokens, Some(900));
+    }
+
+    #[test]
+    fn message_delta_carries_the_output_count() {
+        let line = r#"data: {"type":"message_delta","usage":{"output_tokens":40}}"#;
+        let usage = usage_from_event(line).expect("usage is present");
+        assert_eq!(usage.output_tokens, Some(40));
+    }
+
+    #[test]
+    fn a_later_report_does_not_erase_an_earlier_one() {
+        // `message_delta` carries only what changed. Replacing wholesale would
+        // drop the input and cache counts that arrived with `message_start`.
+        let start = ChatUsage {
+            input_tokens: Some(12),
+            cache_read_tokens: Some(900),
+            ..Default::default()
+        };
+        let delta = ChatUsage {
+            output_tokens: Some(40),
+            ..Default::default()
+        };
+
+        let merged = merge_usage(start, delta);
+        assert_eq!(merged.input_tokens, Some(12));
+        assert_eq!(merged.cache_read_tokens, Some(900));
+        assert_eq!(merged.output_tokens, Some(40));
+    }
+
+    #[test]
     fn an_absent_system_prompt_is_omitted_rather_than_sent_empty() {
         let body = MessagesRequest {
             model: "claude-opus-5".to_string(),
@@ -949,6 +1076,33 @@ mod wire_tests {
         // — and the returned reply is the whole text, which is what gets billed.
         assert_eq!(deltas, vec!["Hello".to_string(), ", world".to_string()]);
         assert_eq!(reply.text, "Hello, world");
+    }
+
+    #[tokio::test]
+    async fn a_multi_byte_character_split_across_chunks_survives() {
+        // mockito sends the body in one piece, so the split is forced here by
+        // driving the same reader the stream loop uses. Decoding per chunk
+        // rather than per line would replace both halves of the "é" with
+        // U+FFFD, and no later buffering could repair it.
+        let whole = "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"café\"}}\n";
+        let bytes = whole.as_bytes();
+        let split = bytes.len() - 4; // lands inside the two-byte é
+
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut text = String::new();
+        for chunk in [&bytes[..split], &bytes[split..]] {
+            buffer.extend_from_slice(chunk);
+            while let Some(newline) = buffer.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=newline).collect();
+                let line = String::from_utf8_lossy(&line);
+                if let Some(delta) = text_delta(line.trim_end()) {
+                    text.push_str(&delta);
+                }
+            }
+        }
+
+        assert_eq!(text, "café");
+        assert!(!text.contains('\u{FFFD}'), "the character was corrupted");
     }
 
     #[tokio::test]
