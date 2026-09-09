@@ -738,3 +738,263 @@ mod tests {
         assert!(json.get("system").is_none());
     }
 }
+
+/// Wire-level tests against a mock server.
+///
+/// The serialisation tests above prove the structs are shaped right; these
+/// prove the bytes that leave the process are, which is a different claim.
+/// This client was written from the API documentation without a key, so what
+/// is actually sent — headers, path, body — had no coverage at all otherwise.
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use mockito::Matcher;
+    use serde_json::json;
+
+    fn turns() -> Vec<ChatTurn> {
+        vec![ChatTurn::system("be terse"), ChatTurn::user("hello")]
+    }
+
+    #[tokio::test]
+    async fn a_completion_is_posted_to_v1_messages_with_the_documented_headers() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .match_header("x-api-key", "sk-test")
+            .match_header("anthropic-version", ANTHROPIC_VERSION)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"content":[{"type":"text","text":"hi"}]}"#)
+            .create_async()
+            .await;
+
+        let client = AnthropicChat::new("sk-test", Url::parse(&server.url()).unwrap());
+        let reply = client
+            .chat(ChatRequest::new("claude-opus-5", turns()))
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+        assert_eq!(reply.text, "hi");
+    }
+
+    #[tokio::test]
+    async fn the_request_body_carries_the_model_max_tokens_and_a_cached_system_prompt() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(Matcher::PartialJson(json!({
+                "model": "claude-opus-5",
+                "max_tokens": DEFAULT_MAX_TOKENS,
+                "system": [{
+                    "type": "text",
+                    "text": "be terse",
+                    "cache_control": { "type": "ephemeral" },
+                }],
+                "messages": [{ "role": "user", "content": "hello" }],
+            })))
+            .with_status(200)
+            .with_body(r#"{"content":[]}"#)
+            .create_async()
+            .await;
+
+        let client = AnthropicChat::new("sk-test", Url::parse(&server.url()).unwrap());
+        client
+            .chat(ChatRequest::new("claude-opus-5", turns()))
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn tools_go_out_as_input_schema() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(Matcher::PartialJson(json!({
+                "tools": [{
+                    "name": "search",
+                    "description": "find things",
+                    "input_schema": { "type": "object" },
+                }],
+            })))
+            .with_status(200)
+            .with_body(r#"{"content":[]}"#)
+            .create_async()
+            .await;
+
+        let client = AnthropicChat::new("sk-test", Url::parse(&server.url()).unwrap());
+        client
+            .chat(
+                ChatRequest::new("claude-opus-5", turns()).with_tools(vec![ToolSpec {
+                    name: "search".into(),
+                    description: "find things".into(),
+                    parameters: json!({ "type": "object" }),
+                }]),
+            )
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_tool_use_block_comes_back_as_a_structured_call() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/messages")
+            .with_status(200)
+            .with_body(
+                r#"{"content":[
+                    {"type":"text","text":"one moment"},
+                    {"type":"tool_use","id":"toolu_1","name":"search","input":{"q":"x"}}
+                ]}"#,
+            )
+            .create_async()
+            .await;
+
+        let client = AnthropicChat::new("sk-test", Url::parse(&server.url()).unwrap());
+        let reply = client
+            .chat(ChatRequest::new("claude-opus-5", turns()))
+            .await
+            .expect("completion succeeds");
+
+        assert_eq!(reply.text, "one moment");
+        assert_eq!(reply.tool_calls.len(), 1);
+        assert_eq!(reply.tool_calls[0].id, "toolu_1");
+        assert_eq!(reply.tool_calls[0].name, "search");
+        assert_eq!(reply.tool_calls[0].arguments["q"], "x");
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_surfaces_the_providers_own_message() {
+        // The status alone does not tell an operator whether the key is wrong
+        // or the model name is, and both are things only they can fix.
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/messages")
+            .with_status(401)
+            .with_body(r#"{"error":{"message":"invalid x-api-key"}}"#)
+            .create_async()
+            .await;
+
+        let client = AnthropicChat::new("bad", Url::parse(&server.url()).unwrap());
+        let error = client
+            .chat(ChatRequest::new("claude-opus-5", turns()))
+            .await
+            .expect_err("a 401 is an error");
+
+        let message = error.to_string();
+        assert!(message.contains("401"), "got: {message}");
+        assert!(message.contains("invalid x-api-key"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn a_streamed_completion_sets_stream_and_yields_each_delta() {
+        let mut server = mockito::Server::new_async().await;
+        let sse = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\"}\n",
+            "\n",
+            "event: content_block_delta\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n",
+            "\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\", world\"}}\n",
+            "\n",
+            "data: {\"type\":\"message_stop\"}\n",
+            "\n",
+        );
+
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .match_body(Matcher::PartialJson(json!({ "stream": true })))
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_body(sse)
+            .create_async()
+            .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = AnthropicChat::new("sk-test", Url::parse(&server.url()).unwrap());
+        let reply = client
+            .chat_stream(ChatRequest::new("claude-opus-5", turns()), tx)
+            .await
+            .expect("stream succeeds");
+
+        mock.assert_async().await;
+
+        let mut deltas = Vec::new();
+        while let Ok(delta) = rx.try_recv() {
+            deltas.push(delta);
+        }
+
+        // Each delta reaches the consumer separately — the point of streaming
+        // — and the returned reply is the whole text, which is what gets billed.
+        assert_eq!(deltas, vec!["Hello".to_string(), ", world".to_string()]);
+        assert_eq!(reply.text, "Hello, world");
+    }
+
+    #[tokio::test]
+    async fn a_streamed_error_status_never_reaches_the_parser() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("POST", "/v1/messages")
+            .with_status(429)
+            .with_body(r#"{"error":{"message":"rate limited"}}"#)
+            .create_async()
+            .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = AnthropicChat::new("sk-test", Url::parse(&server.url()).unwrap());
+        let error = client
+            .chat_stream(ChatRequest::new("claude-opus-5", turns()), tx)
+            .await
+            .expect_err("a 429 is an error");
+
+        assert!(error.to_string().contains("rate limited"));
+        // An error body is not a stream of deltas; nothing should have been
+        // pushed to a consumer that is about to be told the call failed.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn listing_models_reads_the_data_array() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/models")
+            .match_header("x-api-key", "sk-test")
+            .match_header("anthropic-version", ANTHROPIC_VERSION)
+            .with_status(200)
+            .with_body(r#"{"data":[{"id":"claude-opus-5"},{"id":"claude-sonnet-5"}]}"#)
+            .create_async()
+            .await;
+
+        let models = list_models("sk-test", Url::parse(&server.url()).unwrap())
+            .await
+            .expect("listing succeeds");
+
+        mock.assert_async().await;
+        assert_eq!(models, vec!["claude-opus-5", "claude-sonnet-5"]);
+    }
+
+    #[tokio::test]
+    async fn listing_models_reports_a_refused_key_rather_than_an_empty_list() {
+        // An empty list would read as "this endpoint serves nothing", which
+        // sends an operator looking in the wrong place entirely.
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(401)
+            .with_body(r#"{"error":{"message":"invalid x-api-key"}}"#)
+            .create_async()
+            .await;
+
+        let error = list_models("bad", Url::parse(&server.url()).unwrap())
+            .await
+            .expect_err("a 401 is an error");
+
+        assert!(error.to_string().contains("401"));
+        assert!(error.to_string().contains("invalid x-api-key"));
+    }
+}

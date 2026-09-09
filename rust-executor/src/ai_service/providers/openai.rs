@@ -123,3 +123,86 @@ impl RemoteChat for OpenAiChat {
         })
     }
 }
+
+/// Wire-level tests for the discovery path against a mock server.
+///
+/// The chat path is `chat_gpt_lib_rs`'s to get right and is exercised in
+/// production; discovery is ours, and its auth differs from the chat client's
+/// in a way worth pinning down — some endpoints that serve models need no key
+/// at all, and sending an empty bearer token to one is not the same as sending
+/// nothing.
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use mockito::Matcher;
+
+    #[tokio::test]
+    async fn a_key_is_sent_as_a_bearer_token() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/models")
+            .match_header("authorization", "Bearer sk-test")
+            .with_status(200)
+            .with_body(r#"{"data":[{"id":"gpt-4o"}]}"#)
+            .create_async()
+            .await;
+
+        let models = list_models("sk-test", Url::parse(&server.url()).unwrap())
+            .await
+            .expect("listing succeeds");
+
+        mock.assert_async().await;
+        assert_eq!(models, vec!["gpt-4o"]);
+    }
+
+    #[tokio::test]
+    async fn no_key_means_no_authorization_header_at_all() {
+        // A local Ollama or vLLM serves models without credentials, and some
+        // reject a malformed `Bearer ` outright — so an absent key must mean
+        // an absent header rather than an empty one.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/v1/models")
+            .match_header("authorization", Matcher::Missing)
+            .with_status(200)
+            .with_body(r#"{"data":[{"id":"llama3.1"}]}"#)
+            .create_async()
+            .await;
+
+        let models = list_models("", Url::parse(&server.url()).unwrap())
+            .await
+            .expect("listing succeeds");
+
+        mock.assert_async().await;
+        assert_eq!(models, vec!["llama3.1"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_key_is_an_error_rather_than_an_empty_list() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/v1/models")
+            .with_status(401)
+            .with_body(r#"{"error":{"message":"Incorrect API key provided"}}"#)
+            .create_async()
+            .await;
+
+        let error = list_models("bad", Url::parse(&server.url()).unwrap())
+            .await
+            .expect_err("a 401 is an error");
+
+        assert!(error.to_string().contains("401"));
+        assert!(error.to_string().contains("Incorrect API key provided"));
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_endpoint_names_the_url_it_tried() {
+        // The URL is the thing an operator got wrong, so it belongs in the
+        // message rather than only in whatever reqwest says went wrong.
+        let error = list_models("k", Url::parse("http://127.0.0.1:1/").unwrap())
+            .await
+            .expect_err("nothing listens there");
+
+        assert!(error.to_string().contains("127.0.0.1:1"), "got: {error}");
+    }
+}
