@@ -1436,20 +1436,10 @@ mod tests {
         }
     }
 
-    // Test the auth_status logic directly without needing full MCP handler
-    #[tokio::test]
-    async fn test_auth_status_unauthenticated() {
-        let ctx = TestAuthContext::new(None);
-        let token = ctx.get_auth_token().await;
-
-        // Simulate auth_status logic
-        let result = match token {
-            Some(t) if !t.is_empty() => "authenticated",
-            _ => "not_authenticated",
-        };
-
-        assert_eq!(result, "not_authenticated");
-    }
+    // `test_auth_status_unauthenticated` used to live here. It re-implemented the
+    // match inside the test body and asserted against its own copy, so no change to
+    // the real tool could ever fail it. The real answer function is now tested
+    // directly in `mcp::tools::auth::auth_status_tests`.
 
     #[tokio::test]
     async fn test_auth_token_stores_value() {

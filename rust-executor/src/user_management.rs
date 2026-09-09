@@ -10,6 +10,15 @@ use crate::agent::AgentService;
 use crate::db::Ad4mDb;
 use crate::wallet::wallet_backend;
 
+/// Whether the wallet holds its keys right now.
+///
+/// False after every restart until the admin calls `unlockAgent`. Read this when a
+/// caller needs to *describe* the executor's state rather than refuse an operation —
+/// `auth_status` uses it so a locked node does not present as an unauthenticated one.
+pub fn executor_is_unlocked() -> bool {
+    wallet_backend().is_unlocked()
+}
+
 /// Returns `Err` with an operator-facing message when the executor wallet is locked.
 ///
 /// After a restart, in-memory keys are gone until the admin calls `unlockAgent`. Any
@@ -17,7 +26,7 @@ use crate::wallet::wallet_backend;
 /// otherwise surface as "User key not found" — indistinguishable from a deleted account.
 /// Calling this guard first gives callers a clear, actionable message.
 fn check_executor_unlocked() -> Result<(), String> {
-    if !wallet_backend().is_unlocked() {
+    if !executor_is_unlocked() {
         return Err(
             "Executor is locked: its admin has not unlocked the agent yet (keys are held in \
              memory only, so this happens after every restart). Ask the executor operator to \
