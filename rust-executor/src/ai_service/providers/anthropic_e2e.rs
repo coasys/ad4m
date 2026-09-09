@@ -58,23 +58,35 @@ fn client(api_key: &str) -> AnthropicChat {
 /// Below that minimum the API declines to cache and reports nothing, so a
 /// short prompt cannot tell a working breakpoint from a broken one.
 ///
-/// This is real prose from this repository rather than generated filler, and
-/// that matters. Three synthetic prefixes were refused outright with three
-/// different categories — a repeated paragraph, 900 numbered behaviour rules
-/// (`reasoning_extraction`), and a parts catalogue (`cyber`). Bulk
-/// machine-generated text appears to trip classifiers whatever it says, and a
-/// refusal looks exactly like a caching failure from the outside. Real
-/// documentation is also closer to the case this feature exists for, where the
-/// cached prefix is a large generated reference document.
+/// Two constraints shaped this.
+///
+/// It is real prose rather than generated filler. Three synthetic prefixes were
+/// refused outright with three different categories — a repeated paragraph, 900
+/// numbered behaviour rules (`reasoning_extraction`), and a parts catalogue
+/// (`cyber`). Bulk machine-generated text appears to trip classifiers whatever
+/// it says, and a refusal looks exactly like a caching failure from the
+/// outside. Real documentation is also closer to the case this feature exists
+/// for, where the cached prefix is a large generated reference document.
+///
+/// Every file is under `rust-executor/src`. `Cargo.toml` packages only
+/// `src/**/*`, so an `include_str!` reaching the repository root — which an
+/// earlier version did, for `planning/` and for the crate's own `AGENTS.md` —
+/// compiles here and fails wherever the crate is packaged or copied without
+/// its parent directories.
 fn long_system_prompt() -> String {
     let mut prompt = String::from(
         "The following is internal documentation. Answer questions about it briefly.\n\n",
     );
-    prompt.push_str(include_str!("../../../AGENTS.md"));
-    prompt.push_str(include_str!("../../../src/ai_service/AGENTS.md"));
-    prompt.push_str(include_str!(
-        "../../../../planning/llm-harness-design-2026-08-21-v3.md"
-    ));
+    for doc in [
+        include_str!("../AGENTS.md"),
+        include_str!("../../api/AGENTS.md"),
+        include_str!("../../perspectives/AGENTS.md"),
+        include_str!("../../mcp/AGENTS.md"),
+        include_str!("../../languages/AGENTS.md"),
+    ] {
+        prompt.push_str(doc);
+        prompt.push('\n');
+    }
     prompt
 }
 
