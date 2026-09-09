@@ -287,6 +287,26 @@ plugins/ad4m/
 
 ## Changelog
 
+### Unreleased
+
+- ⚠️ **Breaking for existing configs: credentials are no longer sent to a cleartext
+  remote endpoint.** Every MCP call carries the plugin's JWT in an `Authorization`
+  header, so an `mcpEndpoint` that is plain `http://` on anything but loopback now
+  fails closed. A config that worked before this change stops working on the first
+  restart after it, and **every `ad4m_*` tool returns the refusal instead of a result**
+  — the failure looks like a broken bridge, not a config problem.
+
+  The fix is one field. Either move the executor behind TLS and use `https://`, or, if
+  the network path is genuinely yours end to end (a LAN host, an SSH tunnel), set
+  `allowInsecureHttp: true` in `plugins.entries.ad4m.config`. The flag is a client-side
+  guard only; it does not change anything about the executor.
+- **Setup no longer prints credentials to the terminal.** A config snippet holding a
+  `wakeToken` or a real `agentPassphrase` now goes to `ad4m-setup-config.json` (mode
+  `0600`) like a JWT already did, instead of being printed as one copy-paste line.
+- **Setup warns instead of falling back silently.** An `--endpoint` that does not answer
+  used to drop to managed mode without a word, downloading an executor and returning a
+  localhost config for a remote node you named.
+
 ### 0.0.2
 
 - **Fixed external mode setup flow** — the JWT capability request and code verification now works correctly with running executors
