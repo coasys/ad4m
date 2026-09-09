@@ -229,11 +229,15 @@ fn structured_turn(m: &Value) -> Result<ChatTurn> {
     match role {
         "system" => Ok(ChatTurn::system(content)),
         "tool" => {
-            let call_id = m
-                .get("tool_call_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            Ok(ChatTurn::tool_result(call_id, content))
+            // Anthropic rejects a `tool_result` whose `tool_use_id` is empty,
+            // and an unidentified result cannot be paired with a call anyway.
+            // Carrying the text as an ordinary user turn keeps what the tool
+            // said in front of the model, which is the part that matters, and
+            // is what the prompt-injection path does with it too.
+            match m.get("tool_call_id").and_then(|v| v.as_str()) {
+                Some(call_id) if !call_id.is_empty() => Ok(ChatTurn::tool_result(call_id, content)),
+                _ => Ok(ChatTurn::user(content)),
+            }
         }
         "assistant" => {
             let calls: Vec<ToolCall> = m
@@ -258,25 +262,36 @@ fn structured_turn(m: &Value) -> Result<ChatTurn> {
 /// One entry of an assistant turn's `tool_calls`, as the providers want it.
 ///
 /// `arguments` arrives as a JSON *string* on the OpenAI wire and as an object
-/// once it has been through the harness. Both are accepted; anything that
-/// parses as neither is skipped rather than sent as a malformed call, since a
-/// call with unreadable arguments cannot be dispatched anyway.
+/// once it has been through the harness. Both are accepted.
+///
+/// Unparseable arguments are kept rather than dropped, under `_raw`. Dropping
+/// the call looked safer and is not: the harness has already dispatched it and
+/// appends the matching `tool_result` on the next turn, so a missing `tool_use`
+/// leaves a result whose `tool_use_id` refers to nothing, and Anthropic rejects
+/// the whole request. A call the model can see went wrong is recoverable; an
+/// unbalanced conversation is not.
+///
+/// A call with no id is the one case that is skipped, because the pairing it
+/// would need does not exist either way and an empty `tool_use` id is refused.
 fn to_provider_call(raw: &Value) -> Option<ToolCall> {
     let function = raw.get("function").unwrap_or(raw);
     let name = function.get("name")?.as_str()?.to_string();
 
+    let id = raw.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    if id.is_empty() {
+        return None;
+    }
+
     let arguments = match function.get("arguments") {
-        Some(Value::String(text)) => serde_json::from_str(text).ok()?,
+        Some(Value::String(text)) => {
+            serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({ "_raw": text }))
+        }
         Some(value) => value.clone(),
         None => Value::Object(Default::default()),
     };
 
     Some(ToolCall {
-        id: raw
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        id: id.to_string(),
         name,
         arguments,
     })
@@ -688,7 +703,7 @@ mod native_mapping_tests {
     }
 
     #[test]
-    fn a_call_with_unparseable_arguments_is_dropped_not_sent_malformed() {
+    fn a_call_with_unparseable_arguments_is_kept_under_raw() {
         let turn = structured_turn(&json!({
             "role": "assistant",
             "content": "hmm",
@@ -699,10 +714,47 @@ mod native_mapping_tests {
         }))
         .expect("maps");
 
-        // A call whose arguments cannot be read cannot be dispatched, so the
-        // turn degrades to plain text rather than carrying a broken call.
+        // Dropping the call would leave the tool_result the harness appends
+        // next turn pointing at nothing, and Anthropic rejects a request whose
+        // tool_use_id matches no tool_use.
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].arguments["_raw"], "{not json");
+    }
+
+    #[test]
+    fn a_call_without_an_id_is_skipped() {
+        // An empty tool_use id is refused by the API, and the result that
+        // would answer it cannot be paired either way.
+        let turn = structured_turn(&json!({
+            "role": "assistant",
+            "content": "hmm",
+            "tool_calls": [{ "function": { "name": "search", "arguments": "{}" } }],
+        }))
+        .expect("maps");
+
         assert!(turn.tool_calls.is_empty());
         assert_eq!(turn.content, "hmm");
+    }
+
+    #[test]
+    fn a_tool_result_without_an_id_becomes_an_ordinary_user_turn() {
+        // Anthropic rejects an empty tool_use_id. The text still has to reach
+        // the model, so it travels as a user turn.
+        let turn = structured_turn(&json!({ "role": "tool", "content": "42" })).expect("maps");
+
+        assert_eq!(turn.role, ChatRole::User);
+        assert!(turn.tool_result_for.is_none());
+        assert_eq!(turn.content, "42");
+    }
+
+    #[test]
+    fn a_tool_result_with_an_empty_id_becomes_an_ordinary_user_turn() {
+        let turn = structured_turn(&json!({
+            "role": "tool", "tool_call_id": "", "content": "42",
+        }))
+        .expect("maps");
+
+        assert!(turn.tool_result_for.is_none());
     }
 
     #[test]
