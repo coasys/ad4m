@@ -855,9 +855,47 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
 }
 
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
+/// Synthetic keys `hydrate_one` (`model_query/hydration.rs`) always writes onto
+/// every hydrated instance, regardless of the class's own properties. A
+/// property sharing one of these names collides with it in the flat instance
+/// JSON — whichever write happens later in `hydrate_one` silently wins, with
+/// no error either way. See issue #974: a `hasOne` relation named `author`
+/// read back the creating agent's DID instead of the linked instance.
+const RESERVED_PROPERTY_NAMES: [&str; 6] = [
+    "id",
+    "baseExpression",
+    "createdAt",
+    "updatedAt",
+    "author",
+    "timestamp",
+];
+
 pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
     let shape: SHACLShape = serde_json::from_str(shacl_json)
         .map_err(|e| anyhow::anyhow!("Failed to parse SHACL JSON: {}", e))?;
+
+    // Reject reserved names before generating a single link: a class that
+    // registers cleanly but silently shadows one of its own properties on
+    // every read is a much worse failure than a rejection naming the fix.
+    let reserved_collisions: Vec<String> = shape
+        .properties
+        .iter()
+        .map(|prop| {
+            prop.name
+                .clone()
+                .unwrap_or_else(|| extract_local_name(&prop.path))
+        })
+        .filter(|name| RESERVED_PROPERTY_NAMES.contains(&name.as_str()))
+        .collect();
+    if !reserved_collisions.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Property name(s) {:?} collide with synthetic fields every hydrated instance \
+             already carries ({}). Whichever value hydration writes last wins silently, with \
+             no error — pick a different property name.",
+            reserved_collisions,
+            RESERVED_PROPERTY_NAMES.join(", "),
+        ));
+    }
 
     let mut links = Vec::new();
 
@@ -1307,6 +1345,74 @@ mod tests {
             "property"
         );
         assert_eq!(extract_local_name("simple://test/path/item"), "item");
+    }
+
+    /// #974: a property named `author` shadows the hydration metadata field of
+    /// the same name — the linked-instance value and the creating agent's DID
+    /// collide in the flat instance JSON, and whichever `hydrate_one` writes
+    /// last wins silently. Reject it at registration instead.
+    #[test]
+    fn parse_shacl_to_links_rejects_a_property_named_author() {
+        let shacl_json = r#"{
+            "target_class": "book://Post",
+            "properties": [
+                { "path": "book://author", "name": "author", "relation_kind": "hasOne", "target_class_name": "User" }
+            ]
+        }"#;
+        let err = parse_shacl_to_links(shacl_json, "Post").unwrap_err();
+        let message = format!("{err}");
+        assert!(message.contains("author"), "{message}");
+        assert!(message.contains("hydration"), "{message}");
+    }
+
+    /// Every synthetic key `hydrate_one` writes, checked one at a time so a
+    /// future addition to that list without a matching entry here fails loud
+    /// rather than leaving a silent gap in the guard.
+    #[test]
+    fn parse_shacl_to_links_rejects_every_reserved_name() {
+        for reserved in RESERVED_PROPERTY_NAMES {
+            let shacl_json = format!(
+                r#"{{
+                    "target_class": "book://Post",
+                    "properties": [
+                        {{ "path": "book://{reserved}", "name": "{reserved}", "datatype": "xsd://string" }}
+                    ]
+                }}"#
+            );
+            assert!(
+                parse_shacl_to_links(&shacl_json, "Post").is_err(),
+                "'{reserved}' should be rejected"
+            );
+        }
+    }
+
+    /// A property whose `name` is omitted still derives from `path` before
+    /// this check runs (matches the derivation immediately below), so a bare
+    /// `path` ending in a reserved segment must be caught the same way an
+    /// explicit `name` is.
+    #[test]
+    fn parse_shacl_to_links_rejects_a_reserved_name_derived_from_path() {
+        let shacl_json = r#"{
+            "target_class": "book://Post",
+            "properties": [
+                { "path": "book://timestamp", "datatype": "xsd://string" }
+            ]
+        }"#;
+        let err = parse_shacl_to_links(shacl_json, "Post").unwrap_err();
+        assert!(format!("{err}").contains("timestamp"));
+    }
+
+    /// A property with an ordinary name is unaffected — the guard must not
+    /// reject legitimate schemas.
+    #[test]
+    fn parse_shacl_to_links_accepts_an_ordinary_property_name() {
+        let shacl_json = r#"{
+            "target_class": "book://Post",
+            "properties": [
+                { "path": "book://title", "name": "title", "datatype": "xsd://string" }
+            ]
+        }"#;
+        assert!(parse_shacl_to_links(shacl_json, "Post").is_ok());
     }
 
     #[test]
