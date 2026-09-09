@@ -64,6 +64,30 @@ use serde_json::json;
 use crate::utils::constant_time_eq;
 use axum::http::request::Parts as HttpRequestParts;
 
+/// The credential carried by this request's `Authorization` header, if any.
+///
+/// A `Bearer <value>` header yields `<value>`; any other scheme yields the whole header
+/// verbatim, because an admin credential may be sent raw. Returns `None` when the header
+/// is absent — which callers must distinguish from an empty or unusable one.
+fn bearer_credential(context: &RequestContext<RoleServer>) -> Option<String> {
+    context
+        .extensions
+        .get::<HttpRequestParts>()
+        .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
+        .and_then(|h| h.to_str().ok())
+        .map(|h| {
+            let mut parts = h.splitn(2, char::is_whitespace);
+            let scheme = parts.next().unwrap_or_default();
+            let value = parts.next().unwrap_or_default().trim_start();
+
+            if scheme.eq_ignore_ascii_case("bearer") && !value.is_empty() {
+                value.to_string()
+            } else {
+                h.to_string()
+            }
+        })
+}
+
 // ============================================================================
 // MCP Handler
 // ============================================================================
@@ -147,12 +171,16 @@ impl ServerHandler for Ad4mMcpHandler {
         let tool_name = request.name.to_string();
 
         // Check if tool requires authentication
-        if !AUTH_TOOLS.contains(&tool_name.as_str()) {
-            if !self.check_auth(&tool_name, &context).await {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
-                )]));
-            }
+        if AUTH_TOOLS.contains(&tool_name.as_str()) {
+            // The auth tools run without a credential by design, but they still need to
+            // *see* one: `auth_status` reports the session token, and a header-only
+            // client has none until something adopts it. Result ignored — absence is
+            // not an error here.
+            self.adopt_header_credential(&context).await;
+        } else if !self.check_auth(&tool_name, &context).await {
+            return Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
+            )]));
         }
 
         self.dispatch_tool(request, context).await
@@ -204,52 +232,56 @@ impl Ad4mMcpHandler {
 
         // 3. Try HTTP Authorization header (for clients like mcporter that send
         //    credentials per-request rather than using the MCP session)
-        let http_header_value = context
-            .extensions
-            .get::<HttpRequestParts>()
-            .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
-            .and_then(|h| h.to_str().ok())
-            .map(|h| {
-                let mut parts = h.splitn(2, char::is_whitespace);
-                let scheme = parts.next().unwrap_or_default();
-                let value = parts.next().unwrap_or_default().trim_start();
-
-                if scheme.eq_ignore_ascii_case("bearer") && !value.is_empty() {
-                    value.to_string()
-                } else {
-                    h.to_string()
-                }
-            });
-
-        if let Some(ref header_token) = http_header_value {
-            // 3a. Header matches admin credential → store & pass
-            if let Some(cred) = admin_cred {
-                if constant_time_eq(header_token, cred) {
-                    let mut guard = self.context.auth_token.write().await;
-                    *guard = Some(cred.to_string());
-                    return true;
-                }
-            }
-
-            // 3b. Header is a valid JWT → store & pass
-            if !header_token.is_empty() {
-                let caps =
-                    capabilities_from_token(header_token.clone(), admin_cred.map(String::from));
-                if caps.is_ok() {
-                    let mut guard = self.context.auth_token.write().await;
-                    *guard = Some(header_token.clone());
-                    return true;
-                }
-            }
+        let header_present = bearer_credential(context).is_some();
+        if self.adopt_header_credential(context).await {
+            return true;
         }
 
         // 4. No admin credential configured and no token → single-user local mode
         //    (mirrors REST localhost trust model)
-        if admin_cred.is_none() && session_token.is_empty() && http_header_value.is_none() {
+        if admin_cred.is_none() && session_token.is_empty() && !header_present {
             return true;
         }
 
         // Everything else → reject
+        false
+    }
+
+    /// Store a valid `Authorization` credential from this request into the session.
+    ///
+    /// Returns whether one was adopted. Called for every tool, including the ones that
+    /// skip [`Self::check_auth`]: a client that authenticates purely by header (mcporter,
+    /// the OpenClaw plugin, any `.mcp.json` `headers` entry) otherwise leaves the session
+    /// token empty, and `auth_status` — which reads only the session — answers
+    /// "not authenticated" to a caller whose every other tool call succeeds. That reading
+    /// is what sends an agent back through a login it does not need.
+    ///
+    /// Only a credential that already passes validation is stored, so this widens where
+    /// an accepted credential is remembered, never which credentials are accepted.
+    async fn adopt_header_credential(&self, context: &RequestContext<RoleServer>) -> bool {
+        let Some(header_token) = bearer_credential(context) else {
+            return false;
+        };
+        let admin_cred = self.context.admin_credential.as_deref();
+
+        // Header matches admin credential → store & pass
+        if let Some(cred) = admin_cred {
+            if constant_time_eq(&header_token, cred) {
+                let mut guard = self.context.auth_token.write().await;
+                *guard = Some(cred.to_string());
+                return true;
+            }
+        }
+
+        // Header is a valid JWT → store & pass
+        if !header_token.is_empty()
+            && capabilities_from_token(header_token.clone(), admin_cred.map(String::from)).is_ok()
+        {
+            let mut guard = self.context.auth_token.write().await;
+            *guard = Some(header_token);
+            return true;
+        }
+
         false
     }
 

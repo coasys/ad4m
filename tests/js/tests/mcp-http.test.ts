@@ -171,6 +171,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     let executorProcess: ChildProcess | null = null;
     let perspectiveUuid: string = "";
     let mcpSessionId: string = "";
+    // Captured from generate_jwt so a later test can authenticate by header alone.
+    let headerOnlyToken: string = "";
     let agentDid: string = "";
 
     // Addresses for the populated perspective
@@ -294,11 +296,33 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             expect(jwtResult.success).to.be.true;
             expect(jwtResult.token).to.be.a('string');
+            headerOnlyToken = jwtResult.token;
         });
 
         it("should confirm auth status", async function() {
             const status = await callMcpTool(MCP_BASE_URL,'auth_status', {}, mcpSessionId);
             expect(status.authenticated).to.be.true;
+        });
+
+        // A client that authenticates only by Authorization header — mcporter, the
+        // OpenClaw plugin, any .mcp.json `headers` entry — never populates the MCP
+        // session token. auth_status used to read only the session, so it answered
+        // "not authenticated" to a caller whose every other tool call succeeded, and
+        // that reading sends an agent back through a login it does not need.
+        it("should report authenticated for a header-only client on a fresh session", async function() {
+            expect(headerOnlyToken, "previous test must have produced a token").to.be.a('string');
+            const fresh = await initializeMcp(MCP_BASE_URL);
+            expect(fresh.sessionId).to.not.equal(mcpSessionId);
+
+            const status = await callMcpTool(
+                MCP_BASE_URL,
+                'auth_status',
+                {},
+                fresh.sessionId,
+                { Authorization: `Bearer ${headerOnlyToken}` },
+            );
+            expect(status.authenticated).to.be.true;
+            expect(status.executor_locked).to.be.false;
         });
     });
 
