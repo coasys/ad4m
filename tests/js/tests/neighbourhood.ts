@@ -97,17 +97,20 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 await testContext.makeAllNodesKnown()
                 expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
 
-                // Wait for Alice's perspective to reach Synced state.
-                // install_neighbourhood sets state to
-                // LinkLanguageInstalledButNotSynced BEFORE the background
-                // ensure_link_language task wires self.link_language. Only
-                // nh_sync_loop sets Synced — and it requires link_language
-                // to be wired first. So Synced guarantees addLink won't hit
+                // Wait for Alice's link language to be wired.
+                // publishFromPerspective sets state=NeighbourhoodCreationInitiated.
+                // ensure_link_language (5s-interval background task) detects
+                // the neighbourhood, wires self.link_language, and atomically
+                // sets state to LinkLanguageInstalledButNotSynced. So any
+                // state after NeighbourhoodCreationInitiated guarantees the
+                // language runtime exists and addLink won't hit
                 // "LinkLanguage not available".
+                // NOTE: Do NOT wait for Synced — sync() can fail ("fetch
+                // failed") in CI, so Synced may never be reached.
                 let aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
                 let readyTries = 0;
-                while (aliceReady?.state !== PerspectiveState.Synced
-                    && readyTries < 30) {
+                while (aliceReady?.state === PerspectiveState.NeighbourhoodCreationInitiated
+                    && readyTries < 60) {
                     await sleep(500);
                     aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
                     readyTries++;
@@ -178,12 +181,12 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 await testContext.makeAllNodesKnown()
 
-                // Wait for Alice's Synced state — guarantees
-                // self.link_language is wired (see simple test comment).
+                // Wait for Alice's link language to be wired (see simple
+                // test comment for rationale).
                 let aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
                 let readyTries = 0;
-                while (aliceReady?.state !== PerspectiveState.Synced
-                    && readyTries < 30) {
+                while (aliceReady?.state === PerspectiveState.NeighbourhoodCreationInitiated
+                    && readyTries < 60) {
                     await sleep(500);
                     aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
                     readyTries++;
