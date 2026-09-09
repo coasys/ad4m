@@ -171,6 +171,36 @@ pub fn build_flow_contexts(
         .collect()
 }
 
+/// Drop every flow not named by the selection. `None` = no filtering
+/// (direct interpretation runs default to all flows); `Some(uris)` keeps
+/// only the listed canonical flow URIs — the per-processor targeting Nico
+/// specified 2026-09-04: flow features run only on flows the operator
+/// selected, exactly like the interpretation-class selection.
+pub fn retain_selected_flows(
+    flows_by_uri: &mut HashMap<String, SHACLFlow>,
+    flow_filter: Option<&[String]>,
+) {
+    if let Some(selected) = flow_filter {
+        // A selection entry matching nothing in the catalogue is otherwise a
+        // silent no-op, and the canonical form (`{namespace}{name}Flow`)
+        // makes near-misses cheap (`DeliveryFlow` vs `delivery://DeliveryFlow`).
+        // One warn per pass listing all unmatched entries — not one per
+        // entry — so a misconfigured processor is distinguishable from a
+        // correctly configured one without flooding the log every tick.
+        let unmatched: Vec<&String> = selected
+            .iter()
+            .filter(|entry| !flows_by_uri.contains_key(*entry))
+            .collect();
+        if !unmatched.is_empty() {
+            log::warn!(
+                "retain_selected_flows: selection entries {unmatched:?} match no flow in the \
+                 catalogue — check the canonical form `{{namespace}}{{name}}Flow`"
+            );
+        }
+        flows_by_uri.retain(|uri, _| selected.iter().any(|s| s == uri));
+    }
+}
+
 /// Compose the two loaders + [`build_flow_contexts`] into one call that
 /// the extraction pass (`run.rs`) can use directly.
 ///
@@ -196,14 +226,16 @@ pub fn build_flow_contexts(
 pub async fn gather_active_flow_contexts(
     perspective: &PerspectiveInstance,
     subjects: &[String],
+    flow_filter: Option<&[String]>,
 ) -> Vec<FlowContext> {
-    let flows_by_uri = match load_shacl_flows(perspective).await {
+    let mut flows_by_uri = match load_shacl_flows(perspective).await {
         Ok(m) => m,
         Err(e) => {
             log::warn!("gather_active_flow_contexts: load_shacl_flows failed, using empty: {e:#}");
             return Vec::new();
         }
     };
+    retain_selected_flows(&mut flows_by_uri, flow_filter);
     if flows_by_uri.is_empty() {
         return Vec::new();
     }
@@ -406,6 +438,60 @@ pub async fn load_shacl_flows(
 mod tests {
     use super::*;
     use crate::perspectives::shacl_parser::parse_flow_to_links;
+
+    // ------------- retain_selected_flows -------------
+
+    fn catalogue(uris: &[(&str, &str)]) -> HashMap<String, SHACLFlow> {
+        uris.iter()
+            .map(|(name, namespace)| {
+                let flow: SHACLFlow = serde_json::from_value(
+                    serde_json::json!({ "name": name, "namespace": namespace }),
+                )
+                .expect("minimal SHACLFlow deserializes");
+                (flow.flow_uri(), flow)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn retain_selected_flows_none_keeps_all() {
+        let mut flows = catalogue(&[("Delivery", "delivery://"), ("Deliberation", "coasys://")]);
+        retain_selected_flows(&mut flows, None);
+        assert_eq!(flows.len(), 2, "no filter = direct runs see every flow");
+    }
+
+    #[test]
+    fn retain_selected_flows_keeps_only_listed() {
+        let mut flows = catalogue(&[("Delivery", "delivery://"), ("Deliberation", "coasys://")]);
+        let selection = vec!["delivery://DeliveryFlow".to_string()];
+        retain_selected_flows(&mut flows, Some(&selection));
+        assert_eq!(flows.len(), 1);
+        assert!(flows.contains_key("delivery://DeliveryFlow"));
+    }
+
+    #[test]
+    fn retain_selected_flows_unmatched_entry_keeps_nothing_extra() {
+        // The near-miss shape the warn is about: a bare name instead of the
+        // canonical `{namespace}{name}Flow`. It must not match, and must not
+        // disturb the entries that do.
+        let mut flows = catalogue(&[("Delivery", "delivery://"), ("Deliberation", "coasys://")]);
+        let selection = vec![
+            "DeliveryFlow".to_string(),
+            "coasys://DeliberationFlow".to_string(),
+        ];
+        retain_selected_flows(&mut flows, Some(&selection));
+        assert_eq!(flows.len(), 1);
+        assert!(flows.contains_key("coasys://DeliberationFlow"));
+    }
+
+    #[test]
+    fn retain_selected_flows_empty_selection_drops_all() {
+        // `Some(&[])` is a deliberate "no flow features" selection, distinct
+        // from `None` — the pre-flow-config migration default.
+        let mut flows = catalogue(&[("Delivery", "delivery://")]);
+        retain_selected_flows(&mut flows, Some(&[]));
+        assert!(flows.is_empty());
+    }
 
     // ------------- parse_flow_instance_from_hydrated -------------
 

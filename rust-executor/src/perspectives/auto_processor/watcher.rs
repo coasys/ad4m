@@ -823,6 +823,10 @@ pub async fn run_one_pass(
                     // session to bill against) and each completion still
                     // fire-and-forgets bill_prompt_if_authed via AIService.
                     None,
+                    // Flow targeting (Nico 2026-09-04): flow features run
+                    // only on the flows this processor selected. An empty
+                    // selection = flow-blind pass.
+                    Some(&cfg.flows),
                 )
                 .await
             );
@@ -847,6 +851,8 @@ pub async fn run_one_pass(
                     Some(&cursor),
                     cfg.emit_debug_events,
                     emit_ctx.as_ref(),
+                    // Same flow targeting as the harness branch above.
+                    Some(&cfg.flows),
                 )
                 .await
             );
@@ -986,19 +992,12 @@ mod tests {
             source_scope_query: format!(
                 "SELECT ?speaker ?text WHERE {{ ?s <ns://{id}/turn> ?t . }}"
             ),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms,
             batch_min: 1,
             batch_max,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         }
     }
 

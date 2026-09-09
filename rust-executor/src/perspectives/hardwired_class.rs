@@ -30,21 +30,50 @@ pub(crate) async fn subject_class_registered(
     Ok(links.iter().any(|l| l.data.source == target_class))
 }
 
-/// True when a SHACL property shape with this `sh://path` is registered.
-/// Distinguishes a class registered from an older SDNA revision from one
-/// carrying the property set the caller needs.
+/// True when **`target_class`'s own shape** declares a property at this
+/// `sh://path`. Distinguishes a class registered from an older SDNA revision
+/// from one carrying the property set the caller needs.
+///
+/// Scoped via the shape graph (`target_class ad4m://shape → sh://property →
+/// sh://path`) rather than a bare perspective-wide `sh://path` query: any
+/// *app-declared* class may legitimately declare a property at the same path
+/// (e.g. `ad4m://flow`), and an unscoped hit would permanently suppress the
+/// refresh while `write_processor`'s links land against a shape that never
+/// gained the property.
 pub(crate) async fn shacl_path_present(
     perspective: &PerspectiveInstance,
+    target_class: &str,
     path: &str,
 ) -> anyhow::Result<bool> {
-    let links = perspective
+    let shape_links = perspective
+        .get_links(&LinkQuery {
+            source: Some(target_class.to_string()),
+            predicate: Some("ad4m://shape".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let mut prop_nodes = std::collections::HashSet::new();
+    for shape in &shape_links {
+        let props = perspective
+            .get_links(&LinkQuery {
+                source: Some(shape.data.target.clone()),
+                predicate: Some("sh://property".to_string()),
+                ..Default::default()
+            })
+            .await?;
+        prop_nodes.extend(props.into_iter().map(|l| l.data.target));
+    }
+
+    let path_links = perspective
         .get_links(&LinkQuery {
             predicate: Some("sh://path".to_string()),
             target: Some(path.to_string()),
             ..Default::default()
         })
         .await?;
-    Ok(!links.is_empty())
+    Ok(path_links
+        .iter()
+        .any(|l| prop_nodes.contains(&l.data.source)))
 }
 
 /// Idempotently register a hard-wired subject class. A no-op once the class is
@@ -65,7 +94,7 @@ pub(crate) async fn ensure_subject_class(
 ) -> anyhow::Result<()> {
     if subject_class_registered(perspective, target_class).await? {
         let up_to_date = match required_path {
-            Some(path) => shacl_path_present(perspective, path).await?,
+            Some(path) => shacl_path_present(perspective, target_class, path).await?,
             None => true,
         };
         if up_to_date {

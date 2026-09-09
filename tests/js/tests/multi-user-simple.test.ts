@@ -1136,6 +1136,159 @@ describe("Multi-User Simple integration tests", () => {
             console.log("✅ Local neighbourhood sharing works correctly");
         });
 
+        it("converges when two agents reorder the same ordered collection concurrently", async function () {
+            this.timeout(300000);
+
+            const { Model, Property, Flag, HasMany, Ad4mModel } = await import("@coasys/ad4m");
+
+            @Model({ name: "ConvTask" })
+            class ConvTask extends Ad4mModel {
+                @Flag({ through: "conv://type", value: "conv://task" })
+                type = "conv://task";
+                @Property({ through: "conv://title", resolveLanguage: "literal" })
+                title: string = "";
+            }
+
+            @Model({ name: "ConvColumn" })
+            class ConvColumn extends Ad4mModel {
+                @Flag({ through: "conv://type", value: "conv://column" })
+                type = "conv://column";
+                @HasMany({
+                    through: "conv://tasks",
+                    target: () => ConvTask,
+                    ordering: { strategy: "linkedList" },
+                })
+                tasks: string[] = [];
+            }
+
+            // Enabled by sibling tests rather than a shared hook, so assert it
+            // here — otherwise this test only passes when the whole file runs.
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+
+            await createTestUser("conv1@example.com", "password1");
+            await createTestUser("conv2@example.com", "password2");
+            const token1 = await adminAd4mClient!.agent.loginUser("conv1@example.com", "password1");
+            const token2 = await adminAd4mClient!.agent.loginUser("conv2@example.com", "password2");
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+
+            // Agent 1 publishes a neighbourhood; agent 2 joins it.
+            const p1Handle = await client1.perspective.add("Convergence Neighbourhood");
+            const linkLanguage = await client1.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL,
+                JSON.stringify({ uid: uuidv4(), name: "CRDT Ordering Convergence" }),
+            );
+            const neighbourhoodUrl = await client1.neighbourhood.publishFromPerspective(
+                p1Handle.uuid,
+                linkLanguage.address,
+                new Perspective([]),
+            );
+            await sleep(1000);
+            await client2.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000);
+
+            const p2Handle = (await client2.perspective.all()).find(
+                (p) => p.sharedUrl === neighbourhoodUrl,
+            );
+            expect(p2Handle, "agent 2 joined the neighbourhood").to.not.be.undefined;
+
+            const p1 = await client1.perspective.byUUID(p1Handle.uuid);
+            const p2 = await client2.perspective.byUUID(p2Handle!.uuid);
+            expect(p1).to.not.be.null;
+            expect(p2).to.not.be.null;
+
+            for (const p of [p1!, p2!]) {
+                for (const M of [ConvTask, ConvColumn]) await (M as any).register(p);
+            }
+
+            // Agent 1 seeds the collection.
+            const a = await (ConvTask as any).create(p1!, { title: "a" });
+            const b = await (ConvTask as any).create(p1!, { title: "b" });
+            const c = await (ConvTask as any).create(p1!, { title: "c" });
+            const column = await (ConvColumn as any).create(p1!, {
+                tasks: [a.id, b.id, c.id],
+            });
+
+            const readTasksAs = async (p: any): Promise<string[] | null> => {
+                const found = await (ConvColumn as any).findOne(p, {
+                    where: { id: column.id },
+                });
+                return found ? (found.tasks as string[]) : null;
+            };
+
+            // Poll rather than sleep a fixed amount: sync latency is the thing
+            // we cannot predict, and a fixed wait either flakes or is slow.
+            const waitUntil = async (
+                predicate: () => Promise<boolean>,
+                label: string,
+                budgetMs = 60000,
+            ) => {
+                const deadline = Date.now() + budgetMs;
+                while (Date.now() < deadline) {
+                    if (await predicate()) return true;
+                    await sleep(1000);
+                }
+                return false;
+            };
+
+            const seeded = await waitUntil(async () => {
+                const t = await readTasksAs(p2!);
+                return !!t && t.length === 3;
+            }, "agent 2 sees the seeded collection");
+            expect(seeded, "agent 2 received the collection over p-diff-sync").to.be.true;
+
+            // The concurrent edit. Both sides are *read first*, so each computes
+            // its reorder against the same starting state — that is what makes
+            // this a genuine conflict rather than two writes that happened to
+            // serialise. Only then are the saves issued together.
+            const col1 = await (ConvColumn as any).findOne(p1!, {
+                where: { id: column.id },
+            });
+            const col2 = await (ConvColumn as any).findOne(p2!, {
+                where: { id: column.id },
+            });
+            expect(
+                JSON.stringify(col1.tasks),
+                "both agents start from the same order",
+            ).to.equal(JSON.stringify(col2.tasks));
+
+            col1.tasks = [c.id, a.id, b.id];
+            col2.tasks = [b.id, c.id, a.id];
+            await Promise.all([col1.save(), col2.save()]);
+
+            // Convergence is the claim, not a particular winner: the entry that
+            // wins for an item is decided by pid, which carries the author's
+            // DID, so which agent's move survives is not something a test can
+            // predict. What both peers must agree on is the result.
+            let last1: string[] | null = null;
+            let last2: string[] | null = null;
+            const converged = await waitUntil(async () => {
+                last1 = await readTasksAs(p1!);
+                last2 = await readTasksAs(p2!);
+                return (
+                    !!last1 &&
+                    !!last2 &&
+                    last1.length === 3 &&
+                    JSON.stringify(last1) === JSON.stringify(last2)
+                );
+            }, "both agents agree on the order");
+
+            console.log("agent 1 order:", last1);
+            console.log("agent 2 order:", last2);
+
+            expect(
+                converged,
+                `agents did not converge — agent1=${JSON.stringify(last1)} agent2=${JSON.stringify(last2)}`,
+            ).to.be.true;
+
+            // And no member was lost or duplicated by the merge.
+            expect(last1!.slice().sort()).to.deep.equal(
+                [a.id, b.id, c.id].slice().sort(),
+            );
+
+            console.log("✅ Concurrent reorders converged across both agents");
+        });
+
         it("should use separate prolog pools for different users in shared neighbourhood", async () => {
             // Create two users
             const user1Result = await createTestUser("prolog1@example.com", "password1");

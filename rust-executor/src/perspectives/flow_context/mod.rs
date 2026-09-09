@@ -48,7 +48,8 @@ mod real_llm_e2e;
 #[allow(unused_imports)]
 pub use loader::{
     build_flow_contexts, gather_active_flow_contexts, load_all_flow_instances, load_flow_instances,
-    load_shacl_flows, parse_flow_instance_from_hydrated, parse_flows_from_bag, scope_subject,
+    load_shacl_flows, parse_flow_instance_from_hydrated, parse_flows_from_bag,
+    retain_selected_flows, scope_subject,
 };
 #[allow(unused_imports)]
 pub use render::{

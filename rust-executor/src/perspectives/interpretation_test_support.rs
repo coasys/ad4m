@@ -488,6 +488,8 @@ pub(crate) async fn run_interpretation_harness_e2e(
         // the ledger deltas are zero regardless, and asserting on
         // billing side-effects is not part of these scenarios.
         None,
+        // All flows visible — flow-targeting is exercised by its own tests.
+        None,
     )
     .await
     .expect("run_interpretation_with_harness against real LLM to succeed")
@@ -1089,4 +1091,50 @@ pub(crate) async fn seed_message(
         )
         .await
         .expect("seed_message author");
+}
+
+/// Two-state Delivery flow (`identified → scoped`) parameterized by
+/// `input_type` (the class *name*, not a URI). Minimal fields — no
+/// `state_check`, `interpretationHint`, or `requires` — so it compiles
+/// cleanly in pure-unit tests that don't need LLM context.
+pub(crate) fn delivery_flow_json_for(input_type: &str) -> String {
+    serde_json::json!({
+        "name": "Delivery",
+        "namespace": "delivery://",
+        "start_action": [],
+        "states": [
+            { "name": "identified", "value": 0.0 },
+            { "name": "scoped", "value": 0.5 },
+        ],
+        "transitions": [
+            {
+                "action_name": "Scope",
+                "from_state": "identified",
+                "to_state": "scoped",
+                "actions": []
+            }
+        ],
+        "inputTypes": [input_type],
+        "outputTypes": [],
+    })
+    .to_string()
+}
+
+/// Parse `flow_json` into links and add them all to `perspective`.
+/// Panics on any parse or add_link error; only for test scaffolding.
+pub(crate) async fn seed_flow(
+    perspective: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    flow_json: &str,
+    flow_name: &str,
+) {
+    use crate::types::LinkStatus;
+    for link in
+        super::shacl_parser::parse_flow_to_links(flow_json, flow_name).expect("parse_flow_to_links")
+    {
+        perspective
+            .add_link(link, LinkStatus::Local, None, ctx)
+            .await
+            .expect("add_link(flow definition)");
+    }
 }

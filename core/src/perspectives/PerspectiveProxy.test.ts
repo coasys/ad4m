@@ -529,3 +529,65 @@ describe('QuerySubscriptionProxy', () => {
     expect(liveCallbacks).toBe(0);
   });
 });
+
+describe('PerspectiveProxy.subjectClassTargetClasses', () => {
+  function mockLink(source: string) {
+    return { data: { source, predicate: 'rdf://type', target: 'ad4m://SubjectClass' } };
+  }
+
+  function proxyWithLinks(links: any[]): PerspectiveProxy {
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      queryLinks: jest.fn().mockResolvedValue(links),
+    };
+    return createProxy(mockClient);
+  }
+
+  it('returns full URIs, not stripped names', async () => {
+    const proxy = proxyWithLinks([
+      mockLink('we://Space'),
+      mockLink('flux://Channel'),
+      mockLink('recipe://Recipe'),
+    ]);
+
+    const result = await proxy.subjectClassTargetClasses();
+
+    expect(result).toContain('we://Space');
+    expect(result).toContain('flux://Channel');
+    expect(result).toContain('recipe://Recipe');
+    expect(result).toHaveLength(3);
+  });
+
+  it('deduplicates URIs', async () => {
+    const proxy = proxyWithLinks([
+      mockLink('we://Space'),
+      mockLink('we://Space'),
+    ]);
+
+    expect(await proxy.subjectClassTargetClasses()).toEqual(['we://Space']);
+  });
+
+  it('filters out empty sources', async () => {
+    const proxy = proxyWithLinks([
+      mockLink('we://Space'),
+      mockLink(''),
+    ]);
+
+    expect(await proxy.subjectClassTargetClasses()).toEqual(['we://Space']);
+  });
+
+  it('returns an empty array when no classes are registered', async () => {
+    const proxy = proxyWithLinks([]);
+    expect(await proxy.subjectClassTargetClasses()).toEqual([]);
+  });
+
+  it('returns an empty array on error', async () => {
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
+    };
+    const proxy = createProxy(mockClient);
+
+    expect(await proxy.subjectClassTargetClasses()).toEqual([]);
+  });
+});

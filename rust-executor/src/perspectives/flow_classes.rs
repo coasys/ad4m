@@ -104,10 +104,9 @@ pub(crate) fn flow_transition_proposal_uri(proposal_id: &str) -> String {
 ///
 /// Returns the freshly-minted `FlowInstance` URI (`ad4m://flow/instance/{id}`).
 ///
-/// Only test-called today; the live mint path is TS `FlowInstanceRecord.create`.
-/// Comes alive as the write path when the consensus engine (slice 10.6+) fires
-/// transitions server-side.
-#[allow(dead_code)]
+/// Live-called by [`super::flow_spawn::run_flow_spawn_pass`] — the Rust-side
+/// spawn path — alongside TS `FlowInstanceRecord.create` for human-initiated
+/// starts.
 pub(crate) async fn mint_flow_instance(
     perspective: &mut PerspectiveInstance,
     flow_uri: &str,
