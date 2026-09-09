@@ -245,6 +245,15 @@ Removing the config entry does not necessarily remove the plugin. If a global in
 also exists, the gateway falls back to it on the next restart — possibly an older build
 from a different checkout. Check `source` again after every restart.
 
+The precedence order, strongest first, is: config-selected (`plugins.load.paths`, or
+`plugins install -l`) → a bundled plugin inside a dev source root → a global install the
+registry has a record for → bundled → workspace → anything else, including a global
+directory with no install record. Two candidates can therefore both be `global` and still
+rank differently — that is what a `global plugin will be overridden by global plugin`
+warning means. The consequence worth remembering: **`openclaw plugins install` does not
+take effect while a `plugins.load.paths` entry for the same id is present.** The install
+succeeds, `plugins list` shows one entry, and the gateway keeps loading the path.
+
 ### `plugins uninstall` refuses
 
 ```
