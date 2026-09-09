@@ -96,6 +96,8 @@ pub async fn send_verification_email(
 
 /// Create a new user: ensure key, get DID, save wallet, add to DB.
 pub fn create_user(email: &str, password: &str) -> Result<String, String> {
+    check_executor_unlocked()?;
+
     // Ensure user key exists
     AgentService::ensure_user_key_exists(email)
         .map_err(|e| format!("Failed to create user key: {}", e))?;
@@ -318,4 +320,84 @@ pub fn user_exists(email: &str) -> Result<(), String> {
         return Err("User key not found on executor".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{set_global_config, Ad4mConfig};
+    use crate::wallet::{try_init_wallet_backend, LocalWallet, WalletBackend};
+    use std::sync::Arc;
+
+    /// Initialise the in-process globals that create_user touches.
+    ///
+    /// `AgentService` is initialised deliberately, even though the guard returns
+    /// long before `create_user` reaches it. Without it the *negative* direction —
+    /// the run with the guard deleted, which is what proves the guard is
+    /// load-bearing — panics on "AgentService not initialized" inside
+    /// `ensure_user_key_exists` and never reaches the row assertion. It would
+    /// still go red, but for the wrong reason, and a test that goes red for the
+    /// wrong reason does not defend the claim in #982.
+    fn setup() {
+        set_global_config(Ad4mConfig::default());
+        Ad4mDb::init_global_instance(":memory:").expect("init in-memory DB");
+        // A fresh LocalWallet has no keys → is_unlocked() returns false.
+        // try_init is idempotent: if another test already set the backend it is a no-op.
+        let _ = try_init_wallet_backend(Arc::new(LocalWallet::new()) as Arc<dyn WalletBackend>);
+        crate::test_utils::setup_agent();
+    }
+
+    /// Invariant: create_user on a locked executor must return Err before writing any DB row.
+    ///
+    /// Without the check_executor_unlocked() guard, the wallet-save is silently
+    /// skipped (passphrase is None while locked), but the user row is still written.
+    /// The account is then permanently unusable and the email cannot be re-registered
+    /// (issue #982, found by Lal during #973 round-4 testing).
+    #[test]
+    fn create_user_on_locked_executor_errors_and_leaves_no_row() {
+        setup();
+
+        let backend = wallet_backend();
+
+        // If a prior test left the wallet unlocked, lock it now so the guard
+        // sees the locked-executor state.  lock() is a no-op when keys are None,
+        // but is_unlocked() is already false in that case, so the assert below holds.
+        let was_unlocked = backend.is_unlocked();
+        let test_pass = "test-982-lock-passphrase";
+        if was_unlocked {
+            backend.lock(test_pass);
+        }
+        assert!(
+            !backend.is_unlocked(),
+            "wallet must be locked at the start of this test"
+        );
+
+        let email = "create-user-locked-982@example.com";
+
+        // Act: call create_user while the executor is locked.
+        let result = create_user(email, "any-password");
+
+        // The call must fail with the operator-facing locked-executor message.
+        assert!(
+            result.is_err(),
+            "create_user must return Err when the executor is locked"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Executor is locked"),
+            "error must mention 'Executor is locked'; got: {err}"
+        );
+
+        // No user row must have been written — a row here bricks the account forever.
+        let row_written = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+        assert!(
+            !row_written,
+            "create_user must not write a user row when the executor is locked"
+        );
+
+        // Restore wallet state so subsequent tests are not affected.
+        if was_unlocked {
+            backend.unlock(test_pass).expect("restore wallet unlock");
+        }
+    }
 }
