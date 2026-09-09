@@ -26,20 +26,35 @@ impl OpenAiChat {
     /// Build a client for `base_url`.
     ///
     /// A trailing `/v1` is stripped because `chat_gpt_lib_rs` appends the
-    /// versioned path itself — so a base URL saved as `https://host/v1`
-    /// (which is what every provider's docs show, and therefore what users
-    /// paste) would otherwise resolve to `/v1/v1/chat/completions`.
+    /// versioned path itself, so a base URL saved as `https://host/v1` would
+    /// otherwise resolve to `/v1/v1/chat/completions`. Every provider's docs
+    /// show the `/v1` form, so that is what gets pasted into a model form.
+    ///
+    /// It must be the *trailing* segment that is tested, not the first. An
+    /// earlier version checked the first, which worked for
+    /// `https://api.openai.com/v1` and failed for every provider that mounts
+    /// under a path — including Groq, whose documented URL is
+    /// `https://api.groq.com/openai/v1`, and this executor's own compat
+    /// surface at `/api/v1/openai/v1`. Discovery already resolved those
+    /// correctly through `versioned_endpoint`, so chat and model listing
+    /// disagreed about the same URL.
     pub fn new(api_key: &str, base_url: Url) -> Self {
-        let mut url = base_url;
-        if let Some(segments) = url.path_segments() {
-            if segments.clone().next() == Some("v1") {
-                url.set_path(&segments.skip(1).collect::<Vec<_>>().join("/"));
-            }
-        }
+        let trimmed = base_url.as_str().trim_end_matches('/');
+        let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
         Self {
-            client: ChatGPTClient::new(api_key, url.as_ref()),
+            client: ChatGPTClient::new(api_key, root),
         }
     }
+}
+
+/// The base URL `chat_gpt_lib_rs` is handed, exposed for tests.
+#[cfg(test)]
+fn chat_base(base_url: Url) -> String {
+    let trimmed = base_url.as_str().trim_end_matches('/').to_string();
+    trimmed
+        .strip_suffix("/v1")
+        .map(|s| s.to_string())
+        .unwrap_or(trimmed)
 }
 
 /// Ask an endpoint which models it serves — `GET {base}/v1/models`.
@@ -137,6 +152,56 @@ impl RemoteChat for OpenAiChat {
 mod wire_tests {
     use super::*;
     use mockito::Matcher;
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).expect("test URL parses")
+    }
+
+    #[test]
+    fn a_trailing_v1_is_stripped_so_the_client_does_not_double_it() {
+        assert_eq!(
+            chat_base(url("https://api.openai.com/v1")),
+            "https://api.openai.com"
+        );
+    }
+
+    #[test]
+    fn a_v1_under_a_path_prefix_is_stripped_too() {
+        // Groq's documented URL, and the shape this executor mounts its own
+        // compat surface at. Testing the first segment instead of the last
+        // sent these to `/openai/v1/v1/chat/completions`.
+        assert_eq!(
+            chat_base(url("https://api.groq.com/openai/v1")),
+            "https://api.groq.com/openai"
+        );
+        assert_eq!(
+            chat_base(url("http://localhost:12000/api/v1/openai/v1")),
+            "http://localhost:12000/api/v1/openai"
+        );
+    }
+
+    #[test]
+    fn a_base_url_without_v1_is_left_alone() {
+        assert_eq!(
+            chat_base(url("http://localhost:11434")),
+            "http://localhost:11434"
+        );
+    }
+
+    #[test]
+    fn chat_and_discovery_agree_about_the_same_url() {
+        // The bug this pair of assertions exists to prevent: discovery
+        // resolved a prefixed URL correctly while chat doubled the `/v1`.
+        let configured = url("https://api.groq.com/openai/v1");
+        assert_eq!(
+            format!("{}/v1/chat/completions", chat_base(configured.clone())),
+            "https://api.groq.com/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            super::super::versioned_endpoint(configured, "models"),
+            "https://api.groq.com/openai/v1/models"
+        );
+    }
 
     #[tokio::test]
     async fn a_key_is_sent_as_a_bearer_token() {
