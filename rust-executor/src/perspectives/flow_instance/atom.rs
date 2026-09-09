@@ -307,17 +307,28 @@ fn earliest_proposer_timestamp(links: &[DecoratedLinkExpression], proposer: &str
 /// `get_links` scopes the result to properly-typed proposals and reuses the
 /// machinery already validated by `flow_evaluator`'s `run_query`.
 ///
+/// This narrows the *pointer* set, not the atom set. Class conformance emits a
+/// triple per required property, so a half-written proposal carrying only
+/// `flowInstance` is no longer discovered — but [`TransitionAtom::from_links`]
+/// already rejected that shape with `MissingField`, so the fold never saw it
+/// either way. The `where` is exists-style (`?source <ad4m://flow/instance>
+/// …`) and this function reads only `instances[].id`, never the hydrated
+/// `flowInstance` value, so a third-party re-point cannot drop a real proposal
+/// from discovery — that is the same attack half 2 refuses to hydrate.
+///
 /// **Half 2 — raw `get_links` per proposal (must stay raw):** model_query
 /// hydration collapses each instance to a single `author` field (the earliest
 /// author across all links, `model_query/hydration.rs:171-183,350`) and
-/// carries no per-link signature verdict. The identity checks below need
-/// exactly those two fields on every individual link: `signed_by` requires
-/// `proof.valid == Some(true)`, and `unique_field` reads only links where
-/// `l.author == proposer`. Hydrating the proposals would silently break both
-/// checks — a third-party forgery that model_query would collapse into the
-/// proposer's own hydrated value would pass undetected. This half cannot go
-/// away until the fold is rewritten to work on hydrated instances rather than
-/// raw link-level proofs.
+/// carries no per-link signature verdict — its row is
+/// `(predicate, target, author, timestamp)`, and `proof.valid` is never in it.
+/// Both identity checks below run through [`signed_by`], which needs both
+/// dropped fields at once: `l.author == did` **and** `proof.valid ==
+/// Some(true)`. Worse than lossy, hydrating would *invert* [`unique_field`]:
+/// scalar properties last-write-win on timestamp with no author filter, so a
+/// later third-party `to_state` becomes the hydrated value while `author`
+/// stays the earliest DID — the forgery would be served back as the
+/// proposer's own word. This half cannot go away until instances carry
+/// per-property `(author, proof.valid)`.
 pub async fn load_proposal_links(
     perspective: &PerspectiveInstance,
     instance_uri: &str,

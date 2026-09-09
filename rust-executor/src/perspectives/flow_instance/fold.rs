@@ -55,12 +55,18 @@
 //! voter land at position n, pulling `nth_at` down. The floor below is
 //! `after` (see next property).
 //!
-//! **`settled_at = nth_at.max(after)` floors every edge at the moment the walk
-//! arrived at its `from_state`.** `after` is the `settled_at` of the most
-//! recently taken edge (`""` at genesis, which sorts before every real
-//! timestamp). A vote back-dated to 1970 therefore settles the edge at the
-//! walk's arrival, not at 1970. This is what makes back-dating bounded: the
-//! earliest any edge can settle is when the walk came to its starting state.
+//! **`settled_at = nth_at.max(after)` floors every edge *after the first* at
+//! the moment the walk arrived at its `from_state`.** `after` is the
+//! `settled_at` of the most recently taken edge. Once that is a real
+//! timestamp, a vote back-dated to 1970 settles the edge at the walk's
+//! arrival, not at 1970 — the earliest any such edge can settle is when the
+//! walk came to its starting state.
+//!
+//! **The floor is vacuous at genesis, and that is a hole.** `after` is `""`
+//! on the first edge, and `""` is a sort sentinel, not an arrival time: every
+//! non-empty string wins the `max`. A genesis vote back-dated to 1970 settles
+//! at 1970. Nothing bounds the first edge backward, which is what makes the
+//! residual below unbounded rather than merely narrow.
 //!
 //! **Back-dating cannot manufacture a quorum.** Quorum is a count of distinct
 //! eligible DIDs, determined by deduplication in [`settle_edge`]. Timestamps
@@ -69,11 +75,13 @@
 //!
 //! **RESIDUAL — collusion can win a same-state race.** When two edges out of
 //! the same state both reach quorum, [`settle`] picks the one whose
-//! `settled_at` is smallest. A quorum that coordinates their votes can
-//! back-date enough to undercut the floor and beat an honest quorum for a
-//! competing edge. The floor prevents them from going earlier than the walk's
-//! arrival time, but if the honest quorum settled after arrival, the colluding
-//! one can still win. This is a known residual; the engine makes no attempt to
+//! `settled_at` is smallest. A quorum that coordinates their votes cannot
+//! *undercut* the floor — `max` forbids `settled_at < after` — but it can
+//! *meet* it, and an honest quorum whose `nth_at` is later than arrival then
+//! loses the race. At genesis, where the floor is vacuous, meeting it means
+//! "any timestamp at all": a colluding quorum, or a lone proposer under an
+//! `{n:1}` rule, back-dates to 1970 and beats every wall-clock vote out of the
+//! starting state. This is a known residual; the engine makes no attempt to
 //! close it.
 //!
 //! **DEFERRED — a causal floor would bound collusion without clocks.** If a
