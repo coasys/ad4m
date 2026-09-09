@@ -854,13 +854,20 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     Ok(flow)
 }
 
-/// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
 /// Synthetic keys `hydrate_one` (`model_query/hydration.rs`) always writes onto
 /// every hydrated instance, regardless of the class's own properties. A
 /// property sharing one of these names collides with it in the flat instance
-/// JSON — whichever write happens later in `hydrate_one` silently wins, with
-/// no error either way. See issue #974: a `hasOne` relation named `author`
-/// read back the creating agent's DID instead of the linked instance.
+/// JSON, and the direction of the collision is fixed per key, not uniform:
+/// `id`/`baseExpression` are written FIRST in `hydrate_one`, so a matching
+/// class property (written later in the same pass) silently overwrites them;
+/// `createdAt`/`updatedAt`/`author`/`timestamp` are written LAST, so they
+/// silently overwrite a matching class property instead. The second group is
+/// also conditional (`if let Some(...)`) on there being a derivable value at
+/// all, so on an instance whose links happen not to produce one, the class
+/// property's own value survives instead — the same class reads differently
+/// depending on which instance you ask. See issue #974: a `hasOne` relation
+/// named `author` read back the creating agent's DID instead of the linked
+/// instance.
 const RESERVED_PROPERTY_NAMES: [&str; 6] = [
     "id",
     "baseExpression",
@@ -870,6 +877,7 @@ const RESERVED_PROPERTY_NAMES: [&str; 6] = [
     "timestamp",
 ];
 
+/// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
 pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
     let shape: SHACLShape = serde_json::from_str(shacl_json)
         .map_err(|e| anyhow::anyhow!("Failed to parse SHACL JSON: {}", e))?;
@@ -890,8 +898,10 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
     if !reserved_collisions.is_empty() {
         return Err(anyhow::anyhow!(
             "Property name(s) {:?} collide with synthetic fields every hydrated instance \
-             already carries ({}). Whichever value hydration writes last wins silently, with \
-             no error — pick a different property name.",
+             already carries ({}). `id`/`baseExpression` would be silently overwritten by \
+             this property; `createdAt`/`updatedAt`/`author`/`timestamp` would silently \
+             overwrite it instead, and only on instances where a value is derivable — pick \
+             a different property name.",
             reserved_collisions,
             RESERVED_PROPERTY_NAMES.join(", "),
         ));
