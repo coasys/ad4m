@@ -97,7 +97,20 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 await testContext.makeAllNodesKnown()
                 expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
 
-                await sleep(1000)
+                // Wait for the executor's ensure_link_language (5s interval)
+                // to wire self.link_language on Alice's perspective. Without
+                // this, addLink hits "LinkLanguage not available" and the diff
+                // goes to the pending-diffs DB — which should recover but
+                // empirically doesn't in CI.
+                let aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
+                let readyTries = 0;
+                while (aliceReady?.state !== PerspectiveState.LinkLanguageInstalledButNotSynced
+                    && aliceReady?.state !== PerspectiveState.Synced
+                    && readyTries < 20) {
+                    await sleep(500);
+                    aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
+                    readyTries++;
+                }
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
@@ -162,12 +175,22 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 await testContext.makeAllNodesKnown()
 
-                await sleep(1000)
+                // Wait for the executor's ensure_link_language (5s interval)
+                // to wire self.link_language on Alice's perspective.
+                let aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
+                let readyTries = 0;
+                while (aliceReady?.state !== PerspectiveState.LinkLanguageInstalledButNotSynced
+                    && aliceReady?.state !== PerspectiveState.Synced
+                    && readyTries < 20) {
+                    await sleep(500);
+                    aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
+                    readyTries++;
+                }
 
-                // Create 1500 links as fast as possible — the batching system
-                // (enqueueCommitBatched → coalesceDiffs) coalesces the burst
-                // into a small number of POSTs. No artificial throttling: this
-                // exercises the continuous-burst path end-to-end.
+                // Create 1500 links as fast as possible — the executor's own
+                // pending_diffs_loop batches them (1s inactivity / 3s max /
+                // 150 max count). No artificial throttling: this exercises
+                // the continuous-burst path end-to-end.
                 for(let i = 0; i < 1500; i++) {
                     console.log("Alice adding link ", i)
                     const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: `test://test/${i}`})
