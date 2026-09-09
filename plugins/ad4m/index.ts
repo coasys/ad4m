@@ -27,6 +27,7 @@ import * as path from "path";
 import { McpResponse, McpTool, PluginConfig, WakerSubscription } from "./types";
 import {
   generateRandomPassphrase,
+  isLoopbackEndpoint,
   loadWakerState,
   saveWakerState,
 } from "./config";
@@ -62,6 +63,7 @@ export type {
 } from "./types";
 export {
   generateRandomPassphrase,
+  isLoopbackEndpoint,
   loadWakerState,
   saveWakerState,
 } from "./config";
@@ -87,7 +89,7 @@ export {
 export { buildWakeMessage, postWake } from "./wakerHelpers";
 export { WakerSubscriptionManager } from "./wakerSubscriptionManager";
 export type { WakerSubscriptionManagerOptions, WakerLogger } from "./wakerSubscriptionManager";
-export { runSetup, loginViaEmailVerification } from "./setup";
+export { runSetup, loginViaEmailVerification, hasLiveCredential } from "./setup";
 
 // ---------------------------------------------------------------------------
 // MCP HTTP Client (Streamable HTTP with SSE support)
@@ -178,14 +180,7 @@ export function insecureEndpointReason(
   if (url.protocol !== "http:") {
     return `mcpEndpoint must be an http(s) URL, got ${url.protocol}//`;
   }
-  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-  const loopback =
-    host === "localhost" ||
-    host.endsWith(".localhost") ||
-    host === "::1" ||
-    host === "0:0:0:0:0:0:0:1" ||
-    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
-  if (loopback) return null;
+  if (isLoopbackEndpoint(endpoint)) return null;
   return (
     `refusing to send AD4M credentials to ${url.protocol}//${url.host} in cleartext — ` +
     `use https:// for a remote executor, or set allowInsecureHttp: true in the plugin ` +

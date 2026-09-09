@@ -61,18 +61,26 @@ This command handles everything automatically:
 1. **Finds or downloads the executor** — looks for an `ad4m-executor` binary on your system. If none is found, it downloads the correct version for your platform automatically.
 2. **Starts the executor** — launches `ad4m-executor` with MCP enabled.
 3. **Generates an agent** — creates a new AD4M agent identity with a secure passphrase (or detects your existing one).
-4. **Writes the finished config to a file** — `ad4m-setup-config.json`, mode `0600`, beside the config file of the profile it ran against. Setup prints that path.
+4. **Hands you the finished config** — as a file when it contains a credential, otherwise printed.
 
 ### Adding the config
 
-**Copy the config out of `ad4m-setup-config.json`, not out of your terminal.** OpenClaw
-redacts credentials in log output, so the `token` and `agentPassphrase` printed to the
-screen are elided (`"eyJ0eX…kf94"`). A config pasted from the terminal carries a broken
-credential and every later call fails authentication — the single most common reason
-people conclude the plugin is broken and start hand-rolling MCP calls they do not need.
+Where to copy the config from depends on whether it carries a credential, and getting
+this wrong is the single most common reason people conclude the plugin is broken and
+start hand-rolling MCP calls they do not need:
 
-Copy the file's contents into `plugins.entries.ad4m.config`, restart the gateway, then
-delete the file.
+| Snippet contains | Where to copy from |
+|------------------|--------------------|
+| A credential — JWT `token`, `wakeToken`, or a real `agentPassphrase` | **`ad4m-setup-config.json`** (mode `0600`, beside the config file of the profile setup ran against). Setup prints the path. |
+| Nothing secret | The `one line for copy&paste:` line in the output. |
+
+**Never copy a credential out of your terminal.** OpenClaw elides credentials in log
+output, so what you see on screen is `"eyJ0eX…kf94"`, not a usable value. A config pasted
+from scrollback authenticates against nothing.
+
+Copy into `plugins.entries.ad4m.config`, restart the gateway, then **delete
+`ad4m-setup-config.json`**. Leaving it behind is not just hygiene: a later run that finds
+a stale file can hand you a previous run's account.
 
 ### Setup without a terminal
 
@@ -246,7 +254,12 @@ then reinstall the package or run openclaw doctor before retrying.
 
 `openclaw plugins uninstall` owns registry installs only. A plugin loaded through
 `plugins.load.paths` or an explicit `plugins.entries` path is not one, and the message
-does not say so. Remove that kind by hand:
+does not say so.
+
+**The local-development install produces exactly that kind.** `openclaw plugins install -l`
+records the plugin as config-selected, so the documented install and the documented
+uninstall do not round-trip: install with `-l`, and `uninstall` will refuse. Remove it by
+hand:
 
 1. Delete the path from `plugins.load.paths`.
 2. Delete `plugins.entries.ad4m` if you also want its config and credentials gone — back

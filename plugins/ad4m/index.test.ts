@@ -56,6 +56,8 @@ import {
   withTimeout,
   insecureEndpointReason,
   closeWakerClient,
+  hasLiveCredential,
+  isLoopbackEndpoint,
 } from "./index";
 
 import ad4mPlugin, { _resetModuleState } from "./index";
@@ -3602,5 +3604,51 @@ describe("closeWakerClient", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("already gone"));
     // A client that was never created is not an error.
     expect(() => closeWakerClient(null)).not.toThrow();
+  });
+});
+
+describe("isLoopbackEndpoint", () => {
+  it("recognises every loopback spelling the credential guard relies on", () => {
+    for (const url of [
+      "http://localhost:3001/mcp",
+      "http://foo.localhost:3001/mcp",
+      "http://127.0.0.1:3001/mcp",
+      "http://127.5.5.5:3001/mcp",
+      "http://[::1]:3001/mcp",
+    ]) {
+      expect(isLoopbackEndpoint(url), url).toBe(true);
+    }
+  });
+
+  it("treats remote hosts and unparseable input as not loopback", () => {
+    // A hostname merely containing "localhost" is a different machine.
+    for (const url of [
+      "http://marvin.fritz.box:3002/mcp",
+      "http://localhost.evil.example/mcp",
+      "http://10.0.0.1:3001/mcp",
+      "not-a-url",
+    ]) {
+      expect(isLoopbackEndpoint(url), url).toBe(false);
+    }
+  });
+});
+
+describe("hasLiveCredential", () => {
+  // Regression: the no-token branch of printConfigSnippet used to print the
+  // whole config as one copy-paste line, which put the hooks wakeToken and a
+  // real agentPassphrase into terminal scrollback in clear.
+  it("is true for any live credential, not just a JWT", () => {
+    expect(hasLiveCredential({ token: "eyJhbGciOi" })).toBe(true);
+    expect(hasLiveCredential({ wakeToken: "ec066fed2525d2654ac9cdbd33eb0ec5" })).toBe(true);
+    expect(hasLiveCredential({ password: "hunter2" })).toBe(true);
+    expect(hasLiveCredential({ agentPassphrase: "aRealGeneratedPassphrase" })).toBe(true);
+  });
+
+  it("is false for placeholders and for a snippet with nothing secret", () => {
+    // These are instructions to the reader, not values worth protecting.
+    expect(hasLiveCredential({ agentPassphrase: "<enter-your-existing-passphrase>" })).toBe(false);
+    expect(hasLiveCredential({ agentPassphrase: "<run setup again after fixing executor>" })).toBe(false);
+    expect(hasLiveCredential({ agentPassphrase: "" })).toBe(false);
+    expect(hasLiveCredential({ mode: "managed", ad4mBinaryPath: "/usr/bin/ad4m-executor" })).toBe(false);
   });
 });

@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { generateRandomPassphrase } from "./config";
+import { generateRandomPassphrase, isLoopbackEndpoint } from "./config";
 import {
   findExecutorBinary,
   isExecutorRunning,
@@ -80,6 +80,17 @@ export async function runSetup(
 
   // ── Step 3: Check if executor is already running ──
   const running = await isExecutorRunning(endpoint, 3000, executorUrl);
+
+  // Asking for a remote node and silently getting a local one is the worst
+  // outcome here: managed mode downloads ~60MB and hands back a localhost
+  // config, and nothing in the output says the node you named never answered.
+  if (!running && !isLoopbackEndpoint(endpoint)) {
+    logger.warn(
+      `[ad4m-setup] ${endpoint} did not answer, so this is NOT external mode. ` +
+        `Setting up a local managed executor instead. If you meant to connect to ` +
+        `that node, stop here and check it is running and reachable.`,
+    );
+  }
 
   // ── Branch routing ──
 
@@ -711,16 +722,18 @@ function printConfigSnippet(
 
   logger.info(`[ad4m-setup]`);
 
-  // The token is a live credential, so OpenClaw's logger elides it — what you
-  // read above is `"eyJ0eX…kf94"`, not a usable JWT. Printing it unredacted
-  // would only move a credential into terminal scrollback, so the copyable
-  // copy goes to a 0600 file instead and we print the path.
-  if (config.token) {
+  // The snippet above may hold a live credential — a JWT, the hooks wakeToken,
+  // or a real agent passphrase — and OpenClaw's logger elides those, so what
+  // you read is `"eyJ0eX…kf94"` rather than a usable value. Printing them
+  // unredacted would only move credentials into terminal scrollback, so the
+  // copyable copy goes to a 0600 file instead and we print the path. Only a
+  // snippet with nothing secret in it is safe to print as one copy-paste line.
+  if (hasLiveCredential(config)) {
     const written = writeConfigSnippetFile(config);
     if (written) {
       logger.info(
-        `[ad4m-setup] The token above is elided by the logger. The full config ` +
-          `is in ${written} (mode 0600).`,
+        `[ad4m-setup] Credentials above are elided by the logger. The full ` +
+          `config is in ${written} (mode 0600).`,
       );
       logger.info(
         `[ad4m-setup] Copy its contents into openclaw.json under ` +
@@ -728,7 +741,7 @@ function printConfigSnippet(
       );
     } else {
       logger.warn(
-        `[ad4m-setup] The token above is elided by the logger and the full ` +
+        `[ad4m-setup] Credentials above are elided by the logger and the full ` +
           `config could not be written to disk. Re-run with OPENCLAW_CONFIG_PATH ` +
           `set, or obtain a JWT from the executor yourself.`,
       );
@@ -747,8 +760,28 @@ function printConfigSnippet(
 }
 
 /**
- * Write the full config snippet — token included — to a 0600 file beside the
- * OpenClaw config this run belongs to, and return its path.
+ * Whether a config snippet carries a value that must not reach terminal
+ * scrollback.
+ *
+ * `agentPassphrase` is the awkward one: managed mode fills it with a
+ * placeholder (`<enter-your-existing-passphrase>`, `<run setup again …>`) when
+ * it has no real passphrase to give, and those are instructions, not secrets.
+ * Anything in angle brackets is a placeholder; anything else is treated as
+ * live.
+ */
+export function hasLiveCredential(config: Record<string, any>): boolean {
+  if (config.token || config.wakeToken || config.password) return true;
+  const passphrase = config.agentPassphrase;
+  return (
+    typeof passphrase === "string" &&
+    passphrase.length > 0 &&
+    !/^<.*>$/.test(passphrase)
+  );
+}
+
+/**
+ * Write the full config snippet — credentials included — to a 0600 file beside
+ * the OpenClaw config this run belongs to, and return its path.
  *
  * Returns null rather than throwing: a setup run that produced a working token
  * should not fail because a directory was not writable.
