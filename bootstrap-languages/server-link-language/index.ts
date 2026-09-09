@@ -431,9 +431,9 @@ const language = defineLanguage({
 
     async teardown() {
         // Drain any pending batched commits BEFORE we tear down auth/adapters.
-        // enqueueCommitBatched schedules a microtask flush that reads `deps()`
-        // (auth token, transport) at flush time — if teardown resets those
-        // first, the pending flush's POST fails and flushBatch drops the batch.
+        // The main commit path now awaits the POST directly, but the batch
+        // infrastructure still exists (used by unit tests, retry timers) and
+        // may hold stale segments from a failed flush cycle.
         try {
             await syncModule.drainCommitBatch();
         } catch (err) {
@@ -493,6 +493,22 @@ const language = defineLanguage({
                 );
             }
 
+            // E2E is mandatory — if admin and keyRingStatus is still
+            // "none" (init's performRotation failed or was skipped),
+            // retry rotation before committing. Non-admin "none" means
+            // the room genuinely has no E2E yet — plaintext is correct
+            // for the first commit that triggers the admin flow.
+            if (isRoomAdmin && keyRingStatus === "none") {
+                console.log(
+                    "[server-link-language] admin with keyRingStatus=none — retrying rotation before commit",
+                );
+                await performRotation();
+                // performRotation throws on server/auth failure →
+                // executor keeps the diff for retry. If it returns
+                // (success or no-op), keyRingStatus may now be "ready"
+                // or still "none" (no members with X25519 keys yet).
+            }
+
             console.log(
                 `[server-link-language] commit: ${diff.additions.length} adds, ` +
                 `${diff.removals.length} removes (keyRingStatus=${keyRingStatus})`,
@@ -501,14 +517,16 @@ const language = defineLanguage({
             // 1. Store links locally (plaintext, always — see src/sync.ts module doc).
             store.applyDiff(diff);
 
-            // 2. Queue the push to the server. `enqueueCommitBatched` returns
-            //    immediately after appending to the batch; the actual POST
-            //    happens on a microtask flush, so a tight loop of addLink()
-            //    calls collapses into one POST (see the batching block in
-            //    sync.ts for why).
-            syncModule.enqueueCommitBatched(diff);
+            // 2. Push the diff to the server. Awaiting the POST ensures
+            //    the executor only clears its pending-diff DB entry AFTER
+            //    the server accepted the commit. The executor's own
+            //    batching (pending_diffs_loop: 1s inactivity / 3s max /
+            //    150 max count) handles coalescence for burst scenarios
+            //    — the language-level fire-and-forget batch is no longer
+            //    needed on this path.
+            await syncModule.commit(diff);
 
-            // 3. Emit so local subscribers see it immediately.
+            // 3. Emit so local subscribers see it after the POST landed.
             getRuntime().emitPerspectiveDiff(diff);
 
             return "";
