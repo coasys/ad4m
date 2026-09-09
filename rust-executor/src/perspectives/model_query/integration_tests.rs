@@ -7383,3 +7383,152 @@ async fn test_untyped_reverse_include_without_polymorphic_explains_itself() {
     assert!(msg.contains("containers"), "names the relation: {msg}");
     assert!(msg.contains("polymorphic"), "names the fix: {msg}");
 }
+
+/// An ordered collection comes back in CRDT order through the ORM read path.
+///
+/// The path that matters: `$query` / `include` / `findAll` all go through
+/// `hydrate_one`, never through `get_links`. Reconstruction placed only in the
+/// latter would leave every ORM read unordered — which is everything the ORM
+/// actually reads through.
+#[tokio::test]
+async fn test_ordered_collection_hydrates_in_crdt_order() {
+    use crate::perspectives::ordering::{
+        encode_ordering_entry, OrderingEntry, COLLECTION_ORDER_PREDICATE, LIST_HEAD,
+    };
+
+    let store = SparqlStore::new(None).unwrap();
+
+    store
+        .add_link(&make_link(
+            "we://col/1",
+            "we://flag",
+            "we://collection",
+            "1",
+        ))
+        .unwrap();
+
+    // Data links are added in the order c, a, b — so a by-timestamp read would
+    // return exactly that, and anything else proves the entries were applied.
+    for (target, ts) in [
+        ("we://x/c", "1700000000010"),
+        ("we://x/a", "1700000000011"),
+        ("we://x/b", "1700000000012"),
+    ] {
+        store
+            .add_link(&make_link("we://col/1", "we://children", target, ts))
+            .unwrap();
+    }
+
+    let order = |item: &str, after: &str, pid: &str| OrderingEntry {
+        predicate: "we://children".to_string(),
+        item: item.to_string(),
+        pid: pid.to_string(),
+        after: Some(after.to_string()),
+        position: None,
+    };
+    for entry in [
+        order("we://x/a", LIST_HEAD, "0000000000000001_did:x"),
+        order("we://x/b", "we://x/a", "0000000000000002_did:x"),
+        order("we://x/c", "we://x/b", "0000000000000003_did:x"),
+    ] {
+        store
+            .add_link(&make_link(
+                "we://col/1",
+                COLLECTION_ORDER_PREDICATE,
+                &encode_ordering_entry(&entry).unwrap(),
+                "1700000000020",
+            ))
+            .unwrap();
+    }
+
+    // The shape declares the ordering *and* the predicate the entries are stored
+    // under — without the latter the instance query's predicate filter drops the
+    // very links the ordering depends on.
+    let shape_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"},
+            "_collectionOrder": {"predicate":"ad4m://collection_order"}
+        },
+        "relations": {
+            "children": {
+                "predicate": "we://children",
+                "kind": "hasMany",
+                "ordering": "linkedList"
+            }
+        }
+    }"#;
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Collection",
+        &ModelQueryInput::default(),
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    let children: Vec<&str> = result.instances[0]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+
+    assert_eq!(
+        children,
+        vec!["we://x/a", "we://x/b", "we://x/c"],
+        "CRDT order, not the link-timestamp order the data links were written in",
+    );
+}
+
+/// A collection with no ordering entries yet still reads, by timestamp.
+///
+/// The unordered→ordered migration: SHACL says the relation is ordered before
+/// any entry exists for it. It must degrade to today's behaviour rather than
+/// returning nothing.
+#[tokio::test]
+async fn test_ordered_collection_without_entries_falls_back_to_timestamps() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link(
+            "we://col/1",
+            "we://flag",
+            "we://collection",
+            "1",
+        ))
+        .unwrap();
+    for (target, ts) in [("we://x/a", "1700000000010"), ("we://x/b", "1700000000011")] {
+        store
+            .add_link(&make_link("we://col/1", "we://children", target, ts))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"},
+            "_collectionOrder": {"predicate":"ad4m://collection_order"}
+        },
+        "relations": {
+            "children": {"predicate":"we://children","kind":"hasMany","ordering":"linkedList"}
+        }
+    }"#;
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Collection",
+        &ModelQueryInput::default(),
+        shape_json,
+    )
+    .await
+    .unwrap();
+
+    let children: Vec<&str> = result.instances[0]["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(children, vec!["we://x/a", "we://x/b"]);
+}
