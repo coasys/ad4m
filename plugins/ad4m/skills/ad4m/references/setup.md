@@ -2,7 +2,7 @@
 
 > **Scope.** This file covers what has to happen *before* the MCP tools work: installing the plugin, connecting to an executor, and authenticating. Once you are connected, the executor documents itself — `ad4m_get_documentation(topic="overview")` (tool surface, workflow, authentication over MCP, data rules) and `topic="architecture"` (data model, SHACL format) need no authentication and are compiled into the binary, so they always describe the node in front of you. Setup is deliberately *not* served there: an agent that can call the tool is already past it, which is why this file lives in the skill.
 
-If you need to stand up your own executor — downloading, initializing, running, unlocking — see `references/running-an-executor.md`.
+If you need to stand up your own executor — downloading, initializing, running, unlocking — that is node-operator work outside this skill's scope.
 
 ## Installing the plugin itself
 
@@ -49,13 +49,13 @@ ad4m-executor run --app-data-path ~/.ad4m --port 12000 --enable-mcp true
 
 ### Scenario 2: Agent connects to remote executor
 
-The operator networking for Scenario 2 — SSH tunnels, Caddy reverse proxy, Cloudflare Tunnel — is in `references/running-an-executor.md` → "Operator Networking for Remote Executors". What matters on the agent side is the TLS guard below.
+The operator sets up the network path (SSH tunnel, Caddy reverse proxy, or Cloudflare Tunnel) — that is their side of the setup. What matters on the agent side is the TLS guard below.
 
 #### Where TLS actually comes from, and what `allowInsecureHttp` is for
 
 Two different layers, easy to confuse:
 
-- **The executor has no TLS of its own on the MCP port.** It serves `/mcp` as plain HTTP, so encryption comes from the front the operator puts in front of it — Caddy, Cloudflare Tunnel, or an SSH tunnel (see `references/running-an-executor.md` → "Operator Networking for Remote Executors"). That is the recommended path for anything off-LAN. (`--tls-cert-file` / `--tls-key-file` cover the API port, not MCP; executor-native TLS for MCP is a separate piece of work.)
+- **The executor has no TLS of its own on the MCP port.** It serves `/mcp` as plain HTTP, so encryption comes from the front the operator puts in front of it — Caddy, Cloudflare Tunnel, or an SSH tunnel. That is the recommended path for anything off-LAN. (`--tls-cert-file` / `--tls-key-file` cover the API port, not MCP; executor-native TLS for MCP is a separate piece of work.)
 - **`allowInsecureHttp` is a client-side guard in the plugin**, not a transport setting. Every MCP call carries the plugin's JWT or admin credential in an `Authorization` header, so the plugin refuses to talk to a non-loopback plaintext `http://` `mcpEndpoint` unless you set the flag. Turning it on does not weaken the executor; it only stops the plugin from refusing.
 
 `https://` endpoints, `http://localhost…`, and anything reached through an SSH tunnel are all allowed with the flag off — so the only case that needs it is a plaintext endpoint on a network path you trust end to end, e.g. `http://marvin.fritz.box:3002/mcp` on your own LAN. For anything leaving that LAN, put a TLS front in front of the executor and use `https://` rather than setting the flag.
@@ -103,7 +103,7 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
 3. `generate_jwt` with `request_id` + `code` → get JWT token
 4. All subsequent requests include the JWT
 
-**Both auth paths require the node's operator to have unlocked the wallet** — a freshly-restarted multi-user node with no admin credential configured is fully deadlocked until someone runs `agent.unlock` (see `references/running-an-executor.md` → "Step 4: Unlock Agent"), since both `login_email` and the capability bootstrap fail with a locked wallet.
+**Both auth paths require the node's operator to have unlocked the wallet** — a freshly-restarted multi-user node with no admin credential configured is fully deadlocked until someone runs `agent.unlock` (the node operator must do this; if you are a third party, this is not something you can retry around), since both `login_email` and the capability bootstrap fail with a locked wallet.
 
 **Human auth flow (Flux):**
 
@@ -192,7 +192,7 @@ absent from 0.7.3.
 
 ## WebSocket RPC API (Fallback)
 
-**Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging, and unlocking a wallet when you lack CLI access — see `references/running-an-executor.md` → "Step 4: Unlock Agent").
+**Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging, and unlocking a wallet when you lack CLI access — send `agent.unlock` with the agent's passphrase over WS-RPC; there is no REST route for it).
 
 Connect to `ws://localhost:12000/api/v1/ws` (loopback or through an SSH tunnel; `wss://` behind your TLS proxy when remote) and send JSON-RPC messages:
 
@@ -220,7 +220,7 @@ the WebSocket URL:
 ws://localhost:12000/api/v1/ws?token=<admin-credential-or-jwt>
 ```
 
-Remember the test-only behavior from `references/running-an-executor.md` → "Step 4: Unlock Agent": an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
+Remember: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
 **Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`)
 
 ## Troubleshooting
@@ -237,5 +237,5 @@ Remember the test-only behavior from `references/running-an-executor.md` → "St
 | Waker not firing | WS not accessible or bad query | Check `ws://localhost:12000/api/v1/ws/events` and waker logs |
 | Messages "uninitialized" | Property set after creation (race) | Pass all initial values at creation — `instance_create(..., properties={...})` (static tools) or `{class}_create` with every property up front (legacy dynamic tools). Never a create followed by a separate set call. |
 | Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |
-| `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design** — see `references/running-an-executor.md` → "Step 4: Unlock Agent". The node hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: unlock with the agent's passphrase — `ad4m agent unlock` on the CLI, or `agent.unlock` over WS-RPC (there is no REST route for it). If you're a third party: this needs the node's operator, not a client-side retry. |
+| `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design.** The node hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: unlock with the agent's passphrase — `ad4m agent unlock` on the CLI, or `agent.unlock` over WS-RPC (there is no REST route for it). If you're a third party: this needs the node's operator, not a client-side retry. |
 | `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or the subscription shows under a **Pending** section in `list_waker_subscriptions` instead of active | Normal during node startup; also correct if the node genuinely hasn't been unlocked yet (row above). The plugin retries the registration every 30s automatically rather than pretending to have succeeded. | Nothing to do if Pending clears within a minute or two. If it doesn't clear, the cause is almost always the node not being unlocked — an operator problem, not a client-side one. |

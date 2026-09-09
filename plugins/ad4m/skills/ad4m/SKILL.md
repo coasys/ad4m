@@ -37,6 +37,8 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 
 **NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). `ad4m-setup` already performs the capability handshake, so you should not need the first two by hand; if you genuinely do, see `references/setup.md` → "Calling MCP tools without the plugin".
 
+**A nested agent spawned by the default gateway will NOT see a throwaway profile's `ad4m_*` tools.** The tools are served by whichever gateway loaded the plugin — if the plugin is installed into profile B but you are running as profile A, the `ad4m_*` tools simply do not appear. Either run profile B's own gateway, or call the executor's MCP endpoint directly (see `references/setup.md`). Do not reverse-engineer `dist/index.cjs` to find the tool list — it is the plugin bundle, not a standalone MCP client.
+
 **Some tools were removed from the executor outright, not merely un-bridged — they do not exist even via the fallback.** Their jobs moved to `instance_transcript` and the `instance_*` tools; `add_child` / `get_children` kept their names but take `parent` / `child` — there is no `parent_address` anywhere on the static surface. Old memories or notes that mention those names are describing a tool that no longer exists. The Troubleshooting table below lists the specific names.
 
 The whole multi-user onboarding path — `signup` → `verify_email_code` → `login_email` → `set_agent_profile` — is native, so you never need the fallback just to get an identity. Many test/dev executors skip verification even though `signup` says "check your email"; read the `signup` response rather than assuming either way.
@@ -45,14 +47,14 @@ Call `ad4m_get_sample_config` any time you need to see the exact config shape fo
 
 **Cold start, and which half you are in.** There are two different starting points and the wrong instruction for your half wastes real time:
 
-- **No `ad4m_*` tools yet** (you were handed a tarball, or the gateway has not loaded the plugin): you *cannot* call `ad4m_get_documentation` — it is a plugin tool, and there is no plugin. Your sources are this file and `references/setup.md`, in that order. Install, configure, authenticate, restart the gateway; then switch to the other half.
+- **No `ad4m_*` tools yet** (you were handed a tarball, or the gateway has not loaded the plugin): you *cannot* call `ad4m_get_documentation` — it is a plugin tool, and there is no plugin. Your sources are this file and `references/setup.md`, in that order. Install, configure, authenticate, restart the gateway; then switch to the other half. **Read the skill files from the tarball you just installed, not any other copy already on the machine** (e.g. `~/.openclaw/plugin-skills/ad4m/` may be an older version from a prior install and will describe a different surface).
 - **Tools present:** call `ad4m_get_documentation(topic="overview")` **before you read further here, and before you grep this file**.
 
 `get_documentation` needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="usage"` is the working guide — reading and writing instances, the child tree, and the traps. `topic="flux"` is the Flux data model (channels, messages, posts, tasks). `topic="models"` is authoring your own subject classes. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. Older executors serve only `overview` / `usage` / `architecture`; `overview` always lists what that node actually has. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you.
 
 **Whatever the docs say about Flux, the classes in a perspective are whatever `ad4m_describe_perspective(perspective_id)` returns.** A shared space may have no `Channel` class at all. Check before you assume a shape.
 
-**This skill is deliberately the OpenClaw-specific half only** — the plugin's tool surface, setup, auth, the waker. Everything that is general AD4M usage lives in the executor's own docs, so it is reachable even in a session where this skill was never loaded. Setup is not served there either (you need it before the tools work): plugin installation and authentication are in `references/setup.md`; getting, running and unlocking an executor are in `references/running-an-executor.md`.
+**This skill is deliberately the OpenClaw-specific half only** — the plugin's tool surface, setup, auth, the waker. Everything that is general AD4M usage lives in the executor's own docs, so it is reachable even in a session where this skill was never loaded. Setup is not served there either (you need it before the tools work): plugin installation and authentication are in `references/setup.md`.
 
 ---
 
@@ -61,8 +63,7 @@ Call `ad4m_get_sample_config` any time you need to see the exact config shape fo
 **Which of these you need depends on whose executor it is.** If you were given an
 address to connect to, you need no binary and no prerequisite — skip to *Multi-user*
 below. Only if you are standing up your own node do you need the `ad4m-executor` binary
-([GitHub releases](https://github.com/coasys/ad4m/releases)), and `references/running-an-executor.md`
-covers that end of it.
+([GitHub releases](https://github.com/coasys/ad4m/releases)) — node-operator setup (init, run, unlock) is outside this skill's scope.
 
 ### Single-agent (you own the executor)
 
@@ -109,7 +110,7 @@ Treat provisioning (signup, you're creating a new account) and joining (login, a
 
 **Runtime re-auth (automatic, also undocumented until now):** the plugin retries `login_email` (with auto-signup on "user not found") on every restart, using the same `AD4M_PASSWORD` → `config.password` resolution. Keep that env var in sync with the account's actual password — a stale value fails re-auth and leaves you unauthenticated, with only a `[ad4m] Email login failed: …` warning in the plugin log to say so (see Troubleshooting).
 
-For plugin setup and authentication (managed vs external, the TLS guard), see `references/setup.md`. For standing up an executor of your own — downloading, initializing, running, unlocking — see `references/running-an-executor.md`.
+For plugin setup and authentication (managed vs external, the TLS guard), see `references/setup.md`. Standing up a bare executor (init, run, unlock) is node-operator work outside this skill's scope.
 
 ---
 
@@ -168,11 +169,11 @@ Use the `instance_*` tools with a `class_name`, not `add_link`. Why, and the `ba
 
 ### 7. Never post to Conversations
 
-Conversations are Flux's auto-generated AI summaries — only create Messages as children of Channels. Full Flux data model: `ad4m_get_documentation(topic="usage")`.
+Conversations are Flux's auto-generated AI summaries — only create Messages as children of Channels. Full Flux data model: `ad4m_get_documentation(topic="flux")`.
 
 ### 8. Creating visible Flux channels
 
-Conversation channels, space channels, and the chat-view App recipe: `ad4m_get_documentation(topic="usage")`.
+Conversation channels, space channels, and the chat-view App recipe: `ad4m_get_documentation(topic="flux")`.
 
 ### 9. Dynamic per-class tools are opt-in — not your default
 
@@ -231,7 +232,7 @@ ad4m_subscribe_to_children(perspective_id: "...", expression_address: "<channel-
 
 ## The data model, the tree and Flux
 
-Model instance ids, the `ad4m://has_child` tree (`add_child` / `get_children`), the whole Flux data model (message HTML formatting, channels vs conversations, posts and tasks) and the essential channel recipes are general AD4M knowledge, served by the executor itself: `ad4m_get_documentation(topic="usage")`.
+Model instance ids and the `ad4m://has_child` tree (`add_child` / `get_children`) — `ad4m_get_documentation(topic="usage")`. The Flux data model (message HTML formatting, channels vs conversations, posts and tasks, essential channel recipes) — `ad4m_get_documentation(topic="flux")`. These are general AD4M knowledge, served by the executor itself.
 
 ---
 
@@ -247,7 +248,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Mention events include per-messa
 
 ### Steps 1 and 2: read the channel, then reply into the same parent
 
-`ad4m_get_my_did()` → `ad4m_instance_transcript(perspective_id=<from wake>, class_name="Message", parent=<channel parent from wake>, limit=20)` → `ad4m_instance_create(..., parent=<the SAME parent>)`. The exact calls, why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
+`ad4m_get_my_did()` → `ad4m_describe_perspective(perspective_id)` **to confirm the actual class names in this space** (do not assume `Message` or `Channel` exist just because the Flux docs describe them) → `ad4m_instance_transcript(perspective_id=<from wake>, class_name=<class from describe_perspective>, parent=<channel parent from wake>, limit=20)` → `ad4m_instance_create(..., parent=<the SAME parent>)`. The exact calls, why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
 
 ### When to respond
 
@@ -264,7 +265,7 @@ Unchanged architecture: `AD4M Executor → Plugin (ad4m-waker) → OpenClaw /hoo
 
 ## Subject Classes (SHACL) — defining new models
 
-Authoring classes with `ad4m_add_model`, why it takes 2–3 register-then-test rounds, and its non-idempotence: `ad4m_get_documentation(topic="usage")`. The SHACL field reference is in `ad4m_get_documentation(topic="architecture")`.
+Authoring classes with `ad4m_add_model`, why it takes 2–3 register-then-test rounds, and its non-idempotence: `ad4m_get_documentation(topic="models")`. The SHACL field reference is in `ad4m_get_documentation(topic="architecture")`.
 
 ---
 
@@ -281,3 +282,4 @@ These are the symptoms specific to the OpenClaw plugin — bridging, the manifes
 | `Failed to get agent: User profile not found for <email>` on `subscribe_to_mentions` | No agent profile set (Rule 12). | Call `ad4m_set_agent_profile` first. |
 | `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or `list_waker_subscriptions` shows your subscription under **Pending** rather than active | Normal on a node that's still starting up, or genuinely correct if the node hasn't been unlocked yet (a locked wallet — see `ad4m_get_documentation(topic="usage")`) — the plugin retries automatically every 30s rather than silently pretending to have succeeded. | If Pending clears within a minute or two, no action needed. If it stays Pending, the underlying cause is almost always the node not being unlocked — that's the node operator's problem, not something to fix from your side. |
 | `ad4m_channel_query`/`ad4m_message_create`/etc. return "tool not found" | You're reading old instructions or an old memory of this skill — these are dynamic per-class tools, opt-in only (Rule 9), not the default surface anymore. | Use `instance_query`/`instance_create` with `class_name` instead. |
+| `instance_query` or `instance_transcript` returns a SPARQL parse error instead of results | The class URI (or a value used internally as an IRI) is not a valid IRI — e.g. contains spaces or other disallowed characters (known case: `bots://Message` fails the SPARQL backend). This is an executor-side issue, not a plugin issue. | Use a class registered with a well-formed URI. `describe_perspective` reports the registered class names; use those exactly as returned. |
