@@ -584,7 +584,8 @@ impl PerspectiveInstance {
     /// they run.
     #[cfg(test)]
     pub(crate) fn fail_next_add_link(&self, after_n_calls: i64) {
-        self.fail_add_link_after.store(after_n_calls, Ordering::SeqCst);
+        self.fail_add_link_after
+            .store(after_n_calls, Ordering::SeqCst);
     }
 
     /// Look up a cached `ModelShape` for the given class name, loading it
