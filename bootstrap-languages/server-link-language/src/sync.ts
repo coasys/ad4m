@@ -64,6 +64,24 @@ export function initSync(deps: SyncDeps): void {
     _pendingMissingVersions = new Set();
 }
 
+/**
+ * Register key versions that could not be decrypted so the next
+ * HTTP sync cycle retries the key-ring refresh.  The WebSocket
+ * `onDiff` path needs this: it calls `applyInboundWireDiff`
+ * directly (outside `catchUp`), so missed versions never reach the
+ * `_pendingMissingVersions` set that `catchUp` checks.  Without
+ * this bridge the cursor advances past the encrypted diffs and no
+ * retry ever triggers.
+ */
+export function trackMissingKeyVersions(versions: Set<number>): void {
+    for (const v of versions) _pendingMissingVersions.add(v);
+}
+
+/** Clear the pending-missing-versions set after successful recovery. */
+export function clearPendingMissingVersions(): void {
+    _pendingMissingVersions.clear();
+}
+
 function deps(): SyncDeps {
     if (!_deps) {
         throw new Error("sync module not initialized. Call initSync() during language init().");

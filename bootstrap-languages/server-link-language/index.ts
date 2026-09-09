@@ -145,7 +145,17 @@ async function refreshKeyRingIfNeeded(): Promise<boolean> {
     await setupKeyRing();
     const newSize = keyRing?.size ?? 0;
     if (newSize > prevSize) {
+        console.log("[server-link-language] key ring refreshed — re-bootstrapping");
         await syncModule.bootstrap();
+        // bootstrap() replaces the store but does not emit (by design —
+        // cold-start callers query the store directly).  Recovery callers
+        // must emit so the executor's perspective layer surfaces the
+        // recovered links.
+        const recovered = syncModule.render();
+        if (recovered.links.length > 0) {
+            getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
+        }
+        syncModule.clearPendingMissingVersions();
         return true;
     }
     return false;
@@ -297,8 +307,11 @@ const language = defineLanguage({
                 onDiff(msg) {
                     const result = syncModule.applyInboundWireDiff(msg.payload, msg.sequence, msg.revision);
                     // If the live push contained links we couldn't decrypt,
-                    // kick off a background key ring refresh + re-bootstrap.
+                    // bridge the missing versions into the HTTP-sync retry
+                    // set so `catchUp()` retries on the next cycle, then
+                    // kick off an immediate background refresh attempt.
                     if (result.missingVersions.size > 0) {
+                        syncModule.trackMissingKeyVersions(result.missingVersions);
                         void refreshKeyRingIfNeeded().catch((err) => {
                             console.error("[server-link-language] WS diff key ring refresh failed:", err);
                         });

@@ -100,27 +100,25 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 // Wait for Alice's link language to be wired.
                 // publishFromPerspective sets state=NeighbourhoodCreationInitiated.
                 // ensure_link_language (5s-interval background task) detects
-                // the neighbourhood, wires self.link_language, and atomically
-                // sets state to LinkLanguageInstalledButNotSynced. So any
-                // state after NeighbourhoodCreationInitiated guarantees the
-                // language runtime exists and addLink won't hit
-                // "LinkLanguage not available".
-                // NOTE: Do NOT wait for Synced — sync() can fail ("fetch
-                // failed") in CI, so Synced may never be reached.
-                let aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
-                let readyTries = 0;
-                while (aliceReady?.state === PerspectiveState.NeighboudhoodCreationInitiated
-                    && readyTries < 60) {
-                    await sleep(500);
-                    aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
-                    readyTries++;
-                }
-                console.log(`[TEST-DIAG] Alice perspective state after poll: ${aliceReady?.state} (tries=${readyTries})`);
+                // the neighbourhood, wires self.link_language, and sets state
+                // to LinkLanguageInstalledButNotSynced. Wait for any state
+                // past NeighboudhoodCreationInitiated (note: enum member has
+                // typo) — that guarantees the language runtime exists and
+                // addLink won't hit "LinkLanguage not available".
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired" });
 
-                const addResult = await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
-                console.log(`[TEST-DIAG] addLink returned:`, JSON.stringify(addResult?.data))
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
-                await sleep(1000)
+                // Give time for the commit POST to reach the server, and for
+                // Bob's sync cycle to pick up the (possibly encrypted) diff.
+                // With E2E, Bob may need an extra refreshKeyRing round to
+                // decrypt — 5 s covers the typical WS + HTTP sync cadence.
+                await sleep(5000)
 
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
@@ -183,14 +181,12 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 // Wait for Alice's link language to be wired (see simple
                 // test comment for rationale).
-                let aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
-                let readyTries = 0;
-                while (aliceReady?.state === PerspectiveState.NeighboudhoodCreationInitiated
-                    && readyTries < 60) {
-                    await sleep(500);
-                    aliceReady = await alice.perspective.byUUID(aliceP1.uuid);
-                    readyTries++;
-                }
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired (stress)" });
 
                 // Create 1500 links as fast as possible — the executor's own
                 // pending_diffs_loop batches them (1s inactivity / 3s max /
