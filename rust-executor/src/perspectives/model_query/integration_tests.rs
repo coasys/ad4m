@@ -32,6 +32,8 @@ fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> Decorated
             signature: "sig".to_string(),
             valid: Some(true),
             invalid: Some(false),
+
+            ..Default::default()
         },
         status: None,
     }

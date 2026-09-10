@@ -276,6 +276,8 @@ mod tests {
                 key: "key".to_string(),
                 valid: Some(true),
                 invalid: None,
+
+                ..Default::default()
             },
             status: None,
         }

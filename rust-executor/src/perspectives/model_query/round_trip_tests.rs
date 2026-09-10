@@ -25,6 +25,8 @@ fn make_link_for_round_trip(link: Link) -> DecoratedLinkExpression {
             signature: "s".to_string(),
             valid: Some(true),
             invalid: Some(false),
+
+            ..Default::default()
         },
         status: None,
     }

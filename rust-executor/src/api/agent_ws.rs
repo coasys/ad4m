@@ -34,6 +34,8 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
             signature: lei.proof.signature.clone().unwrap_or_default(),
             valid: lei.proof.valid,
             invalid: lei.proof.invalid,
+
+            ..Default::default()
         },
         status: lei.status.clone(),
     }

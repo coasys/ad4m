@@ -1052,6 +1052,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             });
@@ -1151,6 +1153,8 @@ mod tests {
                 signature: "test_signature".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: None,
         }];
@@ -1186,6 +1190,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1202,6 +1208,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1274,6 +1282,8 @@ mod tests {
                 signature: "test_signature".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: None,
         }];
@@ -1340,6 +1350,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1356,6 +1368,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1522,6 +1536,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1538,6 +1554,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1554,6 +1572,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1727,6 +1747,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1743,6 +1765,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1759,6 +1783,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -1878,6 +1904,8 @@ mod tests {
                 signature: "test_signature".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: None,
         });
@@ -2003,6 +2031,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2019,6 +2049,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2243,6 +2275,8 @@ mod tests {
                 signature: "test_signature".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: None,
         }];
@@ -2382,6 +2416,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2398,6 +2434,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2455,6 +2493,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2471,6 +2511,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2492,6 +2534,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2509,6 +2553,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2656,6 +2702,8 @@ mod tests {
                 signature: "test_signature".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: None,
         }];
@@ -2811,6 +2859,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2827,6 +2877,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2843,6 +2895,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -2860,6 +2914,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -3142,6 +3198,8 @@ mod tests {
                 signature: "test_signature".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: None,
         }];
@@ -3313,6 +3371,8 @@ mod tests {
                 signature: "test_signature".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: None,
         }];
@@ -3647,6 +3707,8 @@ mod tests {
                 signature: "test_signature".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: None,
         }];
@@ -3703,6 +3765,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
@@ -3719,6 +3783,8 @@ mod tests {
                     signature: "test_signature".to_string(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             },
