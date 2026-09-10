@@ -113,7 +113,7 @@ async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         Ad4mDb::with_global_instance(|db| db.get_neighbourhood_owners(&neighbourhood_url))
             .unwrap_or_default()
             .contains(&agent_did);
-    if !is_member {
+    if !ctx.is_admin_credential && !is_member {
         return Err(WsRpcError::forbidden(
             "Not a member of this neighbourhood".to_string(),
         ));
@@ -362,8 +362,14 @@ async fn cascade_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 // separate whitelist, no backdoor.
 
 async fn ensure_membership(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
-        .map_err(WsRpcError::forbidden)?;
+    // Admin-only: arbitrary DID registration for test harnesses and bridge
+    // deployments.  Regular users get membership through the neighbourhood
+    // join flow, not this RPC.
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden(
+            "Admin credential required for ensureMembership".to_string(),
+        ));
+    }
     let neighbourhood_url = params.require_str("neighbourhoodUrl")?;
     let did = params.require_str("did")?;
     Ad4mDb::with_global_instance(|db| db.ensure_neighbourhood_member(&neighbourhood_url, &did))

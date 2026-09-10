@@ -102,6 +102,8 @@ use crate::pubsub::{
     SFU_CALL_RENEGOTIATION_OFFER_TOPIC, SFU_DATA_CHANNEL_TOPIC, SFU_MIGRATE_TOPIC,
 };
 
+use crate::db::Ad4mDb;
+
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 
@@ -545,18 +547,47 @@ pub(crate) async fn build_event_stream(
             })
     };
 
-    // SFU data channel relay — fan out to connected clients.
-    // No DID filtering: every participant in the room receives
-    // every data message (same as media relay).  The `senderDid`
-    // field lets clients ignore their own messages.
+    // SFU data channel relay — fan out only to room members.
+    // Each event carries `neighbourhoodUrl`; the caller's DID must
+    // appear in that neighbourhood's owner list (same gate as callJoin).
+    // Admin credentials bypass the filter.
     let s_sfu_data = {
         let rx = pubsub.subscribe(&SFU_DATA_CHANNEL_TOPIC).await;
+        let token = auth_token.clone();
+        let admin = is_admin;
         BroadcastStream::new(rx)
             .filter_map(|r| async { handle_broadcast_result(r) })
-            .filter_map(move |result| async move {
-                match result {
-                    Ok(ref msg) => Some(wrap_event("sfu-data", msg)),
-                    _ => None,
+            .filter_map(move |result| {
+                let token = token.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) => {
+                            if admin {
+                                return Some(wrap_event("sfu-data", msg));
+                            }
+                            let did = {
+                                let ctx = AgentContext::from_auth_token(token.clone());
+                                did_for_context(&ctx).ok()
+                            };
+                            let did = did.as_deref()?;
+                            // Parse the JSON to extract neighbourhoodUrl for
+                            // membership filtering.
+                            let parsed: serde_json::Value = serde_json::from_str(msg).ok()?;
+                            let neighbourhood_url =
+                                parsed.get("neighbourhoodUrl").and_then(|v| v.as_str())?;
+                            let is_member = Ad4mDb::with_global_instance(|db| {
+                                db.get_neighbourhood_owners(neighbourhood_url)
+                            })
+                            .unwrap_or_default()
+                            .contains(&did.to_string());
+                            if is_member {
+                                Some(wrap_event("sfu-data", msg))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
                 }
             })
     };

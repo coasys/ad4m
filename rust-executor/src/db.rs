@@ -1260,6 +1260,13 @@ impl Ad4mDb {
     /// `neighbourhood_url`.  Creates a synthetic perspective_handle if
     /// none with that `shared_url` exists yet (needed by test harnesses
     /// that use synthetic neighbourhood URLs).
+    /// Register `user_did` as a member of `neighbourhood_url`.
+    ///
+    /// **Caller must enforce authorization.** This method trusts
+    /// that the caller already verified the DID matches the
+    /// authenticated identity (or holds admin privileges).
+    /// The `sfu.ensureMembership` WS handler gates this behind
+    /// `is_admin_credential`.
     pub fn ensure_neighbourhood_member(
         &self,
         neighbourhood_url: &str,
