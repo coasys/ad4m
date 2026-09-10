@@ -202,6 +202,9 @@ export class SfuManager {
     private renegotiationUnsubscribe: (() => void) | null = null
     private migrateUnsubscribe: (() => void) | null = null
     private dataChannelUnsubscribe: (() => void) | null = null
+    private disconnectedTimer: ReturnType<typeof setTimeout> | null = null
+    private redirectCount: number = 0
+    private static readonly MAX_REDIRECTS = 5
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -353,13 +356,38 @@ export class SfuManager {
         const pc = new RTCPeerConnection({ iceServers: this.iceServers })
         this.state.peerConnection = pc
 
-        // ICE state monitoring for cascade failover
+        // ICE state monitoring for cascade failover.
+        // "disconnected" is often transient (network blip, route change) —
+        // delay failover by 3 seconds to let it recover.  "failed" triggers
+        // immediate failover.
         pc.oniceconnectionstatechange = () => {
-            if (
-                pc.iceConnectionState === "failed" ||
-                pc.iceConnectionState === "disconnected"
-            ) {
+            if (pc.iceConnectionState === "failed") {
+                if (this.disconnectedTimer) {
+                    clearTimeout(this.disconnectedTimer)
+                    this.disconnectedTimer = null
+                }
                 this.handleCascadeFailover()
+            } else if (pc.iceConnectionState === "disconnected") {
+                if (!this.disconnectedTimer) {
+                    this.disconnectedTimer = setTimeout(() => {
+                        this.disconnectedTimer = null
+                        // Only failover if this pc is still the active one
+                        // and still disconnected.
+                        if (
+                            this.state.peerConnection === pc &&
+                            pc.iceConnectionState === "disconnected"
+                        ) {
+                            this.handleCascadeFailover()
+                        }
+                    }, 3000)
+                }
+            } else {
+                // Any other state (connected, completed, checking) cancels
+                // the pending disconnected timer.
+                if (this.disconnectedTimer) {
+                    clearTimeout(this.disconnectedTimer)
+                    this.disconnectedTimer = null
+                }
             }
         }
 
@@ -484,10 +512,19 @@ export class SfuManager {
             )
         this.state.participantId = session.participantId
 
-        // Handle cascade redirect
+        // Handle cascade redirect — bounded to prevent infinite loops
         if (session.redirectTo) {
+            this.redirectCount++
+            if (this.redirectCount > SfuManager.MAX_REDIRECTS) {
+                pc.close()
+                this.state.peerConnection = null
+                this.redirectCount = 0
+                throw new Error(
+                    `SFU redirect limit exceeded (${SfuManager.MAX_REDIRECTS})`,
+                )
+            }
             console.info(
-                `SFU redirect: reconnecting to node ${session.redirectTo}`,
+                `SFU redirect ${this.redirectCount}/${SfuManager.MAX_REDIRECTS}: reconnecting to node ${session.redirectTo}`,
             )
             this.state.connectedNodeDid = session.redirectTo
             this.state.sfuPeerDid = session.redirectTo
@@ -495,12 +532,20 @@ export class SfuManager {
             this.state.peerConnection = null
             return await this.join(localStream)
         }
+        this.redirectCount = 0
 
         if (
             session.streamMapping &&
             session.streamMapping.length > 0
         ) {
-            this.state.knownParticipantDids = session.streamMapping
+            // streamMapping entries may arrive as "participantId:did" —
+            // extract the bare DID for participant resolution.
+            this.state.knownParticipantDids = session.streamMapping.map(
+                (entry) => {
+                    const colonIdx = entry.indexOf(":")
+                    return colonIdx >= 0 ? entry.slice(colonIdx + 1) : entry
+                },
+            )
             this.trackDidIndex = 0
         }
 
@@ -522,6 +567,11 @@ export class SfuManager {
                 )
             })
         }
+
+        // Release prior subscriptions before subscribing again (join
+        // may be called more than once during cascade redirect/failover).
+        this.renegotiationUnsubscribe?.()
+        this.migrateUnsubscribe?.()
 
         // Subscribe to server-initiated renegotiation offers
         this.renegotiationUnsubscribe =

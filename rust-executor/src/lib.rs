@@ -522,10 +522,13 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
         let mut sfu_config = crate::sfu::server::SfuServerConfig::default();
         if let Some(ref addr) = config.sfu_bind_addr {
-            match format!("{}:0", addr).parse() {
-                Ok(sa) => {
-                    info!("SFU bind address override: {}", addr);
-                    sfu_config.bind_addr = sa;
+            // Parse as IpAddr first, then construct SocketAddr with port 0.
+            // This handles bare IPv6 like "::1" which format!("{}:0") would
+            // turn into "::1:0" — not a valid SocketAddr.
+            match addr.parse::<std::net::IpAddr>() {
+                Ok(ip) => {
+                    sfu_config.bind_addr = std::net::SocketAddr::new(ip, 0);
+                    info!("SFU bind address override: {}", ip);
                 }
                 Err(e) => warn!(
                     "SFU bind address `{}` parse error: {} — using auto-detected default",

@@ -392,7 +392,6 @@ impl SfuServer {
                             );
                             continue;
                         };
-                        peer.pending_offer_sent = None;
                         let answer: str0m::change::SdpAnswer =
                             match serde_json::from_str(&sdp_answer_json) {
                                 Ok(a) => a,
@@ -402,11 +401,16 @@ impl SfuServer {
                                         participant_id, e
                                     );
                                     // Restore the pending offer so deferred
-                                    // tracks don't get orphaned.
+                                    // tracks don't get orphaned.  Keep
+                                    // pending_offer_sent so the stale-offer
+                                    // sweep can eventually clear and retry.
                                     peer.pending_offer = Some(pending);
                                     continue;
                                 }
                             };
+                        // SDP parsed successfully — clear the stale-offer
+                        // timestamp so the sweep no longer considers this peer.
+                        peer.pending_offer_sent = None;
                         if let Err(e) = peer.rtc.sdp_api().accept_answer(pending, answer) {
                             warn!("SFU: accept_answer for {} failed: {:?}", participant_id, e);
                         } else {
@@ -601,10 +605,15 @@ impl SfuServer {
             // established pipes after a remote node crash.
             {
                 let mut dead_pipes: Vec<DeadPipe> = Vec::new();
+                // Collect dead peers first, then remove — we need the pid +
+                // room_id after retain to call clean_stale_track_refs.
+                let mut dead_peers: Vec<(ParticipantId, String)> = Vec::new();
                 peers.retain(|pid, peer| {
                     if !peer.rtc.is_alive() {
                         info!("SFU: peer {} disconnected", pid);
                         relay.remove_participant(pid);
+                        quality_preferences.remove(pid);
+                        dead_peers.push((pid.clone(), peer.room_id.to_string()));
                         if peer.is_pipe {
                             dead_pipes.push(DeadPipe {
                                 room_id: peer.room_id.to_string(),
@@ -617,6 +626,11 @@ impl SfuServer {
                         true
                     }
                 });
+                // Remove stale track references that other peers held for
+                // the disconnected ones — matches the RemovePeer path.
+                for (pid, room_id) in &dead_peers {
+                    clean_stale_track_refs(&mut peers, pid, room_id);
+                }
                 for dp in dead_pipes {
                     let _ = dead_pipe_tx.try_send(dp);
                 }
@@ -939,6 +953,14 @@ impl SfuServer {
                 let mut api = target_peer.rtc.sdp_api();
                 let mut new_outbound: Vec<(Mid, ParticipantId, Mid, MediaKind)> = Vec::new();
                 for (kind, origin_pid, origin_mid) in &additions {
+                    // Skip tracks already forwarded — matches the deferred path's
+                    // tracks_out_rev check to prevent duplicate outbound m-lines.
+                    if target_peer
+                        .tracks_out_rev
+                        .contains_key(&(origin_pid.clone(), *origin_mid))
+                    {
+                        continue;
+                    }
                     let new_mid =
                         api.add_media(*kind, str0m::media::Direction::SendOnly, None, None, None);
                     new_outbound.push((new_mid, origin_pid.clone(), *origin_mid, *kind));

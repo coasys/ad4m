@@ -107,6 +107,12 @@ export class NeighbourhoodProxy {
      * automatically advertise SFU capability in call-presence.
      */
     async createSession(roomName: string, options?: SessionCreateOptions): Promise<Session> {
+        if (!this.#agentDid) {
+            throw new Error(
+                "Cannot create a call session without an agent DID — " +
+                "pass agentDid when constructing NeighbourhoodProxy",
+            )
+        }
         // Fetch SFU status once — reachability only changes at executor restart.
         if (!this.#sfuStatusCache) {
             try {
