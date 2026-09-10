@@ -575,6 +575,9 @@ fn init_test_db() {
             let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
         }
     });
+    // Ensure billing backend exists — bill_ai_operation and bill_compute
+    // call billing_backend() which panics if uninitialised.
+    crate::test_utils::setup_billing();
 }
 
 /// Build a router with only the /v1 openai_compat routes for testing.
@@ -1048,12 +1051,10 @@ impl DbSettingsGuard {
         let prev_multi_user = crate::db::Ad4mDb::with_global_instance(|db| {
             db.get_multi_user_enabled().unwrap_or(false)
         });
-        let prev_rates =
-            crate::db::Ad4mDb::with_global_instance(|db| db.get_host_rates().unwrap_or_default());
-        let _ = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.set_multi_user_enabled(multi_user)?;
-            db.set_host_rates(rates)
-        });
+        let bb = crate::billing_backend::billing_backend();
+        let prev_rates = bb.get_rates().unwrap_or_default();
+        let _ = crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(multi_user));
+        let _ = bb.set_rates(rates);
         Self {
             prev_multi_user,
             prev_rates,
@@ -1064,9 +1065,9 @@ impl DbSettingsGuard {
 impl Drop for DbSettingsGuard {
     fn drop(&mut self) {
         let _ = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.set_multi_user_enabled(self.prev_multi_user)?;
-            db.set_host_rates(&self.prev_rates)
+            db.set_multi_user_enabled(self.prev_multi_user)
         });
+        let _ = crate::billing_backend::billing_backend().set_rates(&self.prev_rates);
     }
 }
 
