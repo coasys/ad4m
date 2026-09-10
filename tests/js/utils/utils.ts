@@ -280,18 +280,23 @@ export async function startExecutor(dataPath: string,
         'run',
         '--app-data-path', effectiveDataPath,
         '--port', String(apiPort),
-        '--hc-admin-port', String(hcAdminPort),
-        '--hc-app-port', String(hcAppPort),
-        '--hc-proxy-url', proxyUrl,
-        '--hc-bootstrap-url', bootstrapUrl,
-        '--hc-use-bootstrap', 'true',
-        '--hc-use-proxy', 'true',
-        '--hc-use-local-proxy', 'true',
-        '--hc-use-mdns', 'true',
         '--language-language-only', String(languageLanguageOnly),
         '--run-dapp-server', 'false',
     ];
-    if (!runHolochain) { args.push('--run-holochain', 'false'); }
+    if (runHolochain) {
+        args.push(
+            '--hc-admin-port', String(hcAdminPort),
+            '--hc-app-port', String(hcAppPort),
+            '--hc-proxy-url', proxyUrl!,
+            '--hc-bootstrap-url', bootstrapUrl!,
+            '--hc-use-bootstrap', 'true',
+            '--hc-use-proxy', 'true',
+            '--hc-use-local-proxy', 'true',
+            '--hc-use-mdns', 'true',
+        );
+    } else {
+        args.push('--run-holochain', 'false');
+    }
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
     if (enableMcp) { args.push('--enable-mcp', 'true'); }
     if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
