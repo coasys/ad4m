@@ -69,8 +69,8 @@ export async function startAgent(
     /** When set, starts the executor in admin-credential mode and connects
      *  the returned client using that credential as the bearer token. */
     adminCredential?: string;
-    /** Skip Holochain startup. Defaults to false when LOCAL_MODE env var
-     *  is set, true otherwise. */
+    /** Start the Holochain conductor. Defaults to false when
+     *  LOCAL_MODE=true, true otherwise. */
     runHolochain?: boolean;
   } = {},
 ): Promise<AgentHandle> {

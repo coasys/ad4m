@@ -111,6 +111,9 @@ commands:
       - fix_workdir
       - checkout
       - run:
+          name: Set LOCAL_MODE for downstream test suites
+          command: echo 'export LOCAL_MODE=true' >> "$BASH_ENV"
+      - run:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"

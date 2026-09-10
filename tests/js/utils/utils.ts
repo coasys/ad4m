@@ -219,7 +219,7 @@ export async function startExecutor(dataPath: string,
     mcpPort?: number,
     runHolochain: boolean = true,
 ): Promise<ChildProcess> {
-    if (!proxyUrl || !bootstrapUrl) {
+    if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
         proxyUrl = services.proxyUrl!;
         bootstrapUrl = services.bootstrapUrl!;
