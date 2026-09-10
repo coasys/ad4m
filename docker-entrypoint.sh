@@ -284,8 +284,13 @@ stamp_bootstrap_language_authors() {
 # summarisation work out of the box.
 ws_rpc() {
     local msg_type="$1" params="$2" msg_id="${3:-1}"
+    # Percent-encode the credential for the query string. Axum's Query
+    # extractor decodes '+' as space (x-www-form-urlencoded), so a raw
+    # credential containing '+' would fail the exact-match check.
+    local encoded_token
+    encoded_token=$(jq -rn --arg t "${ADMIN_CREDENTIAL}" '$t | @uri')
     printf '{"id":"%s","type":"%s","params":%s}\n' "${msg_id}" "${msg_type}" "${params}" \
-        | websocat -n1 "ws://localhost:12000/api/v1/ws?token=${ADMIN_CREDENTIAL}" 2>/dev/null
+        | websocat -n1 "ws://localhost:12000/api/v1/ws?token=${encoded_token}" 2>/dev/null
 }
 
 setup_ai_models() {
