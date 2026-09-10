@@ -13,6 +13,7 @@ use crate::wallet::wallet_backend;
 pub mod assistant;
 pub mod capabilities;
 pub mod enrolment;
+pub mod guardians;
 pub mod kel;
 pub mod resolver;
 pub mod revocation;
