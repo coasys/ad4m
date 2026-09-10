@@ -770,19 +770,13 @@ impl SfuService {
         let room_id = RoomId::new(neighbourhood_url, room_name);
         let pid = ParticipantId::next();
 
-        // Cascade redirect check + participant add in a single lock
-        // scope to prevent TOCTOU races where concurrent joins both
-        // read the same stale count and both accept.
-        {
+        // Cascade redirect check — read-only lock, no room creation yet.
+        // Room creation defers until after SDP parsing succeeds so a
+        // malformed offer never leaves an empty room.
+        let max_per_node = {
             let mgr = self.cascade_manager.read().await;
-            let mut rooms = self.rooms.write().await;
+            let rooms = self.rooms.read().await;
             let configs = self.configs.read().await;
-
-            // Ensure room exists — use max_participants_per_node as the
-            // hard cap, not max_mesh_participants (which controls the
-            // mesh→SFU topology threshold).
-            let max = Some(mgr.max_participants_per_node() as usize);
-            rooms.create_room(room_id.clone(), max).ok(); // idempotent
 
             let local_count = rooms
                 .get_room(&room_id)
@@ -805,24 +799,24 @@ impl SfuService {
                     redirect_to: Some(node.did.clone()),
                     stream_mapping: Vec::new(),
                 });
-            } else {
-                // Accept locally — validated below after SDP parsing.
-                // The rooms write lock drops here; participant registration
-                // defers until after the fallible SDP/RTC steps so a parse
-                // failure never leaves a registered participant without a peer.
             }
-        }
+            mgr.max_participants_per_node() as usize
+        };
 
         // Parse SDP offer and create Rtc instance — do this BEFORE
-        // registering the participant so failures don't leave stale state.
+        // creating the room or registering the participant so failures
+        // never leave stale state.
         let offer: SdpOffer = serde_json::from_str(sdp_offer_json)
             .map_err(|e| format!("Invalid SDP offer: {}", e))?;
 
         let (rtc, sdp_answer) = SfuServer::create_rtc_for_offer(offer, self.server.local_addr)?;
 
-        // SDP and RTC succeeded — now register the participant.
+        // SDP and RTC succeeded — create room (idempotent) and register
+        // the participant in a single write-lock scope.
         {
             let mut rooms = self.rooms.write().await;
+            let max = Some(max_per_node);
+            rooms.create_room(room_id.clone(), max).ok(); // idempotent
             let room = rooms
                 .get_room_mut(&room_id)
                 .ok_or_else(|| RoomError::NotFound.to_string())?;
@@ -840,10 +834,14 @@ impl SfuService {
         );
 
         if let Err(e) = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await {
-            // AddPeer failed — roll back the participant registration.
+            // AddPeer failed — roll back participant and destroy room
+            // if it became empty (avoids orphaned empty rooms).
             let mut rooms = self.rooms.write().await;
             if let Some(room) = rooms.get_room_mut(&room_id) {
                 room.remove_participant(&pid);
+                if room.participant_count() == 0 {
+                    let _ = rooms.destroy_room(&room_id);
+                }
             }
             return Err(format!("Failed to add peer to SFU: {}", e));
         }

@@ -81,15 +81,24 @@ export interface SfuConfig {
     iceServers?: IceServer[]
 }
 
+/** Wire participant — returned by `sfuStartRoom` / `sfuListRooms` JSON-RPC. */
+export interface SfuRoomParticipantInfo {
+    agentDid: string
+    hasAudio: boolean
+    hasVideo: boolean
+    isActiveSpeaker: boolean
+}
+
 /** Snapshot of an active SFU room. */
 export interface SfuRoomInfo {
     neighbourhoodUrl: string
     roomName: string
     participantCount: number
-    participants: SfuParticipantInfo[]
+    participants: SfuRoomParticipantInfo[]
     createdAtMs: number
 }
 
+/** Browser-side participant — carries a live MediaStream. */
 export interface SfuParticipantInfo {
     agentDid: string
     stream: MediaStream
