@@ -607,13 +607,13 @@ impl SfuServer {
                 let mut dead_pipes: Vec<DeadPipe> = Vec::new();
                 // Collect dead peers first, then remove — we need the pid +
                 // room_id after retain to call clean_stale_track_refs.
-                let mut dead_peers: Vec<(ParticipantId, String)> = Vec::new();
+                let mut dead_peers: Vec<(ParticipantId, RoomId)> = Vec::new();
                 peers.retain(|pid, peer| {
                     if !peer.rtc.is_alive() {
                         info!("SFU: peer {} disconnected", pid);
                         relay.remove_participant(pid);
                         quality_preferences.remove(pid);
-                        dead_peers.push((pid.clone(), peer.room_id.to_string()));
+                        dead_peers.push((pid.clone(), peer.room_id.clone()));
                         if peer.is_pipe {
                             dead_pipes.push(DeadPipe {
                                 room_id: peer.room_id.to_string(),
