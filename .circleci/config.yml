@@ -113,10 +113,11 @@ commands:
       - run:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
           command: |
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             mkdir -p target/release
             rm -f target/release/ad4m target/release/ad4m-executor
-            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m target/release/ad4m
-            cp /tmp/circleci-artifacts/${CIRCLE_SHA1}/ad4m-executor target/release/ad4m-executor
+            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m" target/release/ad4m
+            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m-executor" target/release/ad4m-executor
       - setup_env
       - run:
           name: Install dependencies
