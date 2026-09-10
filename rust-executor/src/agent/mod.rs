@@ -15,6 +15,7 @@ pub mod capabilities;
 pub mod enrolment;
 pub mod kel;
 pub mod resolver;
+pub mod revocation;
 pub mod signatures;
 
 /// Validate that a user email is safe to use as a filesystem path segment.
