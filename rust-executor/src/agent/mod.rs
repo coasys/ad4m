@@ -11,6 +11,7 @@ use crate::types::{Expression, ExpressionProof};
 use crate::wallet::wallet_backend;
 
 pub mod capabilities;
+pub mod enrolment;
 pub mod kel;
 pub mod resolver;
 pub mod signatures;

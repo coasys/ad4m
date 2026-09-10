@@ -365,6 +365,8 @@ mod tests {
         let body = KeyEventBody::Delegate {
             key: full_key(&format!("{}#key-1", did1), &did1),
             from_seq: 5,
+            label: None,
+            lane: None,
         };
         // seq 5 instead of 1 → fold rejects with SeqGap.
         let bad_ev = super::super::KeyEvent::new(5, Some("fake".to_string()), body, &key_id0, &kp0);
@@ -391,6 +393,8 @@ mod tests {
         let body = KeyEventBody::Delegate {
             key: full_key(&format!("{}#key-1", did1), &did1),
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = super::super::KeyEvent::new(1, Some(ev0.hash.clone()), body, &key_id0, &kp0);
         adapter.append(&scid, ev1).unwrap();
@@ -428,6 +432,8 @@ mod tests {
         let body = KeyEventBody::Delegate {
             key: full_key(&format!("{}#key-1", did1), &did1),
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = super::super::KeyEvent::new(1, Some(ev0.hash.clone()), body, &key_id0, &kp0);
         adapter.append(&scid, ev1).unwrap();
