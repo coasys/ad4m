@@ -246,15 +246,16 @@ stamp_bootstrap_language_authors() {
     ll_addr=$(cat /opt/ad4m/language-language-kv/address.txt)
     kv_file="/data/ad4m/languages/${ll_addr}/ad4m-language-kv.json"
     if [ ! -f "${kv_file}" ]; then
-        return 0
+        echo "ERROR: language-language KV file not found: ${kv_file}" >&2
+        return 1
     fi
 
     local status_output
     status_output=$(run_ad4m_cli agent status 2>&1 || true)
     did=$(printf '%s' "${status_output}" | sed $'s/\x1b\\[[0-9;]*m//g' | grep -oE 'did:key:z[A-Za-z0-9]+' | head -1)
     if [ -z "${did}" ]; then
-        echo "WARNING: could not read agent DID; bootstrap language authors left unsigned." >&2
-        return 0
+        echo "ERROR: could not read agent DID; cannot stamp bootstrap language authors." >&2
+        return 1
     fi
 
     if ! jq --arg did "${did}" '
@@ -269,9 +270,9 @@ stamp_bootstrap_language_authors() {
             else . end
         ) | from_entries
     ' "${kv_file}" > "${kv_file}.tmp"; then
-        echo "WARNING: failed to stamp bootstrap language authors with ${did}" >&2
+        echo "ERROR: jq failed to stamp bootstrap language authors with ${did}" >&2
         rm -f "${kv_file}.tmp"
-        return 0
+        return 1
     fi
     mv "${kv_file}.tmp" "${kv_file}"
     echo "Stamped bootstrap language meta authors as ${did}"
@@ -524,6 +525,16 @@ ad4m-executor run \
 
 EXECUTOR_PID=$!
 
+# Forward SIGTERM/SIGINT to all child processes so Docker can stop cleanly.
+# Installed immediately after EXECUTOR_PID assignment so the executor receives
+# graceful shutdown signals during readiness/bootstrap (PID 1 ignores
+# untrapped SIGTERM).
+cleanup() {
+    kill -TERM "${EXECUTOR_PID}" 2>/dev/null
+    [ -n "${WE_PID}" ] && kill -TERM "${WE_PID}" 2>/dev/null
+}
+trap cleanup TERM INT
+
 wait_for_executor
 maybe_setup_agent
 stamp_bootstrap_language_authors
@@ -531,13 +542,6 @@ setup_ai_models || true
 setup_global_space
 inject_we_auth
 start_we_server
-
-# Forward SIGTERM/SIGINT to all child processes so Docker can stop cleanly.
-cleanup() {
-    kill -TERM "${EXECUTOR_PID}" 2>/dev/null
-    [ -n "${WE_PID}" ] && kill -TERM "${WE_PID}" 2>/dev/null
-}
-trap cleanup TERM INT
 
 # Wait for executor to exit; propagate its exit code.
 wait "${EXECUTOR_PID}"
