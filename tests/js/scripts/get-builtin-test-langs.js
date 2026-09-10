@@ -19,8 +19,12 @@ const languages = {
   },
   "perspective-language": {
     bundle: "../../bootstrap-languages/perspective-language/build/bundle.js"
+  },
+  "server-link-language": {
+    bundle: "../../bootstrap-languages/server-link-language/build/bundle.js"
   }
 };
+
 
 async function main() {
   for (const lang in languages) {
