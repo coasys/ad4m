@@ -174,6 +174,10 @@ pub enum KeyEventBody {
     SetRecoveryAuthority {
         commitment: String,
     },
+    /// Permanent deactivation — identity stops accepting new events.
+    Deactivate {
+        reason: String,
+    },
 }
 
 /// A signed, self-addressing key event.
@@ -248,6 +252,8 @@ pub enum KelError {
     MissingOwnerBinding,
     UnexpectedOwnerBinding,
     DuplicateKeyId(String),
+    /// Event rejected because the identity has permanently deactivated.
+    IdentityDeactivated,
 }
 
 impl std::fmt::Display for KelError {
@@ -270,6 +276,7 @@ impl std::fmt::Display for KelError {
                 write!(f, "human inception carries an owner binding")
             }
             KelError::DuplicateKeyId(id) => write!(f, "duplicate key id: {}", id),
+            KelError::IdentityDeactivated => write!(f, "identity permanently deactivated"),
         }
     }
 }
@@ -307,6 +314,8 @@ pub struct KeyState {
     head_seq: u64,
     /// The hash of the last processed event (for event chaining).
     head_hash: String,
+    /// Permanent deactivation flag — once true, no further events accepted.
+    deactivated: bool,
 }
 
 impl KeyState {
@@ -362,6 +371,11 @@ impl KeyState {
     /// The total number of keys ever delegated (for key_id indexing).
     pub fn key_count(&self) -> usize {
         self.key_history.len()
+    }
+
+    /// Whether the identity has permanently deactivated.
+    pub fn is_deactivated(&self) -> bool {
+        self.deactivated
     }
 
     /// Convert to the PR1 `signatures::KeyState` shape for the resolver seam.
@@ -496,8 +510,16 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
         });
     }
 
-    // Verify inception signature — the signer must name one of the inception keys.
-    verify_event_signature(e0, &key_history, 0)?;
+    // Verify inception signature.
+    if agent_type == AgentType::Assistant && owner.is_some() {
+        // For assistant inception, the owner signs — their key isn't in the
+        // assistant's key_history. Verify the owner's signature by extracting
+        // the signing key from the signer's key_id (which must encode a did:key).
+        verify_external_signer(e0)?;
+    } else {
+        // Human inception: the signer must name one of the inception keys.
+        verify_event_signature(e0, &key_history, 0)?;
+    }
 
     let mut state = KeyState {
         master,
@@ -507,17 +529,17 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
         recovery_commitment,
         head_seq: 0,
         head_hash: e0.hash.clone(),
+        deactivated: false,
     };
-
-    // Verify owner binding if present.
-    if let Some(_binding) = &owner {
-        // Owner signature verification deferred to PR5 (requires resolving
-        // the owner's KEL). For now, the presence check suffices.
-    }
 
     // --- subsequent events ---
     for (i, ev) in events.iter().enumerate().skip(1) {
         let expected_seq = i as u64;
+        // Reject all events after permanent deactivation.
+        if state.deactivated {
+            return Err(KelError::IdentityDeactivated);
+        }
+
         if ev.seq != expected_seq {
             return Err(KelError::SeqGap {
                 expected: expected_seq,
@@ -592,7 +614,8 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
                 }
                 KeyEventBody::Rotate { .. }
                 | KeyEventBody::Revoke { .. }
-                | KeyEventBody::SetRecoveryAuthority { .. } => {
+                | KeyEventBody::SetRecoveryAuthority { .. }
+                | KeyEventBody::Deactivate { .. } => {
                     if !state.has_kel_ops(&ev.signer, prior_seq) {
                         if state.key_valid_at(&ev.signer, prior_seq) {
                             return Err(KelError::ScopeViolation {
@@ -673,6 +696,15 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
             KeyEventBody::SetRecoveryAuthority { commitment } => {
                 state.recovery_commitment = commitment.clone();
             }
+            KeyEventBody::Deactivate { .. } => {
+                // Revoke all active keys and mark permanently deactivated.
+                for kv in &mut state.key_history {
+                    if kv.revoked_at.is_none() {
+                        kv.revoked_at = Some(ev.seq);
+                    }
+                }
+                state.deactivated = true;
+            }
             _ => {} // Inception handled above.
         }
 
@@ -681,6 +713,30 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
     }
 
     Ok(state)
+}
+
+/// Verify an event's signature against an external signer — the signer's
+/// `did:key` gets extracted from their key_id. Used for assistant inception
+/// where the owner signs but their key isn't in the assistant's key_history.
+fn verify_external_signer(ev: &KeyEvent) -> Result<(), KelError> {
+    // Extract the base DID from the signer key_id: `did:key:z6Mk...#key-0` → `did:key:z6Mk...`
+    let base_did = ev.signer.split('#').next().unwrap_or(&ev.signer);
+    if !base_did.starts_with("did:key:") {
+        return Err(KelError::UnauthorizedSigner {
+            key_id: ev.signer.clone(),
+        });
+    }
+    let kp = PatchedKeyPair::try_from(base_did).map_err(|_| KelError::UnauthorizedSigner {
+        key_id: ev.signer.clone(),
+    })?;
+    let sig_bytes = hex::decode(&ev.signature).map_err(|_| KelError::UnauthorizedSigner {
+        key_id: ev.signer.clone(),
+    })?;
+    kp.verify(ev.hash.as_bytes(), &sig_bytes)
+        .map_err(|_| KelError::UnauthorizedSigner {
+            key_id: ev.signer.clone(),
+        })?;
+    Ok(())
 }
 
 /// Verify an event's signature against the authorized keys at `at_seq`.
