@@ -404,15 +404,25 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // internal_api_token (executor → Worker) must differ from admin_credential
     // (client → executor) to maintain trust boundary separation. Same value
     // means compromise of any admin-capable client leaks platform-internal auth.
-    if config.wallet_backend.as_deref() == Some("shared") {
-        if let (Some(internal), Some(admin)) =
-            (&config.internal_api_token, &config.admin_credential)
-        {
-            if internal == admin {
-                panic!(
-                    "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
-                     Using the same value collapses two trust boundaries."
-                );
+    {
+        let any_shared = [
+            config.wallet_backend.as_deref(),
+            config.db_backend.as_deref(),
+            config.billing_backend.as_deref(),
+        ]
+        .iter()
+        .any(|b| *b == Some("shared"));
+
+        if any_shared {
+            if let (Some(internal), Some(admin)) =
+                (&config.internal_api_token, &config.admin_credential)
+            {
+                if internal == admin {
+                    panic!(
+                        "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
+                         Using the same value collapses two trust boundaries."
+                    );
+                }
             }
         }
     }

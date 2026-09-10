@@ -346,7 +346,9 @@ async fn users_credits(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 
     let email = params
         .require_str("email")
-        .map_err(|e| WsRpcError::bad_request(format!("{e}")))?;
+        .map_err(|e| WsRpcError::bad_request(format!("{e}")))?
+        .trim()
+        .to_lowercase();
     let amount = params
         .get("amount")
         .and_then(|v| v.as_f64())

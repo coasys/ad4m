@@ -616,18 +616,21 @@ async fn unyt_send_hot(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
 
 async fn unyt_wallet_balance(
     _params: Value,
-    _ctx: Arc<RequestContext>,
+    ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
     let ledger = crate::unyt_service::get_ledger()
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(ledger)
 }
 
-async fn unyt_wallet_history(
-    params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
+async fn unyt_wallet_history(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
     let page = params.get("page").and_then(|v| v.as_u64());
     let per_page = params.get("perPage").and_then(|v| v.as_u64()).unwrap_or(50);
 

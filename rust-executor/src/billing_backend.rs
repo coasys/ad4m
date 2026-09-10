@@ -18,6 +18,11 @@ use tokio::sync::OnceCell;
 use crate::billing::BillingError;
 use crate::db::ComputeLogEntry;
 
+/// Percent-encode an email address for safe use in URL path segments.
+fn encode_email(email: &str) -> String {
+    urlencoding::encode(email).into_owned()
+}
+
 // ── Tier limits ──────────────────────────────────────────────────────────────
 
 /// Resource limits for a billing tier. `None` means unlimited.
@@ -43,7 +48,7 @@ pub struct TierLimitExceeded {
 /// database or a remote platform Worker as the billing store.
 ///
 /// Methods are synchronous — matches the WalletBackend / DbBackend pattern.
-/// SharedBillingBackend uses `reqwest::blocking` internally.
+/// SharedBillingBackend bridges to an async `reqwest::Client` via `block_in_place`.
 pub trait BillingBackend: Send + Sync {
     // ── Credits ────────────────────────────────────────────────────────
 
@@ -336,7 +341,7 @@ impl BillingBackend for LocalBillingBackend {
 pub struct SharedBillingBackend {
     base_url: String,
     token: String,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl SharedBillingBackend {
@@ -344,7 +349,7 @@ impl SharedBillingBackend {
         SharedBillingBackend {
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
-            client: reqwest::blocking::Client::builder()
+            client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("Failed to build SharedBillingBackend HTTP client"),
@@ -355,13 +360,25 @@ impl SharedBillingBackend {
         format!("Bearer {}", self.token)
     }
 
+    /// Run an async reqwest future from a synchronous trait method.
+    ///
+    /// Uses `block_in_place` to move the current tokio worker thread out of
+    /// the runtime pool, then `block_on` to drive the future. This avoids the
+    /// panic that `reqwest::blocking` triggers when called inside a tokio
+    /// runtime.
+    fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f))
+    }
+
     fn get_json(&self, path: &str) -> Result<serde_json::Value, AnyError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", self.auth_header())
-            .send()
+            .block_on(
+                self.client
+                    .get(&url)
+                    .header("Authorization", self.auth_header())
+                    .send(),
+            )
             .map_err(|e| anyhow!("SharedBillingBackend GET {} failed: {}", path, e))?;
 
         if !resp.status().is_success() {
@@ -372,7 +389,7 @@ impl SharedBillingBackend {
             ));
         }
 
-        resp.json()
+        self.block_on(resp.json())
             .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
     }
 
@@ -383,16 +400,18 @@ impl SharedBillingBackend {
     ) -> Result<serde_json::Value, AnyError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", self.auth_header())
-            .json(body)
-            .send()
+            .block_on(
+                self.client
+                    .post(&url)
+                    .header("Authorization", self.auth_header())
+                    .json(body)
+                    .send(),
+            )
             .map_err(|e| anyhow!("SharedBillingBackend POST {} failed: {}", path, e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().unwrap_or_default();
+            let body_text = self.block_on(resp.text()).unwrap_or_default();
             return Err(anyhow!(
                 "SharedBillingBackend POST {} returned {}: {}",
                 path,
@@ -401,7 +420,7 @@ impl SharedBillingBackend {
             ));
         }
 
-        resp.json()
+        self.block_on(resp.json())
             .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
     }
 
@@ -412,16 +431,18 @@ impl SharedBillingBackend {
     ) -> Result<serde_json::Value, AnyError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
-            .client
-            .put(&url)
-            .header("Authorization", self.auth_header())
-            .json(body)
-            .send()
+            .block_on(
+                self.client
+                    .put(&url)
+                    .header("Authorization", self.auth_header())
+                    .json(body)
+                    .send(),
+            )
             .map_err(|e| anyhow!("SharedBillingBackend PUT {} failed: {}", path, e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().unwrap_or_default();
+            let body_text = self.block_on(resp.text()).unwrap_or_default();
             return Err(anyhow!(
                 "SharedBillingBackend PUT {} returned {}: {}",
                 path,
@@ -430,17 +451,19 @@ impl SharedBillingBackend {
             ));
         }
 
-        resp.json()
+        self.block_on(resp.json())
             .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
     }
 
     fn delete_json(&self, path: &str) -> Result<serde_json::Value, AnyError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
-            .client
-            .delete(&url)
-            .header("Authorization", self.auth_header())
-            .send()
+            .block_on(
+                self.client
+                    .delete(&url)
+                    .header("Authorization", self.auth_header())
+                    .send(),
+            )
             .map_err(|e| anyhow!("SharedBillingBackend DELETE {} failed: {}", path, e))?;
 
         if !resp.status().is_success() {
@@ -451,14 +474,14 @@ impl SharedBillingBackend {
             ));
         }
 
-        resp.json()
+        self.block_on(resp.json())
             .map_err(|e| anyhow!("SharedBillingBackend parse: {}", e))
     }
 }
 
 impl BillingBackend for SharedBillingBackend {
     fn get_credits(&self, email: &str) -> Result<f64, AnyError> {
-        let result = self.get_json(&format!("/billing/{}/credits", email))?;
+        let result = self.get_json(&format!("/billing/{}/credits", encode_email(email)))?;
         result
             .get("credits")
             .and_then(|v| v.as_f64())
@@ -467,7 +490,7 @@ impl BillingBackend for SharedBillingBackend {
 
     fn set_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
         self.put_json(
-            &format!("/billing/{}/credits", email),
+            &format!("/billing/{}/credits", encode_email(email)),
             &serde_json::json!({ "amount": amount }),
         )?;
         Ok(())
@@ -475,7 +498,7 @@ impl BillingBackend for SharedBillingBackend {
 
     fn add_credits(&self, email: &str, amount: f64) -> Result<(), AnyError> {
         self.post_json(
-            &format!("/billing/{}/credits/add", email),
+            &format!("/billing/{}/credits/add", encode_email(email)),
             &serde_json::json!({ "amount": amount }),
         )?;
         Ok(())
@@ -483,13 +506,15 @@ impl BillingBackend for SharedBillingBackend {
 
     fn deduct_credits_if_available(&self, email: &str, amount: f64) -> Result<(), BillingError> {
         let body = serde_json::json!({ "amount": amount });
-        let url = format!("{}/billing/{}/reserve", self.base_url, email);
+        let url = format!("{}/billing/{}/reserve", self.base_url, encode_email(email));
         let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", self.auth_header())
-            .json(&body)
-            .send()
+            .block_on(
+                self.client
+                    .post(&url)
+                    .header("Authorization", self.auth_header())
+                    .json(&body)
+                    .send(),
+            )
             .map_err(|e| {
                 BillingError::Other(anyhow!("SharedBillingBackend reserve failed: {}", e))
             })?;
@@ -522,13 +547,15 @@ impl BillingBackend for SharedBillingBackend {
             "summary": summary,
         });
 
-        let url = format!("{}/billing/{}/deduct", self.base_url, email);
+        let url = format!("{}/billing/{}/deduct", self.base_url, encode_email(email));
         let resp = self
-            .client
-            .post(&url)
-            .header("Authorization", self.auth_header())
-            .json(&body)
-            .send()
+            .block_on(
+                self.client
+                    .post(&url)
+                    .header("Authorization", self.auth_header())
+                    .json(&body)
+                    .send(),
+            )
             .map_err(|e| {
                 BillingError::Other(anyhow!("SharedBillingBackend deduct failed: {}", e))
             })?;
@@ -546,8 +573,8 @@ impl BillingBackend for SharedBillingBackend {
             )));
         }
 
-        let result: serde_json::Value = resp
-            .json()
+        let result: serde_json::Value = self
+            .block_on(resp.json())
             .map_err(|e| BillingError::Other(anyhow!("SharedBillingBackend parse: {}", e)))?;
 
         let row_id = result.get("rowId").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -565,7 +592,7 @@ impl BillingBackend for SharedBillingBackend {
         since: Option<&str>,
         limit: i64,
     ) -> Result<Vec<ComputeLogEntry>, AnyError> {
-        let mut path = format!("/billing/{}/log?limit={}", email, limit);
+        let mut path = format!("/billing/{}/log?limit={}", encode_email(email), limit);
         if let Some(s) = since {
             path.push_str(&format!("&since={}", s));
         }
@@ -651,7 +678,7 @@ impl BillingBackend for SharedBillingBackend {
     }
 
     fn get_user_free_access(&self, email: &str) -> Result<bool, AnyError> {
-        let result = self.get_json(&format!("/billing/{}/free-access", email))?;
+        let result = self.get_json(&format!("/billing/{}/free-access", encode_email(email)))?;
         Ok(result
             .get("enabled")
             .and_then(|v| v.as_bool())
@@ -660,14 +687,14 @@ impl BillingBackend for SharedBillingBackend {
 
     fn set_user_free_access(&self, email: &str, enabled: bool) -> Result<(), AnyError> {
         self.put_json(
-            &format!("/billing/{}/free-access", email),
+            &format!("/billing/{}/free-access", encode_email(email)),
             &serde_json::json!({ "enabled": enabled }),
         )?;
         Ok(())
     }
 
     fn get_user_hot_wallet(&self, email: &str) -> Result<Option<String>, AnyError> {
-        let result = self.get_json(&format!("/billing/{}/hot-wallet", email))?;
+        let result = self.get_json(&format!("/billing/{}/hot-wallet", encode_email(email)))?;
         Ok(result
             .get("address")
             .and_then(|v| v.as_str())
@@ -676,7 +703,7 @@ impl BillingBackend for SharedBillingBackend {
 
     fn set_user_hot_wallet(&self, email: &str, address: &str) -> Result<(), AnyError> {
         self.put_json(
-            &format!("/billing/{}/hot-wallet", email),
+            &format!("/billing/{}/hot-wallet", encode_email(email)),
             &serde_json::json!({ "address": address }),
         )?;
         Ok(())
@@ -689,10 +716,12 @@ impl BillingBackend for SharedBillingBackend {
             urlencoding::encode(address)
         );
         let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", self.auth_header())
-            .send()
+            .block_on(
+                self.client
+                    .get(&url)
+                    .header("Authorization", self.auth_header())
+                    .send(),
+            )
             .map_err(|e| anyhow!("SharedBillingBackend wallet lookup failed: {}", e))?;
 
         if resp.status().as_u16() == 404 {
@@ -704,8 +733,8 @@ impl BillingBackend for SharedBillingBackend {
                 resp.status()
             ));
         }
-        let body: serde_json::Value = resp
-            .json()
+        let body: serde_json::Value = self
+            .block_on(resp.json())
             .map_err(|e| anyhow!("SharedBillingBackend wallet lookup parse: {}", e))?;
         Ok(body
             .get("email")
@@ -714,7 +743,7 @@ impl BillingBackend for SharedBillingBackend {
     }
 
     fn get_tier_limits(&self, email: &str) -> Result<TierLimits, AnyError> {
-        let result = self.get_json(&format!("/billing/{}/tier-limits", email))?;
+        let result = self.get_json(&format!("/billing/{}/tier-limits", encode_email(email)))?;
         Ok(TierLimits {
             max_perspectives: result.get("maxSpaces").and_then(|v| v.as_i64()),
             max_members_per_perspective: result.get("maxMembersPerSpace").and_then(|v| v.as_i64()),
