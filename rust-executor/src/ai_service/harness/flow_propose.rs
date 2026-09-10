@@ -1,30 +1,8 @@
 //! Flow-transition propose tool for the interpretation-pass harness.
 //!
-//! Companion to [`super::propose`]: where `propose` gives the LLM
-//! `<class>_propose_create` / `<class>_propose_link_child` tools that
-//! accumulate SHACL-instance writes, this module gives the LLM
-//! `<flow>_propose_transition` tools that accumulate
-//! [`crate::perspectives::interpretation::LlmFlowProposal`]s.
-//!
-//! Symmetry with `propose`:
-//!  * per-flow surface (one tool per active [`FlowContext`]) instead of
-//!    per-class
-//!  * shared [`FlowProposalBuffer`] that the engine drains after the
-//!    harness loop terminates
-//!  * tool call is a proposal, not a write — the deterministic
-//!    [`crate::perspectives::flow_evaluator::run_engine_proposal_pass`] gate
-//!    still owns whether it lands (the proposal's `(instance, to_state)`
-//!    is matched against a
-//!    [`crate::perspectives::flow_evaluator::SatisfiedTransition`]'s
-//!    `(instance_uri, to_state)`)
-//!
-//! ## Why decorator (10.7b), not new dynamic MCP tools
-//!
-//! Same reason as `propose`: the propose-transition tool only makes sense
-//! inside a harness pass, it carries a per-pass buffer and its side effect
-//! is "queue a hint," not "mutate the graph." Putting it in
-//! `mcp/tools/dynamic.rs` would leak it onto the external MCP transport
-//! where it'd have no buffer to write to and no engine draining it.
+//! Companion to [`super::propose`] — per-flow surface instead of per-class,
+//! same decorator pattern and `HintBuffer` drain. Scope and rationale in
+//! [`FlowTransitionProposeProvider`] and [`propose_transition_tool_schema`].
 
 use super::provider::{HintBuffer, ToolSchema};
 use crate::perspectives::flow_context::FlowContext;
@@ -68,25 +46,12 @@ pub fn strip_flow_suffix(tool_name: &str) -> Option<&str> {
 /// Build the `_propose_transition` [`ToolSchema`] for one active flow.
 ///
 /// `group` is every live [`FlowContext`] sharing one flow name (non-empty,
-/// as produced by `tools()`); one tool covers them all, so the tool name
-/// stays the clean `{FlowName}_propose_transition` the prompt documents.
+/// as produced by `tools()`).
 ///
-/// The schema mirrors [`LlmFlowProposal`] shape:
-///  * `instance` (required, string) — `enum` over EVERY live instance URI
-///    of this flow, so a schema-obedient model can attribute any of them
-///    (a `const` pinned to one instance would hide the rest from the tool
-///    surface). The decorator also validates it as defence-in-depth.
-///  * `toState` (required, string) — enumerated over the union of the
-///    group's `reachable_next_states` when non-empty. If no instance has a
-///    reachable next state, the tool is STILL emitted (no enum + a
-///    description telling the LLM to skip); this keeps the tool surface
-///    stable across passes so the prompt cache doesn't churn.
-///  * `reason` (optional, string) — free text; lands as the on-graph
-///    `rationale` field once the deterministic guard matches.
-///
-/// The description prefixes the flow's `interpretationHint` (if any) so
-/// the LLM has the same guidance it would get from the `## Active flows`
-/// prompt block, without having to cross-reference.
+/// Non-obvious choices: `instance` uses `enum` (not `const`) so every live
+/// instance of the flow stays visible on the tool surface. The tool is
+/// emitted even for terminal states (no enum on `toState`) to keep the
+/// prompt cache stable across passes.
 pub fn propose_transition_tool_schema(group: &[&FlowContext]) -> ToolSchema {
     let first = group
         .first()
@@ -181,24 +146,12 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
 /// [`ToolProvider`] decorator that adds one `{FlowName}_propose_transition`
-/// tool per active [`FlowContext`] on top of an inner (read-tool / SHACL
-/// propose-write) provider. Symmetric to [`super::propose::ProposeWritesProvider`]:
-///  * `tools()` = inner.tools() + one `_propose_transition` schema per
-///    distinct flow name, whose `instance` enum names every live instance
-///    of that flow
-///  * `call()` intercepts the `_propose_transition` suffix, validates the
-///    args against the pass's active FlowContexts, and pushes an
-///    [`LlmFlowProposal`] into the shared [`FlowProposalBuffer`]
+/// tool per active [`FlowContext`] on top of an inner provider. Symmetric
+/// to [`super::propose::ProposeWritesProvider`].
 ///
-/// The FlowContext list is fixed at construction — new flow instances
-/// minted mid-pass will NOT appear until the next pass. Matches the
-/// design v3 §6 stability guarantee for the tool surface.
-///
-/// Multiple FlowContexts sharing the same `flow_name` (multiple live
-/// instances of the same flow visible to the same pass) share ONE tool
-/// name — the LLM disambiguates via the required `instance` field. The
-/// dispatcher below matches on (flow_name, instance_uri) so hints route
-/// to the correct FlowContext.
+/// Contexts are fixed at construction (new mid-pass instances skip until
+/// the next pass). Multiple contexts sharing a `flow_name` share one tool;
+/// the LLM picks the right instance via the required `instance` field.
 pub struct FlowTransitionProposeProvider<P: ToolProvider + ?Sized> {
     inner: Arc<P>,
     contexts: Vec<FlowContext>,
@@ -422,12 +375,34 @@ mod tests {
     // ── schema shape ─────────────────────────────────────────────────────
 
     #[test]
-    fn schema_carries_flow_name_and_instance_enum() {
+    fn schema_shape_from_delivery_scoped() {
         let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
+        // name
         assert_eq!(schema.name, "Delivery_propose_transition");
+        // instance enum covers every live instance
         assert_eq!(
             schema.parameters["properties"]["instance"]["enum"],
             json!(["ad4m://flow/instance/abc"])
+        );
+        // toState enum lists reachable states
+        let enum_values = schema.parameters["properties"]["toState"]["enum"]
+            .as_array()
+            .expect("toState enum present when states exist")
+            .clone();
+        assert_eq!(enum_values, vec![json!("Scoped"), json!("InProgress")]);
+        // required array
+        let required = schema.parameters["required"]
+            .as_array()
+            .expect("required[] present")
+            .clone();
+        assert_eq!(required, vec![json!("instance"), json!("toState")]);
+        // no extra properties
+        assert_eq!(schema.parameters["additionalProperties"], json!(false));
+        // interpretationHint inlined in description
+        assert!(
+            schema.description.contains("Team task board"),
+            "expected flow interpretationHint in description; got: {}",
+            schema.description
         );
     }
 
@@ -453,16 +428,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_to_state_enumerates_reachable_states() {
-        let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
-        let enum_values = schema.parameters["properties"]["toState"]["enum"]
-            .as_array()
-            .expect("toState enum should be present when reachable states exist")
-            .clone();
-        assert_eq!(enum_values, vec![json!("Scoped"), json!("InProgress")]);
-    }
-
-    #[test]
     fn schema_omits_enum_when_no_reachable_states() {
         // Terminal state (Done) has no outbound transitions — the tool
         // should still exist (surface stability) but not constrain toState.
@@ -473,36 +438,6 @@ mod tests {
                 .get("enum")
                 .is_none(),
             "no enum expected for terminal state"
-        );
-    }
-
-    #[test]
-    fn schema_required_lists_instance_and_to_state() {
-        let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
-        let required = schema.parameters["required"]
-            .as_array()
-            .expect("required[] should be present")
-            .clone();
-        assert_eq!(required, vec![json!("instance"), json!("toState")]);
-    }
-
-    #[test]
-    fn schema_forbids_additional_properties() {
-        let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
-        assert_eq!(
-            schema.parameters["additionalProperties"],
-            json!(false),
-            "additionalProperties: false keeps grammar-decoding LLMs on rails"
-        );
-    }
-
-    #[test]
-    fn schema_description_includes_interpretation_hint_when_present() {
-        let schema = propose_transition_tool_schema(&[&ctx_delivery_scoped()]);
-        assert!(
-            schema.description.contains("Team task board"),
-            "expected flow interpretationHint to be inlined in description; got: {}",
-            schema.description
         );
     }
 
@@ -551,14 +486,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_include_inner_plus_one_per_flow_context() {
-        let (p, _buf) = make_provider(vec![ctx_delivery_scoped(), ctx_terminal_state()]);
+    async fn tools_surface_shape() {
+        // Two Delivery contexts + one Deliberation: same-name contexts collapse
+        // to one tool entry (instance enum lists both), distinct names each
+        // get their own entry. Inner tool is always preserved.
+        let mut deliberation = ctx_delivery_scoped();
+        deliberation.flow_name = "Deliberation".into();
+        deliberation.instance_uri = "ad4m://flow/instance/xyz".into();
+        let (p, _buf) = make_provider(vec![
+            ctx_delivery_scoped(),
+            ctx_terminal_state(),
+            deliberation,
+        ]);
         let tools = p.tools().await;
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        // inner tool preserved
         assert!(names.contains(&"noop"), "inner tool preserved");
-        // Both contexts share flow_name `Delivery`, so ONE tool entry
-        // covers them — and its `instance` enum names BOTH instances, so
-        // neither is hidden from a schema-obedient model.
+        // same-name Delivery contexts collapse to one entry covering both instances
         let delivery: Vec<&ToolSchema> = tools
             .iter()
             .filter(|t| t.name == "Delivery_propose_transition")
@@ -566,23 +510,14 @@ mod tests {
         assert_eq!(
             delivery.len(),
             1,
-            "duplicate flow-name contexts collapse to one tool entry"
+            "duplicate flow-name contexts collapse to one tool"
         );
         assert_eq!(
             delivery[0].parameters["properties"]["instance"]["enum"],
             json!(["ad4m://flow/instance/abc", "ad4m://flow/instance/done"])
         );
-    }
-
-    #[tokio::test]
-    async fn tools_emit_one_entry_per_distinct_flow_name() {
-        let mut deliberation = ctx_delivery_scoped();
-        deliberation.flow_name = "Deliberation".into();
-        deliberation.instance_uri = "ad4m://flow/instance/xyz".into();
-        let (p, _buf) = make_provider(vec![ctx_delivery_scoped(), deliberation]);
-        let names: Vec<String> = p.tools().await.into_iter().map(|t| t.name).collect();
-        assert!(names.contains(&"Delivery_propose_transition".to_string()));
-        assert!(names.contains(&"Deliberation_propose_transition".to_string()));
+        // distinct flow names each get their own tool
+        assert!(names.contains(&"Deliberation_propose_transition"));
     }
 
     #[tokio::test]
@@ -638,101 +573,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_unknown_flow_name_errors_actionably() {
-        let (p, buf) = make_provider(vec![ctx_delivery_scoped()]);
-        let err = p
-            .call(
-                "Ghost_propose_transition",
-                json!({"instance": "x", "toState": "Y"}),
-            )
-            .await
-            .expect_err("unknown flow rejects");
-        let msg = err.to_string();
-        assert!(msg.contains("no active flow named `Ghost`"), "msg: {msg}");
-        assert_eq!(buf.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn call_mismatched_instance_errors_with_valid_uris() {
-        let (p, buf) = make_provider(vec![ctx_delivery_scoped()]);
-        let err = p
-            .call(
-                "Delivery_propose_transition",
-                json!({
-                    "instance": "ad4m://flow/instance/OTHER",
-                    "toState": "Scoped"
-                }),
-            )
-            .await
-            .expect_err("mismatched instance rejects");
-        let msg = err.to_string();
-        assert!(msg.contains("ad4m://flow/instance/OTHER"), "msg: {msg}");
-        assert!(msg.contains("ad4m://flow/instance/abc"), "msg: {msg}");
-        assert_eq!(buf.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn call_unreachable_to_state_errors_with_valid_targets() {
-        let (p, buf) = make_provider(vec![ctx_delivery_scoped()]);
-        let err = p
-            .call(
-                "Delivery_propose_transition",
-                json!({
-                    "instance": "ad4m://flow/instance/abc",
-                    "toState": "Done"
-                }),
-            )
-            .await
-            .expect_err("bad target state rejects");
-        let msg = err.to_string();
-        assert!(msg.contains("`Done`"), "msg: {msg}");
-        assert!(msg.contains("Scoped"), "msg: {msg}");
-        assert!(msg.contains("InProgress"), "msg: {msg}");
-        assert_eq!(buf.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn call_on_terminal_instance_errors() {
-        let (p, buf) = make_provider(vec![ctx_terminal_state()]);
-        let err = p
-            .call(
-                "Delivery_propose_transition",
-                json!({
-                    "instance": "ad4m://flow/instance/done",
-                    "toState": "Anything"
-                }),
-            )
-            .await
-            .expect_err("terminal instance rejects");
-        let msg = err.to_string();
-        assert!(msg.contains("terminal state"), "msg: {msg}");
-        assert!(msg.contains("`Done`"), "msg: {msg}");
-        assert_eq!(buf.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn call_missing_required_field_errors() {
-        let (p, buf) = make_provider(vec![ctx_delivery_scoped()]);
-        let err = p
-            .call(
-                "Delivery_propose_transition",
-                json!({"instance": "ad4m://flow/instance/abc"}),
-            )
-            .await
-            .expect_err("missing toState rejects");
-        assert!(err.to_string().contains("missing field `toState`"));
-        assert_eq!(buf.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn call_non_object_args_error() {
-        let (p, buf) = make_provider(vec![ctx_delivery_scoped()]);
-        let err = p
-            .call("Delivery_propose_transition", json!("nope"))
-            .await
-            .expect_err("scalar args reject");
-        assert!(err.to_string().contains("invalid arguments"));
-        assert_eq!(buf.len(), 0);
+    async fn error_cases_are_actionable() {
+        struct Case {
+            name: &'static str,
+            contexts_fn: fn() -> Vec<FlowContext>,
+            tool: &'static str,
+            args: Value,
+            needles: &'static [&'static str],
+        }
+        let cases = [
+            Case {
+                name: "unknown flow",
+                contexts_fn: || vec![ctx_delivery_scoped()],
+                tool: "Ghost_propose_transition",
+                args: json!({"instance": "x", "toState": "Y"}),
+                needles: &["no active flow named `Ghost`"],
+            },
+            Case {
+                name: "mismatched instance",
+                contexts_fn: || vec![ctx_delivery_scoped()],
+                tool: "Delivery_propose_transition",
+                args: json!({"instance": "ad4m://flow/instance/OTHER", "toState": "Scoped"}),
+                needles: &["ad4m://flow/instance/OTHER", "ad4m://flow/instance/abc"],
+            },
+            Case {
+                name: "unreachable to_state",
+                contexts_fn: || vec![ctx_delivery_scoped()],
+                tool: "Delivery_propose_transition",
+                args: json!({"instance": "ad4m://flow/instance/abc", "toState": "Done"}),
+                needles: &["`Done`", "Scoped", "InProgress"],
+            },
+            Case {
+                name: "terminal instance",
+                contexts_fn: || vec![ctx_terminal_state()],
+                tool: "Delivery_propose_transition",
+                args: json!({"instance": "ad4m://flow/instance/done", "toState": "Anything"}),
+                needles: &["terminal state", "`Done`"],
+            },
+            Case {
+                name: "missing required field",
+                contexts_fn: || vec![ctx_delivery_scoped()],
+                tool: "Delivery_propose_transition",
+                args: json!({"instance": "ad4m://flow/instance/abc"}),
+                needles: &["missing field `toState`"],
+            },
+            Case {
+                name: "non-object args",
+                contexts_fn: || vec![ctx_delivery_scoped()],
+                tool: "Delivery_propose_transition",
+                args: json!("nope"),
+                needles: &["invalid arguments"],
+            },
+        ];
+        for case in &cases {
+            let (p, buf) = make_provider((case.contexts_fn)());
+            let err = p
+                .call(case.tool, case.args.clone())
+                .await
+                .expect_err(case.name);
+            let msg = err.to_string();
+            for needle in case.needles {
+                assert!(
+                    msg.contains(needle),
+                    "{}: expected `{needle}` in `{msg}`",
+                    case.name
+                );
+            }
+            assert_eq!(buf.len(), 0, "{}: buffer must stay empty", case.name);
+        }
     }
 
     #[tokio::test]

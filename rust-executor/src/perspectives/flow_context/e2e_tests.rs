@@ -137,7 +137,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    FlowInstance's subject (J#1, PR #929 James review — the fix
     //    replaced `Option<&Scope>` on the dedup axis with
     //    `subjects: &[String]` sourced from the batch cursor).
-    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()]).await;
+    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
     assert_eq!(
         contexts.len(),
         1,
@@ -170,7 +170,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
         base_uri.to_string(),
         "ad4m://task/other-batch-item".to_string(),
     ];
-    let scoped = gather_active_flow_contexts(&perspective, &multi_matching).await;
+    let scoped = gather_active_flow_contexts(&perspective, &multi_matching, None).await;
     assert_eq!(
         scoped.len(),
         1,
@@ -182,7 +182,8 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    This is the property that lets batch-scoped passes ignore
     //    flows running on unrelated bases.
     let other =
-        gather_active_flow_contexts(&perspective, &["ad4m://task/unrelated".to_string()]).await;
+        gather_active_flow_contexts(&perspective, &["ad4m://task/unrelated".to_string()], None)
+            .await;
     assert!(
         other.is_empty(),
         "batch narrowed to a different subject must drop the running flow, got {other:?}"
@@ -192,7 +193,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //     used to sweep every FlowInstance on the perspective and
     //     inject it into every prompt (unbounded). The fix makes empty
     //     mean empty — no flow context, no unbounded sweep.
-    let empty = gather_active_flow_contexts(&perspective, &[] as &[String]).await;
+    let empty = gather_active_flow_contexts(&perspective, &[] as &[String], None).await;
     assert!(
         empty.is_empty(),
         "empty subjects must not surface any flows, got {empty:?}"

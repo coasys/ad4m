@@ -60,6 +60,14 @@ pub struct PropertyShape {
     /// property node when `Some(true)`. No identity declared ⇒ no dedup.
     #[serde(default)]
     pub identity: Option<bool>,
+    /// CRDT ordering strategy for a collection relation, from
+    /// `@HasMany({ ordering: { strategy } })`. Emitted as an `ad4m://ordering`
+    /// link on the property node, which is the only place
+    /// [`load_shape`](super::model_query::shape) reads it back from — so
+    /// dropping it here leaves the declaration inert: the setter writes no
+    /// ordering entries and hydration never reorders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordering: Option<String>,
     pub datatype: Option<String>,
     pub min_count: Option<u32>,
     pub max_count: Option<u32>,
@@ -790,7 +798,12 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     // Sort states by `value`, matching TS `SHACLFlow.fromLinks`
     // (`core/src/shacl/SHACLFlow.ts`) and for the same reason: link order is
     // not preserved on the graph, so the only stable ordering is the declared
-    // `value`. The convention that rests on it — "the initial state is
+    // `value`. Parity holds for *finite* values only: TS sorts with
+    // `(a, b) => a.value - b.value`, whose NaN comparisons are engine-defined
+    // rather than NaN-last, so the runtimes can diverge on exactly the
+    // undecodable-value input the guard below handles. Mirroring the guard in
+    // TS is a three-line comparator — until then, don't lean on `states[0]`
+    // agreeing cross-runtime when a state value is NaN. The convention that rests on it — "the initial state is
     // `states[0]`", which `FlowInstance.start` consumes on the TS side — would
     // otherwise resolve differently in the two runtimes whenever
     // link-discovery order differs from value order, and a Rust-side spawn
@@ -978,6 +991,18 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://identity".to_string()),
                 target: "literal:string:true".to_string(),
+            });
+        }
+
+        // CRDT ordering strategy for a collection relation. `load_shape` reads
+        // the declaration back from this link and nowhere else, so both the
+        // setter's entry writing and hydration's reconstruction depend on it
+        // being emitted here.
+        if let Some(ordering) = &prop.ordering {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("ad4m://ordering".to_string()),
+                target: format!("literal:string:{}", ordering),
             });
         }
 

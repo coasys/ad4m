@@ -527,14 +527,19 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .expect("App data path not set in Ad4mConfig"),
     );
 
-    if let Some(admin_credential) = &config.admin_credential {
-        if admin_credential.is_empty() {
-            warn!(
-                "adminCredential is not set or empty, empty token will possess admin capabilities."
-            );
-        }
-    } else {
-        warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
+    if config
+        .admin_credential
+        .as_deref()
+        .map(|s| s.is_empty())
+        .unwrap_or(true)
+    {
+        warn!("╔══════════════════════════════════════════════════════════════╗");
+        warn!("║  SECURITY WARNING: no adminCredential configured             ║");
+        warn!("║  Every request — including unauthenticated ones — receives  ║");
+        warn!("║  ALL_CAPABILITY (full admin access to this executor).        ║");
+        warn!("║  This mode is intended for local testing ONLY.               ║");
+        warn!("║  Set adminCredential in your config before going to prod.    ║");
+        warn!("╚══════════════════════════════════════════════════════════════╝");
     }
 
     {
