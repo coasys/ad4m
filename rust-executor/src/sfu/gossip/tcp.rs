@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use log::{debug, info, warn};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -196,19 +196,27 @@ const MAX_GOSSIP_LINE_BYTES: usize = 131_072;
 /// terminates cleanly so the listener can accept the peer again
 /// when it reconnects.
 async fn reader_loop(socket: TcpStream, inbound_tx: mpsc::Sender<CascadeSignal>) {
-    let mut reader = BufReader::with_capacity(MAX_GOSSIP_LINE_BYTES, socket);
+    let reader = BufReader::with_capacity(MAX_GOSSIP_LINE_BYTES, socket);
+    // Wrap in a length-limited reader so a malicious peer cannot send an
+    // unbounded line that grows the String beyond MAX_GOSSIP_LINE_BYTES.
+    let mut reader = reader.take(MAX_GOSSIP_LINE_BYTES as u64);
     let mut line = String::new();
     loop {
         line.clear();
+        // Reset the remaining byte limit before each read so every line
+        // gets the full allowance.
+        reader.set_limit(MAX_GOSSIP_LINE_BYTES as u64);
         match reader.read_line(&mut line).await {
-            Ok(0) => return, // peer closed
+            Ok(0) => return, // peer closed or limit hit without newline
             Ok(_) => {
-                if line.len() > MAX_GOSSIP_LINE_BYTES {
+                // If the line used the entire limit without a newline,
+                // the peer sent an oversized frame — close the connection.
+                if !line.ends_with('\n') {
                     warn!(
-                        "TcpGossip reader: oversized frame ({} bytes), dropping",
-                        line.len()
+                        "TcpGossip reader: frame exceeds {} bytes without newline, closing",
+                        MAX_GOSSIP_LINE_BYTES,
                     );
-                    continue;
+                    return;
                 }
                 match serde_json::from_str::<CascadeSignal>(line.trim()) {
                     Ok(signal) => {

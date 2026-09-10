@@ -597,8 +597,10 @@ impl SfuService {
                     // own 30-second per-room cooldown, so running this
                     // on every 5s tick adds no extra migration chatter.
                     let migrate_events = {
-                        let rooms = self.rooms.read().await;
+                        // Acquire cascade_manager before rooms — matches
+                        // the lock order in call_join to prevent deadlock.
                         let mut mgr = self.cascade_manager.write().await;
+                        let rooms = self.rooms.read().await;
                         let mut events: Vec<SfuMigrateEvent> = Vec::new();
                         for room in rooms.list_rooms() {
                             let local_count = room.participant_count() as u32;
@@ -804,21 +806,29 @@ impl SfuService {
                     stream_mapping: Vec::new(),
                 });
             } else {
-                // Accept locally — add participant while we still
-                // hold the write lock.
-                let room = rooms
-                    .get_room_mut(&room_id)
-                    .ok_or_else(|| RoomError::NotFound.to_string())?;
-                room.add_participant(pid.clone(), agent_did.to_string())
-                    .map_err(|e| e.to_string())?;
+                // Accept locally — validated below after SDP parsing.
+                // The rooms write lock drops here; participant registration
+                // defers until after the fallible SDP/RTC steps so a parse
+                // failure never leaves a registered participant without a peer.
             }
         }
 
-        // Parse SDP offer and create Rtc instance
+        // Parse SDP offer and create Rtc instance — do this BEFORE
+        // registering the participant so failures don't leave stale state.
         let offer: SdpOffer = serde_json::from_str(sdp_offer_json)
             .map_err(|e| format!("Invalid SDP offer: {}", e))?;
 
         let (rtc, sdp_answer) = SfuServer::create_rtc_for_offer(offer, self.server.local_addr)?;
+
+        // SDP and RTC succeeded — now register the participant.
+        {
+            let mut rooms = self.rooms.write().await;
+            let room = rooms
+                .get_room_mut(&room_id)
+                .ok_or_else(|| RoomError::NotFound.to_string())?;
+            room.add_participant(pid.clone(), agent_did.to_string())
+                .map_err(|e| e.to_string())?;
+        }
 
         // Create the SFU peer and send it to the event loop
         let peer = SfuPeer::new(
@@ -829,11 +839,14 @@ impl SfuService {
             false,
         );
 
-        self.server
-            .command_tx
-            .send(SfuCommand::AddPeer(peer))
-            .await
-            .map_err(|e| format!("Failed to add peer to SFU: {}", e))?;
+        if let Err(e) = self.server.command_tx.send(SfuCommand::AddPeer(peer)).await {
+            // AddPeer failed — roll back the participant registration.
+            let mut rooms = self.rooms.write().await;
+            if let Some(room) = rooms.get_room_mut(&room_id) {
+                room.remove_participant(&pid);
+            }
+            return Err(format!("Failed to add peer to SFU: {}", e));
+        }
 
         // Build stream mapping from existing participants in the room.
         // While we're holding a read lock, also snapshot the room's

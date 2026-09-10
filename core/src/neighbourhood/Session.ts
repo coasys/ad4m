@@ -299,10 +299,35 @@ export function createSession(config: SessionImplConfig): Session {
                     )
                 }
 
+                // Build effective ICE servers for the mesh path, using the
+                // same precedence as the SFU path: explicit iceServers →
+                // sfuConfig.iceServers → MeshManager default.
+                const meshIce: RTCIceServer[] = []
+                if (iceServers && iceServers.length > 0) {
+                    for (const s of iceServers) {
+                        meshIce.push({
+                            urls: s.urls,
+                            ...(s.username ? { username: s.username } : {}),
+                            ...(s.credential ? { credential: s.credential } : {}),
+                        })
+                    }
+                } else if (sfuConfig?.iceServers && sfuConfig.iceServers.length > 0) {
+                    for (const s of sfuConfig.iceServers) {
+                        meshIce.push({
+                            urls: s.urls,
+                            ...(s.username ? { username: s.username } : {}),
+                            ...(s.credential ? { credential: s.credential } : {}),
+                        })
+                    }
+                }
+
                 const mesh = new MeshManager({
                     channel,
                     callId: roomId,
                     selfId: agentDid,
+                    ...(meshIce.length > 0
+                        ? { createPeerConnection: () => new RTCPeerConnection({ iceServers: meshIce }) }
+                        : {}),
                 })
                 meshManager = mesh
                 wireMeshEvents(mesh)
