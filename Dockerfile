@@ -151,6 +151,7 @@ COPY --chown=builder:builder dapp/ ./dapp/
 COPY --chown=builder:builder bootstrap-languages/ ./bootstrap-languages/
 COPY --chown=builder:builder ad4m-ldk/ ./ad4m-ldk/
 COPY --chown=builder:builder ad4m-hooks/ ./ad4m-hooks/
+COPY --chown=builder:builder link-server/ ./link-server/
 COPY --chown=builder:builder tests/ ./tests/
 COPY --chown=builder:builder patches/ ./patches/
 COPY --chown=builder:builder hooks/ ./hooks/
