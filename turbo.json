@@ -18,7 +18,8 @@
         "@coasys/ad4m#build",
         "@coasys/ad4m-connect#build",
         "@coasys/rust-ad4m-executor#build",
-        "@coasys/ad4m-cli#build"
+        "@coasys/ad4m-cli#build",
+        "@coasys/link-server#build"
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
@@ -36,7 +37,8 @@
         "@coasys/centralized-agent-language#build",
         "@coasys/centralized-file-storage#build",
         "@coasys/eas#build",
-        "@coasys/embedding-vector-language#build"
+        "@coasys/embedding-vector-language#build",
+        "@coasys/server-link-language#build"
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
@@ -74,6 +76,9 @@
       "dependsOn": ["@coasys/ad4m-ldk#build"]
     },
     "@coasys/embedding-vector-language#build": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"]
+    },
+    "@coasys/server-link-language#build": {
       "dependsOn": ["@coasys/ad4m-ldk#build"]
     },
 

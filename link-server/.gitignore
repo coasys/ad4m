@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+.data/
+data/
+*.log
+.DS_Store
