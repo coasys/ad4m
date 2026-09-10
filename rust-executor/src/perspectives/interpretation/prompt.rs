@@ -335,6 +335,16 @@ Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...rela
 where fields carry strings drawn from what participants actually said or
 committed to, and relations carry *references* to other instances (see below).
 
+When `active_flows` is present you may instead emit an object:
+  `{\"instances\": [ ...the same elements... ], \"flow_proposals\": [ ... ]}`
+Each flow proposal is `{\"instance\": <URI copied from active_flows[i].instance>,
+\"toState\": <one of that instance's nextStates[j].name>, \"reason\": <short optional attribution>}`.
+Propose a transition only when the transcript matches the target state's
+`hint` AND the evidence for its `requires` guard is already in the graph or
+in the `instances` you return now. The engine re-verifies the guard and drops
+proposals without evidence, so guessing does not help. At most one proposal
+per FlowInstance; omit `flow_proposals` when no flow should advance.
+
 How to decide what to extract:
   - Consider EACH class independently against the WHOLE transcript, using its
     `hint`. A turn can match one class, several, or none.
@@ -1130,6 +1140,15 @@ mod tests {
             p.contains("advance"),
             "system prompt must instruct the LLM to bias toward extractions that advance the flow"
         );
+    }
+
+    #[test]
+    fn system_prompt_documents_flow_proposals_output_shape() {
+        let p = INTERPRETATION_SYSTEM_PROMPT;
+        assert!(p.contains("`instances`") && p.contains("`flow_proposals`"));
+        assert!(p.contains("copied from active_flows[i].instance"));
+        assert!(p.contains("one of that instance's nextStates[j].name"));
+        assert!(p.contains("At most one proposal"));
     }
 
     #[test]

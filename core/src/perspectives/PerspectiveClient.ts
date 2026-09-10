@@ -690,4 +690,10 @@ export class PerspectiveClient {
             'perspective.commitBatch', { uuid, batchId }
         )
     }
+
+    /** Register a callback that fires after a successful WebSocket reconnect.
+     *  Passes through to ApiClient.onReconnect(). Returns an unsubscribe function. */
+    onReconnect(callback: () => void): () => void {
+        return this.#apiClient.onReconnect(callback)
+    }
 }

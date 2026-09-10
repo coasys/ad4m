@@ -1,15 +1,16 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { sleep } from "../utils/utils";
-import fs from "fs";
-import { v4 as uuidv4 } from 'uuid';
+import { LinkLangConfig, publishLinkLanguage, pollUntil } from "../utils/linkLangConfig";
 import { expect } from "chai";
 
-const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 let aliceP1: null | PerspectiveProxy = null;
 let bobP1: null | PerspectiveHandle = null;
 
-export default function neighbourhoodTests(testContext: TestContext) {
+// `getLinkLang` is a getter (not a value) because callers wire the config in a
+// `before()` hook — the value doesn't exist yet when this factory runs at
+// import time. See integration.test.ts for the call sites.
+export default function neighbourhoodTests(testContext: TestContext, getLinkLang: () => LinkLangConfig) {
     return () => {
         describe('Neighbourhood', () => {
             it('can publish and join locally @alice', async () => {
@@ -21,7 +22,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(create.state).to.be.equal(PerspectiveState.Private);
 
                 //Create unique perspective-diff-sync to simulate real scenario
-                const socialContext = await ad4mClient.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's perspective-diff-sync"}));
+                const socialContext = await publishLinkLanguage(ad4mClient, getLinkLang(), "Alice's perspective-diff-sync");
                 expect(socialContext.name).to.be.equal("Alice's perspective-diff-sync");
 
                 let link = new LinkExpression()
@@ -43,8 +44,13 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 expect(perspective?.neighbourhood!.data.linkLanguage).to.be.equal(socialContext.address);
                 expect(perspective?.neighbourhood!.data.meta.links.length).to.be.equal(1);
                 
-                // The perspective should start in NeighbourhoodCreationInitiated state
-                expect(perspective?.state).to.be.equal(PerspectiveState.NeighboudhoodCreationInitiated);
+                // The perspective should have left Private state. It may still be in
+                // NeighbourhoodCreationInitiated, or may have already reached Synced if
+                // the link-language startup completed before this poll returned — both are valid.
+                expect([
+                    PerspectiveState.NeighboudhoodCreationInitiated,
+                    PerspectiveState.Synced,
+                ]).to.include(perspective?.state);
                 
                 // Wait for the perspective to transition to Synced state
                 let tries = 0;
@@ -63,7 +69,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob"}));
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob");
                 expect(socialContext.name).to.be.equal("Alice's neighbourhood with Bob");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
@@ -83,7 +89,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 const aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test shared links"}));
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test shared links");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
 
                 let bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
@@ -91,11 +97,28 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 await testContext.makeAllNodesKnown()
                 expect(bobP1!.state).to.be.oneOf([PerspectiveState.LinkLanguageInstalledButNotSynced, PerspectiveState.Synced]);
 
-                await sleep(1000)
+                // Wait for Alice's link language to be wired.
+                // publishFromPerspective sets state=NeighbourhoodCreationInitiated.
+                // ensure_link_language (5s-interval background task) detects
+                // the neighbourhood, wires self.link_language, and sets state
+                // to LinkLanguageInstalledButNotSynced. Wait for any state
+                // past NeighboudhoodCreationInitiated (note: enum member has
+                // typo) — that guarantees the language runtime exists and
+                // addLink won't hit "LinkLanguage not available".
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired" });
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
-                await sleep(1000)
+                // Give time for the commit POST to reach the server, and for
+                // Bob's sync cycle to pick up the (possibly encrypted) diff.
+                // With E2E, Bob may need an extra refreshKeyRing round to
+                // decrypt — 5 s covers the typical WS + HTTP sync cadence.
+                await sleep(5000)
 
                 let bobLinks = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}))
                 let tries = 1
@@ -118,7 +141,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob test local links"}));
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test local links");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
@@ -149,23 +172,31 @@ export default function neighbourhoodTests(testContext: TestContext) {
                 const bob = testContext.bob
 
                 aliceP1 = await alice.perspective.add("friends")
-                const socialContext = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood with Bob stress test"}));
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob stress test");
                 const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, socialContext.address, new Perspective())
                 console.log("neighbourhoodUrl", neighbourhoodUrl);
                 bobP1 = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
 
                 await testContext.makeAllNodesKnown()
 
-                await sleep(1000)
+                // Wait for Alice's link language to be wired (see simple
+                // test comment for rationale).
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired (stress)" });
 
-                // Create 1500 links as fast as possible
-                //const linkPromises = []
+                // Create 1500 links as fast as possible — the executor's own
+                // pending_diffs_loop batches them (1s inactivity / 3s max /
+                // 150 max count). No artificial throttling: this exercises
+                // the continuous-burst path end-to-end.
                 for(let i = 0; i < 1500; i++) {
                     console.log("Alice adding link ", i)
                     const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: `test://test/${i}`})
                     console.log("Link expression:", link)
                 }
-                //await Promise.all(linkPromises)
 
                 console.log("wait 15s for initial sync")
                 await sleep(15000)
@@ -327,7 +358,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     const bob = testContext.bob
 
                     const aliceP1 = await alice.perspective.add("telepresence")
-                    const linkLang = await alice.languages.applyTemplateAndPublish(DIFF_SYNC_OFFICIAL, JSON.stringify({uid: uuidv4(), name: "Alice's neighbourhood for Telepresence"}));
+                    const linkLang = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood for Telepresence");
                     const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
                     await sleep(5000)
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
@@ -376,8 +407,18 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     await aliceNH!.setOnlineStatus(testPerspective)
                     await bobNH!.setOnlineStatus(testPerspective)
 
-                    const aliceOnline = await aliceNH!.onlineAgents()
-                    const bobOnline = await bobNH!.onlineAgents()
+                    // Both sides need to see the peer's status. Polling avoids
+                    // racing propagation (fixed sleep here was Holochain-tuned).
+                    let aliceOnline = await aliceNH!.onlineAgents()
+                    let bobOnline = await bobNH!.onlineAgents()
+                    await pollUntil(async () => {
+                        aliceOnline = await aliceNH!.onlineAgents()
+                        bobOnline = await bobNH!.onlineAgents()
+                        return aliceOnline.length >= 1 && bobOnline.length >= 1 &&
+                            (aliceOnline[0]?.status?.data?.links?.length ?? 0) >= 1 &&
+                            (bobOnline[0]?.status?.data?.links?.length ?? 0) >= 1
+                    }, { label: "alice + bob see each other's online status" })
+
                     expect(aliceOnline.length).to.be.equal(1)
                     expect(aliceOnline[0].did).to.be.equal(bobDID)
                     console.log(aliceOnline[0].status);
@@ -393,7 +434,13 @@ export default function neighbourhoodTests(testContext: TestContext) {
                         target: "test://target"
                     })))
 
-                    const bobOnline2 = await bobNH!.onlineAgents()
+                    // Poll until bob sees alice's UPDATED status (source == "test://source").
+                    let bobOnline2 = await bobNH!.onlineAgents()
+                    await pollUntil(async () => {
+                        bobOnline2 = await bobNH!.onlineAgents()
+                        return bobOnline2.length >= 1 &&
+                            bobOnline2[0]?.status?.data?.links?.[0]?.data?.source === "test://source"
+                    }, { label: "bob sees alice's updated online status" })
 
                     expect(bobOnline2.length).to.be.equal(1)
                     expect(bobOnline2[0].did).to.be.equal(aliceDID)
@@ -434,7 +481,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await aliceNH!.sendSignal(bobDID!, aliceSignal)
 
-                    await sleep(1000)
+                    await pollUntil(() => bobCalls >= 1, { label: "bob receives signal" })
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(0)
@@ -450,7 +497,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
 
                     await bobNH!.sendBroadcastU(bobSignal)
 
-                    await sleep(1000)
+                    await pollUntil(() => aliceCalls >= 1, { label: "alice receives broadcast" })
 
                     expect(aliceCalls).to.be.equal(1)
 
@@ -482,7 +529,7 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     const aliceSignal = new PerspectiveUnsignedInput([link])
                     await aliceNH!.sendBroadcastU(aliceSignal)
 
-                    await sleep(1000)
+                    await pollUntil(() => bobCalls >= 1, { label: "bob receives non-loopback broadcast" })
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(0) // Alice shouldn't receive her own broadcast
@@ -501,7 +548,9 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
                     await aliceNH!.sendBroadcastU(aliceSignal2, true)
 
-                    await sleep(1000)
+                    // Loopback: BOTH counters must reach 1 — polling on just one
+                    // would race the other's assertion.
+                    await pollUntil(() => bobCalls >= 1 && aliceCalls >= 1, { label: "alice+bob receive loopback broadcast" })
 
                     expect(bobCalls).to.be.equal(1)
                     expect(aliceCalls).to.be.equal(1) // Alice should receive her own broadcast
@@ -516,7 +565,12 @@ export default function neighbourhoodTests(testContext: TestContext) {
                     // @ts-ignore - Ignoring the type error since we know the implementation supports loopback
                     await bobNH!.sendBroadcastU(bobSignal, true)
 
-                    await sleep(1000)
+                    // Wait for BOTH counters. Bob's local loopback echo lands
+                    // on Bob's own pubsub within microseconds; Alice receives
+                    // via the link-language broadcast which is much slower.
+                    // Polling on just `bobCalls >= 2` returns as soon as the
+                    // fast half lands and races the aliceCalls assertion below.
+                    await pollUntil(() => bobCalls >= 2 && aliceCalls >= 2, { label: "bob+alice receive bob's loopback broadcast" })
 
                     expect(bobCalls).to.be.equal(2) // Bob should receive his own broadcast
                     expect(aliceCalls).to.be.equal(2) // Alice should receive Bob's broadcast

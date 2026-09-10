@@ -1,12 +1,13 @@
 use super::{
     apply_with_overlay, build_interpretation_input, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
-    identity_property, normalize_identity, parse_interpretation_response,
+    identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
-    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationRunCursor, ProposedInstance,
-    TranscriptTurn,
+    ExistingInstances, ExistingLinks, InterpretationOp, InterpretationOutput,
+    InterpretationRunCursor, TranscriptTurn,
 };
 use crate::agent::AgentContext;
+use crate::ai_service::harness::flow_propose::{FlowProposalBuffer, FlowTransitionProposeProvider};
 use crate::ai_service::harness::propose::{
     class_propose_shape_from_shacl, ProposalBuffer, ProposeWritesProvider,
 };
@@ -25,8 +26,8 @@ use std::sync::Arc;
 /// again a few times before giving up on the whole call.
 pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 
-/// run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
-/// response as an interpretation JSON payload. Returns the first successful parse;
+/// Run `prompt_fn` up to [`INTERPRETATION_MAX_ATTEMPTS`] times, parsing each
+/// response as an [`InterpretationOutput`] (instances plus flow proposals). Returns the first successful parse;
 /// the last parse error propagates if every attempt fails. `prompt_fn` is an
 /// async closure so callers can inject anything (real `AIService`, a canned
 /// script, a mock) without a live LLM.
@@ -36,7 +37,7 @@ pub const INTERPRETATION_MAX_ATTEMPTS: u8 = 5;
 /// fail deterministically in [`build_interpretation_input`], not here.
 pub async fn retry_interpretation_parse<F, Fut>(
     mut prompt_fn: F,
-) -> anyhow::Result<Vec<ProposedInstance>>
+) -> anyhow::Result<InterpretationOutput>
 where
     F: FnMut(u8) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<String>>,
@@ -51,8 +52,8 @@ where
                 continue;
             }
         };
-        match parse_interpretation_response(&raw) {
-            Ok(instances) => return Ok(instances),
+        match parse_interpretation_output(&raw) {
+            Ok(output) => return Ok(output),
             Err(e) => {
                 log::warn!(
                     "interpretation: parse attempt {attempt} failed: {e:#}; will retry (max {INTERPRETATION_MAX_ATTEMPTS})"
@@ -510,6 +511,7 @@ pub async fn run_interpretation_observed(
         None,
         false,
         emit_ctx,
+        None,
     )
     .await
     .map(|out| out.bases)
@@ -544,6 +546,7 @@ pub async fn run_interpretation_with_strategy(
         scope,
         None,
         false,
+        None,
         None,
     )
     .await
@@ -595,6 +598,7 @@ pub async fn run_interpretation_with_strategy_and_model(
     cursor: Option<&InterpretationRunCursor>,
     emit_debug_events: bool,
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
+    flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
@@ -659,6 +663,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
             perspective,
             &flow_subjects,
+            flow_filter,
         )
         .await;
         let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
@@ -682,7 +687,10 @@ pub async fn run_interpretation_with_strategy_and_model(
         // succeeds is by construction the final (parse-successful) attempt.
         let debug_response_capture: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
-        let instances = retry_interpretation_parse(|_attempt| {
+        let InterpretationOutput {
+            instances,
+            flow_proposals: llm_proposals,
+        } = retry_interpretation_parse(|_attempt| {
             let service = service.clone();
             let task_id = task.task_id.clone();
             let prompt = prompt.clone();
@@ -788,7 +796,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         } else {
             None
         };
-        let bases = apply_with_overlay(
+        let (bases, flow_proposals) = apply_ops_and_run_flow_passes(
             perspective,
             shapes,
             ops,
@@ -798,16 +806,11 @@ pub async fn run_interpretation_with_strategy_and_model(
             context,
             cursor,
             debug.as_ref(),
+            &llm_proposals,
+            &flow_subjects,
+            flow_filter,
         )
         .await?;
-
-        // Re-evaluate flow guards for the subjects the LLM just wrote.
-        let flow_proposals = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
-            perspective,
-            &bases,
-            context,
-        )
-        .await;
 
         Ok(InterpretationOutcome {
             bases,
@@ -837,6 +840,121 @@ pub async fn run_interpretation_with_strategy_and_model(
             Err(e)
         }
     }
+}
+
+/// Shared tail of both interpretation paths (single-shot strategy and the
+/// tool-calling harness): capture the created bases from the planned ops
+/// **before** they move into the apply, apply with overlay, run the spawn pass
+/// on the created items, then the flow proposal pass on the relevant subjects.
+///
+/// Extracted so the capture-before-move ordering — the one place the flow
+/// wiring reasons about a value taken before a move — is a single testable
+/// unit instead of a convention duplicated at two call sites. Returns
+/// `(bases, flow_proposals)`.
+///
+/// Spawn runs before the proposal pass: a freshly created item whose class is
+/// in some flow's `inputTypes` gets its `FlowInstance` minted now, so the
+/// flow's first-state `requires` are evaluated against this run's own evidence
+/// in the same pass rather than the next one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn apply_ops_and_run_flow_passes(
+    perspective: &mut PerspectiveInstance,
+    shapes: &[ModelShape],
+    ops: Vec<InterpretationOp>,
+    task: &crate::types::AITask,
+    run_id: String,
+    ran_at: String,
+    context: &AgentContext,
+    cursor: Option<&InterpretationRunCursor>,
+    debug: Option<&crate::perspectives::interpretation::InterpretationDebug>,
+    llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
+    flow_subjects: &[String],
+    flow_filter: Option<&[String]>,
+) -> anyhow::Result<(Vec<String>, Vec<String>)> {
+    // Captured before `ops` moves into the apply: the spawn pass below is
+    // scoped to *created* instances (design §10 v1), and the returned
+    // `bases` mix created and updated indistinguishably.
+    let created = crate::perspectives::flow_spawn::created_bases_of(&ops);
+    let bases = apply_with_overlay(
+        perspective,
+        shapes,
+        ops,
+        task,
+        run_id,
+        ran_at,
+        context,
+        cursor,
+        debug,
+    )
+    .await?;
+
+    let spawned = crate::perspectives::flow_spawn::run_flow_spawn_pass(
+        perspective,
+        &created,
+        context,
+        flow_filter,
+    )
+    .await;
+    if !spawned.is_empty() {
+        log::info!(
+            "🌱 interpretation: spawned {} flow instance(s) on new items",
+            spawned.len()
+        );
+    }
+
+    // The affected instance base URIs (created, updated, or given new
+    // relations). Links are owned by `create_subject` / `update_subject`.
+    let flow_proposals = run_flow_post_pass(
+        perspective,
+        &bases,
+        flow_subjects,
+        context,
+        llm_proposals,
+        &task.task_id,
+        flow_filter,
+    )
+    .await;
+    Ok((bases, flow_proposals))
+}
+
+/// Shared flow post-processing for both interpretation paths (single-shot
+/// strategy and harness): the LLM's writes are on the graph now, so
+/// re-evaluate the guards of every flow anchored on `subjects` — the union
+/// of what this pass wrote (`bases`) and what the LLM was shown
+/// (`flow_subjects`, i.e. cursor sources / scope anchor). The LLM's own
+/// proposals only contribute a rationale; the semantic check reuses the
+/// extraction task so both share one worker and billing scope.
+///
+/// The subject set is bounded to: everything the pass wrote plus everything
+/// the LLM was shown flow context for, deduplicated. Never empty-by-accident
+/// on a pass that did work, never a sweep.
+async fn run_flow_post_pass(
+    perspective: &mut PerspectiveInstance,
+    bases: &[String],
+    flow_subjects: &[String],
+    context: &AgentContext,
+    llm_proposals: &[crate::perspectives::interpretation::LlmFlowProposal],
+    task_id: &str,
+    flow_filter: Option<&[String]>,
+) -> Vec<String> {
+    let mut subjects: Vec<String> = bases.to_vec();
+    for s in flow_subjects {
+        if !subjects.contains(s) {
+            subjects.push(s.clone());
+        }
+    }
+    let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
+        task_id: task_id.to_string(),
+    };
+    crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+        perspective,
+        &subjects,
+        context,
+        llm_proposals,
+        Some(&semantic_check),
+        flow_filter,
+    )
+    .await
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
@@ -883,7 +1001,8 @@ pub async fn run_interpretation_with_harness_and_model(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     dedup_on_drain: bool,
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
-) -> anyhow::Result<Vec<String>> {
+    flow_filter: Option<&[String]>,
+) -> anyhow::Result<InterpretationOutcome> {
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
     // configured — the harness pass is just a different loop, not a
@@ -910,9 +1029,12 @@ pub async fn run_interpretation_with_harness_and_model(
     } else {
         Vec::new()
     };
-    let active_flows =
-        crate::perspectives::flow_context::gather_active_flow_contexts(perspective, &flow_subjects)
-            .await;
+    let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
+        perspective,
+        &flow_subjects,
+        flow_filter,
+    )
+    .await;
     let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
 
     // Build per-class propose shapes from the perspective's SHACL classes,
@@ -989,11 +1111,19 @@ pub async fn run_interpretation_with_harness_and_model(
     // not "mutate the graph." The buffer is drained after the loop.
     let buffer = ProposalBuffer::new();
     let classes_offered = propose_shapes.len();
-    let provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
+    let write_provider: Arc<dyn ToolProvider> = Arc::new(ProposeWritesProvider::new(
         ad4m_filtered,
         propose_shapes,
         buffer.clone(),
         base_prefix.to_string(),
+    ));
+    // One `{Flow}_propose_transition` tool per active flow; calls are
+    // validated against the flow's reachable states and buffered.
+    let flow_buffer = FlowProposalBuffer::new();
+    let provider: Arc<dyn ToolProvider> = Arc::new(FlowTransitionProposeProvider::new(
+        write_provider,
+        active_flows,
+        flow_buffer.clone(),
     ));
 
     // OpenAI-compat bridge: real CompletionSource that talks to AIService
@@ -1058,7 +1188,9 @@ pub async fn run_interpretation_with_harness_and_model(
     // `InterpretationDebug` payload dev #903 wires into the classic path;
     // a follow-up commit on this branch can carry a per-round transcript
     // once the shape is agreed.
-    let bases = apply_with_overlay(
+    // Same tail as the single-shot path — one shared unit, so the
+    // capture-before-move ordering can't drift between the two.
+    let (bases, flow_proposals) = apply_ops_and_run_flow_passes(
         perspective,
         shapes,
         ops,
@@ -1068,30 +1200,34 @@ pub async fn run_interpretation_with_harness_and_model(
         context,
         cursor,
         None,
+        &flow_buffer.drain(),
+        &flow_subjects,
+        flow_filter,
     )
     .await?;
 
     log::warn!("harness: apply_with_overlay produced {} bases", bases.len());
-
-    // Same flow post-processing as the single-shot path. The harness
-    // returns bases only, so the minted proposals are just logged here.
-    let flow_proposals =
-        crate::perspectives::flow_evaluator::run_engine_proposal_pass(perspective, &bases, context)
-            .await;
     if !flow_proposals.is_empty() {
-        log::warn!(
+        log::info!(
             "harness: flow pass minted {} proposal(s): {flow_proposals:?}",
             flow_proposals.len()
         );
     }
 
-    Ok(bases)
+    Ok(InterpretationOutcome {
+        bases,
+        // No single prompt/response to snapshot on the multi-turn harness
+        // loop; per-tool-call events carry the debug surface instead.
+        debug: None,
+        flow_proposals,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::Ad4mDb;
+    use crate::perspectives::flow_context::{load_flow_instances, FlowInstanceRecord};
     use crate::perspectives::interpretation::*;
     use crate::perspectives::interpretation_test_support::*;
     use crate::types::{AITask, Link};
@@ -1672,5 +1808,175 @@ mod tests {
         let deduped = dedup_ops_against_existing(ops, &existing, &shapes, &ExistingLinks::new());
         assert_eq!(deduped.len(), 1);
         assert!(matches!(&deduped[0], InterpretationOp::Update { .. }));
+    }
+
+    // ---- apply_ops_and_run_flow_passes — the shared interpretation tail ----
+    //
+    // The central wiring claim of the spawn slice: an interpretation pass
+    // whose ops CREATE an instance of a class some flow lists in `inputTypes`
+    // ends with a `FlowInstance` on that item — and the created-bases capture
+    // happens before the ops move into the apply. Both interpretation paths
+    // (single-shot + harness) share this tail, so this covers the call
+    // Marvin flagged as untested without needing an LLM in the loop.
+
+    fn tail_task() -> AITask {
+        AITask {
+            model_id: "gemma3:12b".to_string(),
+            system_prompt: "You extract typed instances.".to_string(),
+            prompt_examples: Vec::new(),
+            ..Default::default()
+        }
+    }
+
+    fn tail_create_task_op(base: &str) -> InterpretationOp {
+        InterpretationOp::Create {
+            base: base.to_string(),
+            class: "Task".to_string(),
+            values: serde_json::Map::from_iter([(
+                "title".to_string(),
+                serde_json::json!("write the spawn wiring test"),
+            )]),
+        }
+    }
+
+    async fn run_tail(
+        p: &mut PerspectiveInstance,
+        shapes: &[ModelShape],
+        ctx: &AgentContext,
+        ops: Vec<InterpretationOp>,
+        flow_filter: Option<&[String]>,
+    ) -> (Vec<String>, Vec<String>) {
+        apply_ops_and_run_flow_passes(
+            p,
+            shapes,
+            ops,
+            &tail_task(),
+            uuid::Uuid::new_v4().to_string(),
+            "1700000000000".to_string(),
+            ctx,
+            None,
+            None,
+            &[],
+            &[],
+            flow_filter,
+        )
+        .await
+        .expect("apply_ops_and_run_flow_passes failed")
+    }
+
+    async fn live_on(p: &PerspectiveInstance, base: &str) -> Vec<FlowInstanceRecord> {
+        load_flow_instances(p, std::slice::from_ref(&base.to_string()))
+            .await
+            .expect("load_flow_instances failed")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_spawns_flow_instance_on_created_item() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+
+        let base = "soa://tail/task/created";
+        let (bases, _proposals) = run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![tail_create_task_op(base)],
+            None,
+        )
+        .await;
+
+        assert!(
+            bases.iter().any(|b| b == base),
+            "the Create op must land as a written base, got {bases:?}"
+        );
+        let live = live_on(&perspective, base).await;
+        assert_eq!(
+            live.len(),
+            1,
+            "exactly one FlowInstance must spawn on the created Task"
+        );
+        assert_eq!(live[0].flow_uri, "delivery://DeliveryFlow");
+        assert_eq!(
+            live[0].current_state, "identified",
+            "fresh instance starts in the flow's first state by value"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_honours_empty_flow_selection() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+
+        // `Some(&[])` is the auto-processor's "no flows selected" — the pass
+        // must be flow-blind even though the catalogue has a matching flow.
+        let base = "soa://tail/task/filtered";
+        let (bases, proposals) = run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![tail_create_task_op(base)],
+            Some(&[]),
+        )
+        .await;
+
+        assert!(bases.iter().any(|b| b == base), "the write itself proceeds");
+        assert!(proposals.is_empty(), "flow-blind pass mints no proposals");
+        let live = live_on(&perspective, base).await;
+        assert!(
+            live.is_empty(),
+            "deselected flows must not spawn, got {live:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_does_not_spawn_on_updates() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+
+        // Seed the Task first (a "pre-existing" item), then run the tail with
+        // only an Update op on it. Spawn is scoped to created instances
+        // (design §10 v1) — the capture from the op list must exclude it.
+        let base = "soa://tail/task/updated";
+        seed_instance(&mut perspective, &ctx, &shapes[0], base, "already here").await;
+
+        let (_bases, _proposals) = run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![InterpretationOp::Update {
+                base: base.to_string(),
+                class: "Task".to_string(),
+                values: serde_json::Map::from_iter([(
+                    "title".to_string(),
+                    serde_json::json!("edited title"),
+                )]),
+            }],
+            None,
+        )
+        .await;
+
+        let live = live_on(&perspective, base).await;
+        assert!(
+            live.is_empty(),
+            "an updated (not created) item must not spawn, got {live:?}"
+        );
     }
 }
