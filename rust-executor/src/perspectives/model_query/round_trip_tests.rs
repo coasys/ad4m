@@ -189,12 +189,16 @@ fn round_trip_preserves_relation_kind_and_target() {
 
 #[test]
 fn round_trip_scalar_relation_is_rendered_scalar() {
+    // Named `writer`, not `author`: `author` collides with the hydration
+    // metadata field of the same name (#974) and parse_shacl_to_links now
+    // rejects it — this test is about scalar-relation rendering, not that
+    // guard, so it uses a name the guard doesn't touch.
     let shacl_json = r#"{
         "target_class": "ns://Post",
         "properties": [
             {
-                "path": "ns://author",
-                "name": "author",
+                "path": "ns://writer",
+                "name": "writer",
                 "node_kind": "IRI",
                 "relation_kind": "hasOne",
                 "max_count": 1,
@@ -206,8 +210,8 @@ fn round_trip_scalar_relation_is_rendered_scalar() {
     let prop = shape
         .properties
         .iter()
-        .find(|p| p.name == "author")
-        .expect("author");
+        .find(|p| p.name == "writer")
+        .expect("writer");
     // Scalar relations stay `is_collection: true` so the hydration pipeline
     // accumulates link targets; the renderer uses `is_scalar_relation` to
     // unwrap the array down to a single value.
@@ -217,12 +221,13 @@ fn round_trip_scalar_relation_is_rendered_scalar() {
 
 #[test]
 fn round_trip_belongs_to_relation_is_reverse() {
+    // `writer`, not `author` — see the note on round_trip_scalar_relation_is_rendered_scalar.
     let shacl_json = r#"{
         "target_class": "ns://Comment",
         "properties": [
             {
-                "path": "ns://author",
-                "name": "author",
+                "path": "ns://writer",
+                "name": "writer",
                 "node_kind": "IRI",
                 "relation_kind": "belongsToOne",
                 "target_class_name": "User"
@@ -233,8 +238,8 @@ fn round_trip_belongs_to_relation_is_reverse() {
     let prop = shape
         .properties
         .iter()
-        .find(|p| p.name == "author")
-        .expect("author");
+        .find(|p| p.name == "writer")
+        .expect("writer");
     assert_eq!(prop.direction.as_deref(), Some("reverse"));
     assert!(prop.is_scalar_relation);
 }
@@ -325,12 +330,13 @@ fn round_trip_picks_up_max_count_for_relations() {
 
 #[test]
 fn round_trip_target_class_name_falls_back_to_sh_class_suffix() {
+    // `writer`, not `author` — see the note on round_trip_scalar_relation_is_rendered_scalar.
     let shacl_json = r#"{
         "target_class": "ns://Post",
         "properties": [
             {
-                "path": "ns://author",
-                "name": "author",
+                "path": "ns://writer",
+                "name": "writer",
                 "node_kind": "IRI",
                 "relation_kind": "hasOne",
                 "class": "ns://UserShape"
@@ -341,8 +347,8 @@ fn round_trip_target_class_name_falls_back_to_sh_class_suffix() {
     let rel = shape
         .include_relations
         .iter()
-        .find(|r| r.name == "author")
-        .expect("author relation");
+        .find(|r| r.name == "writer")
+        .expect("writer relation");
     // Without an explicit target_class_name link the loader falls back to
     // extracting the local-name from the sh:class URI.  A trailing `Shape`
     // suffix is normalised away so the cache/resolver lookup uses the bare
