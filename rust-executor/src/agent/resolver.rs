@@ -187,6 +187,53 @@ impl KeyStateResolver for AgentLanguageResolver {
     }
 }
 
+// ─── global identity service ─────────────────────────────────────────────────
+
+use std::sync::Mutex;
+
+lazy_static::lazy_static! {
+    static ref IDENTITY_SERVICE: Mutex<Option<IdentityService>> = Mutex::new(None);
+}
+
+/// Holds the KEL adapter + resolver + reverse index as a singleton.
+/// RPC handlers use `IdentityService::with(|svc| ...)` to access identity ops.
+pub struct IdentityService {
+    pub adapter: Arc<dyn KelAdapter>,
+    pub resolver: AgentLanguageResolver,
+    pub reverse_index: Arc<ReverseIndex>,
+}
+
+impl IdentityService {
+    /// Install the global identity service. Called once at boot.
+    pub fn install(adapter: Arc<dyn KelAdapter>) {
+        let cache = Arc::new(MonotonicityCache::new());
+        let reverse_index = Arc::new(ReverseIndex::new());
+        let resolver =
+            AgentLanguageResolver::new(adapter.clone(), cache, reverse_index.clone());
+
+        let mut svc = IDENTITY_SERVICE.lock().unwrap();
+        *svc = Some(IdentityService {
+            adapter,
+            resolver,
+            reverse_index,
+        });
+    }
+
+    /// Run a closure with the global identity service. Returns Err if not installed.
+    pub fn with<F, R>(f: F) -> Result<R, String>
+    where
+        F: FnOnce(&IdentityService) -> R,
+    {
+        let guard = IDENTITY_SERVICE
+            .lock()
+            .map_err(|_| "identity service lock poisoned".to_string())?;
+        match guard.as_ref() {
+            Some(svc) => Ok(f(svc)),
+            None => Err("identity service not initialized".to_string()),
+        }
+    }
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
