@@ -676,3 +676,131 @@ test("no server endpoint leaks plaintext room key in its response", async () => 
     }
   });
 });
+
+// ---- Review item 13: admin loss scenario ----
+
+test("non-admin member cannot rotate or grant keys when admin is absent", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const member = await createTestAgent();
+
+    // Setup: admin creates room, adds member, both auth with x25519 keys
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+    await postJson(
+      `${server.url}/rooms/${roomId}/acl`,
+      { action: "add", did: member.did },
+      adminToken,
+    );
+    const memberToken = await authenticateAgent(server.url, roomId, member);
+
+    // Admin rotates keys
+    await clientSideRotate(server.url, roomId, adminToken);
+
+    // Member can fetch keys — should have them
+    const keysRes = await getJson<{ keys: unknown[]; e2e_enabled: boolean }>(
+      `${server.url}/rooms/${roomId}/keys`,
+      memberToken,
+    );
+    assert.equal(keysRes.status, 200);
+    assert.equal(keysRes.body.e2e_enabled, true);
+    assert.equal(keysRes.body.keys.length, 1);
+
+    // Member tries to rotate — should get 403 (not admin)
+    const rotateAttempt = await postJson(
+      `${server.url}/rooms/${roomId}/keys/rotate`,
+      {
+        keys: [{
+          did: member.did,
+          encryptedKey: {
+            ephemeralPublicKey: "aa".repeat(32),
+            nonce: "bb".repeat(12),
+            ciphertext: "cc".repeat(32),
+          },
+        }],
+      },
+      memberToken,
+    );
+    assert.equal(rotateAttempt.status, 403);
+
+    // Member tries to grant keys — should get 403 (not admin)
+    const grantAttempt = await postJson(
+      `${server.url}/rooms/${roomId}/keys/grant`,
+      {
+        targetDid: member.did,
+        keys: [{
+          version: 1,
+          encryptedKey: {
+            ephemeralPublicKey: "aa".repeat(32),
+            nonce: "bb".repeat(12),
+            ciphertext: "cc".repeat(32),
+          },
+        }],
+      },
+      memberToken,
+    );
+    assert.equal(grantAttempt.status, 403);
+
+    // Member cannot manage ACL — should get 403 (not admin)
+    const aclAttempt = await postJson(
+      `${server.url}/rooms/${roomId}/acl`,
+      { action: "add", did: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK" },
+      memberToken,
+    );
+    assert.equal(aclAttempt.status, 403);
+  });
+});
+
+// ---- Review item 1: X25519 signature verification ----
+
+test("auth rejects an invalid x25519 signature", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+
+    // Step 1: get challenge
+    const step1 = await postJson<{ challenge: string }>(
+      `${server.url}/rooms/${roomId}/auth`,
+      { did: agent.did },
+    );
+    assert.equal(step1.status, 200);
+
+    // Step 2: valid challenge signature, but bogus x25519 signature
+    const { signHex, hashMessageForVerify } = await import("../src/auth.js");
+    const challenge = step1.body.challenge;
+    const challengeHash = hashMessageForVerify(challenge);
+    const validChallengeSignature = await signHex(agent.privateKey, challengeHash);
+    const x25519PublicKey = testAgentX25519PublicKey(agent);
+
+    const step2 = await postJson(
+      `${server.url}/rooms/${roomId}/auth`,
+      {
+        did: agent.did,
+        challenge,
+        signature: validChallengeSignature,
+        x25519PublicKey,
+        x25519Signature: "deadbeef".repeat(16), // bogus 64-byte hex
+      },
+    );
+    assert.equal(step2.status, 400);
+  });
+});
+
+test("ACL response includes x25519Signature when provided during auth", async () => {
+  await withServer(async (server) => {
+    const roomId = randomUUID();
+    const agent = await createTestAgent();
+    const token = await authenticateAgent(server.url, roomId, agent);
+
+    const acl = await getJson<{
+      admin: string;
+      members: Array<{ did: string; x25519PublicKey: string | null; x25519Signature: string | null }>;
+    }>(`${server.url}/rooms/${roomId}/acl`, token);
+
+    assert.equal(acl.status, 200);
+    assert.equal(acl.body.members.length, 1);
+    assert.equal(typeof acl.body.members[0].x25519PublicKey, "string");
+    assert.equal(typeof acl.body.members[0].x25519Signature, "string");
+    assert.notEqual(acl.body.members[0].x25519Signature, null);
+  });
+});

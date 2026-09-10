@@ -170,6 +170,7 @@ export interface PeersResponse {
 export interface AclMember {
     did: DID;
     x25519PublicKey: string | null;
+    x25519Signature: string | null;
 }
 
 export interface AclResponse {
@@ -193,6 +194,7 @@ export interface MemberMissingKeys {
     did: string;
     missingVersions: number[];
     x25519PublicKey: string;
+    x25519Signature: string | null;
 }
 
 export interface MissingKeysResponse {

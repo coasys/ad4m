@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS acl (
   did TEXT,
   added_at TEXT,
   x25519_public_key TEXT,
+  x25519_signature TEXT,
   PRIMARY KEY (room_id, did)
 );
 CREATE TABLE IF NOT EXISTS links (
@@ -75,6 +76,7 @@ export interface AclRow {
   did: string;
   added_at: string;
   x25519_public_key: string | null;
+  x25519_signature: string | null;
 }
 
 export interface LinkRow {
@@ -158,7 +160,11 @@ export class LinkServerDB {
       addAcl: this.raw.prepare("INSERT OR IGNORE INTO acl (room_id, did, added_at) VALUES (?, ?, ?)"),
       removeAcl: this.raw.prepare("DELETE FROM acl WHERE room_id = ? AND did = ?"),
       setX25519: this.raw.prepare("UPDATE acl SET x25519_public_key = ? WHERE room_id = ? AND did = ?"),
+      setX25519WithSig: this.raw.prepare(
+        "UPDATE acl SET x25519_public_key = ?, x25519_signature = ? WHERE room_id = ? AND did = ?"
+      ),
       getX25519: this.raw.prepare("SELECT x25519_public_key FROM acl WHERE room_id = ? AND did = ?"),
+      transferAdmin: this.raw.prepare("UPDATE rooms SET admin_did = ? WHERE id = ?"),
 
       insertLink: this.raw.prepare(
         `INSERT OR IGNORE INTO links (room_id, link_hash, link_data, sequence)
@@ -272,8 +278,12 @@ export class LinkServerDB {
     this.stmts.removeAcl.run(roomId, did);
   }
 
-  setX25519PublicKey(roomId: string, did: string, x25519PublicKey: string): void {
-    this.stmts.setX25519.run(x25519PublicKey, roomId, did);
+  setX25519PublicKey(roomId: string, did: string, x25519PublicKey: string, x25519Signature?: string): void {
+    if (x25519Signature) {
+      this.stmts.setX25519WithSig.run(x25519PublicKey, x25519Signature, roomId, did);
+    } else {
+      this.stmts.setX25519.run(x25519PublicKey, roomId, did);
+    }
   }
 
   getX25519PublicKey(roomId: string, did: string): string | null {
@@ -442,6 +452,12 @@ export class LinkServerDB {
   addRoomKeyIfMissing(roomId: string, did: string, version: number, encryptedKey: string): boolean {
     const info = this.stmts.addRoomKeyIfMissing.run(roomId, did, encryptedKey, version);
     return info.changes > 0;
+  }
+
+  // ---- admin transfer ----
+
+  transferAdmin(roomId: string, newAdminDid: string): void {
+    this.stmts.transferAdmin.run(newAdminDid, roomId);
   }
 
   // ---- server identity ----

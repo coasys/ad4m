@@ -23,6 +23,7 @@ import {
     openRoomKeyEnvelope,
     randomBytes,
     sealRoomKeyForRecipient,
+    verifyX25519Ownership,
 } from "../src/encryption.js";
 import type { LinkExpression } from "../src/types.js";
 import { isEncryptedLinkData } from "../src/types.js";
@@ -303,5 +304,90 @@ describe("encryption: link_hash invariant", () => {
         const decryptedAdd = decryptLinkFromWire(wireAdd, ring);
         const decryptedRemove = decryptLinkFromWire(wireRemove, ring);
         assert.deepEqual(decryptedAdd, decryptedRemove, "both decrypt to the same plaintext link");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// X25519 ownership verification
+// ---------------------------------------------------------------------------
+
+describe("encryption: verifyX25519Ownership", () => {
+    /**
+     * Creates a real Ed25519 keypair, derives the X25519 public key, and
+     * signs it — matching the production flow where the agent signs its
+     * X25519 public key hex via agentSignStringHex (SHA-256 hashing
+     * convention).
+     */
+    async function makeTestIdentity() {
+        const { ed25519 } = await import("@noble/curves/ed25519");
+        const privateKey = ed25519.utils.randomPrivateKey();
+        const publicKey = ed25519.getPublicKey(privateKey);
+
+        // Build did:key from the ed25519 public key
+        const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        function base58Encode(bytes: Uint8Array): string {
+            const digits = [0];
+            for (const b of bytes) {
+                let carry = b;
+                for (let j = 0; j < digits.length; j++) {
+                    carry += digits[j] << 8;
+                    digits[j] = carry % 58;
+                    carry = (carry / 58) | 0;
+                }
+                while (carry > 0) { digits.push(carry % 58); carry = (carry / 58) | 0; }
+            }
+            let str = "";
+            for (let i = 0; i < bytes.length && bytes[i] === 0; i++) str += "1";
+            for (let i = digits.length - 1; i >= 0; i--) str += BASE58_ALPHABET[digits[i]];
+            return str;
+        }
+        const prefixed = new Uint8Array(34);
+        prefixed[0] = 0xed; prefixed[1] = 0x01;
+        prefixed.set(publicKey, 2);
+        const did = `did:key:z${base58Encode(prefixed)}`;
+
+        // Derive X25519 keypair the same way the production code does
+        const kp = deriveX25519KeyPair((payload: string) => {
+            // Replicate agentSignStringHex: sign SHA-256(payload)
+            const msgHash = createHash("sha256").update(payload).digest();
+            const sig = ed25519.sign(msgHash, privateKey);
+            return bytesToHex(sig);
+        });
+        const x25519Hex = bytesToHex(kp.publicKey);
+
+        // Sign the X25519 public key (matching agentSignStringHex convention)
+        const keyHash = createHash("sha256").update(x25519Hex).digest();
+        const x25519Sig = ed25519.sign(keyHash, privateKey);
+        const x25519SigHex = bytesToHex(x25519Sig);
+
+        return { did, privateKey, publicKey, x25519Hex, x25519SigHex };
+    }
+
+    it("accepts a valid X25519 ownership signature", async () => {
+        const id = await makeTestIdentity();
+        assert.equal(verifyX25519Ownership(id.did, id.x25519Hex, id.x25519SigHex), true);
+    });
+
+    it("rejects a wrong signature", async () => {
+        const id = await makeTestIdentity();
+        // Flip a byte in the signature
+        const badSig = "ff" + id.x25519SigHex.slice(2);
+        assert.equal(verifyX25519Ownership(id.did, id.x25519Hex, badSig), false);
+    });
+
+    it("rejects a substituted X25519 key (signed by a different agent)", async () => {
+        const agent1 = await makeTestIdentity();
+        const agent2 = await makeTestIdentity();
+        // agent1's signature, but agent2's X25519 key — should fail
+        assert.equal(verifyX25519Ownership(agent1.did, agent2.x25519Hex, agent1.x25519SigHex), false);
+    });
+
+    it("rejects a malformed DID", () => {
+        assert.equal(verifyX25519Ownership("not-a-did", "aa".repeat(32), "bb".repeat(64)), false);
+    });
+
+    it("rejects an empty signature", async () => {
+        const id = await makeTestIdentity();
+        assert.equal(verifyX25519Ownership(id.did, id.x25519Hex, ""), false);
     });
 });

@@ -95,6 +95,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         challenge?: string;
         signature?: string;
         x25519PublicKey?: string;
+        x25519Signature?: string;
       } | null;
 
       if (!body || typeof body.did !== "string") {
@@ -148,12 +149,26 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       // sealing. The language sends this during step 2 of the DID
       // challenge-response — the one point where DID ownership has
       // already been verified.
+      //
+      // When x25519Signature is provided, verify that the key genuinely
+      // belongs to the DID (prevents a MITM from substituting keys).
+      // The signature is: ed25519.sign(SHA-256(x25519PublicKey), privateKey)
+      // — same hashing convention as agentSignStringHex.
       if (
         typeof body.x25519PublicKey === "string" &&
         body.x25519PublicKey.length === 64 &&
         /^[0-9a-fA-F]{64}$/.test(body.x25519PublicKey)
       ) {
-        ctx.db.setX25519PublicKey(roomId, body.did, body.x25519PublicKey);
+        let x25519Sig: string | undefined;
+        if (typeof body.x25519Signature === "string") {
+          const keyHash = hashMessageForVerify(body.x25519PublicKey);
+          const sigValid = await verifyHex(pubkey, keyHash, body.x25519Signature);
+          if (!sigValid) {
+            return reply.code(400).send({ error: "x25519 public key signature verification failed" });
+          }
+          x25519Sig = body.x25519Signature;
+        }
+        ctx.db.setX25519PublicKey(roomId, body.did, body.x25519PublicKey, x25519Sig);
       }
 
       const { token, expiresAt } = await ctx.auth.issueSession(body.did, roomId);
@@ -336,6 +351,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         members: acl.map((a) => ({
           did: a.did,
           x25519PublicKey: a.x25519_public_key ?? null,
+          x25519Signature: a.x25519_signature ?? null,
         })),
       });
     }
@@ -425,6 +441,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         did: string;
         missingVersions: number[];
         x25519PublicKey: string;
+        x25519Signature: string | null;
       }> = [];
       if (version > 1) {
         const allAcl = ctx.db.getAcl(claims.roomId);
@@ -439,6 +456,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
               did: row.did,
               missingVersions: missing,
               x25519PublicKey: row.x25519_public_key,
+              x25519Signature: row.x25519_signature ?? null,
             });
           }
         }
@@ -462,13 +480,18 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const aclRows = ctx.db.getAcl(claims.roomId);
       const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
       const expectedVersions = Array.from({ length: latestVersion }, (_, i) => i + 1);
-      const missingKeys: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string }> = [];
+      const missingKeys: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string; x25519Signature: string | null }> = [];
       for (const row of aclRows) {
         if (!row.x25519_public_key) continue;
         const memberVersions = new Set(allVersions.get(row.did) ?? []);
         const missing = expectedVersions.filter((v) => !memberVersions.has(v));
         if (missing.length > 0) {
-          missingKeys.push({ did: row.did, missingVersions: missing, x25519PublicKey: row.x25519_public_key });
+          missingKeys.push({
+            did: row.did,
+            missingVersions: missing,
+            x25519PublicKey: row.x25519_public_key,
+            x25519Signature: row.x25519_signature ?? null,
+          });
         }
       }
       return reply.send({ membersNeedingHistoricalKeys: missingKeys });
@@ -527,6 +550,30 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       }
 
       return reply.send({ granted: stored });
+    }
+  );
+
+  // ---- admin transfer ----
+
+  app.post(
+    "/rooms/:roomId/admin/transfer",
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    async (request, reply) => {
+      const claims = request.authClaims!;
+      const body = request.body as { newAdminDid?: string } | null;
+      if (!body || typeof body.newAdminDid !== "string") {
+        return reply.code(400).send({ error: "newAdminDid is required" });
+      }
+      if (body.newAdminDid === claims.did) {
+        return reply.code(400).send({ error: "already the admin" });
+      }
+      if (!ctx.db.isMember(claims.roomId, body.newAdminDid)) {
+        return reply.code(400).send({ error: "newAdminDid must be a member of the room" });
+      }
+      ctx.db.transferAdmin(claims.roomId, body.newAdminDid);
+      const room = ctx.db.getRoom(claims.roomId)!;
+      const acl = ctx.db.getAcl(claims.roomId);
+      return reply.send({ admin: room.admin_did, members: acl.map((a) => a.did) });
     }
   );
 }

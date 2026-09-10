@@ -79,7 +79,11 @@ export class TelepresenceManager {
     const timer = setTimeout(() => {
       this.offlineTimers.delete(k);
       this.agents.get(roomId)?.delete(did);
-      onExpired();
+      try {
+        onExpired();
+      } catch {
+        // Best-effort — onExpired fires outside any caller's error boundary.
+      }
     }, this.graceMs);
     timer.unref();
     this.offlineTimers.set(k, { timer, onExpired });

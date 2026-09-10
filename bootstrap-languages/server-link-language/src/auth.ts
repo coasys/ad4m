@@ -59,7 +59,11 @@ export async function authenticate(): Promise<AuthSession> {
 
     const challenge = await api.requestChallenge(config, did);
     const signature = agent.signStringHex(challenge);
-    const token = await api.verifyChallenge(config, did, challenge, signature, myX25519PublicKeyHex());
+    const x25519Hex = myX25519PublicKeyHex();
+    // Sign the X25519 public key to prove it belongs to this DID.
+    // Uses the same SHA-256 hashing convention as agentSignStringHex.
+    const x25519Signature = agent.signStringHex(x25519Hex);
+    const token = await api.verifyChallenge(config, did, challenge, signature, x25519Hex, x25519Signature);
 
     const session: AuthSession = { token, expiresAt: parseJwtExpiryMs(token) };
     _session = session;

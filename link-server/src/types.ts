@@ -119,7 +119,19 @@ export function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }
 
-/** Deterministic content hash of a LinkExpression (used for OR-Set membership). */
+/**
+ * Deterministic content hash of a LinkExpression (used for OR-Set membership).
+ *
+ * TRUST MODEL: For encrypted links the server cannot verify link_hash — it
+ * cannot decrypt the ciphertext. The client-supplied link_hash field gets
+ * trusted directly. A malicious authenticated client can submit a false
+ * hash, causing OR-Set dedup to malfunction (duplicates from distinct
+ * hashes for identical plaintext, or collisions from identical hashes for
+ * distinct plaintext). This follows from the overall trust model:
+ * authenticated clients behave correctly. An attacker needs a valid JWT
+ * (obtained via DID challenge-response) to exploit this, which limits the
+ * attack surface to compromised agents.
+ */
 export function linkHash(link: LinkExpression): string {
   if (link.link_hash) return link.link_hash;
   return sha256Hex(canonicalLinkPayload(link));

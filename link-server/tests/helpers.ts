@@ -156,9 +156,11 @@ export async function authenticateAgent(
   }
   const signature = await signChallenge(agent, step1.body.challenge);
   const x25519PublicKey = testAgentX25519PublicKey(agent);
+  // Sign the X25519 public key to prove it belongs to this DID
+  const x25519Signature = await signHex(agent.privateKey, hashMessageForVerify(x25519PublicKey));
   const step2 = await postJson<{ token?: string; error?: string }>(
     `${serverUrl}/rooms/${roomId}/auth`,
-    { did: agent.did, challenge: step1.body.challenge, signature, x25519PublicKey }
+    { did: agent.did, challenge: step1.body.challenge, signature, x25519PublicKey, x25519Signature }
   );
   if (step2.status !== 200 || !step2.body.token) {
     throw new Error(`auth verify failed: ${step2.status} ${JSON.stringify(step2.body)}`);

@@ -1380,7 +1380,7 @@ impl PerspectiveInstance {
     pub async fn commit(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         let handle = self.persisted.lock().await.clone();
         if handle.neighbourhood.is_none() {
-            log::info!("commit({}): skipping — no neighbourhood", handle.uuid);
+            log::debug!("commit({}): skipping — no neighbourhood", handle.uuid);
             return Ok(());
         }
 
@@ -1389,7 +1389,7 @@ impl PerspectiveInstance {
             Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&handle.uuid, Some(1)))
                 .unwrap_or((PerspectiveDiff::empty(), Vec::new()));
 
-        log::info!(
+        log::debug!(
             "commit({}): state={:?} link_language={} pending_ids={} adds={} removes={}",
             handle.uuid,
             handle.state,

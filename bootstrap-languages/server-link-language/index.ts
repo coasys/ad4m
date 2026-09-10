@@ -27,6 +27,7 @@ import {
     generateRoomKey,
     hexToBytes,
     sealRoomKeyForRecipient,
+    verifyX25519Ownership,
     type KeyRing,
 } from "./src/encryption.js";
 
@@ -181,6 +182,15 @@ async function performAdminKeyGrants(): Promise<void> {
         if (members.length === 0) return;
 
         for (const member of members) {
+            // Verify X25519 key ownership before trusting the server's ACL
+            if (member.x25519Signature) {
+                if (!verifyX25519Ownership(member.did, member.x25519PublicKey, member.x25519Signature)) {
+                    console.error(
+                        `[server-link-language] X25519 signature verification failed for ${member.did} — skipping key grant`,
+                    );
+                    continue;
+                }
+            }
             const recipientPub = hexToBytes(member.x25519PublicKey);
             const sealedKeys: Array<{ version: number; encryptedKey: ReturnType<typeof sealRoomKeyForRecipient> }> = [];
             for (const version of member.missingVersions) {
@@ -223,6 +233,15 @@ async function performRotation(): Promise<void> {
         const sealedKeys: api.RotateKeyEntry[] = [];
         for (const member of aclRes.members) {
             if (!member.x25519PublicKey) continue;
+            // Verify X25519 key ownership before trusting the server's ACL
+            if (member.x25519Signature) {
+                if (!verifyX25519Ownership(member.did, member.x25519PublicKey, member.x25519Signature)) {
+                    console.error(
+                        `[server-link-language] X25519 signature verification failed for ${member.did} — skipping`,
+                    );
+                    continue;
+                }
+            }
             const recipientPub = hexToBytes(member.x25519PublicKey);
             sealedKeys.push({
                 did: member.did,

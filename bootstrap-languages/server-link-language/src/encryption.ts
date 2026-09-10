@@ -53,7 +53,7 @@
  * encrypted before the full-encryption change).
  */
 
-import { x25519 } from "@noble/curves/ed25519";
+import { x25519, ed25519 } from "@noble/curves/ed25519";
 import { gcm } from "@noble/ciphers/aes";
 import { sha256 } from "@noble/hashes/sha2";
 import { hkdf } from "@noble/hashes/hkdf";
@@ -134,6 +134,91 @@ export function randomBytes(length: number): Uint8Array {
     const out = new Uint8Array(length);
     globalThis.crypto.getRandomValues(out);
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Base58btc decoder (minimal — avoids @scure/base dependency)
+// ---------------------------------------------------------------------------
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58_MAP = new Map<string, number>();
+for (let i = 0; i < BASE58_ALPHABET.length; i++) BASE58_MAP.set(BASE58_ALPHABET[i], i);
+
+function base58Decode(input: string): Uint8Array {
+    if (input.length === 0) return new Uint8Array(0);
+    const bytes: number[] = [0];
+    for (const ch of input) {
+        const val = BASE58_MAP.get(ch);
+        if (val === undefined) throw new Error(`base58: invalid character '${ch}'`);
+        let carry = val;
+        for (let j = 0; j < bytes.length; j++) {
+            carry += bytes[j] * 58;
+            bytes[j] = carry & 0xff;
+            carry >>= 8;
+        }
+        while (carry > 0) {
+            bytes.push(carry & 0xff);
+            carry >>= 8;
+        }
+    }
+    // Preserve leading zeros (base58 '1' == 0x00)
+    let leadingZeros = 0;
+    for (const ch of input) { if (ch === "1") leadingZeros++; else break; }
+    const result = new Uint8Array(leadingZeros + bytes.length);
+    bytes.reverse();
+    result.set(bytes, leadingZeros);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// DID:key → Ed25519 public key extraction
+// ---------------------------------------------------------------------------
+
+const ED25519_MULTICODEC = new Uint8Array([0xed, 0x01]);
+
+/**
+ * Extracts the raw 32-byte Ed25519 public key from a `did:key:z...` string.
+ * Only supports ed25519 keys (multicodec prefix 0xed01). Strips any
+ * `#fragment` key-id suffix.
+ */
+function didToEd25519PublicKey(did: string): Uint8Array {
+    const base = did.includes("#") ? did.slice(0, did.indexOf("#")) : did;
+    const prefix = "did:key:";
+    if (!base.startsWith(prefix)) throw new Error(`not a did:key DID: ${did}`);
+    const multibase = base.slice(prefix.length);
+    if (!multibase.startsWith("z")) throw new Error(`unsupported multibase: ${did}`);
+    const decoded = base58Decode(multibase.slice(1));
+    if (decoded.length !== 34 || decoded[0] !== ED25519_MULTICODEC[0] || decoded[1] !== ED25519_MULTICODEC[1]) {
+        throw new Error(`unsupported did:key type: ${did}`);
+    }
+    return decoded.slice(2);
+}
+
+// ---------------------------------------------------------------------------
+// X25519 ownership verification
+// ---------------------------------------------------------------------------
+
+/**
+ * Verifies that an X25519 public key genuinely belongs to the given DID.
+ * The signature must have been produced by:
+ *   `agentSignStringHex(x25519PublicKeyHex)` — which internally signs
+ *   `SHA-256(x25519PublicKeyHex)` (the AD4M executor's hashing convention).
+ *
+ * Returns true if valid, false otherwise. Never throws on invalid input.
+ *
+ * Use this before sealing room keys for a member — prevents a malicious
+ * server from substituting X25519 keys in the ACL response.
+ */
+export function verifyX25519Ownership(did: string, x25519PublicKeyHex: string, signatureHex: string): boolean {
+    try {
+        const ed25519PubKey = didToEd25519PublicKey(did);
+        // Match the AD4M executor's agentSignStringHex convention: signs SHA-256(message)
+        const messageHash = sha256(utf8ToBytes(x25519PublicKeyHex));
+        const signatureBytes = hexToBytes(signatureHex);
+        return ed25519.verify(signatureBytes, messageHash, ed25519PubKey);
+    } catch {
+        return false;
+    }
 }
 
 // ---------------------------------------------------------------------------

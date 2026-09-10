@@ -91,9 +91,11 @@ export async function verifyChallenge(
     challenge: string,
     signature: string,
     x25519PublicKeyHex?: string,
+    x25519Signature?: string,
 ): Promise<string> {
     const payload: Record<string, unknown> = { did, challenge, signature };
     if (x25519PublicKeyHex) payload.x25519PublicKey = x25519PublicKeyHex;
+    if (x25519Signature) payload.x25519Signature = x25519Signature;
 
     const res = await request<AuthTokenResponse>(
         roomUrl(config, "/auth"),
