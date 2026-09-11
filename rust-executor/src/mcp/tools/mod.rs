@@ -13,25 +13,30 @@
 //!
 //! Tools are organized by domain:
 //! - `perspectives` — perspective & link operations
-//! - `subjects` — subject CRUD, properties, collections
+//! - `instances` — the static, class-agnostic surface for typed data:
+//!   `describe_perspective`, the `instance_*` family (class name as a
+//!   parameter), the raw `add_child` / `get_children` tree ops and
+//!   `execute_commands`
 //! - `flows` — flow state machine tools
 //! - `auth` — authentication & JWT tools
 //! - `profiles` — agent profile management
 //! - `subscriptions` — waker query generation
-//! - `dynamic` — auto-generated SHACL-based tools
+//! - `neighbourhoods` / `languages` — P2P sharing and language metadata
+//! - `dynamic` — auto-generated per-class SHACL tools (exposed over MCP only
+//!   with `dynamicClassTools`; always fed to the in-process harness)
 
 pub mod auth;
-pub mod children;
+pub mod docs;
 pub mod dynamic;
 pub mod flows;
 pub mod harness_bridge;
+pub mod instances;
 pub mod languages;
 pub mod neighbourhoods;
 pub mod perspectives;
 pub mod profiles;
 pub mod provider_impl;
 pub(crate) mod side_effects;
-pub mod subjects;
 pub mod subscriptions;
 
 use super::server::McpContext;
@@ -59,6 +64,30 @@ use serde_json::json;
 use crate::utils::constant_time_eq;
 use axum::http::request::Parts as HttpRequestParts;
 
+/// The credential carried by this request's `Authorization` header, if any.
+///
+/// A `Bearer <value>` header yields `<value>`; any other scheme yields the whole header
+/// verbatim, because an admin credential may be sent raw. Returns `None` when the header
+/// is absent — which callers must distinguish from an empty or unusable one.
+fn bearer_credential(context: &RequestContext<RoleServer>) -> Option<String> {
+    context
+        .extensions
+        .get::<HttpRequestParts>()
+        .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
+        .and_then(|h| h.to_str().ok())
+        .map(|h| {
+            let mut parts = h.splitn(2, char::is_whitespace);
+            let scheme = parts.next().unwrap_or_default();
+            let value = parts.next().unwrap_or_default().trim_start();
+
+            if scheme.eq_ignore_ascii_case("bearer") && !value.is_empty() {
+                value.to_string()
+            } else {
+                h.to_string()
+            }
+        })
+}
+
 // ============================================================================
 // MCP Handler
 // ============================================================================
@@ -70,9 +99,26 @@ pub struct Ad4mMcpHandler {
     tool_router: ToolRouter<Self>,
 }
 
+/// What an MCP client sees in the `initialize` response. Kept short — it
+/// points at `get_documentation`, which carries the real text.
+pub(crate) const SERVER_INSTRUCTIONS: &str =
+    "AD4M executor: an agent-centric P2P knowledge graph. \
+If you are new to AD4M, call get_documentation(topic=\"overview\") first — it explains the \
+tool surface (describe_perspective + the generic instance_* tools, which take a class_name \
+parameter), the workflow and the rules for writing data that humans and other agents can \
+use; topic=\"usage\" is the working guide (reading and writing instances, the child tree, \
+common traps), topic=\"flux\" is the Flux data model (channels, messages, posts, tasks), \
+topic=\"models\" teaches authoring your own subject classes with add_model, and \
+topic=\"architecture\" goes deeper into the data model. Typical flow: authenticate (or \
+nothing, if the executor was started with the admin credential for you) -> list_perspectives \
+or neighbourhood_join_from_url -> describe_perspective -> instance_query / instance_transcript \
+to read, instance_create to write.";
+
 /// Tool names that can be called without authentication.
-/// These are the auth bootstrapping tools for multi-user mode.
-const AUTH_TOOLS: &[&str] = &[
+/// These are the auth bootstrapping tools for multi-user mode, plus the
+/// documentation (which is what tells a cold agent how to authenticate).
+pub(crate) const AUTH_TOOLS: &[&str] = &[
+    "get_documentation",
     "login_email",
     "signup",
     "verify_email_code",
@@ -100,6 +146,7 @@ impl ServerHandler for Ad4mMcpHandler {
                 icons: None,
                 website_url: Some("https://ad4m.dev".to_string()),
             },
+            instructions: Some(SERVER_INSTRUCTIONS.to_string()),
             ..Default::default()
         }
     }
@@ -109,10 +156,8 @@ impl ServerHandler for Ad4mMcpHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
-        let mut tools = self.tool_router.list_all();
-        tools.extend(self.generate_dynamic_tools().await);
         Ok(ListToolsResult {
-            tools,
+            tools: self.exposed_tools().await,
             meta: None,
             next_cursor: None,
         })
@@ -126,12 +171,16 @@ impl ServerHandler for Ad4mMcpHandler {
         let tool_name = request.name.to_string();
 
         // Check if tool requires authentication
-        if !AUTH_TOOLS.contains(&tool_name.as_str()) {
-            if !self.check_auth(&tool_name, &context).await {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
-                )]));
-            }
+        if AUTH_TOOLS.contains(&tool_name.as_str()) {
+            // The auth tools run without a credential by design, but they still need to
+            // *see* one: `auth_status` reports the session token, and a header-only
+            // client has none until something adopts it. Result ignored — absence is
+            // not an error here.
+            self.adopt_header_credential(&context).await;
+        } else if !self.check_auth(&tool_name, &context).await {
+            return Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Authentication required. Use request_capability + generate_jwt, login_email, or signup to authenticate."}).to_string()
+            )]));
         }
 
         self.dispatch_tool(request, context).await
@@ -183,52 +232,56 @@ impl Ad4mMcpHandler {
 
         // 3. Try HTTP Authorization header (for clients like mcporter that send
         //    credentials per-request rather than using the MCP session)
-        let http_header_value = context
-            .extensions
-            .get::<HttpRequestParts>()
-            .and_then(|parts| parts.headers.get(axum::http::header::AUTHORIZATION))
-            .and_then(|h| h.to_str().ok())
-            .map(|h| {
-                let mut parts = h.splitn(2, char::is_whitespace);
-                let scheme = parts.next().unwrap_or_default();
-                let value = parts.next().unwrap_or_default().trim_start();
-
-                if scheme.eq_ignore_ascii_case("bearer") && !value.is_empty() {
-                    value.to_string()
-                } else {
-                    h.to_string()
-                }
-            });
-
-        if let Some(ref header_token) = http_header_value {
-            // 3a. Header matches admin credential → store & pass
-            if let Some(cred) = admin_cred {
-                if constant_time_eq(header_token, cred) {
-                    let mut guard = self.context.auth_token.write().await;
-                    *guard = Some(cred.to_string());
-                    return true;
-                }
-            }
-
-            // 3b. Header is a valid JWT → store & pass
-            if !header_token.is_empty() {
-                let caps =
-                    capabilities_from_token(header_token.clone(), admin_cred.map(String::from));
-                if caps.is_ok() {
-                    let mut guard = self.context.auth_token.write().await;
-                    *guard = Some(header_token.clone());
-                    return true;
-                }
-            }
+        let header_present = bearer_credential(context).is_some();
+        if self.adopt_header_credential(context).await {
+            return true;
         }
 
         // 4. No admin credential configured and no token → single-user local mode
         //    (mirrors REST localhost trust model)
-        if admin_cred.is_none() && session_token.is_empty() && http_header_value.is_none() {
+        if admin_cred.is_none() && session_token.is_empty() && !header_present {
             return true;
         }
 
         // Everything else → reject
+        false
+    }
+
+    /// Store a valid `Authorization` credential from this request into the session.
+    ///
+    /// Returns whether one was adopted. Called for every tool, including the ones that
+    /// skip [`Self::check_auth`]: a client that authenticates purely by header (mcporter,
+    /// the OpenClaw plugin, any `.mcp.json` `headers` entry) otherwise leaves the session
+    /// token empty, and `auth_status` — which reads only the session — answers
+    /// "not authenticated" to a caller whose every other tool call succeeds. That reading
+    /// is what sends an agent back through a login it does not need.
+    ///
+    /// Only a credential that already passes validation is stored, so this widens where
+    /// an accepted credential is remembered, never which credentials are accepted.
+    async fn adopt_header_credential(&self, context: &RequestContext<RoleServer>) -> bool {
+        let Some(header_token) = bearer_credential(context) else {
+            return false;
+        };
+        let admin_cred = self.context.admin_credential.as_deref();
+
+        // Header matches admin credential → store & pass
+        if let Some(cred) = admin_cred {
+            if constant_time_eq(&header_token, cred) {
+                let mut guard = self.context.auth_token.write().await;
+                *guard = Some(cred.to_string());
+                return true;
+            }
+        }
+
+        // Header is a valid JWT → store & pass
+        if !header_token.is_empty()
+            && capabilities_from_token(header_token.clone(), admin_cred.map(String::from)).is_ok()
+        {
+            let mut guard = self.context.auth_token.write().await;
+            *guard = Some(header_token);
+            return true;
+        }
+
         false
     }
 
@@ -237,35 +290,37 @@ impl Ad4mMcpHandler {
         ToolRouter::<Self>::new()
             // perspectives.rs
             .with_route((Self::list_perspectives_tool_attr(), Self::list_perspectives))
-            .with_route((Self::get_models_tool_attr(), Self::get_models))
             .with_route((Self::add_perspective_tool_attr(), Self::add_perspective))
             .with_route((Self::add_link_tool_attr(), Self::add_link))
             .with_route((Self::query_links_tool_attr(), Self::query_links))
             .with_route((Self::add_model_tool_attr(), Self::add_model))
-            .with_route((Self::infer_tool_attr(), Self::infer))
-            // subjects.rs
-            .with_route((Self::query_subjects_tool_attr(), Self::query_subjects))
-            .with_route((Self::get_subject_data_tool_attr(), Self::get_subject_data))
-            .with_route((Self::create_subject_tool_attr(), Self::create_subject))
+            // instances/
+            .with_route((
+                Self::describe_perspective_tool_attr(),
+                Self::describe_perspective,
+            ))
+            .with_route((Self::instance_create_tool_attr(), Self::instance_create))
+            .with_route((Self::instance_query_tool_attr(), Self::instance_query))
+            .with_route((Self::instance_get_tool_attr(), Self::instance_get))
+            .with_route((Self::instance_update_tool_attr(), Self::instance_update))
+            .with_route((
+                Self::instance_add_to_collection_tool_attr(),
+                Self::instance_add_to_collection,
+            ))
+            .with_route((
+                Self::instance_remove_from_collection_tool_attr(),
+                Self::instance_remove_from_collection,
+            ))
+            .with_route((Self::instance_remove_tool_attr(), Self::instance_remove))
+            .with_route((
+                Self::instance_transcript_tool_attr(),
+                Self::instance_transcript,
+            ))
+            .with_route((Self::add_child_tool_attr(), Self::add_child))
+            .with_route((Self::get_children_tool_attr(), Self::get_children))
             .with_route((Self::execute_commands_tool_attr(), Self::execute_commands))
-            .with_route((
-                Self::set_subject_property_tool_attr(),
-                Self::set_subject_property,
-            ))
-            .with_route((
-                Self::get_subject_collection_tool_attr(),
-                Self::get_subject_collection,
-            ))
-            .with_route((Self::add_to_collection_tool_attr(), Self::add_to_collection))
-            .with_route((
-                Self::remove_from_collection_tool_attr(),
-                Self::remove_from_collection,
-            ))
-            .with_route((
-                Self::get_subject_children_tool_attr(),
-                Self::get_subject_children,
-            ))
-            .with_route((Self::delete_subject_tool_attr(), Self::delete_subject))
+            // docs.rs
+            .with_route((Self::get_documentation_tool_attr(), Self::get_documentation))
             // flows.rs
             .with_route((Self::add_flow_tool_attr(), Self::add_flow))
             .with_route((Self::get_flows_tool_attr(), Self::get_flows))
@@ -300,13 +355,6 @@ impl Ad4mMcpHandler {
             .with_route((
                 Self::set_agent_public_perspective_tool_attr(),
                 Self::set_agent_public_perspective,
-            ))
-            // children.rs
-            .with_route((Self::add_child_tool_attr(), Self::add_child))
-            .with_route((Self::get_children_tool_attr(), Self::get_children))
-            .with_route((
-                Self::get_children_body_parsed_tool_attr(),
-                Self::get_children_body_parsed,
             ))
             // subscriptions.rs
             .with_route((
@@ -347,10 +395,59 @@ impl Ad4mMcpHandler {
             let result = self.tool_router.call(tcc).await?;
             Ok(result)
         } else {
-            // Try dynamic SHACL tools
-            self.handle_dynamic_tool(&tool_name, request.arguments)
+            self.dispatch_non_router_tool(&tool_name, request.arguments)
                 .await
         }
+    }
+
+    /// The tool list this MCP transport advertises: every static `#[tool]`
+    /// on the router, plus the dynamic per-class SHACL tools **only when**
+    /// `dynamicClassTools` is enabled. With the flag off (the default) the
+    /// list is constant regardless of which social DNA is loaded — that is
+    /// what lets plugin manifests and agent configs declare the AD4M tools
+    /// statically. The generic `instance_*` tools cover per-class operations
+    /// in that mode.
+    ///
+    /// Note this is deliberately NOT what the in-process harness sees:
+    /// `harness_bridge::list_tool_schemas` always merges the dynamic tools.
+    pub(crate) async fn exposed_tools(&self) -> Vec<rmcp::model::Tool> {
+        let mut tools = self.tool_router.list_all();
+        if self.context.dynamic_class_tools {
+            tools.extend(self.generate_dynamic_tools().await);
+        }
+        tools
+    }
+
+    /// Handle a call to a tool that is not on the static router. That is
+    /// either a dynamic per-class SHACL tool (when exposed) or an unknown
+    /// name. When dynamic tools are hidden, calling one by name is refused
+    /// with a pointer to the static equivalent — hidden tools must not be
+    /// silently callable, or the "stable surface" guarantee would only hold
+    /// for `tools/list` and not for `tools/call`.
+    pub(crate) async fn dispatch_non_router_tool(
+        &self,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<CallToolResult, ErrorData> {
+        if self.context.dynamic_class_tools {
+            return self.handle_dynamic_tool(tool_name, arguments).await;
+        }
+        Ok(CallToolResult::error(vec![Content::text(
+            json!({
+                "error": format!(
+                    "Unknown tool: {}. Dynamic per-class tools are not exposed on this MCP \
+                     server (config `dynamicClassTools` is false). Use the generic instance \
+                     tools instead: describe_perspective, instance_create, instance_query, \
+                     instance_get, instance_update, instance_add_to_collection, \
+                     instance_remove_from_collection, instance_remove, instance_transcript \
+                     — pass the class name as `class_name`; add_child / get_children for \
+                     the raw ad4m://has_child tree. To re-enable per-class tools start the \
+                     executor with `--dynamic-class-tools true`.",
+                    tool_name
+                ),
+            })
+            .to_string(),
+        )]))
     }
 
     // ========================================================================
@@ -512,7 +609,7 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// Encode a string value as a literal:// URL.
+    /// Encode a string value as a `literal:string:` URL.
     /// Uses rust-client's `Literal` for proper URL encoding.
     pub(crate) fn encode_literal(value: &str) -> String {
         use ad4m_client::literal::Literal;
@@ -523,8 +620,8 @@ impl Ad4mMcpHandler {
 
     /// Get the SHACL name literal for a class, trying both encoded and raw formats.
     /// Flux's TypeScript Literal doesn't URL-encode inner URIs, producing
-    /// "literal://string:shacl://Class", while Rust's Literal produces
-    /// "literal://string:shacl%3A%2F%2FClass". Returns (encoded, raw).
+    /// "literal:string:shacl://Class", while Rust's Literal produces
+    /// "literal:string:shacl%3A%2F%2FClass". Returns (encoded, raw).
     pub(crate) fn shacl_name_variants(class_name: &str) -> (String, String) {
         let encoded = Self::encode_literal(&format!("shacl://{}", class_name));
         let raw = format!("literal:string:shacl://{}", class_name);
@@ -582,7 +679,7 @@ impl Ad4mMcpHandler {
     /// Resolve a property value through the appropriate storage path, respecting
     /// the SHACL `resolveLanguage` setting for the property.
     ///
-    /// If the value already has a URI scheme (e.g. `literal://...`, `did:...`),
+    /// If the value already has a URI scheme (e.g. `literal:...`, `did:...`),
     /// it is returned as-is. Otherwise, the value is parsed as JSON to recover
     /// its native type (boolean, number, etc.) and resolved through the
     /// perspective's `resolve_property_value` method.

@@ -25,9 +25,11 @@ pub struct SubscribeToModelParams {
     pub class_name: String,
     /// Parent expression address to scope the subscription (e.g., a channel address).
     /// If provided, only watches for new instances that are children of this parent.
-    pub parent_address: Option<String>,
+    /// Accepts the pre-rename `parent_address` spelling from older clients.
+    #[serde(alias = "parent_address")]
+    pub parent: Option<String>,
     /// Predicate URI to filter by (e.g., "ad4m://has_child").
-    /// If neither parent_address nor predicate is provided, the query is derived
+    /// If neither parent nor predicate is provided, the query is derived
     /// from the SHACL definition — watching for links whose predicates match
     /// any property defined on the subject class.
     pub predicate: Option<String>,
@@ -102,7 +104,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let query = if let Some(ref parent) = p.parent_address {
+        let query = if let Some(ref parent) = p.parent {
             // Scope to children of a specific parent
             let parent_encoded = if parent.contains("://") {
                 parent.clone()
@@ -110,7 +112,7 @@ impl Ad4mMcpHandler {
                 Self::encode_literal(parent)
             };
             if let Err(e) = validate_sparql_iri(&parent_encoded) {
-                return json!({"error": format!("Invalid parent_address: {}", e)}).to_string();
+                return json!({"error": format!("Invalid parent: {}", e)}).to_string();
             }
             format!(
                 "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?source) = \"{}\" && STR(?predicate) = \"ad4m://has_child\") }}",
@@ -171,7 +173,7 @@ impl Ad4mMcpHandler {
             "subscription_id": subscription_id,
             "perspective_id": p.perspective_id,
             "class_name": p.class_name,
-            "parent_address": p.parent_address,
+            "parent": p.parent,
             "predicate": p.predicate,
             "target_value": p.target_value,
             "query": query,
@@ -179,9 +181,10 @@ impl Ad4mMcpHandler {
                 "Subscription {} created for {} changes{}.",
                 subscription_id,
                 p.class_name,
-                p.parent_address.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
+                p.parent.as_ref().map(|a| format!(" under parent {}", a)).unwrap_or_default()
             ),
-        }).to_string()
+        })
+        .to_string()
     }
 
     /// Generate a single waker subscription config for mention tracking
@@ -359,6 +362,23 @@ pub fn build_mention_sub_id(perspective_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Clients built against the pre-rename schema still send
+    /// `parent_address`; both spellings must land in `parent`.
+    #[test]
+    fn subscribe_params_accept_legacy_parent_address() {
+        let legacy: SubscribeToModelParams = serde_json::from_str(
+            r#"{"perspective_id":"p","class_name":"Message","parent_address":"chan://1"}"#,
+        )
+        .expect("legacy spelling deserializes");
+        assert_eq!(legacy.parent.as_deref(), Some("chan://1"));
+
+        let current: SubscribeToModelParams = serde_json::from_str(
+            r#"{"perspective_id":"p","class_name":"Message","parent":"chan://2"}"#,
+        )
+        .expect("current spelling deserializes");
+        assert_eq!(current.parent.as_deref(), Some("chan://2"));
+    }
 
     #[test]
     fn scoped_query_excludes_ontology_proof_metadata() {

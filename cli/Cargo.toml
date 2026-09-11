@@ -31,7 +31,7 @@ default = []
 ad4m-client = { path = "../rust-client", version="0.13.0-test-interpretation-2" }
 ad4m-executor = { path = "../rust-executor", version="0.13.0-test-interpretation-2" }
 anyhow = "1.0.65"
-clap = { version = "4.0.8", features = ["derive"] }
+clap = { version = "4.0.8", features = ["derive", "env"] }
 futures = "0.3"
 tokio = { version = "1.25.0", features = ["full"] }
 rustyline = "10"

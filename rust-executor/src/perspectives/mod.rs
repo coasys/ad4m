@@ -314,6 +314,14 @@ pub(crate) fn register_perspective(uuid: String, instance: PerspectiveInstance) 
     perspectives.insert(uuid, RwLock::new(instance));
 }
 
+/// Remove an instance from the global map without touching the persistence
+/// backend. Test-only: lets fixtures that used `register_perspective` leave
+/// global state clean for tests that assert on it.
+#[cfg(test)]
+pub(crate) fn unregister_perspective(uuid: &str) {
+    PERSPECTIVES.write().unwrap().remove(uuid);
+}
+
 pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
     PERSPECTIVES
         .read()

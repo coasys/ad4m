@@ -11,17 +11,18 @@ export interface McpTool {
   inputSchema?: Record<string, any>;
 }
 
-// WakerSubscription is defined in wakerSubscriptionManager.ts (kept import-free for testability)
+// WakerSubscription comes from core via ./wakerSubscriptionManager (a pure re-export).
 export type { WakerSubscription } from "./wakerSubscriptionManager";
 
 export interface PluginConfig {
   mode?: "managed" | "external";
   mcpEndpoint?: string;
+  /** Opt in to sending credentials to a non-loopback plaintext http:// mcpEndpoint. */
+  allowInsecureHttp?: boolean;
   /** Auth token — JWT in external mode, admin credential in managed mode (internal). */
   token?: string;
   agentPassphrase?: string;
   ad4mBinaryPath?: string;
-  toolRefreshIntervalMs?: number;
   wakerEnabled?: boolean;
   executorUrl?: string;
   wakeUrl?: string;

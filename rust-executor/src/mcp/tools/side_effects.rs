@@ -59,35 +59,37 @@ use crate::ai_service::harness::provider::SideEffect;
 /// the parity test in this module ensures no static tool actually hits
 /// that fallback in practice.
 ///
-/// Ordering matches the tool-file layout (perspectives → subjects →
-/// profiles → flows → children → subscriptions → neighbourhoods → auth
-/// → languages) for readability.
+/// Ordering matches the tool-file layout (perspectives → instances →
+/// profiles → flows → subscriptions → neighbourhoods → auth → languages)
+/// for readability.
 pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
+    // ── docs.rs ─────────────────────────────────────────────────────
+    ("get_documentation", SideEffect::Read),
     // ── perspectives.rs ─────────────────────────────────────────────
     ("list_perspectives", SideEffect::Read),
-    ("get_models", SideEffect::Read),
     ("add_perspective", SideEffect::Write),
     ("add_link", SideEffect::Write),
     ("query_links", SideEffect::Read),
     ("add_model", SideEffect::Write),
-    // `infer` runs an LLM prompt and returns the text. No graph mutation —
-    // the tool is a compute-and-return, not a state change. Billing is
-    // handled per-completion inside AIService; the harness classifies on
-    // the graph-state axis.
-    ("infer", SideEffect::Read),
-    // ── subjects.rs ─────────────────────────────────────────────────
-    ("query_subjects", SideEffect::Read),
-    ("get_subject_data", SideEffect::Read),
-    ("create_subject", SideEffect::Write),
-    // `execute_commands` runs SDNA-declared setter actions on an instance
-    // — always a mutation.
+    // ── instances/ ──────────────────────────────────────────────────
+    // The static, class-agnostic surface. Same read/write split as the
+    // per-class tools they replace: describe/query/get inspect, the
+    // rest mutate.
+    ("describe_perspective", SideEffect::Read),
+    ("instance_create", SideEffect::Write),
+    ("instance_query", SideEffect::Read),
+    ("instance_get", SideEffect::Read),
+    ("instance_update", SideEffect::Write),
+    ("instance_add_to_collection", SideEffect::Write),
+    ("instance_remove_from_collection", SideEffect::Write),
+    ("instance_remove", SideEffect::Write),
+    ("instance_transcript", SideEffect::Read),
+    // Raw ad4m://has_child tree ops, class-agnostic.
+    ("add_child", SideEffect::Write),
+    ("get_children", SideEffect::Read),
+    // `execute_commands` runs SDNA-declared actions on an instance —
+    // always a mutation.
     ("execute_commands", SideEffect::Write),
-    ("set_subject_property", SideEffect::Write),
-    ("get_subject_collection", SideEffect::Read),
-    ("add_to_collection", SideEffect::Write),
-    ("remove_from_collection", SideEffect::Write),
-    ("get_subject_children", SideEffect::Read),
-    ("delete_subject", SideEffect::Write),
     // ── profiles.rs ─────────────────────────────────────────────────
     ("get_my_did", SideEffect::Read),
     ("get_agent_profile", SideEffect::Read),
@@ -102,10 +104,6 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // no mutation.
     ("flow_state", SideEffect::Read),
     ("flow_actions", SideEffect::Read),
-    // ── children.rs ─────────────────────────────────────────────────
-    ("add_child", SideEffect::Write),
-    ("get_children", SideEffect::Read),
-    ("get_children_body_parsed", SideEffect::Read),
     // ── subscriptions.rs ────────────────────────────────────────────
     // Both tools construct a query string / return config metadata; the
     // actual subscription is a separate transport-level concern outside
@@ -209,7 +207,6 @@ mod tests {
         assert_eq!(side_effect_of("list_perspectives"), SideEffect::Read);
         assert_eq!(side_effect_of("query_links"), SideEffect::Read);
         assert_eq!(side_effect_of("add_link"), SideEffect::Write);
-        assert_eq!(side_effect_of("infer"), SideEffect::Read);
     }
 
     #[test]
@@ -343,6 +340,7 @@ mod tests {
         let handler = Ad4mMcpHandler::new(McpContext {
             admin_credential: None,
             auth_token: Arc::new(RwLock::new(None)),
+            dynamic_class_tools: false,
         });
 
         let table_names: std::collections::BTreeSet<&str> =
@@ -376,6 +374,7 @@ mod tests {
         let handler = Ad4mMcpHandler::new(McpContext {
             admin_credential: None,
             auth_token: Arc::new(RwLock::new(None)),
+            dynamic_class_tools: false,
         });
 
         let registered: std::collections::BTreeSet<String> = handler

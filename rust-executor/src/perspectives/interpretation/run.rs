@@ -1061,6 +1061,11 @@ pub async fn run_interpretation_with_harness_and_model(
     let mcp_context = crate::mcp::server::McpContext {
         admin_credential: std::env::var("AD4M_ADMIN_CREDENTIAL").ok(),
         auth_token: Arc::new(tokio::sync::RwLock::new(auth_token.clone())),
+        // The harness reaches tools through `list_tool_schemas` /
+        // `call_tool_by_name`, which always include the dynamic per-class
+        // tools regardless of this flag (it only gates the MCP transport).
+        // Set explicitly so the intent is visible at the construction site.
+        dynamic_class_tools: true,
     };
     let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(mcp_context));
     let ad4m_provider = Arc::new(crate::mcp::tools::provider_impl::Ad4mToolProvider::new(

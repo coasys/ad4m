@@ -22,11 +22,31 @@ Once set up, you can ask your agent to:
 openclaw plugins install @coasys/openclaw-ad4m
 ```
 
-For local development:
+From a packed tarball, pass **both** flags. A local archive is outside ClawHub's trust
+metadata, so the install stops twice and each error names only one flag:
 
 ```bash
-openclaw plugins install -l plugins/ad4m
+openclaw plugins install /path/to/coasys-openclaw-ad4m-<version>.tgz \
+  --accept-capabilities --force
 ```
+
+For local development. Build first — the plugin is TypeScript and the install links
+`dist/index.cjs`, which is not in the repo:
+
+```bash
+cd plugins/ad4m && npm install && npm run build && cd -
+openclaw plugins install -l plugins/ad4m --accept-capabilities --force
+```
+
+**Restart the gateway after any install, uninstall, or enable/disable.** Plugins load at
+gateway start; nothing changes in a running session. Then confirm what actually loaded:
+
+```bash
+openclaw plugins list --json   # check id, origin, source, status for "ad4m"
+```
+
+`source` is the build the gateway is really running. If it points somewhere you did not
+expect, read *Two installs of the same plugin* under Troubleshooting before going further.
 
 ## Setup
 
@@ -41,11 +61,41 @@ This command handles everything automatically:
 1. **Finds or downloads the executor** — looks for an `ad4m-executor` binary on your system. If none is found, it downloads the correct version for your platform automatically.
 2. **Starts the executor** — launches `ad4m-executor` with MCP enabled.
 3. **Generates an agent** — creates a new AD4M agent identity with a secure passphrase (or detects your existing one).
-4. **Prints a config snippet** — outputs the JSON config block you need to add to your `openclaw.json`.
+4. **Hands you the finished config** — as a file when it contains a credential, otherwise printed.
 
 ### Adding the config
 
-At the end of setup, you'll see a config snippet like this:
+Where to copy the config from depends on whether it carries a credential, and getting
+this wrong is the single most common reason people conclude the plugin is broken and
+start hand-rolling MCP calls they do not need:
+
+| Snippet contains | Where to copy from |
+|------------------|--------------------|
+| A credential — JWT `token`, `wakeToken`, or a real `agentPassphrase` | **`ad4m-setup-config.json`** (mode `0600`, beside the config file of the profile setup ran against). Setup prints the path. |
+| Nothing secret | The `one line for copy&paste:` line in the output. |
+
+**Never copy a credential out of your terminal.** OpenClaw elides credentials in log
+output, so what you see on screen is `"eyJ0eX…kf94"`, not a usable value. A config pasted
+from scrollback authenticates against nothing.
+
+Copy into `plugins.entries.ad4m.config`, restart the gateway, then **delete
+`ad4m-setup-config.json`**. Leaving it behind is not just hygiene: a later run that finds
+a stale file can hand you a previous run's account.
+
+### Setup without a terminal
+
+`ad4m-setup` prompts on stdin only where it has to, and each prompt has a headless route:
+
+| What it needs | Headless route |
+|---------------|----------------|
+| Multi-user password | Export `AD4M_PASSWORD` before running setup (recommended; also lets the plugin re-authenticate when the JWT expires). `config.password` works but is plaintext at rest. |
+| Capability approval code (external mode) | Run the executor with `--auto-permit-cap-requests`; the code is logged to stdout. |
+| Email verification code (multi-user node with SMTP verification) | **No headless route.** A human reads the code from the inbox. Nodes without SMTP verification return the JWT from `login_email` and never reach this prompt. |
+
+Without a TTY and without `AD4M_PASSWORD`, setup fails with an explicit message rather
+than hanging.
+
+The config block it writes looks like this:
 
 ```json
 {
@@ -135,11 +185,17 @@ All fields are optional. In managed mode, credentials are auto-generated during 
 | `agentPassphrase` | generated during setup | Passphrase to unlock the agent |
 | `mcpEndpoint` | `http://localhost:3001/mcp` | AD4M executor MCP endpoint URL |
 | `token` | — | JWT token for external mode authentication |
-| `toolRefreshIntervalMs` | `30000` | How often to poll for new dynamic tools (ms) |
 | `executorUrl` | `http://localhost:12000` | REST URL for the executor |
 | `wakeUrl` | `http://localhost:18789/hooks/wake` | OpenClaw wake endpoint URL |
 | `wakeToken` | auto from `hooks.token` | Override for the hooks authentication token |
 | `debounceMs` | `2000` | Debounce interval for wake events (ms) |
+| `allowInsecureHttp` | `false` | Client-side guard. Every MCP call carries a credential, so the plugin refuses a non-loopback plaintext `http://` `mcpEndpoint` unless this is set. `https://`, `http://localhost…` and SSH-tunnelled endpoints need it off. Use it only for a trusted LAN path; otherwise put TLS in front of the executor. |
+| `multiUser` | `false` | External mode: provision the agent's own user account on a multi-user node (`signup` + `login_email`) instead of requesting a capability against the node's base agent. |
+| `email` | — | Multi-user: the agent's account identifier. Persisted by setup for re-authentication. |
+| `password` | — | Multi-user password. Resolution order: `AD4M_PASSWORD` env var → interactive prompt during setup → this field. **Prefer the env var** — this field is plaintext at rest, and setup persists only the resulting `token` and `email`. |
+| `runHolochain` | `true` | Managed mode: set `false` to start the executor with `--run-holochain false` — no P2P or bootstrap egress, for isolated or offline nodes that do not need neighbourhood sync. |
+| `rustLog` | — | `RUST_LOG` value for the executor process (e.g. `holochain=debug`). Managed mode only. |
+| `executorLogTarget` | `file` | Where executor logs go: `file` (`~/.ad4m/ad4m.log`), `openclaw`, or `both`. |
 
 ## How it works
 
@@ -147,7 +203,7 @@ The plugin runs two background services:
 
 ### `ad4m-mcp` — MCP tool bridge
 
-Connects to the AD4M executor's MCP endpoint, discovers all available tools, and registers them as native OpenClaw agent tools. As perspectives sync SHACL schemas, new tools (e.g. `ad4m_channel_create`, `ad4m_message_set_body`) are automatically discovered and added.
+Connects to the AD4M executor's MCP endpoint and registers a **fixed** set of tools as native OpenClaw agent tools — the class-agnostic static surface (`describe_perspective`, the `instance_*` family, `add_child` / `get_children`, `add_model`, …). The list does not change at runtime: per-class tools such as `channel_create` / `message_set_body` are generated by the executor only when it runs with `dynamicClassTools` enabled, and are deliberately not bridged. `contracts.tools` in `openclaw.plugin.json` is the authoritative list.
 
 ### `ad4m-waker` — real-time subscriptions
 
@@ -155,17 +211,96 @@ Connects to the executor's REST API. When your agent subscribes to mentions or c
 
 ## Plugin-provided tools
 
-In addition to all dynamically discovered AD4M MCP tools, the plugin registers:
+In addition to the bridged MCP tools, the plugin registers:
 
 | Tool | Description |
 |------|-------------|
-| `ad4m_refresh_ad4m_tools()` | Re-fetch the MCP tool list immediately |
+| `ad4m_get_sample_config()` | Print the config shape for the current mode |
 | `ad4m_subscribe_to_mentions(perspective_id)` | Watch for messages mentioning your agent |
 | `ad4m_subscribe_to_children(perspective_id, expression_address)` | Watch for new messages in a channel |
 | `ad4m_unsubscribe_from_mentions(perspective_id)` | Stop watching mentions |
 | `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching a channel |
 | `ad4m_list_waker_subscriptions()` | List all active subscriptions |
 | `ad4m_set_profile_picture_from_file(file_path)` | Set your agent's profile picture |
+
+## Troubleshooting
+
+### Two installs of the same plugin
+
+OpenClaw resolves a plugin id from more than one place, and a config-selected plugin
+silently wins over a globally installed one:
+
+```
+[config] warnings: plugins.entries.ad4m: plugin ad4m: duplicate plugin id resolved by
+explicit config-selected plugin; global plugin will be overridden by config plugin (…)
+```
+
+`openclaw plugins list` then shows a single `ad4m` entry — the winner. The symptom is a
+tool surface that does not match the code you think you are running: a stale checkout
+serving old tool names, or a tool count that does not match `contracts.tools` in
+`openclaw.plugin.json`. **Read `source` in `openclaw plugins list --json` before
+debugging anything else.**
+
+Removing the config entry does not necessarily remove the plugin. If a global install
+also exists, the gateway falls back to it on the next restart — possibly an older build
+from a different checkout. Check `source` again after every restart.
+
+The precedence order, strongest first, is: config-selected (`plugins.load.paths`, or
+`plugins install -l`) → a bundled plugin inside a dev source root → a global install the
+registry has a record for → bundled → workspace → anything else, including a global
+directory with no install record. Two candidates can therefore both be `global` and still
+rank differently — that is what a `global plugin will be overridden by global plugin`
+warning means. The consequence worth remembering: **`openclaw plugins install` does not
+take effect while a `plugins.load.paths` entry for the same id is present.** The install
+succeeds, `plugins list` shows one entry, and the gateway keeps loading the path.
+
+### `plugins uninstall` refuses
+
+```
+Plugin "ad4m" has no authoritative package-owner metadata. Refresh the plugin registry,
+then reinstall the package or run openclaw doctor before retrying.
+```
+
+`openclaw plugins uninstall` owns registry installs only. A plugin loaded through
+`plugins.load.paths` or an explicit `plugins.entries` path is not one, and the message
+does not say so.
+
+**The local-development install produces exactly that kind.** `openclaw plugins install -l`
+records the plugin as config-selected, so the documented install and the documented
+uninstall do not round-trip: install with `-l`, and `uninstall` will refuse. Remove it by
+hand:
+
+1. Delete the path from `plugins.load.paths`.
+2. Delete `plugins.entries.ad4m` if you also want its config and credentials gone — back
+   the block up first, it holds your JWT.
+3. Restart the gateway and re-check `openclaw plugins list --json`.
+
+### Setup cannot authenticate, and the executor is locked
+
+An AD4M executor holds its keys in memory only, so it comes back **locked** after every
+restart — including one it did not choose, such as a gateway restart that took the
+executor down with it. While it is locked, `request_capability` cannot be confirmed and
+no login of any kind succeeds.
+
+Setup names this case rather than blaming the token:
+
+```
+[ad4m-setup] Could not complete auth: the executor is LOCKED, not misconfigured.
+[ad4m-setup] A JWT will not help here — a locked node rejects it too. Have the
+executor's operator call unlockAgent, then run `openclaw ad4m-setup` again.
+```
+
+**Pasting a JWT is not the remedy** — a locked node rejects a valid token exactly as it
+rejects the handshake. Unlock the executor first (`unlockAgent`, or the launcher's
+passphrase prompt), then re-run setup. The config snippet printed below the warning says
+the same thing in the field you would otherwise fill:
+`"token": "<unlock the executor first, then re-run ad4m-setup>"`.
+
+If `auth_status` cannot be reached either, setup says the lock state is **unknown** rather
+than implying the node is fine — check it before pasting anything.
+
+`ad4m_auth_status` answers the same question at any time: `executor_locked: true`
+alongside `authenticated: true` means your credential is fine and the node is not ready.
 
 ## Plugin structure
 
@@ -187,6 +322,30 @@ plugins/ad4m/
 ```
 
 ## Changelog
+
+### Unreleased
+
+- ⚠️ **Breaking for existing configs: credentials are no longer sent to a cleartext
+  remote endpoint.** Every MCP call carries the plugin's JWT in an `Authorization`
+  header, so an `mcpEndpoint` that is plain `http://` on anything but loopback now
+  fails closed. A config that worked before this change stops working on the first
+  restart after it, and **every `ad4m_*` tool returns the refusal instead of a result**
+  — the failure looks like a broken bridge, not a config problem.
+
+  The fix is one field. Either move the executor behind TLS and use `https://`, or, if
+  the network path is genuinely yours end to end (a LAN host, an SSH tunnel), set
+  `allowInsecureHttp: true` in `plugins.entries.ad4m.config`. The flag is a client-side
+  guard only; it does not change anything about the executor.
+- **Setup no longer prints credentials to the terminal.** A config snippet holding a
+  `wakeToken` or a real `agentPassphrase` now goes to `ad4m-setup-config.json` (mode
+  `0600`) like a JWT already did, instead of being printed as one copy-paste line.
+- **Setup warns instead of falling back silently.** An `--endpoint` that does not answer
+  used to drop to managed mode without a word, downloading an executor and returning a
+  localhost config for a remote node you named.
+- **Setup names a locked executor as the cause when auth fails.** It used to answer every
+  failed handshake with "obtain a JWT token manually" — the one remedy that cannot work
+  against a locked node, which rejects a pasted token too. Setup now asks `auth_status`
+  before it advises, and points at `unlockAgent` when the node is locked.
 
 ### 0.0.2
 

@@ -53,10 +53,17 @@ import {
   type McpResponse,
   type ExecutorStartResult,
   type AgentResult,
+  withTimeout,
+  insecureEndpointReason,
+  closeWakerClient,
+  hasLiveCredential,
+  isLoopbackEndpoint,
+  explainCapabilityFailure,
 } from "./index";
 
 import ad4mPlugin, { _resetModuleState } from "./index";
-import { WakerSubscriptionManager } from "./wakerSubscriptionManager";
+import { STATIC_TOOL_DEFS } from "./staticToolDefs";
+import { WakerSubscriptionManager, hintFor } from "./wakerSubscriptionManager";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1433,6 +1440,36 @@ describe("loginViaEmailVerification (auth-both fallback)", () => {
     expect(n).toBe(2);
   });
 
+  it("sends verification_type, not type, and skips the login request for a signup code", async () => {
+    const bodies: any[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return fakeJsonResponse({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ type: "text", text: JSON.stringify({ token: "jwt-signup" }) }] },
+      });
+    });
+    const token = await loginViaEmailVerification(
+      makeMockLogger(),
+      "http://localhost:3001/mcp",
+      "a@b.c",
+      "sess",
+      async () => "123456",
+      "signup",
+    );
+    expect(token).toBe("jwt-signup");
+    // signup already emailed a signup-typed code — no login code is requested.
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].params.name).toBe("verify_email_code");
+    expect(bodies[0].params.arguments).toMatchObject({
+      email: "a@b.c",
+      code: "123456",
+      verification_type: "signup",
+    });
+    expect(bodies[0].params.arguments.type).toBeUndefined();
+  });
+
   it("returns null when no code is entered (does not call verify_email_code)", async () => {
     let n = 0;
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
@@ -1647,6 +1684,54 @@ describe("ad4mPlugin", () => {
     mockExecFileSync.mockClear();
   });
 
+  it("waker start() returns even when the executor never answers", async () => {
+    // The executor accepts the socket but never replies (locked wallet,
+    // mid-restart). Before this was detached, start() awaited agent.status()
+    // forever and stalled plugin startup — and the gateway control channel
+    // with it, so the box could not even be woken.
+    const registeredServices: Array<{ id: string; [k: string]: any }> = [];
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
+
+    const neverResolves = vi.fn(() => new Promise(() => {}));
+    vi.doMock("@coasys/ad4m", () => ({
+      Ad4mClient: vi.fn(() => makeMockAd4mClient({ status: neverResolves })),
+      QuerySubscriptionProxy: vi.fn(),
+    }));
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        token: "eyJhbGciOiJIUzI1NiJ9.test.token",
+        wakeToken: "wake-token",
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn(),
+      registerService: vi.fn((svc: any) => registeredServices.push(svc)),
+      registerCli: vi.fn(),
+    };
+
+    await ad4mPlugin(mockApi);
+    const waker = registeredServices.find((s) => s.id === "ad4m-waker");
+    expect(waker).toBeDefined();
+
+    const started = Date.now();
+    await waker!.start({ stateDir: undefined });
+    expect(Date.now() - started).toBeLessThan(2000);
+
+    waker!.stop();
+    vi.doUnmock("@coasys/ad4m");
+  });
+
+  it("withTimeout rejects a promise that never settles, and passes one that does", async () => {
+    await expect(
+      withTimeout(new Promise(() => {}), 20, "[test] hang"),
+    ).rejects.toThrow(/timed out after 20ms/);
+    await expect(withTimeout(Promise.resolve("ok"), 1000, "[test] fast")).resolves.toBe(
+      "ok",
+    );
+  });
+
   it("registers expected tools and services", async () => {
     const registeredTools: Array<{ name: string; [k: string]: any }> = [];
     const registeredServices: Array<{ id: string; [k: string]: any }> = [];
@@ -1671,12 +1756,63 @@ describe("ad4mPlugin", () => {
     // Check that base tools are registered
     const toolNames = registeredTools.map((t) => t.name);
     expect(toolNames).toContain("ad4m_get_sample_config");
-    expect(toolNames).toContain("ad4m_refresh_ad4m_tools");
+    expect(toolNames).not.toContain("ad4m_refresh_ad4m_tools");
     expect(toolNames).toContain("ad4m_subscribe_to_mentions");
     expect(toolNames).toContain("ad4m_unsubscribe_from_mentions");
     expect(toolNames).toContain("ad4m_subscribe_to_children");
     expect(toolNames).toContain("ad4m_unsubscribe_from_children");
     expect(toolNames).toContain("ad4m_list_waker_subscriptions");
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "openclaw.plugin.json"), "utf8"),
+    ).contracts.tools as string[];
+    const missing = toolNames.filter((n) => !manifest.includes(n));
+    expect(missing).toEqual([]);
+    // …and the other direction: a manifest entry with nothing behind it is a
+    // name agents can see and call but that always fails with tool-not-found
+    // (this is how `ad4m_remove_link` / `ad4m_agent_status` survived after
+    // the executor stopped implementing them).
+    const phantom = manifest.filter((n) => !toolNames.includes(n));
+    expect(phantom).toEqual([]);
+
+    // Every captured executor def is registered at register() time — with
+    // no executor reachable — and is declared in the manifest. The executor
+    // name set in index.ts is derived from STATIC_TOOL_DEFS; contracts.tools
+    // is the OpenClaw allowlist of ad4m_-prefixed names plus plugin-local
+    // tools. The two bidirectional checks above are what keep those from
+    // drifting.
+    const unregisteredDefs = STATIC_TOOL_DEFS.map((d) => `ad4m_${d.name}`)
+      .filter((n) => !toolNames.includes(n));
+    expect(unregisteredDefs).toEqual([]);
+    const undeclaredDefs = STATIC_TOOL_DEFS.map((d) => `ad4m_${d.name}`)
+      .filter((n) => !manifest.includes(n));
+    expect(undeclaredDefs).toEqual([]);
+
+    // The consolidation's additions to the static surface.
+    for (const name of [
+      "ad4m_get_documentation",
+      "ad4m_instance_remove_from_collection",
+      "ad4m_instance_transcript",
+      "ad4m_add_child",
+      "ad4m_get_children",
+    ]) {
+      expect(toolNames).toContain(name);
+    }
+
+    // Parameter schemas come from the captured defs with $schema stripped;
+    // everything else (including get_documentation's $defs/$ref enum) is
+    // passed through as the executor emits it.
+    const getDoc = registeredTools.find((t) => t.name === "ad4m_get_documentation");
+    expect(getDoc!.parameters.$schema).toBeUndefined();
+    expect(getDoc!.parameters.required).toEqual(["topic"]);
+    expect(getDoc!.parameters.properties.topic.$ref).toBe("#/$defs/DocTopic");
+    expect(getDoc!.parameters.$defs.DocTopic.oneOf.map((o: any) => o.const))
+      .toEqual(["overview", "architecture", "usage", "flux", "models"]);
+    const transcript = registeredTools.find((t) => t.name === "ad4m_instance_transcript");
+    expect(transcript!.parameters.required).toEqual(["perspective_id", "class_name", "parent"]);
+    expect(transcript!.parameters.properties).not.toHaveProperty("parent_address");
+    const query = registeredTools.find((t) => t.name === "ad4m_instance_query");
+    expect(query!.parameters.properties).not.toHaveProperty("order");
 
     // Check services
     const serviceIds = registeredServices.map((s) => s.id);
@@ -1739,35 +1875,6 @@ describe("ad4mPlugin", () => {
 
     const result = await listTool!.execute();
     expect(result.content[0].text).toContain("No active waker subscriptions");
-  });
-
-  it("refresh_ad4m_tools returns count when MCP is unavailable", async () => {
-    const registeredTools: Array<{ name: string; execute: Function }> = [];
-
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No executor"));
-
-    const mockApi = {
-      pluginConfig: {
-        mode: "external",
-        mcpEndpoint: "http://localhost:3001/mcp",
-        token: "test-cred",
-      },
-      logger: makeMockLogger(),
-      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
-      registerService: vi.fn(),
-      registerCli: vi.fn(),
-    };
-
-    await ad4mPlugin(mockApi);
-
-    const refreshTool = registeredTools.find(
-      (t) => t.name === "ad4m_refresh_ad4m_tools",
-    );
-    expect(refreshTool).toBeDefined();
-
-    const result = await refreshTool!.execute();
-    // MCP unavailable, so "No new tools found"
-    expect(result.content[0].text).toContain("No new tools found");
   });
 
   it("ad4m_subscribe_to_mentions reports 'Waker service not connected' when the waker isn't running", async () => {
@@ -2006,7 +2113,7 @@ describe("ad4mPlugin", () => {
     expect(credMessage).toContain("length: 24");
   }, 10000);
 
-  it("refreshTools recovers from 422 by re-initializing session", async () => {
+  it("executor tool-surface check recovers from 422 by re-initializing session", async () => {
     const registeredTools: Array<{ name: string; execute: Function }> = [];
     const registeredServices: Array<{
       id: string;
@@ -2056,7 +2163,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "recovered_tool",
+                name: "get_my_did",
                 description: "A tool discovered after session recovery",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2081,7 +2188,7 @@ describe("ad4mPlugin", () => {
 
     await ad4mPlugin(mockApi);
 
-    // Start the MCP service — ensureSession + refreshTools with 422 recovery
+    // Start the MCP service — ensureSession + drift check with 422 recovery
     const mcpService = registeredServices.find((s) => s.id === "ad4m-mcp");
     expect(mcpService).toBeDefined();
     await mcpService!.start(makeServiceCtx());
@@ -2093,7 +2200,7 @@ describe("ad4mPlugin", () => {
 
     // The recovered tool should be registered
     const toolNames = registeredTools.map((t) => t.name);
-    expect(toolNames).toContain("ad4m_recovered_tool");
+    expect(toolNames).toContain("ad4m_get_my_did");
 
     // Logger should show re-initialization
     const infoMsgs = mockApi.logger.info.mock.calls.map((c: any[]) => c[0]);
@@ -2144,7 +2251,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "test_tool",
+                name: "instance_query",
                 description: "A test tool",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2192,7 +2299,7 @@ describe("ad4mPlugin", () => {
     await mcpService!.start(makeServiceCtx());
 
     // Find the dynamically registered MCP tool
-    const testTool = registeredTools.find((t) => t.name === "ad4m_test_tool");
+    const testTool = registeredTools.find((t) => t.name === "ad4m_instance_query");
     expect(testTool).toBeDefined();
 
     // Reset counters to track just the tool call
@@ -2251,7 +2358,7 @@ describe("ad4mPlugin", () => {
           result: {
             tools: [
               {
-                name: "failing_tool",
+                name: "add_link",
                 description: "Tool that fails with 500",
                 inputSchema: { type: "object", properties: {} },
               },
@@ -2287,7 +2394,7 @@ describe("ad4mPlugin", () => {
     await mcpService!.start(makeServiceCtx());
 
     const failingTool = registeredTools.find(
-      (t) => t.name === "ad4m_failing_tool",
+      (t) => t.name === "ad4m_add_link",
     );
     expect(failingTool).toBeDefined();
 
@@ -2712,6 +2819,11 @@ describe("ad4mPlugin", () => {
     const registeredClis: any[] = [];
     const registeredServices: any[] = [];
 
+    // Point the snippet file at a throwaway dir rather than the real profile.
+    const snippetDir = fs.mkdtempSync(path.join(os.tmpdir(), "ad4m-setup-"));
+    const prevConfigPath = process.env.OPENCLAW_CONFIG_PATH;
+    process.env.OPENCLAW_CONFIG_PATH = path.join(snippetDir, "openclaw.json");
+
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
       const body = JSON.parse((opts as any).body as string);
       if (body.method === "initialize") {
@@ -2787,12 +2899,29 @@ describe("ad4mPlugin", () => {
     expect(allMsgs.some((m: string) => m.includes("jwt-secret"))).toBe(true);
     expect(allMsgs.some((m: string) => m.includes("bot@test.local"))).toBe(true);
 
-    // But MUST NOT contain the plaintext password
-    const snippetLines = allMsgs.filter((m: string) => m.includes("one line for copy"));
-    expect(snippetLines.length).toBeGreaterThan(0);
-    for (const line of snippetLines) {
+    // The copyable config goes to a file, because the real OpenClaw logger
+    // elides the token in every line it prints. The file is the thing a user
+    // actually pastes from, so the password guard has to hold there too.
+    const snippetPath = path.join(snippetDir, "ad4m-setup-config.json");
+    expect(fs.existsSync(snippetPath)).toBe(true);
+    const written = fs.readFileSync(snippetPath, "utf-8");
+    expect(written).toContain("jwt-secret");
+    expect(written).toContain("bot@test.local");
+    expect(written).not.toContain("super-secret-pass");
+    // Owner-only: it holds a live JWT.
+    expect(fs.statSync(snippetPath).mode & 0o777).toBe(0o600);
+
+    // And MUST NOT appear in any logged line either
+    for (const line of allMsgs) {
       expect(line).not.toContain("super-secret-pass");
     }
+
+    if (prevConfigPath === undefined) {
+      delete process.env.OPENCLAW_CONFIG_PATH;
+    } else {
+      process.env.OPENCLAW_CONFIG_PATH = prevConfigPath;
+    }
+    fs.rmSync(snippetDir, { recursive: true, force: true });
 
     vi.restoreAllMocks();
   });
@@ -2983,6 +3112,116 @@ describe("WakerSubscriptionManager", () => {
   const mockPerspectiveClientSimple = {
     querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] }})),
   };
+
+  it("should throw when the executor rejects the subscription, and not keep it active", async () => {
+    const mock = makeMockProxy();
+    mock.proxy.subscribe = vi.fn(() =>
+      Promise.reject(new Error("RPC error 403: main key not found")),
+    );
+    const persisted: { subs: any[] } = { subs: [{ placeholder: true }] };
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => {},
+      onPersist: (subs: any[]) => { persisted.subs = subs; },
+    });
+
+    // A failed subscription must surface to the caller — the subscribe tools
+    // replied "Subscribed..." on a 403 before this.
+    await expect(manager.subscribe({
+      id: "mention-fail",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    })).rejects.toThrow(/main key not found/);
+
+    expect(manager.has("mention-fail")).toBe(false);
+    expect(manager.getActive()).toHaveLength(0);
+    expect(persisted.subs).toHaveLength(0);
+    expect(mock.proxy.dispose).toHaveBeenCalled();
+    // ...and it stays pending, because the caller asked to be enrolled
+    expect(manager.getPending().map((s) => s.id)).toEqual(["mention-fail"]);
+  });
+
+  it("re-attempts a rejected subscription until the executor accepts it", async () => {
+    const mock = makeMockProxy();
+    let attempt = 0;
+    mock.proxy.subscribe = vi.fn(() => {
+      attempt += 1;
+      // Fails while the wallet is locked, succeeds once it is unlocked.
+      return attempt === 1
+        ? Promise.reject(new Error("RPC error 403: main key not found"))
+        : Promise.resolve();
+    });
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      retryPendingMs: 20,
+      onWake: () => {},
+    });
+
+    const sub = {
+      id: "mention-retry",
+      type: "mention" as const,
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    };
+    await expect(manager.subscribe(sub)).rejects.toThrow(/re-attempting every/);
+    expect(manager.getPending()).toHaveLength(1);
+
+    // Wait for the scheduled re-attempt to run.
+    await vi.waitFor(() => {
+      expect(manager.has("mention-retry")).toBe(true);
+    });
+    expect(manager.getPending()).toHaveLength(0);
+    expect(attempt).toBe(2);
+    manager.disposeAll();
+  });
+
+  it("stops re-attempting a subscription that was disposed", async () => {
+    const mock = makeMockProxy();
+    mock.proxy.subscribe = vi.fn(() =>
+      Promise.reject(new Error("RPC error 403: main key not found")),
+    );
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      retryPendingMs: 20,
+      onWake: () => {},
+    });
+
+    await expect(manager.subscribe({
+      id: "mention-gone",
+      type: "mention",
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    })).rejects.toThrow();
+    expect(manager.getPending()).toHaveLength(1);
+
+    manager.dispose("mention-gone");
+    expect(manager.getPending()).toHaveLength(0);
+
+    const attemptsAfterDispose = mock.proxy.subscribe.mock.calls.length;
+    await manager.retryPending();
+    expect(mock.proxy.subscribe.mock.calls.length).toBe(attemptsAfterDispose);
+  });
+
+  it("should hint at a locked wallet on a main-key 403 only", () => {
+    expect(hintFor("RPC error 403: main key not found")).toContain("wallet is locked");
+    expect(hintFor("connection refused")).toBe("");
+  });
 
   it("should ignore non-array results (e.g. false) and not store them as seen", async () => {
     const mock = makeMockProxy();
@@ -3230,5 +3469,296 @@ describe("WakerSubscriptionManager", () => {
     expect(capturedMentions![0].parents).toEqual([]);
 
     manager.disposeAll();
+  });
+});
+
+describe("WakerSubscriptionManager disposal races", () => {
+  const noopLogger = () => ({
+    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+  });
+  const perspectiveClient = {
+    querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] } })),
+  };
+
+  /** A proxy whose subscribe() only settles when the test says so. */
+  function makeSlowProxy() {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const proxy = {
+      initialized: Promise.resolve(),
+      subscribe: vi.fn(() => gate),
+      dispose: vi.fn(),
+      onResult: vi.fn(),
+    };
+    return { ProxyClass: vi.fn(function () { return proxy; }), proxy, release };
+  }
+
+  const sub: WakerSubscription = {
+    id: "mention-race",
+    type: "mention",
+    perspective: "fake-uuid",
+    channel: "",
+    query: "SELECT * FROM link",
+  };
+
+  it("dispose() during subscribe() must not leave a live subscription behind", async () => {
+    const mock = makeSlowProxy();
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => {},
+    });
+
+    const pending = manager.subscribe(sub);
+    manager.dispose(sub.id);
+    mock.release();
+    await pending;
+
+    expect(manager.getActive()).toEqual([]);
+    expect(manager.has(sub.id)).toBe(false);
+    expect(mock.proxy.dispose).toHaveBeenCalled();
+  });
+
+  it("disposeAll() during subscribe() must not leave a live subscription behind", async () => {
+    const mock = makeSlowProxy();
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      onWake: () => {},
+    });
+
+    const pending = manager.subscribe(sub);
+    manager.disposeAll();
+    mock.release();
+    await pending;
+
+    expect(manager.getActive()).toEqual([]);
+    expect(manager.getPending()).toEqual([]);
+    expect(mock.proxy.dispose).toHaveBeenCalled();
+  });
+
+  it("a subscription disposed mid-attempt is not re-queued as pending on failure", async () => {
+    let reject!: (e: Error) => void;
+    const gate = new Promise<void>((_r, rj) => { reject = rj; });
+    const proxy = {
+      initialized: Promise.resolve(),
+      subscribe: vi.fn(() => gate),
+      dispose: vi.fn(),
+      onResult: vi.fn(),
+    };
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: vi.fn(function () { return proxy; }),
+      debounceMs: 10,
+      onWake: () => {},
+    });
+
+    const pending = manager.subscribe(sub);
+    manager.dispose(sub.id);
+    reject(new Error("RPC error 403: main key not found"));
+    await pending;
+
+    expect(manager.getPending()).toEqual([]);
+    expect(manager.getActive()).toEqual([]);
+  });
+});
+
+describe("insecureEndpointReason", () => {
+  it("allows https anywhere and http only on loopback", () => {
+    expect(insecureEndpointReason("http://localhost:3001/mcp")).toBeNull();
+    expect(insecureEndpointReason("http://127.0.0.1:3001/mcp")).toBeNull();
+    expect(insecureEndpointReason("http://[::1]:3001/mcp")).toBeNull();
+    expect(insecureEndpointReason("https://executor.example.com/mcp")).toBeNull();
+  });
+
+  it("refuses to send credentials to a remote http endpoint", () => {
+    const reason = insecureEndpointReason("http://their-executor:3001/mcp");
+    expect(reason).toMatch(/cleartext/);
+    expect(reason).toMatch(/allowInsecureHttp/);
+  });
+
+  it("honours the explicit opt-in and rejects non-http schemes", () => {
+    expect(
+      insecureEndpointReason("http://their-executor:3001/mcp", true),
+    ).toBeNull();
+    expect(insecureEndpointReason("ftp://executor/mcp")).toMatch(/http\(s\)/);
+    expect(insecureEndpointReason("not a url")).toMatch(/not a valid URL/);
+  });
+});
+
+describe("closeWakerClient", () => {
+  it("closes the client and swallows a throwing close()", () => {
+    const close = vi.fn();
+    closeWakerClient({ close });
+    expect(close).toHaveBeenCalled();
+
+    const warn = vi.fn();
+    closeWakerClient(
+      { close: () => { throw new Error("already gone"); } },
+      { warn },
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("already gone"));
+    // A client that was never created is not an error.
+    expect(() => closeWakerClient(null)).not.toThrow();
+  });
+});
+
+describe("isLoopbackEndpoint", () => {
+  it("recognises every loopback spelling the credential guard relies on", () => {
+    for (const url of [
+      "http://localhost:3001/mcp",
+      "http://foo.localhost:3001/mcp",
+      "http://127.0.0.1:3001/mcp",
+      "http://127.5.5.5:3001/mcp",
+      "http://[::1]:3001/mcp",
+    ]) {
+      expect(isLoopbackEndpoint(url), url).toBe(true);
+    }
+  });
+
+  it("treats remote hosts and unparseable input as not loopback", () => {
+    // A hostname merely containing "localhost" is a different machine.
+    for (const url of [
+      "http://marvin.fritz.box:3002/mcp",
+      "http://localhost.evil.example/mcp",
+      "http://10.0.0.1:3001/mcp",
+      "not-a-url",
+    ]) {
+      expect(isLoopbackEndpoint(url), url).toBe(false);
+    }
+  });
+});
+
+describe("explainCapabilityFailure", () => {
+  // Regression: against a LOCKED executor, setup used to say "obtain a JWT
+  // token manually" — naming the one remedy that cannot work, since a locked
+  // node rejects a pasted token too. Observed on Marvin 2026-09-09: the
+  // operator hand-edited a JWT into the config chasing a cause that was not
+  // the token.
+  it("names the lock, and says a JWT will not help, when the node is locked", () => {
+    const { lines } = explainCapabilityFailure({
+      capData: { request_id: "req-1", code: "123456" },
+      // Deliberately terser than the executor's real message: the action has
+      // to come from our own line, not from whatever the node happened to say.
+      statusData: {
+        authenticated: false,
+        executor_locked: true,
+        message: "Executor is locked.",
+      },
+    });
+    const text = lines.join(" ");
+    expect(text).toContain("LOCKED");
+    expect(text).toContain("unlockAgent");
+    // The remedy must not be the one that cannot work.
+    expect(text).toContain("will not help");
+    expect(text).toContain("ad4m-setup");
+  });
+
+  it("does not print a JWT prompt under a warning that a JWT will not help", () => {
+    // The snippet is still printed — its shape is what the operator needs
+    // after unlocking — but the field they copy must not contradict the
+    // warning directly above it. Skimming past that warning is how this
+    // failure was reached.
+    const locked = explainCapabilityFailure({
+      statusData: { executor_locked: true },
+    });
+    expect(locked.tokenPlaceholder).not.toContain("paste-your-jwt");
+    expect(locked.tokenPlaceholder).toContain("unlock");
+
+    const unlocked = explainCapabilityFailure({
+      capData: { request_id: "req-1" },
+      statusData: { executor_locked: false },
+    });
+    expect(unlocked.tokenPlaceholder).toBe("<paste-your-jwt-here>");
+  });
+
+  it("passes the executor's own lock message through rather than paraphrasing it", () => {
+    const { lines } = explainCapabilityFailure({
+      statusData: { executor_locked: true, message: "Ask the operator, then retry." },
+    });
+    expect(lines).toContain("Ask the operator, then retry.");
+  });
+
+  it("blames the unconfirmed handshake, not the lock, on an unlocked node", () => {
+    const { lines } = explainCapabilityFailure({
+      capData: { request_id: "req-1", code: "123456" },
+      statusData: { authenticated: false, executor_locked: false },
+    });
+    const text = lines.join(" ");
+    expect(text).toContain("never confirmed");
+    expect(text).not.toContain("LOCKED");
+    // Here a manually obtained JWT genuinely is a remedy.
+    expect(text).toContain("JWT");
+    // We checked and the node is fine — do not hedge about the lock state.
+    expect(text).not.toContain("lock state is unknown");
+  });
+
+  it("reports the executor's error when the capability request itself failed", () => {
+    const { lines } = explainCapabilityFailure({
+      capData: { error: "capability request rejected" },
+      statusData: { executor_locked: false },
+    });
+    const text = lines.join(" ");
+    expect(text).toContain("did not issue a capability request");
+    expect(text).toContain("capability request rejected");
+  });
+
+  it("says the lock state is unknown when auth_status itself failed", () => {
+    // "We checked, you are fine" and "we could not check" must not read
+    // alike: undefined statusData used to produce a message word-for-word
+    // identical to the confirmed-unlocked case.
+    const { lines } = explainCapabilityFailure({ capData: { request_id: "req-1" } });
+    const text = lines.join(" ");
+    expect(text).toContain("lock state is unknown");
+    expect(text).toContain("unlockAgent");
+    expect(text).toContain("ad4m-setup");
+  });
+});
+
+describe("hasLiveCredential", () => {
+  // Regression: the no-token branch of printConfigSnippet used to print the
+  // whole config as one copy-paste line, which put the hooks wakeToken and a
+  // real agentPassphrase into terminal scrollback in clear.
+  it("is true for any live credential, not just a JWT", () => {
+    expect(hasLiveCredential({ token: "eyJhbGciOi" })).toBe(true);
+    expect(hasLiveCredential({ wakeToken: "ec066fed2525d2654ac9cdbd33eb0ec5" })).toBe(true);
+    expect(hasLiveCredential({ password: "hunter2" })).toBe(true);
+    expect(hasLiveCredential({ agentPassphrase: "aRealGeneratedPassphrase" })).toBe(true);
+  });
+
+  it("is false for placeholders and for a snippet with nothing secret", () => {
+    // These are instructions to the reader, not values worth protecting.
+    expect(hasLiveCredential({ agentPassphrase: "<enter-your-existing-passphrase>" })).toBe(false);
+    expect(hasLiveCredential({ agentPassphrase: "<run setup again after fixing executor>" })).toBe(false);
+    expect(hasLiveCredential({ agentPassphrase: "" })).toBe(false);
+    expect(hasLiveCredential({ mode: "managed", ad4mBinaryPath: "/usr/bin/ad4m-executor" })).toBe(false);
+  });
+
+  it("agrees with the manifest about which fields are secret", () => {
+    // Two lists answer "what is secret here": hasLiveCredential, which decides
+    // whether a snippet may be printed, and uiHints.sensitive, which decides
+    // whether a UI masks the field. They drifted once — `password` was in the
+    // first and missing from the second. This fails if they drift again.
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "openclaw.plugin.json"), "utf8"),
+    );
+    for (const field of ["token", "wakeToken", "password", "agentPassphrase"]) {
+      expect(hasLiveCredential({ [field]: "a-real-value" })).toBe(true);
+      expect(manifest.uiHints?.[field]?.sensitive, `uiHints.${field}.sensitive`).toBe(true);
+    }
+  });
+
+  it("treats a bracket-wrapped real passphrase as live, not as a placeholder", () => {
+    // The placeholders are bracket-styled, so keeping the brackets while
+    // substituting a real passphrase is a natural mistake. A shape test would
+    // have classified these as instructions and printed them.
+    expect(hasLiveCredential({ agentPassphrase: "<aRealGeneratedPassphrase>" })).toBe(true);
+    expect(hasLiveCredential({ agentPassphrase: "<enter-your-existing-passphrase> hunter2" })).toBe(true);
+    expect(hasLiveCredential({ agentPassphrase: "<>" })).toBe(true);
   });
 });

@@ -2,10 +2,10 @@
 //!
 //! Tools for managing perspectives (knowledge graphs) and raw links.
 
+use super::instances::normalize_legacy_literal;
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
 use crate::perspectives::perspective_instance::SdnaType;
-use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::perspectives::{add_perspective, all_perspectives};
 use crate::types::Link;
 use crate::types::{LinkQuery, LinkStatus, PerspectiveHandle};
@@ -21,13 +21,6 @@ use serde_json::json;
 /// Parameters for listing perspectives
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListPerspectivesParams {}
-
-/// Parameters for listing subject classes in a perspective
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ListSubjectClassesParams {
-    /// Perspective UUID
-    pub perspective_id: String,
-}
 
 /// Parameters for creating a new perspective
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -117,15 +110,6 @@ fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Parameters for running a Prolog query
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct InferParams {
-    /// Perspective UUID
-    pub perspective_id: String,
-    /// Prolog query string
-    pub query: String,
-}
-
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -159,46 +143,6 @@ impl Ad4mMcpHandler {
             }));
         }
         serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
-    }
-
-    /// Get all models (subject classes) defined in a perspective
-    #[tool(
-        description = "Get all models (SHACL subject classes) defined in a perspective. Models are schemas that give structure to the raw link graph — like database table definitions. Each model defines typed properties and collections. Use query_subjects to find instances, get_subject_data to read them, or use the dynamic per-class tools (e.g. channel_create, message_get)."
-    )]
-    pub async fn get_models(&self, params: Parameters<ListSubjectClassesParams>) -> String {
-        let uuid = &params.0.perspective_id;
-
-        match self.get_readable_perspective(uuid).await {
-            Ok(perspective) => {
-                let links = perspective
-                    .get_links(&LinkQuery {
-                        predicate: Some("rdf://type".to_string()),
-                        target: Some("ad4m://SubjectClass".to_string()),
-                        ..Default::default()
-                    })
-                    .await;
-
-                match links {
-                    Ok(class_links) => {
-                        let classes: Vec<String> = class_links
-                            .iter()
-                            .map(|l| {
-                                l.data
-                                    .source
-                                    .split("://")
-                                    .last()
-                                    .unwrap_or(&l.data.source)
-                                    .to_string()
-                            })
-                            .collect();
-                        serde_json::to_string_pretty(&classes)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
-                    }
-                    Err(e) => format!("Error listing subject classes: {}", e),
-                }
-            }
-            Err(e) => e,
-        }
     }
 
     /// Create a new perspective
@@ -251,17 +195,22 @@ impl Ad4mMcpHandler {
 
     /// Add a link to a perspective
     #[tool(
-        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members."
+        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal:string:Alice' — note the single colon: the legacy 'literal://string:…' spelling is not a parseable IRI and breaks every query that inlines it. In shared neighbourhoods, links sync to all members."
     )]
     pub async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
         let p = &params.0;
 
         match self.get_writable_perspective(&p.perspective_id).await {
             Ok((mut perspective, agent_context)) => {
+                // The legacy `literal://…` spelling the old example advertised
+                // is not a parseable IRI, so storing it verbatim poisons every
+                // SPARQL read of the link. Normalise to the single-colon form
+                // (what the TypeScript SDK's `Literal` now requires too) and
+                // echo the stored target back so the caller sees it.
                 let link = Link {
-                    source: p.source.clone(),
+                    source: normalize_legacy_literal(&p.source).into_owned(),
                     predicate: Some(p.predicate.clone()),
-                    target: p.target.clone(),
+                    target: normalize_legacy_literal(&p.target).into_owned(),
                 };
 
                 match perspective
@@ -330,7 +279,7 @@ impl Ad4mMcpHandler {
 
     /// Add a model (subject class definition) to a perspective
     #[tool(
-        description = "Register a model (subject class) using a SHACL JSON definition. This defines the schema — properties, collections, types — for typed objects in the perspective. Once registered, dynamic MCP tools are auto-generated for the class: {class}_create, {class}_get, {class}_set_{property}, {class}_add_{collection}, etc. The tool list updates after registration."
+        description = "Register a model (subject class) using a SHACL JSON definition. This defines the schema — properties, collections, types — for typed objects in the perspective. Once registered, the class appears in describe_perspective and can be used with the generic instance_* tools by class_name (instance_create, instance_query, …). If the executor runs with dynamicClassTools enabled, per-class tools ({class}_create, {class}_set_{property}, …) are additionally generated and the tool list updates after registration."
     )]
     pub async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;
@@ -361,27 +310,6 @@ impl Ad4mMcpHandler {
                             .unwrap_or_else(|e| format!("Error: {}", e))
                     }
                     Err(e) => format!("Error adding SDNA: {}", e),
-                }
-            }
-            Err(e) => e,
-        }
-    }
-
-    /// Run a Prolog query for complex reasoning
-    #[tool(
-        description = "Run a Prolog query on a perspective for complex reasoning. The link graph is exposed as Prolog facts (triple/3), enabling pattern matching and inference beyond simple link queries. Example: 'triple(X, \"rdf://type\", \"ad4m://SubjectClass\")' finds all subject classes. Use for advanced queries not covered by other tools."
-    )]
-    pub async fn infer(&self, params: Parameters<InferParams>) -> String {
-        let p = &params.0;
-
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((perspective, agent_context)) => {
-                match perspective
-                    .prolog_query_with_context(p.query.clone(), &agent_context)
-                    .await
-                {
-                    Ok(result) => prolog_resolution_to_string(result),
-                    Err(e) => format!("Error running query: {}", e),
                 }
             }
             Err(e) => e,

@@ -86,10 +86,13 @@ pub(crate) fn relation_predicates(shape: &ModelShape) -> HashSet<&str> {
         .collect()
 }
 
-/// Local class name from a class URI: `ns://Intention` -> `Intention`.
+/// Local class name from a class URI: `ns://Intention` -> `Intention`,
+/// `http://ex.org/ont#Task` -> `Task`. The `#` separator matters for SHACL
+/// shapes written against a hash-namespace ontology, which the MCP layer
+/// also has to name in its error messages.
 pub(crate) fn class_local_name(target_class: &str) -> &str {
     target_class
-        .rsplit(|c| c == '/' || c == ':')
+        .rsplit(|c| c == '/' || c == ':' || c == '#')
         .find(|seg| !seg.is_empty())
         .unwrap_or(target_class)
 }
