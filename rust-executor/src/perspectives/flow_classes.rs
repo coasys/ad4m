@@ -262,6 +262,8 @@ pub(crate) async fn advance_flow_instance_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::perspective_instance::SdnaType;
     use serde_json::Value;
 
     fn parse(sdna: &str) -> Value {
@@ -480,6 +482,62 @@ mod tests {
             identity_names,
             vec!["flowInstance"],
             "FlowTransitionProposal identity must be `flowInstance` (its parent-instance discriminator)",
+        );
+    }
+
+    /// Regression guard for issue #1007: after `add_sdna` with `SdnaType::Flow`
+    /// the two hard-wired runtime classes are registered, so
+    /// `model_query("FlowTransitionProposal", "{}")` must return an empty list
+    /// rather than the "No SHACL shape stored" RPC 500 the engine was producing
+    /// on perspectives that had never had a proposal written to them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_flow_registers_runtime_classes() {
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        // Before add_sdna, both classes are absent — model_query must error.
+        let before = perspective.model_query("FlowTransitionProposal", "{}").await;
+        assert!(
+            before.is_err(),
+            "FlowTransitionProposal must not be queryable before any flow is added (got Ok)"
+        );
+
+        // Register a flow (no SHACL body needed — the sdna_type hook fires regardless).
+        perspective
+            .add_sdna(
+                "TestFlow".to_string(),
+                String::new(),
+                SdnaType::Flow,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("add_sdna(Flow) must succeed");
+
+        // After add_sdna the runtime classes are present: findAll returns [] not 500.
+        let result_json = perspective
+            .model_query("FlowTransitionProposal", "{}")
+            .await
+            .expect("FlowTransitionProposal.findAll must return Ok after add_flow (#1007)");
+
+        let result: Value = serde_json::from_str(&result_json)
+            .expect("model_query result must be valid JSON");
+        let instances = result["instances"]
+            .as_array()
+            .expect("model_query result must contain an 'instances' array");
+        assert!(
+            instances.is_empty(),
+            "fresh perspective must return empty FlowTransitionProposal list, got {instances:?}"
+        );
+
+        // FlowInstance must also be queryable.
+        let fi_json = perspective
+            .model_query("FlowInstance", "{}")
+            .await
+            .expect("FlowInstance.findAll must return Ok after add_flow (#1007)");
+        let fi: Value = serde_json::from_str(&fi_json).expect("FlowInstance result must be JSON");
+        assert!(
+            fi["instances"].as_array().map_or(false, |a| a.is_empty()),
+            "fresh perspective must return empty FlowInstance list"
         );
     }
 }

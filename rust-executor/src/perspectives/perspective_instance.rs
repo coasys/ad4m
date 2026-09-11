@@ -2604,6 +2604,16 @@ impl PerspectiveInstance {
             self.invalidate_shape(&name);
         }
 
+        // A flow definition entering the perspective means callers will
+        // immediately try to read FlowTransitionProposal / FlowInstance rows.
+        // Register those two hard-wired runtime classes now so that findAll
+        // returns [] rather than an RPC 500 on a fresh perspective.
+        if matches!(sdna_type, SdnaType::Flow) {
+            crate::perspectives::flow_classes::ensure_flow_model_classes(self, context)
+                .await
+                .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
+        }
+
         Ok(true)
     }
 
