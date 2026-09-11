@@ -271,16 +271,22 @@ fn structured_turn(m: &Value) -> Result<ChatTurn> {
 /// the whole request. A call the model can see went wrong is recoverable; an
 /// unbalanced conversation is not.
 ///
-/// A call with no id is the one case that is skipped, because the pairing it
-/// would need does not exist either way and an empty `tool_use` id is refused.
+/// A call with no id gets one minted, for the same reason. An empty `tool_use`
+/// id is refused by the wire, but dropping the call produces exactly the
+/// unbalanced conversation the paragraph above is about, so the missing id
+/// argues for replacing it rather than for discarding the call. `complete`
+/// already mints `call_{uuid}` for every call it sees, so this is the same
+/// shape by the time anything downstream reads it.
 fn to_provider_call(raw: &Value) -> Option<ToolCall> {
     let function = raw.get("function").unwrap_or(raw);
     let name = function.get("name")?.as_str()?.to_string();
 
     let id = raw.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-    if id.is_empty() {
-        return None;
-    }
+    let id = if id.is_empty() {
+        format!("call_{}", Uuid::new_v4())
+    } else {
+        id.to_string()
+    };
 
     let arguments = match function.get("arguments") {
         Some(Value::String(text)) => {
@@ -291,7 +297,7 @@ fn to_provider_call(raw: &Value) -> Option<ToolCall> {
     };
 
     Some(ToolCall {
-        id: id.to_string(),
+        id,
         name,
         arguments,
     })
@@ -722,9 +728,11 @@ mod native_mapping_tests {
     }
 
     #[test]
-    fn a_call_without_an_id_is_skipped() {
-        // An empty tool_use id is refused by the API, and the result that
-        // would answer it cannot be paired either way.
+    fn a_call_without_an_id_is_given_one_rather_than_dropped() {
+        // An empty tool_use id is refused by the API — which argues for
+        // replacing the id, not for discarding the call. Dropping it produces
+        // the same unbalanced conversation that keeping unparseable arguments
+        // under `_raw` exists to avoid.
         let turn = structured_turn(&json!({
             "role": "assistant",
             "content": "hmm",
@@ -732,8 +740,29 @@ mod native_mapping_tests {
         }))
         .expect("maps");
 
-        assert!(turn.tool_calls.is_empty());
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].name, "search");
+        assert!(
+            turn.tool_calls[0].id.starts_with("call_"),
+            "a minted id matches the shape `complete` produces: {}",
+            turn.tool_calls[0].id
+        );
         assert_eq!(turn.content, "hmm");
+    }
+
+    #[test]
+    fn a_call_with_an_empty_id_is_given_one_too() {
+        // An id present but empty is the same failure as an absent one: the
+        // wire refuses it.
+        let turn = structured_turn(&json!({
+            "role": "assistant",
+            "content": "hmm",
+            "tool_calls": [{ "id": "", "function": { "name": "search", "arguments": "{}" } }],
+        }))
+        .expect("maps");
+
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert!(!turn.tool_calls[0].id.is_empty());
     }
 
     #[test]
