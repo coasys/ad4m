@@ -1163,3 +1163,86 @@ async fn stream_without_token_does_not_bill() {
     );
     test_seam::reset();
 }
+
+// ---------------------------------------------------------------------------
+// flatten_message — tool results and tool calls folded into prompt text
+// ---------------------------------------------------------------------------
+
+fn tool_result(content: &str, tool_call_id: Option<&str>) -> ChatMessage {
+    ChatMessage {
+        role: Role::Tool,
+        content: Some(ChatMessageContent::Text(content.to_string())),
+        name: None,
+        tool_calls: None,
+        tool_call_id: tool_call_id.map(|s| s.to_string()),
+    }
+}
+
+#[test]
+fn tool_result_carries_its_call_id() {
+    // Correlation matters the moment a turn dispatches more than one tool:
+    // without the id the model sees an unordered pile of responses and has to
+    // guess which answers which.
+    let (role, text) = super::chat::flatten_message(&tool_result("42", Some("call_abc")));
+
+    assert_eq!(role, "user");
+    assert!(
+        text.contains(r#"<tool_response id="call_abc">"#),
+        "expected the id to survive, got: {text}"
+    );
+    assert!(text.contains("42"));
+}
+
+#[test]
+fn tool_result_without_an_id_renders_the_bare_tag() {
+    // Callers that send no id, and the hand-written messages in these tests,
+    // must keep working rather than growing an empty attribute.
+    let (_, text) = super::chat::flatten_message(&tool_result("42", None));
+
+    assert!(text.contains("<tool_response>"), "got: {text}");
+    assert!(!text.contains("id="), "got: {text}");
+}
+
+#[test]
+fn tool_result_with_an_empty_id_renders_the_bare_tag() {
+    let (_, text) = super::chat::flatten_message(&tool_result("42", Some("")));
+
+    assert!(text.contains("<tool_response>"), "got: {text}");
+    assert!(!text.contains("id="), "got: {text}");
+}
+
+// ---------------------------------------------------------------------------
+// ai.discoverModels — a credential must not travel in the clear
+// ---------------------------------------------------------------------------
+
+fn safe(url: &str) -> bool {
+    super::super::ai_ws::is_transport_safe(&url::Url::parse(url).expect("parses"))
+}
+
+#[test]
+fn https_may_carry_a_credential_anywhere() {
+    assert!(safe("https://api.openai.com/v1"));
+    assert!(safe("https://gateway.internal/openai/v1"));
+}
+
+#[test]
+fn plain_http_on_loopback_may_carry_a_credential() {
+    // A local Ollama, vLLM or gateway is reached over http by design, and
+    // nothing leaves the machine.
+    assert!(safe("http://localhost:11434"));
+    assert!(safe("http://127.0.0.1:12000/api/v1"));
+    assert!(safe("http://[::1]:11434"));
+}
+
+#[test]
+fn plain_http_to_a_remote_host_may_not() {
+    assert!(!safe("http://api.openai.com/v1"));
+    assert!(!safe("http://192.168.1.10:11434"));
+}
+
+#[test]
+fn a_hostname_that_merely_looks_local_is_not_loopback() {
+    // `localhost.example.com` resolves wherever its owner points it.
+    assert!(!safe("http://localhost.example.com/v1"));
+    assert!(!safe("http://notlocalhost/v1"));
+}

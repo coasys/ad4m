@@ -47,6 +47,88 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(models)?)
 }
 
+/// `ai.discoverModels` — what does this endpoint serve, and does this key work?
+///
+/// Takes the credentials of a model that does not exist yet: an operator is
+/// filling in the form and wants the list to pick from, before there is
+/// anything to list. Answers the provider's own model ids.
+///
+/// Gated on AI_CREATE rather than AI_READ. It reads nothing of this node's,
+/// but it makes an outbound request to an arbitrary URL with an
+/// arbitrary key, which is the same authority adding a model carries and more
+/// than reading the models already configured.
+///
+/// That includes the failure body. `list_models` puts the upstream response
+/// verbatim into its error, so a caller can point `baseUrl` at a host this
+/// node can reach and read what it answers. Deliberate, on two grounds: a
+/// holder of AI_CREATE can already name an arbitrary URL and send it
+/// credentials, so this widens reach and not authority; and the body is the
+/// reason the endpoint is worth having, because a status alone does not
+/// separate a bad key from a bad model name from a host that is not an LLM.
+/// Revisit it if AI_CREATE is ever granted more widely than to the operator of
+/// the node — the reach is a cleaner read primitive than `addModel` plus a
+/// prompt, needing no model and no completion.
+async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let base_url = params.require_str("baseUrl")?;
+    let base_url = url::Url::parse(&base_url)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid baseUrl: {e}")))?;
+
+    // Defaults to OpenAI, which is what every endpoint that is not Anthropic
+    // speaks, and what the field meant before there was a choice.
+    let api_type = match params.get("apiType").and_then(|v| v.as_str()) {
+        Some(raw) => raw
+            .parse::<crate::types::ModelApiType>()
+            .map_err(WsRpcError::bad_request)?,
+        None => crate::types::ModelApiType::OpenAi,
+    };
+
+    let api_key = params
+        .get("apiKey")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    // A key sent over plain HTTP crosses the network in the clear, and the
+    // OpenAI path sends it as a bearer token. Refuse that rather than leak it
+    // on the operator's behalf.
+    //
+    // Loopback is exempt, because a local Ollama, vLLM or gateway is reached
+    // over http by design and nothing leaves the machine. Keyless discovery
+    // against any host stays available, which is the case that made this
+    // endpoint worth having.
+    if !api_key.is_empty() && !is_transport_safe(&base_url) {
+        return Err(WsRpcError::bad_request(
+            "Refusing to send an API key over plain HTTP. Use https, or omit the key.",
+        ));
+    }
+
+    let models = crate::ai_service::providers::list_models(&api_type, api_key, base_url)
+        .await
+        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+
+    Ok(serde_json::to_value(models)?)
+}
+
+/// Whether a credential may be sent to this URL.
+///
+/// True for https anywhere, and for http on loopback only. A hostname that
+/// merely looks local is not enough: `localhost.example.com` resolves
+/// wherever its owner points it.
+pub(super) fn is_transport_safe(url: &url::Url) -> bool {
+    if url.scheme() == "https" {
+        return true;
+    }
+
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+        None => false,
+    }
+}
+
 async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
@@ -334,6 +416,7 @@ async fn close_transcription_stream(
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("ai.models", list_models);
+    map.register("ai.discoverModels", discover_models);
     map.register("ai.addModel", add_model);
     map.register("ai.updateModel", update_model);
     map.register("ai.removeModel", remove_model);

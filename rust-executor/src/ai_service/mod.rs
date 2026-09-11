@@ -5,11 +5,10 @@ use crate::pubsub::AI_TRANSCRIPTION_TEXT_TOPIC;
 use crate::types::ModelInput;
 #[allow(unused_imports)]
 use crate::types::{AIModelLoadingStatus, AITaskInput, TranscriptionTextFilter};
-use crate::types::{AITask, LocalModel, Model, ModelType};
+use crate::types::{AITask, LocalModel, Model, ModelApi, ModelApiType, ModelType};
 use crate::{db::Ad4mDb, pubsub::get_global_pubsub};
 use anyhow::anyhow;
 use candle_core::Device;
-use chat_gpt_lib_rs::{ChatGPTClient, ChatInput, Message, Role};
 use deno_core::error::AnyError;
 use futures::{FutureExt, SinkExt};
 use holochain::test_utils::itertools::Itertools;
@@ -28,7 +27,9 @@ use tokio::time::sleep;
 
 mod error;
 pub mod harness;
+pub mod providers;
 use log::error;
+use providers::{ChatReply, ChatRequest, ChatTurn, RemoteChat, ToolSpec};
 
 pub type Result<T> = std::result::Result<T, AnyError>;
 
@@ -212,11 +213,25 @@ impl std::fmt::Debug for LLMTaskPromptStreamRequest {
     }
 }
 
+/// A prompt sent as a complete turn list, with tools handed over as
+/// definitions rather than rendered into the text.
+///
+/// Distinct from [`LLMTaskPromptRequest`] because it needs no ephemeral task:
+/// the turns are already the whole conversation, so there is no system prompt
+/// or example list for the worker to assemble one from.
+#[derive(Debug)]
+struct LLMTaskPromptTurnsRequest {
+    pub turns: Vec<ChatTurn>,
+    pub tools: Vec<ToolSpec>,
+    pub result_sender: oneshot::Sender<Result<ChatReply>>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug)]
 enum LLMTaskRequest {
     Spawn(LLMTaskSpawnRequest),
     Prompt(LLMTaskPromptRequest),
+    PromptTurns(LLMTaskPromptTurnsRequest),
     PromptStream(LLMTaskPromptStreamRequest),
     Remove(LLMTaskRemoveRequest),
     Shutdown(LLMTaskShutdownRequest),
@@ -224,7 +239,59 @@ enum LLMTaskRequest {
 
 enum LlmModel {
     Local(Llama),
-    Remote((ChatGPTClient, String)),
+    /// A remote endpoint and the model string to ask it for. Which wire
+    /// protocol is behind the trait — see `ai_service::providers`.
+    Remote((Box<dyn RemoteChat>, String)),
+}
+
+/// Every part of one turn that reaches the wire.
+///
+/// A turn is not only its text. An assistant turn that called something also
+/// carries the call's id, name and arguments, and a tool result carries the id
+/// it answers. The Anthropic provider serialises all of that into content
+/// blocks, so the caller pays for it.
+///
+/// It compounds. Tool definitions are sent once per request, but the calls in
+/// the history are resent on every turn of an agentic loop, and their arguments
+/// are the payload rather than a label — a schema patch, a query, a document.
+/// Counting only `content` under-bills a long tool conversation by more than it
+/// under-bills a short one.
+fn estimate_turn_tokens(turn: &ChatTurn) -> usize {
+    let calls: usize = turn
+        .tool_calls
+        .iter()
+        .map(|call| {
+            estimate_token_count(&call.id)
+                + estimate_token_count(&call.name)
+                + estimate_token_count(&call.arguments.to_string())
+        })
+        .sum();
+
+    let answered_call = turn
+        .tool_result_for
+        .as_deref()
+        .map(estimate_token_count)
+        .unwrap_or(0);
+
+    estimate_token_count(&turn.content) + calls + answered_call
+}
+
+/// The turn list for a task-shaped prompt: the task's system prompt, its
+/// examples as alternating user/assistant turns, then the live prompt.
+///
+/// Local models get this shape from kalosm's own task builder
+/// (`llama.task(system).with_examples(..)`); remote ones have to be handed
+/// it explicitly, which is what this builds. Shared by the `Prompt` and
+/// `PromptStream` remote arms, which differ only in how the reply comes back.
+fn turns_for_task(task: &AITask, prompt: String) -> Vec<ChatTurn> {
+    let mut turns = Vec::with_capacity(2 + task.prompt_examples.len() * 2);
+    turns.push(ChatTurn::system(task.system_prompt.clone()));
+    for example in task.prompt_examples.iter() {
+        turns.push(ChatTurn::user(example.input.clone()));
+        turns.push(ChatTurn::assistant(example.output.clone()));
+    }
+    turns.push(ChatTurn::user(prompt));
+    turns
 }
 
 async fn publish_model_status(
@@ -677,19 +744,23 @@ impl AIService {
         Ok(llama)
     }
 
-    async fn build_remote_client(
-        model_id: String,
-        api_key: String,
-        base_url: Url,
-    ) -> ChatGPTClient {
-        let mut url = base_url;
-        if let Some(segments) = url.path_segments() {
-            if segments.clone().next() == Some("v1") {
-                url.set_path(&segments.skip(1).collect::<Vec<_>>().join("/"));
-            }
-        }
+    /// Build the provider client for a remote model.
+    ///
+    /// Which protocol is spoken is decided here, once, from the model's
+    /// `api_type` — everything downstream holds a `dyn RemoteChat` and does
+    /// not know or care. See `ai_service::providers`.
+    async fn build_remote_client(model_id: String, api: ModelApi) -> Box<dyn RemoteChat> {
         publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
-        let client = ChatGPTClient::new(&api_key, url.as_ref());
+        let client: Box<dyn RemoteChat> = match api.api_type {
+            ModelApiType::OpenAi => Box::new(providers::openai::OpenAiChat::new(
+                &api.api_key,
+                api.base_url,
+            )),
+            ModelApiType::Anthropic => Box::new(providers::anthropic::AnthropicChat::new(
+                &api.api_key,
+                api.base_url,
+            )),
+        };
         publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
         client
     }
@@ -729,9 +800,10 @@ impl AIService {
                                 .await
                                 .map(LlmModel::Local)
                         } else if let Some(api) = model_config.api {
+                            let model_string = api.model.clone();
                             Ok(LlmModel::Remote((
-                                Self::build_remote_client(model_id, api.api_key, api.base_url).await,
-                                api.model
+                                Self::build_remote_client(model_id, api).await,
+                                model_string
                             )))
                         } else {
                             Err(anyhow!("AI model definition {} doesn't have a body, and this error should have been caught above", model_config.name))
@@ -830,62 +902,44 @@ impl AIService {
                                 }
                             },
 
+                            LLMTaskRequest::PromptTurns(turns_request) => match model {
+                                LlmModel::Remote((ref mut remote_client, ref model_string)) => {
+                                    let request =
+                                        ChatRequest::new(model_string.clone(), turns_request.turns)
+                                            .with_tools(turns_request.tools);
+
+                                    let result = rt.block_on(remote_client.chat(request));
+                                    let _ = turns_request.result_sender.send(result);
+                                }
+                                LlmModel::Local(_) => {
+                                    // Unreachable in practice: the caller
+                                    // checks `api_type_supports_native_tools`
+                                    // first, and no local model answers true.
+                                    // Refuse loudly rather than silently
+                                    // dropping the tools if that check is ever
+                                    // got wrong.
+                                    let _ = turns_request.result_sender.send(Err(anyhow!(
+                                        "Model {} is local; native tool calling needs a provider whose wire format carries tools",
+                                        model_config.id
+                                    )));
+                                }
+                            },
+
                             LLMTaskRequest::Prompt(prompt_request) => match model {
                                 LlmModel::Remote((ref mut remote_client, ref model_string)) => {
                                     if let Some(task) =
                                         task_descriptions.get(&prompt_request.task_id)
                                     {
-                                        // System prompt
-                                        let mut messages = vec![Message {
-                                            role: Role::System,
-                                            content: task.system_prompt.clone(),
-                                        }];
+                                        let request = ChatRequest::new(
+                                            model_string.clone(),
+                                            turns_for_task(task, prompt_request.prompt),
+                                        );
 
-                                        // Examples
-                                        for example in task.prompt_examples.iter() {
-                                            messages.push(Message {
-                                                role: Role::User,
-                                                content: example.input.clone(),
-                                            });
-                                            messages.push(Message {
-                                                role: Role::Assistant,
-                                                content: example.output.clone(),
-                                            })
-                                        }
+                                        let result = rt
+                                            .block_on(remote_client.chat(request))
+                                            .map(|reply| reply.text);
 
-                                        // Prompt
-                                        messages.push(Message {
-                                            role: Role::User,
-                                            content: prompt_request.prompt,
-                                        });
-
-                                        let chat_input = ChatInput {
-                                            model: chat_gpt_lib_rs::Model::Custom(
-                                                model_string.clone(),
-                                            ),
-                                            messages,
-                                            ..Default::default()
-                                        };
-
-                                        match rt.block_on(remote_client.chat(chat_input)) {
-                                            Err(e) => {
-                                                let _ = prompt_request.result_sender.send(Err(
-                                                    anyhow!(
-                                                        "Error connecting to remote LLM API: {:?}",
-                                                        e
-                                                    ),
-                                                ));
-                                            }
-                                            Ok(response) => {
-                                                let result = response
-                                                    .choices
-                                                    .first()
-                                                    .map(|choice| choice.message.content.clone())
-                                                    .ok_or(anyhow!("Got response with no choice"));
-
-                                                let _ = prompt_request.result_sender.send(result);
-                                            }
-                                        }
+                                        let _ = prompt_request.result_sender.send(result);
                                     } else {
                                         let _ = prompt_request.result_sender.send(Err(anyhow!(
                                             "Task with ID {} not spawned",
@@ -948,58 +1002,35 @@ impl AIService {
 
                             LLMTaskRequest::PromptStream(stream_request) => match model {
                                 LlmModel::Remote((ref mut remote_client, ref model_string)) => {
-                                    // Remote upstreams use the non-streaming
-                                    // chat call today; we deliver the full
-                                    // response as a single token chunk so
-                                    // SSE consumers still see the "stream"
-                                    // protocol (one delta + final usage).
-                                    // A native streaming upstream client is
-                                    // a follow-up.
+                                    // Whether this really streams is the
+                                    // provider's business: one that can
+                                    // pushes text as the model writes it,
+                                    // one that cannot answers in a single
+                                    // chunk through the trait's default. The
+                                    // SSE consumer sees the same protocol
+                                    // either way.
                                     if let Some(task) =
                                         task_descriptions.get(&stream_request.task_id)
                                     {
-                                        let mut messages = vec![Message {
-                                            role: Role::System,
-                                            content: task.system_prompt.clone(),
-                                        }];
-                                        for example in task.prompt_examples.iter() {
-                                            messages.push(Message {
-                                                role: Role::User,
-                                                content: example.input.clone(),
-                                            });
-                                            messages.push(Message {
-                                                role: Role::Assistant,
-                                                content: example.output.clone(),
-                                            });
-                                        }
                                         let prompt_clone = stream_request.prompt.clone();
-                                        messages.push(Message {
-                                            role: Role::User,
-                                            content: prompt_clone.clone(),
-                                        });
-                                        let chat_input = ChatInput {
-                                            model: chat_gpt_lib_rs::Model::Custom(
-                                                model_string.clone(),
-                                            ),
-                                            messages,
-                                            ..Default::default()
-                                        };
-                                        match rt.block_on(remote_client.chat(chat_input)) {
+                                        let request = ChatRequest::new(
+                                            model_string.clone(),
+                                            turns_for_task(task, prompt_clone.clone()),
+                                        );
+                                        let token_sender = stream_request.token_sender.clone();
+                                        match rt.block_on(
+                                            remote_client.chat_stream(request, token_sender),
+                                        ) {
                                             Err(e) => {
-                                                let _ =
-                                                    stream_request.done_sender.send(Err(anyhow!(
-                                                        "Error connecting to remote LLM API: {:?}",
-                                                        e
-                                                    )));
+                                                let _ = stream_request.done_sender.send(Err(e));
                                             }
-                                            Ok(response) => {
-                                                let text = response
-                                                    .choices
-                                                    .first()
-                                                    .map(|c| c.message.content.clone())
-                                                    .unwrap_or_default();
-                                                let _ =
-                                                    stream_request.token_sender.send(text.clone());
+                                            Ok(reply) => {
+                                                // Tokens have already gone out
+                                                // through `token_sender`; the
+                                                // reply is here only so the
+                                                // closing usage event can be
+                                                // billed on the whole text.
+                                                let text = reply.text;
                                                 let prompt_tokens =
                                                     estimate_token_count(&prompt_clone);
                                                 let completion_tokens = estimate_token_count(&text);
@@ -1393,6 +1424,102 @@ impl AIService {
             completion_tokens,
             model_id: resolved,
         })
+    }
+
+    /// Whether this model's provider carries tools as definitions rather than
+    /// as text rendered into the prompt.
+    ///
+    /// Asked of the stored config rather than of a built client, because the
+    /// caller has to decide how to render tools before anything reaches a
+    /// worker thread. Local models are always false — they have no wire format
+    /// to carry a tool in.
+    pub fn model_supports_native_tools(model_id: &str) -> bool {
+        let resolved = match Self::replace_model_variables(&model_id.to_string()) {
+            Ok(resolved) => resolved,
+            Err(_) => return false,
+        };
+
+        Ad4mDb::with_global_instance(|db| db.get_model(resolved))
+            .ok()
+            .flatten()
+            .and_then(|model| model.api)
+            .map(|api| providers::api_type_supports_native_tools(&api.api_type))
+            .unwrap_or(false)
+    }
+
+    /// Prompt a model with a complete turn list and tool definitions, getting
+    /// back whatever text it wrote and any calls it wants dispatched.
+    ///
+    /// The counterpart of [`Self::prompt_messages`] for providers whose wire
+    /// format carries tools. Gate it on [`Self::model_supports_native_tools`]:
+    /// a model that does not will refuse rather than silently drop the tools.
+    ///
+    /// No ephemeral task is spawned. `prompt_messages` needs one because it
+    /// has to reassemble a system prompt and examples out of a flattened
+    /// message list; here the turns *are* the conversation, so there is
+    /// nothing to rebuild and nothing to clean up afterwards.
+    pub async fn prompt_with_tools(
+        &self,
+        model_id: String,
+        turns: Vec<ChatTurn>,
+        tools: Vec<ToolSpec>,
+        auth_token: Option<String>,
+    ) -> Result<ChatReply> {
+        let resolved = Self::replace_model_variables(&model_id)?;
+
+        // Estimated before the turns are handed over, because everything below
+        // goes on the wire and the caller is charged for all of it. Billing
+        // runs on this number: `ChatReply.usage` reports the provider's exact
+        // counts but does not replace the estimate.
+        let prompt_tokens: usize = turns
+            .iter()
+            .map(estimate_turn_tokens)
+            .chain(tools.iter().map(|tool| {
+                estimate_token_count(&tool.name)
+                    + estimate_token_count(&tool.description)
+                    + estimate_token_count(&tool.parameters.to_string())
+            }))
+            .sum();
+
+        let (result_tx, result_rx) = oneshot::channel();
+        {
+            let llm_channel = self.llm_channel.lock().await;
+            let sender = llm_channel
+                .get(&resolved)
+                .ok_or_else(|| anyhow!("Model '{}' not found in LLM channel", resolved))?;
+            sender.send(LLMTaskRequest::PromptTurns(LLMTaskPromptTurnsRequest {
+                turns,
+                tools,
+                result_sender: result_tx,
+            }))?;
+        }
+
+        let reply = result_rx.await??;
+
+        // A tool call is output the model generated and the caller pays for,
+        // so its arguments count towards completion tokens alongside the text.
+        let completion_tokens = estimate_token_count(&reply.text)
+            + reply
+                .tool_calls
+                .iter()
+                .map(|call| estimate_token_count(&call.arguments.to_string()))
+                .sum::<usize>();
+
+        log::debug!(
+            "🤖 prompt_with_tools model={} text={:?} calls={}",
+            resolved,
+            truncate_for_log(&reply.text),
+            reply.tool_calls.len()
+        );
+
+        Self::bill_prompt_if_authed(
+            auth_token.as_deref(),
+            &resolved,
+            prompt_tokens,
+            completion_tokens,
+        );
+
+        Ok(reply)
     }
 
     /// Streaming variant of [`Self::prompt_messages`].  Returns a token
@@ -2436,6 +2563,68 @@ impl AIService {
 
 #[cfg(test)]
 mod tests {
+    use super::providers::{ChatTurn, ToolCall};
+
+    fn call(arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "toolu_01Eg163G7WZHsU3H4jik7nNC".to_string(),
+            name: "update_schema".to_string(),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn a_turn_with_no_tool_metadata_is_estimated_from_its_text() {
+        let turn = ChatTurn::user("hello there");
+        assert_eq!(
+            estimate_turn_tokens(&turn),
+            estimate_token_count("hello there")
+        );
+    }
+
+    #[test]
+    fn a_calls_arguments_are_billed_not_just_its_text() {
+        // The arguments are the payload in an agentic loop — a schema patch, a
+        // query, a document — and they dwarf whatever the model said alongside.
+        let patch = serde_json::json!({
+            "patches": [{ "targetId": "root", "node": { "type": "Column", "props": {
+                "gap": "400", "p": "500", "bg": "surface", "r": "400"
+            }}}]
+        });
+
+        let plain = ChatTurn::assistant("Applying that now.");
+        let calling = ChatTurn::assistant_calling("Applying that now.", vec![call(patch)]);
+
+        assert!(
+            estimate_turn_tokens(&calling) > estimate_turn_tokens(&plain) + 20,
+            "the call should add far more than its name, got {} vs {}",
+            estimate_turn_tokens(&calling),
+            estimate_turn_tokens(&plain)
+        );
+    }
+
+    #[test]
+    fn a_tool_result_is_billed_for_the_id_it_answers() {
+        let bare = ChatTurn::user("42");
+        let answering = ChatTurn::tool_result("toolu_01Eg163G7WZHsU3H4jik7nNC", "42");
+
+        assert!(estimate_turn_tokens(&answering) > estimate_turn_tokens(&bare));
+    }
+
+    #[test]
+    fn several_calls_in_one_turn_each_count() {
+        let one = ChatTurn::assistant_calling("", vec![call(serde_json::json!({ "a": 1 }))]);
+        let two = ChatTurn::assistant_calling(
+            "",
+            vec![
+                call(serde_json::json!({ "a": 1 })),
+                call(serde_json::json!({ "a": 1 })),
+            ],
+        );
+
+        assert_eq!(estimate_turn_tokens(&two), estimate_turn_tokens(&one) * 2);
+    }
+
     use super::*;
     use crate::types::{AIPromptExamplesInput, LocalModelInput};
     use tokio::time::{sleep, Duration};
