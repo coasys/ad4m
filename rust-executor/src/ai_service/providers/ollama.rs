@@ -29,7 +29,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use url::Url;
 
-use super::{ChatReply, ChatRequest, ChatRole, ChatTurn, ChatUsage, RemoteChat, ToolCall, ToolSpec};
+use super::{
+    ChatReply, ChatRequest, ChatRole, ChatTurn, ChatUsage, RemoteChat, ToolCall, ToolSpec,
+};
 
 /// Cap: never request more context than this, even if the model advertises a
 /// larger window.  131072 tokens covers the WE schema context (~75K) plus
@@ -94,7 +96,10 @@ impl OllamaChat {
         let ctx = self.query_model_ctx(model).await;
 
         // Cache the result.
-        self.model_ctx_cache.lock().unwrap().insert(model.to_string(), ctx);
+        self.model_ctx_cache
+            .lock()
+            .unwrap()
+            .insert(model.to_string(), ctx);
         ctx
     }
 
@@ -143,7 +148,9 @@ impl OllamaChat {
                 if key.ends_with(".context_length") {
                     if let Some(ctx) = val.as_u64() {
                         let capped = (ctx as u32).min(MAX_NUM_CTX);
-                        log::info!("Ollama model {model}: context_length={ctx}, using num_ctx={capped}");
+                        log::info!(
+                            "Ollama model {model}: context_length={ctx}, using num_ctx={capped}"
+                        );
                         return capped;
                     }
                 }
@@ -362,10 +369,7 @@ fn extract_tool_calls(wire_calls: &[WireToolCall]) -> Vec<ToolCall> {
         .iter()
         .enumerate()
         .map(|(i, call)| ToolCall {
-            id: call
-                .id
-                .clone()
-                .unwrap_or_else(|| format!("call_{i}")),
+            id: call.id.clone().unwrap_or_else(|| format!("call_{i}")),
             name: call.function.name.clone(),
             arguments: call.function.arguments.clone(),
         })
@@ -719,12 +723,15 @@ mod wire_tests {
             .mock("POST", "/api/show")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(json!({
-                "model_info": {
-                    "general.architecture": "qwen3",
-                    "qwen3.context_length": ctx_len,
-                }
-            }).to_string())
+            .with_body(
+                json!({
+                    "model_info": {
+                        "general.architecture": "qwen3",
+                        "qwen3.context_length": ctx_len,
+                    }
+                })
+                .to_string(),
+            )
             .create_async()
             .await
     }
@@ -747,13 +754,16 @@ mod wire_tests {
             .mock("POST", "/api/chat")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(json!({
-                "message": {"role": "assistant", "content": "hi"},
-                "done": true,
-                "done_reason": "stop",
-                "prompt_eval_count": 10,
-                "eval_count": 2,
-            }).to_string())
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "hi"},
+                    "done": true,
+                    "done_reason": "stop",
+                    "prompt_eval_count": 10,
+                    "eval_count": 2,
+                })
+                .to_string(),
+            )
             .create_async()
             .await;
 
@@ -781,10 +791,13 @@ mod wire_tests {
                 "stream": false,
             })))
             .with_status(200)
-            .with_body(json!({
-                "message": {"role": "assistant", "content": "ok"},
-                "done": true,
-            }).to_string())
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "ok"},
+                    "done": true,
+                })
+                .to_string(),
+            )
             .create_async()
             .await;
 
@@ -807,10 +820,13 @@ mod wire_tests {
                 "options": {"num_ctx": MAX_NUM_CTX},
             })))
             .with_status(200)
-            .with_body(json!({
-                "message": {"role": "assistant", "content": "ok"},
-                "done": true,
-            }).to_string())
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "ok"},
+                    "done": true,
+                })
+                .to_string(),
+            )
             .create_async()
             .await;
 
@@ -833,10 +849,13 @@ mod wire_tests {
                 "options": {"num_ctx": FALLBACK_NUM_CTX},
             })))
             .with_status(200)
-            .with_body(json!({
-                "message": {"role": "assistant", "content": "ok"},
-                "done": true,
-            }).to_string())
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "ok"},
+                    "done": true,
+                })
+                .to_string(),
+            )
             .create_async()
             .await;
 
@@ -866,10 +885,13 @@ mod wire_tests {
                 }],
             })))
             .with_status(200)
-            .with_body(json!({
-                "message": {"role": "assistant", "content": ""},
-                "done": true,
-            }).to_string())
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": ""},
+                    "done": true,
+                })
+                .to_string(),
+            )
             .create_async()
             .await;
 
@@ -895,20 +917,23 @@ mod wire_tests {
         server
             .mock("POST", "/api/chat")
             .with_status(200)
-            .with_body(json!({
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{
-                        "function": {
-                            "name": "search",
-                            "arguments": {"q": "rust"},
-                        },
-                    }],
-                },
-                "done": true,
-                "done_reason": "stop",
-            }).to_string())
+            .with_body(
+                json!({
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "function": {
+                                "name": "search",
+                                "arguments": {"q": "rust"},
+                            },
+                        }],
+                    },
+                    "done": true,
+                    "done_reason": "stop",
+                })
+                .to_string(),
+            )
             .create_async()
             .await;
 
@@ -1029,12 +1054,15 @@ mod wire_tests {
         let mock = server
             .mock("GET", "/api/tags")
             .with_status(200)
-            .with_body(json!({
-                "models": [
-                    {"name": "qwen3:32b"},
-                    {"name": "llama3.1:8b"},
-                ]
-            }).to_string())
+            .with_body(
+                json!({
+                    "models": [
+                        {"name": "qwen3:32b"},
+                        {"name": "llama3.1:8b"},
+                    ]
+                })
+                .to_string(),
+            )
             .create_async()
             .await;
 

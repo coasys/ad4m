@@ -322,7 +322,11 @@ mod tests {
         use crate::types::ModelApiType;
         let base = url("https://example.test");
 
-        for api_type in [ModelApiType::OpenAi, ModelApiType::Anthropic, ModelApiType::Ollama] {
+        for api_type in [
+            ModelApiType::OpenAi,
+            ModelApiType::Anthropic,
+            ModelApiType::Ollama,
+        ] {
             let client: Box<dyn RemoteChat> = match api_type {
                 ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new("k", base.clone())),
                 ModelApiType::Anthropic => {
