@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 pub mod anthropic;
+pub mod ollama;
 pub mod openai;
 
 #[cfg(test)]
@@ -40,6 +41,7 @@ pub async fn list_models(
     match api_type {
         crate::types::ModelApiType::OpenAi => openai::list_models(api_key, base_url).await,
         crate::types::ModelApiType::Anthropic => anthropic::list_models(api_key, base_url).await,
+        crate::types::ModelApiType::Ollama => ollama::list_models(api_key, base_url).await,
     }
 }
 
@@ -87,6 +89,7 @@ pub(crate) fn model_ids_from_data(json: &serde_json::Value) -> Vec<String> {
 pub fn api_type_supports_native_tools(api_type: &crate::types::ModelApiType) -> bool {
     match api_type {
         crate::types::ModelApiType::Anthropic => true,
+        crate::types::ModelApiType::Ollama => true,
         crate::types::ModelApiType::OpenAi => false,
     }
 }
@@ -319,12 +322,13 @@ mod tests {
         use crate::types::ModelApiType;
         let base = url("https://example.test");
 
-        for api_type in [ModelApiType::OpenAi, ModelApiType::Anthropic] {
+        for api_type in [ModelApiType::OpenAi, ModelApiType::Anthropic, ModelApiType::Ollama] {
             let client: Box<dyn RemoteChat> = match api_type {
                 ModelApiType::OpenAi => Box::new(openai::OpenAiChat::new("k", base.clone())),
                 ModelApiType::Anthropic => {
                     Box::new(anthropic::AnthropicChat::new("k", base.clone()))
                 }
+                ModelApiType::Ollama => Box::new(ollama::OllamaChat::new("", base.clone())),
             };
             assert_eq!(
                 api_type_supports_native_tools(&api_type),

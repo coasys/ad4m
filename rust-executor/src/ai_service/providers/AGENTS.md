@@ -8,13 +8,16 @@ through here — `LlmModel::Local` is a different thing entirely.
 | File | Content |
 |---|---|
 | `mod.rs` | `RemoteChat` trait + the neutral `ChatRole`/`ChatTurn`/`ChatRequest`/`ChatReply` DTOs. Declarations only. |
-| `openai.rs` | OpenAI-shaped HTTP (`chat_gpt_lib_rs`): OpenAI, Groq, OpenRouter, Google compat, Ollama `/v1`, vLLM. |
+| `anthropic.rs` | Anthropic Messages API. Native tool calling, prompt caching, SSE streaming. |
+| `ollama.rs` | Ollama native `/api/chat`. Native tool calling, `num_ctx`, ndjson streaming. |
+| `openai.rs` | OpenAI-shaped HTTP (`chat_gpt_lib_rs`): OpenAI, Groq, OpenRouter, Google compat, vLLM. |
 
 ## Entry points
 
-- `OpenAiChat::new(api_key, base_url)` / `AnthropicChat::new(..)` — built once
-  per model by `ai_service::AIService::build_remote_client`, then owned by that
-  model's worker thread for its lifetime.
+- `OpenAiChat::new(api_key, base_url)` / `AnthropicChat::new(..)` /
+  `OllamaChat::new(..)` — built once per model by
+  `ai_service::AIService::build_remote_client`, then owned by that model's
+  worker thread for its lifetime.
 - `RemoteChat::chat` / `chat_stream` — called from the `LLMTaskRequest::Prompt`
   and `PromptStream` arms of that thread's loop. `chat_stream` has a default
   that answers in one chunk; override it only where the upstream really streams.
