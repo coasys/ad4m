@@ -495,7 +495,9 @@ mod tests {
         let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
 
         // Before add_sdna, both classes are absent — model_query must error.
-        let before = perspective.model_query("FlowTransitionProposal", "{}").await;
+        let before = perspective
+            .model_query("FlowTransitionProposal", "{}")
+            .await;
         assert!(
             before.is_err(),
             "FlowTransitionProposal must not be queryable before any flow is added (got Ok)"
@@ -519,8 +521,8 @@ mod tests {
             .await
             .expect("FlowTransitionProposal.findAll must return Ok after add_flow (#1007)");
 
-        let result: Value = serde_json::from_str(&result_json)
-            .expect("model_query result must be valid JSON");
+        let result: Value =
+            serde_json::from_str(&result_json).expect("model_query result must be valid JSON");
         let instances = result["instances"]
             .as_array()
             .expect("model_query result must contain an 'instances' array");
