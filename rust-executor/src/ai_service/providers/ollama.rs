@@ -23,16 +23,23 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use url::Url;
 
 use super::{ChatReply, ChatRequest, ChatRole, ChatTurn, ChatUsage, RemoteChat, ToolCall, ToolSpec};
 
-/// Default context window.  131072 matches WE's Ollama provider; the value
-/// must be large enough to hold the schema context (~75K tokens) plus the
-/// conversation.  Models with a smaller trained window will clamp silently.
-const DEFAULT_NUM_CTX: u32 = 131_072;
+/// Cap: never request more context than this, even if the model advertises a
+/// larger window.  131072 tokens covers the WE schema context (~75K) plus
+/// conversation history with room to spare.
+const MAX_NUM_CTX: u32 = 131_072;
+
+/// Fallback if `/api/show` cannot determine the model's native window.
+/// Matches Ollama's own default, which allocates a KV cache the model
+/// can actually serve without VRAM exhaustion on typical hardware.
+const FALLBACK_NUM_CTX: u32 = 2_048;
 
 /// Same reasoning as the Anthropic timeout — a long prompt on a local model
 /// can take minutes.
@@ -40,7 +47,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct OllamaChat {
     http: reqwest::Client,
+    /// Base URL with `/api/chat` appended.
     endpoint: String,
+    /// Base URL without any path suffix — used for `/api/show`.
+    base: String,
+    /// Per-model context window cache.  Populated on first use via `/api/show`.
+    model_ctx_cache: Mutex<HashMap<String, u32>>,
 }
 
 impl OllamaChat {
@@ -58,7 +70,102 @@ impl OllamaChat {
                 .build()
                 .unwrap_or_default(),
             endpoint: format!("{root}/api/chat"),
+            base: root.to_string(),
+            model_ctx_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Determine `num_ctx` for a model by querying `/api/show`.
+    ///
+    /// Ollama sizes the KV cache from `num_ctx` at model load.  Requesting
+    /// 131K on a model whose native window is 4K or 8K causes multi-GB KV
+    /// allocations that can exhaust VRAM or force layers to CPU.  Querying
+    /// the model's own context length and capping at `MAX_NUM_CTX` avoids
+    /// this: a 4K model gets 4K; a 128K model gets 128K; nothing exceeds
+    /// the cap.
+    ///
+    /// Result is cached per model name for the lifetime of this client.
+    async fn resolve_num_ctx(&self, model: &str) -> u32 {
+        // Check cache first (lock scope: just the lookup).
+        if let Some(&cached) = self.model_ctx_cache.lock().unwrap().get(model) {
+            return cached;
+        }
+
+        let ctx = self.query_model_ctx(model).await;
+
+        // Cache the result.
+        self.model_ctx_cache.lock().unwrap().insert(model.to_string(), ctx);
+        ctx
+    }
+
+    /// Query `/api/show` for a model's context length.
+    ///
+    /// Walks the `model_info` map looking for `<arch>.context_length`.  Falls
+    /// back to `FALLBACK_NUM_CTX` on any error — the request still goes out,
+    /// just with a conservative window.
+    async fn query_model_ctx(&self, model: &str) -> u32 {
+        let url = format!("{}/api/show", self.base);
+        let response = match self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                log::warn!(
+                    "Ollama /api/show returned {} for {model}; falling back to num_ctx={FALLBACK_NUM_CTX}",
+                    r.status()
+                );
+                return FALLBACK_NUM_CTX;
+            }
+            Err(e) => {
+                log::warn!(
+                    "Could not query Ollama /api/show for {model}: {e}; falling back to num_ctx={FALLBACK_NUM_CTX}"
+                );
+                return FALLBACK_NUM_CTX;
+            }
+        };
+
+        let json: serde_json::Value = match response.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("Could not parse /api/show response for {model}: {e}");
+                return FALLBACK_NUM_CTX;
+            }
+        };
+
+        // model_info contains architecture-specific keys like
+        // "qwen3.context_length", "llama.context_length", etc.
+        if let Some(info) = json.get("model_info").and_then(|v| v.as_object()) {
+            for (key, val) in info {
+                if key.ends_with(".context_length") {
+                    if let Some(ctx) = val.as_u64() {
+                        let capped = (ctx as u32).min(MAX_NUM_CTX);
+                        log::info!("Ollama model {model}: context_length={ctx}, using num_ctx={capped}");
+                        return capped;
+                    }
+                }
+            }
+        }
+
+        // Some Modelfiles set num_ctx in parameters directly.
+        if let Some(params) = json.get("parameters").and_then(|v| v.as_str()) {
+            for line in params.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 && parts[0] == "num_ctx" {
+                    if let Ok(ctx) = parts[1].parse::<u32>() {
+                        let capped = ctx.min(MAX_NUM_CTX);
+                        log::info!("Ollama model {model}: Modelfile num_ctx={ctx}, using {capped}");
+                        return capped;
+                    }
+                }
+            }
+        }
+
+        log::warn!("Could not determine context_length for {model}; falling back to num_ctx={FALLBACK_NUM_CTX}");
+        FALLBACK_NUM_CTX
     }
 }
 
@@ -276,14 +383,13 @@ impl RemoteChat for OllamaChat {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
+        let num_ctx = self.resolve_num_ctx(&request.model).await;
         let body = ChatRequestBody {
             model: request.model,
             messages: request.messages.iter().map(to_wire_message).collect(),
             tools: request.tools.iter().map(to_wire_tool).collect(),
             stream: false,
-            options: ChatOptions {
-                num_ctx: DEFAULT_NUM_CTX,
-            },
+            options: ChatOptions { num_ctx },
         };
 
         let response = self
@@ -329,14 +435,13 @@ impl RemoteChat for OllamaChat {
     ) -> Result<ChatReply> {
         use futures::StreamExt;
 
+        let num_ctx = self.resolve_num_ctx(&request.model).await;
         let body = ChatRequestBody {
             model: request.model,
             messages: request.messages.iter().map(to_wire_message).collect(),
             tools: request.tools.iter().map(to_wire_tool).collect(),
             stream: true,
-            options: ChatOptions {
-                num_ctx: DEFAULT_NUM_CTX,
-            },
+            options: ChatOptions { num_ctx },
         };
 
         let response = self
@@ -567,12 +672,12 @@ mod tests {
             })],
             stream: false,
             options: ChatOptions {
-                num_ctx: DEFAULT_NUM_CTX,
+                num_ctx: MAX_NUM_CTX,
             },
         };
 
         let json = serde_json::to_value(&body).expect("body serialises");
-        assert_eq!(json["options"]["num_ctx"], DEFAULT_NUM_CTX);
+        assert_eq!(json["options"]["num_ctx"], MAX_NUM_CTX);
         assert_eq!(json["tools"][0]["type"], "function");
         assert_eq!(json["stream"], false);
     }
@@ -589,7 +694,7 @@ mod tests {
             tools: Vec::new(),
             stream: false,
             options: ChatOptions {
-                num_ctx: DEFAULT_NUM_CTX,
+                num_ctx: FALLBACK_NUM_CTX,
             },
         };
 
@@ -608,9 +713,36 @@ mod wire_tests {
         vec![ChatTurn::system("be terse"), ChatTurn::user("hello")]
     }
 
+    /// Mock `/api/show` to return model info with a given context length.
+    async fn mock_show(server: &mut mockito::ServerGuard, ctx_len: u64) -> mockito::Mock {
+        server
+            .mock("POST", "/api/show")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({
+                "model_info": {
+                    "general.architecture": "qwen3",
+                    "qwen3.context_length": ctx_len,
+                }
+            }).to_string())
+            .create_async()
+            .await
+    }
+
+    /// Mock `/api/show` to return a 404 (model not found).
+    async fn mock_show_missing(server: &mut mockito::ServerGuard) -> mockito::Mock {
+        server
+            .mock("POST", "/api/show")
+            .with_status(404)
+            .with_body(r#"{"error":"model not found"}"#)
+            .create_async()
+            .await
+    }
+
     #[tokio::test]
     async fn a_completion_is_posted_to_api_chat() {
         let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 32768).await;
         let mock = server
             .mock("POST", "/api/chat")
             .with_status(200)
@@ -638,13 +770,14 @@ mod wire_tests {
     }
 
     #[tokio::test]
-    async fn the_request_carries_num_ctx_and_model() {
+    async fn num_ctx_comes_from_the_model_via_api_show() {
         let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 32768).await;
         let mock = server
             .mock("POST", "/api/chat")
             .match_body(mockito::Matcher::PartialJson(json!({
                 "model": "qwen3:32b",
-                "options": {"num_ctx": DEFAULT_NUM_CTX},
+                "options": {"num_ctx": 32768},
                 "stream": false,
             })))
             .with_status(200)
@@ -665,8 +798,61 @@ mod wire_tests {
     }
 
     #[tokio::test]
+    async fn large_model_ctx_is_capped_at_max() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 1_048_576).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "options": {"num_ctx": MAX_NUM_CTX},
+            })))
+            .with_status(200)
+            .with_body(json!({
+                "message": {"role": "assistant", "content": "ok"},
+                "done": true,
+            }).to_string())
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        client
+            .chat(ChatRequest::new("big-model:latest", turns()))
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn show_failure_falls_back_to_conservative_ctx() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show_missing(&mut server).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "options": {"num_ctx": FALLBACK_NUM_CTX},
+            })))
+            .with_status(200)
+            .with_body(json!({
+                "message": {"role": "assistant", "content": "ok"},
+                "done": true,
+            }).to_string())
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        client
+            .chat(ChatRequest::new("missing:latest", turns()))
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn tools_go_out_in_the_function_wrapper() {
         let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 32768).await;
         let mock = server
             .mock("POST", "/api/chat")
             .match_body(mockito::Matcher::PartialJson(json!({
@@ -705,6 +891,7 @@ mod wire_tests {
     #[tokio::test]
     async fn a_tool_call_response_comes_back_as_a_structured_call() {
         let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 32768).await;
         server
             .mock("POST", "/api/chat")
             .with_status(200)
@@ -740,6 +927,8 @@ mod wire_tests {
     #[tokio::test]
     async fn a_server_error_surfaces_the_response_body() {
         let mut server = mockito::Server::new_async().await;
+        // /api/show may or may not fire before the 500 — does not matter
+        let _show = mock_show(&mut server, 32768).await;
         server
             .mock("POST", "/api/chat")
             .with_status(500)
@@ -761,6 +950,7 @@ mod wire_tests {
     #[tokio::test]
     async fn streamed_ndjson_yields_each_delta() {
         let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 32768).await;
         let ndjson = format!(
             "{}\n{}\n{}\n",
             json!({"message": {"role": "assistant", "content": "Hello"}, "done": false}),
@@ -799,6 +989,7 @@ mod wire_tests {
     #[tokio::test]
     async fn tool_calls_arrive_on_the_final_streamed_chunk() {
         let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 32768).await;
         let ndjson = format!(
             "{}\n{}\n",
             json!({"message": {"role": "assistant", "content": "Let me search."}, "done": false}),
