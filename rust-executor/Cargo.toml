@@ -82,6 +82,9 @@ deno_snapshots = { version = "0.72.0", git = "https://github.com/coasys/deno.git
 sys_traits = "0.1.28"
 # deno_runtime = {version = "0.162.0", path = "../../deno/runtime"}
 tokio = { version = "1.25.0", features = ["full"] }
+# WebRTC SFU — str0m is a pure-Rust sans-I/O WebRTC stack. We drive the
+# event loop ourselves over a UDP socket in `rust-executor/src/sfu`.
+str0m = "0.9"
 url = "2.3.1"
 urlencoding = "2.1"
 percent-encoding = "2"
@@ -105,6 +108,9 @@ hex = "0.4.3"
 argon2 = { version = "0.5.0", features = ["simple"] }
 rand = "0.8.5"
 base64 = "0.21.0"
+# TURN credential generation for SFU ICE server config
+hmac = "0.12"
+sha1 = "0.10"
 rmcp = { version = "0.15.0", features = ["server", "transport-streamable-http-server"] }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws", "multipart"] }

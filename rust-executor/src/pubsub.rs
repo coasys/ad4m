@@ -146,6 +146,35 @@ lazy_static::lazy_static! {
     /// subscribe to `link-added` and filter for `has_claim`.
     pub static ref AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC: String =
         "auto-processor-neighbourhood-state-topic".to_owned();
+    /// SFU pushes a fresh SDP offer to one specific participant when
+    /// the relay's set of outbound tracks changes (a new peer joins
+    /// the same room).  Payload is a JSON [`crate::sfu::types::SfuCallRenegotiationOffer`].
+    pub static ref SFU_CALL_RENEGOTIATION_OFFER_TOPIC: String = "sfu-call-renegotiation-offer-topic".to_owned();
+    /// SFU emits a fresh SDP offer for a *pipe-bound* renegotiation
+    /// (the local end of an inter-SFU pipe transport gained outbound
+    /// tracks and needs the remote SFU to renegotiate).  Payload is a
+    /// JSON [`crate::sfu::types::SfuPipeRenegotiationOffer`].  Consumed
+    /// only by the SFU service's internal cascade router — never fans
+    /// out to clients.
+    pub static ref SFU_PIPE_RENEGOTIATION_OFFER_TOPIC: String = "sfu-pipe-renegotiation-offer-topic".to_owned();
+    /// Counterpart of [`SFU_PIPE_RENEGOTIATION_OFFER_TOPIC`] — the SFU
+    /// event loop publishes an SDP answer for a pipe-renegotiation
+    /// offer it just received and applied.  The cascade router relays
+    /// it back over gossip.  Payload is a JSON
+    /// [`crate::sfu::types::SfuPipeRenegotiationAnswer`].
+    pub static ref SFU_PIPE_RENEGOTIATION_ANSWER_TOPIC: String = "sfu-pipe-renegotiation-answer-topic".to_owned();
+    /// Cascade rebalancer tells a specific participant to leave this
+    /// node and rejoin on a less-loaded peer.  Payload is a JSON
+    /// [`crate::sfu::types::SfuMigrateEvent`].  Filtered by `targetDid`
+    /// in the events_ws fanout — only the named participant receives it.
+    pub static ref SFU_MIGRATE_TOPIC: String = "sfu-migrate-topic".to_owned();
+    /// SFU data channel relay.  When a participant sends data on a
+    /// WebRTC data channel, the SFU publishes it here so events_ws can
+    /// fan it out to subscribers.  Payload carries `senderDid`,
+    /// `channelLabel`, `binary`, and `data` (base64 for binary, UTF-8
+    /// text otherwise).  Filtered by room membership in the events_ws
+    /// fanout.
+    pub static ref SFU_DATA_CHANNEL_TOPIC: String = "sfu-data-channel-topic".to_owned();
 }
 
 /// Per-user dirty set for batched credit change notifications.

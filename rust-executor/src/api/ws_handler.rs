@@ -161,6 +161,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::neighbourhoods_ws::register_ws_handlers(&mut map);
     super::users_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
+    super::sfu_ws::register_ws_handlers(&mut map);
     log::info!("WS RPC: registered {} handlers", map.len());
     map
 }

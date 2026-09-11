@@ -94,6 +94,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
+ "hmac 0.12.1",
  "holochain",
  "holochain_cli_bundle",
  "holochain_types",
@@ -139,9 +140,11 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha1 0.10.7",
  "sha2 0.10.9",
  "signal-hook",
  "sodoken",
+ "str0m",
  "sys_traits",
  "tar",
  "tempfile",
@@ -18006,6 +18009,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sctp-proto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4dea4fe3384a24652f065296ac333c810dfd0c5b39b98a2214762c16aaadc3c"
+dependencies = [
+ "bytes",
+ "crc",
+ "fxhash",
+ "log",
+ "rand 0.8.5",
+ "slab",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "sd-notify"
 version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -19439,6 +19457,27 @@ name = "str-buf"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e08d8363704e6c71fc928674353e6b7c23dcea9d82d7012c8faf2a3a025f8d0"
+
+[[package]]
+name = "str0m"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7f9fdffeb677e1d5d2cf84993f865143680b8e5eece3396fa488d43b34c1245"
+dependencies = [
+ "combine",
+ "crc",
+ "fastrand 2.5.0",
+ "hmac 0.12.1",
+ "libc",
+ "once_cell",
+ "openssl",
+ "openssl-sys",
+ "sctp-proto",
+ "serde",
+ "sha1 0.10.7",
+ "thiserror 1.0.69",
+ "tracing",
+]
 
 [[package]]
 name = "str_stack"
