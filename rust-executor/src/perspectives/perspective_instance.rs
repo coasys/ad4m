@@ -2608,8 +2608,20 @@ impl PerspectiveInstance {
         // immediately try to read FlowTransitionProposal / FlowInstance rows.
         // Register those two hard-wired runtime classes now so that findAll
         // returns [] rather than an RPC 500 on a fresh perspective.
+        //
+        // `Box::pin` here is load-bearing, not style. `ensure_flow_model_classes`
+        // reaches `ensure_subject_class`, which comes back through `add_sdna`
+        // into this function — so this is an async fn that transitively awaits
+        // itself, and rustc cannot compute the future's size (E0733). Boxing
+        // puts the inner future on the heap and breaks the size recursion.
+        // The cycle terminates at runtime because the two hard-wired classes
+        // register as `SdnaType::SubjectClass`, so this branch is not taken on
+        // the way back in.
+        //
+        // Note this only fails to compile under the deno-snapshot build's
+        // feature set, not under `cargo test` — see #1011.
         if matches!(sdna_type, SdnaType::Flow) {
-            crate::perspectives::flow_classes::ensure_flow_model_classes(self, context)
+            Box::pin(crate::perspectives::flow_classes::ensure_flow_model_classes(self, context))
                 .await
                 .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
         }
