@@ -1,6 +1,6 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import fs from "fs";
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import { sleep } from '../utils/utils'
 import { expect } from "chai";
 import { v4 as uuidv4 } from 'uuid';

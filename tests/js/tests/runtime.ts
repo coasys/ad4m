@@ -1,4 +1,4 @@
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import fs from "fs";
 import { expect } from "chai";
 import { NotificationInput, TriggeredNotification } from '@coasys/ad4m';
@@ -16,7 +16,8 @@ const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZ
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 const PUBLISHING_AGENT = JSON.parse(fs.readFileSync("./tst-tmp/agents/p/ad4m/agent.json").toString())["did"];
 
-export default function runtimeTests(testContext: TestContext) {
+export default function runtimeTests(testContext: TestContext, options?: { hasHolochain?: boolean }) {
+    const hasHolochain = options?.hasHolochain ?? true;
     return () => {
         it('Trusted Agents CRUD', async () => {
             const ad4mClient = testContext.ad4mClient!
@@ -133,7 +134,7 @@ export default function runtimeTests(testContext: TestContext) {
             expect(postDeleteAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ].sort())
         })
 
-        it("can deal with Holochain's agent_infos", async () => {
+        ;(hasHolochain ? it : it.skip)("can deal with Holochain's agent_infos", async () => {
             const ad4mClient = testContext.ad4mClient!
             const agentInfos = await ad4mClient.runtime.hcAgentInfos()
             expect(agentInfos).to.be.an('array')
