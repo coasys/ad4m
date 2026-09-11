@@ -760,6 +760,10 @@ impl AIService {
                 &api.api_key,
                 api.base_url,
             )),
+            ModelApiType::Ollama => Box::new(providers::ollama::OllamaChat::new(
+                &api.api_key,
+                api.base_url,
+            )),
         };
         publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
         client
