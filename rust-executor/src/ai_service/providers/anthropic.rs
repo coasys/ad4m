@@ -430,6 +430,25 @@ impl RemoteChat for AnthropicChat {
     ) -> Result<ChatReply> {
         use futures::StreamExt;
 
+        // `build_body` is shared so the two calls cannot drift in what they
+        // send — which means tools go out on this path too, and the read side
+        // has no matching half: a `tool_use` block arrives as a run of
+        // `input_json_delta` events that nothing here accumulates. `text_delta`
+        // correctly refuses to treat them as text, so the call does not corrupt
+        // the reply; it disappears, and the caller sees a successful completion
+        // with no calls, which reads as "the model chose not to call anything".
+        //
+        // Refuse loudly instead. Accumulating the deltas per
+        // `content_block_index` and flushing on `content_block_stop` is the
+        // real fix and needs its own tests. Nothing streams with tools today.
+        if !request.tools.is_empty() {
+            return Err(anyhow!(
+                "Streaming with native tools is not supported on this provider yet: \
+                 tool_use blocks arrive as input_json_delta and are not accumulated. \
+                 Use the non-streaming call for a turn that carries tools."
+            ));
+        }
+
         let body = self.build_body(request, true);
         let response = self.send(&body).await?;
 
@@ -1079,6 +1098,40 @@ mod wire_tests {
         // — and the returned reply is the whole text, which is what gets billed.
         assert_eq!(deltas, vec!["Hello".to_string(), ", world".to_string()]);
         assert_eq!(reply.text, "Hello, world");
+    }
+
+    #[tokio::test]
+    async fn streaming_with_tools_is_refused_rather_than_dropping_the_calls() {
+        let mut server = mockito::Server::new_async().await;
+        // No `.expect(0)` on a mock here: the assertion is that nothing is
+        // posted at all, so any request to the server is an unmatched one and
+        // the request never leaves the client.
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .expect(0)
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = AnthropicChat::new("sk-test", Url::parse(&server.url()).unwrap());
+        let error = client
+            .chat_stream(
+                ChatRequest::new("claude-opus-5", turns()).with_tools(vec![ToolSpec {
+                    name: "search".into(),
+                    description: "find things".into(),
+                    parameters: json!({ "type": "object" }),
+                }]),
+                tx,
+            )
+            .await
+            .expect_err("a streamed turn carrying tools is refused");
+
+        assert!(
+            error.to_string().contains("not supported"),
+            "the error names the gap: {error}"
+        );
+        mock.assert_async().await;
     }
 
     #[tokio::test]

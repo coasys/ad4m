@@ -290,6 +290,14 @@ pub trait RemoteChat: Send + Sync {
     ///
     /// The returned [`ChatReply`] always carries the complete text whether or
     /// not it streamed, because the caller bills on it.
+    ///
+    /// Tools are *not* promised here, even on a provider whose
+    /// [`Self::supports_native_tools`] is true. Reading structured calls out of
+    /// a stream means reassembling them from partial JSON, which no
+    /// implementation does yet. An implementation that cannot must answer a
+    /// request carrying tools with an error rather than a reply with none —
+    /// an empty `tool_calls` is indistinguishable from a model that chose not
+    /// to call anything.
     async fn chat_stream(
         &self,
         request: ChatRequest,
