@@ -5,11 +5,17 @@
 //! The HTTP work is `chat_gpt_lib_rs` (coasys fork); this file is the mapping
 //! between [`ChatTurn`] and that crate's request shape.
 //!
-//! Tools are not passed natively here. Callers that want tool use on an
-//! OpenAI-shaped endpoint go through the prompt-injection path in
-//! `api::openai_compat::harness_bridge`, which renders tool definitions into
+//! Tools are not passed natively here. That is a limitation of this client and
+//! not of the protocol — the OpenAI format carries `tools[]` and answers with
+//! `tool_calls`; this file simply does not build them yet. Callers that want
+//! tool use on an OpenAI-shaped endpoint go through the prompt-injection path
+//! in `api::openai_compat::harness_bridge`, which renders tool definitions into
 //! the system prompt and recovers calls from the reply text — one uniform
 //! mechanism that works whether or not the far end supports `tools[]`.
+//!
+//! A request that arrives carrying tools anyway is refused rather than served
+//! without them, so the day someone flips the answer in
+//! `api_type_supports_native_tools` the mistake is loud.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -112,6 +118,21 @@ fn to_wire_message(turn: &ChatTurn) -> Message {
 #[async_trait]
 impl RemoteChat for OpenAiChat {
     async fn chat(&self, request: ChatRequest) -> Result<ChatReply> {
+        // `ChatRequest::tools` is documented as only ever non-empty for a
+        // provider whose `supports_native_tools` is true. This enforces that
+        // invariant rather than asserting it. Building `ChatInput` from
+        // `to_wire_message` alone would otherwise drop the definitions
+        // silently: the model is handed no tools, answers in prose, and the
+        // empty `tool_calls` reads to the harness as "done" on turn one.
+        if !request.tools.is_empty() {
+            return Err(anyhow!(
+                "This client does not pass tools natively, so a request carrying {} of them \
+                 cannot be served. The OpenAI wire format supports them; `OpenAiChat` does not \
+                 build them yet. Render tools into the prompt instead.",
+                request.tools.len()
+            ));
+        }
+
         let chat_input = ChatInput {
             model: chat_gpt_lib_rs::Model::Custom(request.model),
             messages: request.messages.iter().map(to_wire_message).collect(),
@@ -150,6 +171,7 @@ impl RemoteChat for OpenAiChat {
 /// nothing.
 #[cfg(test)]
 mod wire_tests {
+    use super::super::ToolSpec;
     use super::*;
     use mockito::Matcher;
 
@@ -201,6 +223,39 @@ mod wire_tests {
             super::super::versioned_endpoint(configured, "models"),
             "https://api.groq.com/openai/v1/models"
         );
+    }
+
+    #[tokio::test]
+    async fn a_request_carrying_tools_is_refused_rather_than_stripped() {
+        // The failure this guards is quiet: the tools would be dropped, the
+        // model would answer in prose, and the harness would read the empty
+        // `tool_calls` as "the model is done" on its first turn. So the
+        // assertion is that nothing is sent at all.
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", Matcher::Any)
+            .expect(0)
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let client = OpenAiChat::new("sk-test", url(&server.url()));
+        let error = client
+            .chat(
+                ChatRequest::new("gpt-4o", vec![ChatTurn::user("hi")]).with_tools(vec![ToolSpec {
+                    name: "search".into(),
+                    description: "find things".into(),
+                    parameters: serde_json::json!({ "type": "object" }),
+                }]),
+            )
+            .await
+            .expect_err("a request carrying tools is refused");
+
+        assert!(
+            error.to_string().contains("does not pass tools natively"),
+            "the error says whose limitation it is: {error}"
+        );
+        mock.assert_async().await;
     }
 
     #[tokio::test]

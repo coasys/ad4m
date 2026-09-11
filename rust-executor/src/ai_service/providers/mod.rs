@@ -75,15 +75,21 @@ pub(crate) fn model_ids_from_data(json: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether a wire protocol can carry tool definitions and return tool calls
-/// as structured data.
+/// Whether this executor's client for an API type passes tools as data.
 ///
 /// The same fact as [`RemoteChat::supports_native_tools`], asked of a model
 /// config rather than of a built client — the harness has to decide how to
 /// render tools *before* anything reaches a worker thread, so it cannot ask
 /// the instance. Kept beside the trait, and covered by a test asserting the
 /// two agree, because two answers drifting apart would route a model down a
-/// path its provider cannot serve.
+/// path its client cannot serve.
+///
+/// `OpenAi => false` is about [`openai::OpenAiChat`] and not about the OpenAI
+/// wire format, which carries tools perfectly well. That client could support
+/// them and does not yet, so every OpenAI-shaped model takes the prompt-
+/// injection path. Flipping this arm alone is not enough to make it work — it
+/// would also need building `tools[]` in `OpenAiChat::chat`, which is why that
+/// method refuses a request carrying tools instead of ignoring them.
 pub fn api_type_supports_native_tools(api_type: &crate::types::ModelApiType) -> bool {
     match api_type {
         crate::types::ModelApiType::Anthropic => true,
@@ -271,8 +277,18 @@ pub trait RemoteChat: Send + Sync {
     /// model is handed a schema instead of a description of one, and the calls
     /// come back as data rather than as text that happens to look like data.
     ///
-    /// Answering this wrongly is the one way a provider can break a caller, so
-    /// it is a plain fact about the wire format, never a preference.
+    /// It is a fact about *this implementation*, not about the protocol it
+    /// speaks. The OpenAI wire format carries `tools[]` and answers with
+    /// `tool_calls` — it is one of the two formats that defined the shape —
+    /// and [`super::openai::OpenAiChat`] still answers `false`, because it
+    /// does not build them. Read a `false` as "this client does not pass
+    /// tools as data", never as "this protocol cannot".
+    ///
+    /// Answering it wrongly is the one way a provider can break a caller: a
+    /// `true` from a client that then drops `ChatRequest::tools` hands the
+    /// model no tools, and the empty `tool_calls` that comes back reads as
+    /// "done" on the first turn. So a client answering `false` must refuse a
+    /// request carrying tools rather than ignore them.
     fn supports_native_tools(&self) -> bool {
         false
     }
