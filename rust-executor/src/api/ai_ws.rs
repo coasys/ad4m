@@ -57,6 +57,17 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// but it makes an outbound request to an arbitrary URL with an
 /// arbitrary key, which is the same authority adding a model carries and more
 /// than reading the models already configured.
+///
+/// That includes the failure body. `list_models` puts the upstream response
+/// verbatim into its error, so a caller can point `baseUrl` at a host this
+/// node can reach and read what it answers. Deliberate, on two grounds: a
+/// holder of AI_CREATE can already name an arbitrary URL and send it
+/// credentials, so this widens reach and not authority; and the body is the
+/// reason the endpoint is worth having, because a status alone does not
+/// separate a bad key from a bad model name from a host that is not an LLM.
+/// Revisit it if AI_CREATE is ever granted more widely than to the operator of
+/// the node — the reach is a cleaner read primitive than `addModel` plus a
+/// prompt, needing no model and no completion.
 async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
