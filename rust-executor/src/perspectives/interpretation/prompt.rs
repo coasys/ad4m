@@ -350,16 +350,6 @@ Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...rela
 where fields carry strings drawn from what participants actually said or
 committed to, and relations carry *references* to other instances (see below).
 
-A relation's `cardinality` decides the shape of its value, and the two are not
-interchangeable:
-  - `\"cardinality\": \"many\"` takes an ARRAY of references, even when there is
-    exactly one: `\"between\": [\"new:Position:1\", \"new:Position:2\"]`.
-  - `\"cardinality\": \"one\"` takes a SINGLE reference: `\"owner\": \"new:Person:1\"`.
-Never repeat a key to attach a second reference — `{\"between\": \"a\", \"between\": \"b\"}`
-is not valid JSON for this purpose and silently keeps only one of them. If a
-`many` relation has several targets, they all go in one array. If it has none,
-omit the key entirely rather than emitting an empty array.
-
 When `active_flows` is present you may instead emit an object:
   `{\"instances\": [ ...the same elements... ], \"flow_proposals\": [ ... ]}`
 Each flow proposal is `{\"instance\": <URI copied from active_flows[i].instance>,
@@ -391,6 +381,9 @@ Relations (linking instances together):
   - Only set a relation when the transcript clearly identifies the target;
     omit the relation field otherwise. Never invent an `id`, and never emit a
     `\"new:<Class>:<n>\"` ref for which no matching output element exists.
+  - Each relation's `cardinality` fixes the shape of its value: `\"many\"`
+    takes an ARRAY of refs even for a single target, `\"one\"` takes a bare
+    ref. Never repeat a key to add a second target — JSON keeps only the last.
 
 Worked examples follow (as prior turns) before your real input — study how
 every co-present item is captured, then apply the same to your input.
