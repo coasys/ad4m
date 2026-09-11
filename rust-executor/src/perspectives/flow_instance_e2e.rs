@@ -16,7 +16,7 @@ use super::flow_classes::advance_flow_instance_state;
 use super::flow_context::load_shacl_flows;
 use super::flow_evaluator::recompute_evidence_hash;
 use super::flow_evaluator_e2e::{literal, seed_flow, seed_satisfied_fixture, Fixture};
-use super::flow_instance::accept::accept_flow_proposal;
+use super::flow_instance::accept::{accept_flow_proposal, reject_flow_proposal};
 use super::flow_instance::atom::{
     ACCEPTED_BY_PREDICATE, FIRED_MARK, RESOLVED_AS_PREDICATE, TO_STATE_PREDICATE,
 };
@@ -414,6 +414,21 @@ async fn n2_second_signer_accept_settles_and_replays() {
         "one accept, one vote link"
     );
 
+    // Lock the camelCase wire shape so the TS `FlowFireOutcome` interface
+    // can never drift from what `serde_json::to_value(fired)` produces.
+    let wire = serde_json::to_value(&fired).expect("serialize fired outcomes");
+    let obj = wire[0]
+        .as_object()
+        .expect("outcome must serialize as object");
+    assert_eq!(obj.len(), 5, "unexpected field count on the wire: {obj:?}");
+    assert_eq!(wire[0]["instanceUri"], fired[0].instance_uri.as_str());
+    assert_eq!(wire[0]["fromState"], fired[0].from_state.as_str());
+    assert_eq!(wire[0]["toState"], fired[0].to_state.as_str());
+    assert_eq!(wire[0]["voters"].as_array().map(Vec::len), Some(2));
+    assert!(wire[0]["contributingProposalUris"]
+        .as_array()
+        .is_some_and(|a| a.contains(&serde_json::Value::String(proposal.clone()))));
+
     // Voting again on an edge that has already settled is refused as stale:
     // the proposal leaves `identified` and the instance is in `scoped`.
     let err = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
@@ -806,5 +821,103 @@ async fn two_replicas_with_the_same_links_derive_the_same_state() {
         b.cached_state().await,
         "review",
         "B never ran a pass, so its cache lags — and the fold does not care"
+    );
+}
+
+/// Nico's deletion ruling, pinned on the *write path* rather than on raw
+/// links: retracting our own vote through `reject_flow_proposal` moves a
+/// settled flow back. The engine has no "already fired, refuse" guard, and
+/// must not grow one — a `resolved_as → "fired"` mark is an index any member
+/// can write, so guarding on it would both read a forgeable link as authority
+/// and contradict the semantics that state follows the links present now.
+#[tokio::test(flavor = "multi_thread")]
+async fn rejecting_our_own_settled_vote_regresses_the_state() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let proposal = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+
+    let fired = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect("our vote settles the edge at n = 2");
+    assert_eq!(fired.len(), 1, "precondition: the edge settled");
+    assert_eq!(f.derived().await.state, "scoped");
+
+    reject_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect("a fired proposal is not immutable — our own vote stays ours");
+
+    let derived = f.derived().await;
+    assert_eq!(
+        derived.state, "identified",
+        "with our vote gone the edge is 1 < n = 2 again, so the flow stands where it stood"
+    );
+    assert!(
+        derived.settled.is_empty(),
+        "nothing settled survives the retraction: {:?}",
+        derived.settled
+    );
+    assert!(
+        f.links_by_predicate(&proposal)
+            .await
+            .get(ACCEPTED_BY_PREDICATE)
+            .is_none(),
+        "our acceptedBy link is gone; Bob's proposal links are untouched"
+    );
+}
+
+/// Reject deletes what this DID *signed*, not what merely names it. A peer
+/// can publish a link claiming our authorship with an unverifiable proof; it
+/// is not our action, so retracting it is not ours to do either — the same
+/// rule that stops the forgery suppressing our vote in `accept`.
+#[tokio::test(flavor = "multi_thread")]
+async fn reject_leaves_a_forged_link_claiming_our_did_alone() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let proposal = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+    let me = acting_did(&f);
+
+    f.perspective
+        .add_link_expression(
+            LinkExpression {
+                author: me.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                data: Link {
+                    source: proposal.clone(),
+                    predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+                    target: me.clone(),
+                },
+                proof: crate::types::ExpressionProof {
+                    key: format!("{me}#key"),
+                    signature: "not-a-signature".to_string(),
+                },
+                status: Some(LinkStatus::Shared),
+            },
+            LinkStatus::Shared,
+            None,
+        )
+        .await
+        .expect("sync a forged vote claiming our authorship");
+
+    let err = reject_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect_err("we signed nothing on this proposal, so there is nothing of ours to retract");
+    assert!(
+        format!("{err:#}").contains("no link signed by"),
+        "got {err:#}"
+    );
+
+    assert_eq!(
+        f.links_by_predicate(&proposal)
+            .await
+            .get(ACCEPTED_BY_PREDICATE)
+            .map(Vec::len),
+        Some(1),
+        "the forgery is still on the graph — invisible to the fold, but not ours to delete"
     );
 }

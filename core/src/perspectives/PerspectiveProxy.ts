@@ -1,4 +1,4 @@
-import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import { LinkCallback, PerspectiveClient, SyncStateChangeCallback, FlowFireOutcome } from "./PerspectiveClient";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
@@ -866,6 +866,15 @@ export class PerspectiveProxy {
      */
     async rejectInterpretation(base: string, property?: string): Promise<boolean> {
         return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+    }
+
+    async acceptFlowProposal(proposalUri: string): Promise<FlowFireOutcome[]> {
+        return await this.#client.acceptFlowProposal(this.#handle.uuid, proposalUri)
+    }
+
+    /** Withdraw our own links from a proposal; resolves to how many went. */
+    async rejectFlowProposal(proposalUri: string): Promise<number> {
+        return await this.#client.rejectFlowProposal(this.#handle.uuid, proposalUri)
     }
 
     /** Subscribe to this perspective's auto-processor step signals. */

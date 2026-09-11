@@ -37,9 +37,6 @@ use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
 /// evidence seal does not recompute on this replica. Returns whatever
 /// settled as a result, which may be nothing: a vote that does not yet reach
 /// quorum is a landed vote, not a failure.
-// The WS-RPC / MCP / TS surfaces that call this land in the accept-reject PR
-// (#968); in this PR the e2e tests are its only caller.
-#[allow(dead_code)]
 pub async fn accept_flow_proposal(
     perspective: &mut PerspectiveInstance,
     proposal_uri: &str,
@@ -134,6 +131,54 @@ pub async fn accept_flow_proposal(
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
     Ok(run_flow_consensus_pass(perspective, None, context, None, Some(&instance_uri)).await)
+}
+
+/// Reject a proposal: retract the links on it that this replica signed.
+///
+/// Invariant: a replica only ever refuses its own action. So we delete only
+/// the links this DID actually signed — another agent's links are theirs to
+/// retract, and a link that merely *claims* our authorship without a valid
+/// signature is not our action either, so it is left alone.
+///
+/// There is deliberately no "already fired, refuse" guard. A `resolved_as →
+/// "fired"` mark is an index any member may write, not authority, and this
+/// engine reads no mark to decide anything. Retracting a vote that helped
+/// settle an edge therefore does move the flow back — that is the semantics
+/// stated in this module's parent doc, not a hole in this function: state is
+/// a function of the links present now.
+pub async fn reject_flow_proposal(
+    perspective: &mut PerspectiveInstance,
+    proposal_uri: &str,
+    context: &AgentContext,
+) -> anyhow::Result<usize> {
+    use crate::types::LinkExpression;
+
+    let links = proposal_links(perspective, proposal_uri).await?;
+
+    let did = crate::agent::did_for_context(context)
+        .map_err(|e| anyhow::anyhow!("reject_flow_proposal: no acting DID: {e:#}"))?;
+
+    let to_remove: Vec<LinkExpression> = links
+        .into_iter()
+        .filter(|l| signed_by(l, &did))
+        .map(LinkExpression::from)
+        .collect();
+
+    if to_remove.is_empty() {
+        return Err(anyhow::anyhow!(
+            "proposal {proposal_uri} carries no link signed by {did} — cannot reject another agent's proposal"
+        ));
+    }
+
+    // Callers report this rather than a bare "deleted": retracting one vote
+    // and retracting a whole proposal are different events, and the count is
+    // the only thing that distinguishes them at the wire.
+    let retracted = to_remove.len();
+    perspective
+        .remove_links(to_remove, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("reject_flow_proposal: remove_links failed: {e:#}"))?;
+    Ok(retracted)
 }
 
 /// Every source-link of a proposal. `Err` when the URI carries none —

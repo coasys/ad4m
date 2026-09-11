@@ -27,7 +27,7 @@ import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Ad4mClient, Link, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
+import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, SHACLFlow, FlowState } from "@coasys/ad4m";
 import { FlowInstance, FlowInstanceRecord, FlowTransitionProposal, FlowTransition } from "@coasys/ad4m";
 import { Ad4mModel, Flag, Model, Property } from "@coasys/ad4m";
 import { getSharedAgent } from "./hooks.js";
@@ -805,5 +805,116 @@ describe("PerspectiveProxy.availableFlows — concrete-type matching", function 
   it("returns an empty array when no flows are registered", async () => {
     const found = await p.availableFlows("test-lang://anything");
     expect(found).to.deep.equal([]);
+  });
+});
+
+describe("FlowInstance.acceptProposal / rejectProposal — consensus write API", function () {
+  this.timeout(120_000);
+
+  let ad4m: Ad4mClient;
+  let stopAgent: (() => Promise<void>) | null = null;
+  let p: PerspectiveProxy;
+  let myDid: string;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("flow-accept-reject");
+      ad4m = agent.client;
+      stopAgent = agent.stop;
+    }
+    myDid = (await ad4m.agent.me()).did;
+  });
+
+  after(async () => {
+    if (stopAgent) await stopAgent();
+  });
+
+  beforeEach(async () => {
+    const handle = await ad4m.perspective.add("flow-accept-reject-test");
+    p = (await ad4m.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+  });
+
+  afterEach(async () => {
+    if (p) await ad4m.perspective.remove(p.uuid);
+  });
+
+  function makeDeliveryFlow(): SHACLFlow {
+    const flow = new SHACLFlow("Delivery", "flow://");
+    flow.inputTypes = ["ad4m://Task"];
+    const identified: FlowState = { name: "Identified", value: 0 };
+    const inProgress: FlowState = { name: "InProgress", value: 1 };
+    flow.addState(identified);
+    flow.addState(inProgress);
+    return flow;
+  }
+
+  async function seedProposal(instanceUri: string, fromState: string, toState: string): Promise<string> {
+    const proposal = `ad4m://flow/proposal/js-test-${Math.random().toString(36).slice(2)}`;
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/instance", target: instanceUri }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/from_state", target: `literal:string:${fromState}` }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/to_state", target: `literal:string:${toState}` }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/proposer", target: myDid }));
+    await p.add(new Link({ source: proposal, predicate: "ad4m://flow/evidence_hashes", target: "literal:string:" }));
+    return proposal;
+  }
+
+  // The happy path — a vote that counts and an edge that settles — needs a
+  // proposal whose evidence seal the executor can reproduce, and that seal is
+  // computed inside the executor from the target state's `requires` guard. A
+  // client cannot construct one, so the settle path is covered by the Rust
+  // e2e (`flow_instance_e2e.rs`), which has the seal machinery. What the wire
+  // layer is responsible for, and what this pins, is that a proposal the fold
+  // would never count is refused here too rather than half-accepted.
+  it("acceptProposal refuses a proposal with an empty evidence seal and writes nothing", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
+    expect(instance.currentStateName).to.equal("Identified");
+    const proposal = await seedProposal(instance.uri, "Identified", "InProgress");
+
+    let message = "";
+    try {
+      await instance.acceptProposal(proposal);
+    } catch (e: any) {
+      message = String(e?.message ?? e);
+    }
+    expect(message, "accept must refuse a proposal that is not an atom").to.contain(
+      "not engine-visible",
+    );
+
+    // Refused means nothing was written — not our vote, and not a state move.
+    const votes = await p.get(
+      new LinkQuery({ source: proposal, predicate: "ad4m://acceptedBy" }),
+    );
+    expect(votes).to.have.lengthOf(0);
+
+    const all = await FlowInstance.findAll(p);
+    expect(all).to.have.lengthOf(1);
+    expect(all[0].currentStateName).to.equal("Identified");
+  });
+
+  it("rejectProposal retracts our own links and errors on unknown URIs", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const instance = await FlowInstance.start(p, "Delivery", "ad4m://task/2");
+    const proposal = await seedProposal(instance.uri, "Identified", "InProgress");
+
+    // We seeded the proposal, so every link on it is ours: the count is how
+    // many went, not a bare boolean. It must be > 0 or nothing was retracted.
+    const retracted = await instance.rejectProposal(proposal);
+    expect(retracted).to.be.a("number");
+    expect(retracted).to.be.greaterThan(0);
+
+    let threw = false;
+    try {
+      await instance.rejectProposal(proposal);
+    } catch {
+      threw = true;
+    }
+    expect(threw, "reject on a deleted proposal must error").to.equal(true);
+
+    const all = await FlowInstance.findAll(p);
+    expect(all[0].currentStateName).to.equal("Identified");
   });
 });

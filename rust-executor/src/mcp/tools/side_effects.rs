@@ -102,6 +102,8 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     // no mutation.
     ("flow_state", SideEffect::Read),
     ("flow_actions", SideEffect::Read),
+    ("flow_proposal_accept", SideEffect::Write),
+    ("flow_proposal_reject", SideEffect::Write),
     // ── children.rs ─────────────────────────────────────────────────
     ("add_child", SideEffect::Write),
     ("get_children", SideEffect::Read),
