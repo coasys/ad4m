@@ -385,6 +385,25 @@ fn read_content(blocks: &[ContentBlock]) -> (String, Vec<ToolCall>) {
     (text, tool_calls)
 }
 
+/// Put the provider's exact counts in the log.
+///
+/// Caching is the reason this client exists rather than routing Claude through
+/// the OpenAI-shaped shim, and it fails silently: a breakpoint that stops
+/// landing reports nothing and shows up only as a larger bill.
+/// `cache_read_tokens` is the observation that says it worked, and until
+/// billing moves off `estimate_token_count` the log is the only place it can
+/// be seen outside the `#[ignore]`d e2e suite.
+fn log_usage(model: &str, streamed: bool, usage: &ChatUsage) {
+    log::debug!(
+        "Anthropic usage ({model}{}): in={:?} out={:?} cache_read={:?} cache_write={:?}",
+        if streamed { ", streamed" } else { "" },
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+    );
+}
+
 #[async_trait]
 impl RemoteChat for AnthropicChat {
     fn supports_native_tools(&self) -> bool {
@@ -415,11 +434,13 @@ impl RemoteChat for AnthropicChat {
         }
 
         let (text, tool_calls) = read_content(&parsed.content);
+        let usage = parsed.usage.map(ChatUsage::from).unwrap_or_default();
+        log_usage(&body.model, false, &usage);
 
         Ok(ChatReply {
             text,
             tool_calls,
-            usage: parsed.usage.map(ChatUsage::from).unwrap_or_default(),
+            usage,
         })
     }
 
@@ -492,6 +513,7 @@ impl RemoteChat for AnthropicChat {
                     if tokens.send(delta).is_err() {
                         // Consumer hung up. Stop reading rather than
                         // draining a response nobody will see.
+                        log_usage(&body.model, true, &usage);
                         return Ok(ChatReply {
                             text,
                             tool_calls: Vec::new(),
@@ -501,6 +523,8 @@ impl RemoteChat for AnthropicChat {
                 }
             }
         }
+
+        log_usage(&body.model, true, &usage);
 
         Ok(ChatReply {
             text,
