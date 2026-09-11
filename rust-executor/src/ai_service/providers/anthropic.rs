@@ -45,7 +45,10 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// `max_tokens` is mandatory on this API — unlike the OpenAI path, where
 /// omitting it lets the server pick. 16k is large enough that a long
 /// interpretation answer is not clipped and small enough to bound a runaway.
-/// Model options override it (`ModelApi.options.max_tokens`).
+///
+/// Nothing overrides it. `ModelApi` carries no options, and the `max_tokens`
+/// a client sends to the compat surface is dropped before it reaches either
+/// provider. Threading that through is worth doing and is not done here.
 const DEFAULT_MAX_TOKENS: u32 = 16_384;
 
 /// A completion can legitimately run for minutes on a long prompt. Without a
