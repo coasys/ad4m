@@ -1140,12 +1140,36 @@ export class PerspectiveProxy {
 
     /**
      * Removes a link from the perspective.
-     * 
-     * @param link - The link to remove
+     *
+     * Accepts either a full `LinkExpressionInput` (as returned by `add`) or a bare
+     * `Link` (source/predicate/target only).  When a bare Link is passed the method
+     * resolves it to the first stored `LinkExpression` whose source, predicate, and
+     * target match, then removes that expression.  If no match is found an error is
+     * thrown naming the link so the caller knows what was expected.
+     *
+     * @param link - The link to remove (LinkExpressionInput or bare Link)
      * @param batchId - Optional batch ID to group this operation with others
      */
-    async remove(link: LinkExpressionInput, batchId?: string): Promise<boolean> {
-        const result = await this.#client.removeLink(this.#handle.uuid, link, batchId)
+    async remove(link: LinkExpressionInput | Link, batchId?: string): Promise<boolean> {
+        let resolvedLink: LinkExpressionInput;
+        if (!('data' in link) || (link as any).data === undefined) {
+            // bare Link — resolve to stored expression
+            const bare = link as Link;
+            const matches = await this.get(new LinkQuery({
+                source: bare.source || undefined,
+                predicate: bare.predicate || undefined,
+                target: bare.target || undefined,
+            }));
+            if (matches.length === 0) {
+                throw new Error(
+                    `PerspectiveProxy.remove: no stored LinkExpression matches Link { source: "${bare.source}", predicate: "${bare.predicate}", target: "${bare.target}" }`
+                );
+            }
+            resolvedLink = matches[0] as unknown as LinkExpressionInput;
+        } else {
+            resolvedLink = link as LinkExpressionInput;
+        }
+        const result = await this.#client.removeLink(this.#handle.uuid, resolvedLink, batchId)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }

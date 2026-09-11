@@ -1,4 +1,5 @@
 import { PerspectiveProxy, QuerySubscriptionProxy } from './PerspectiveProxy';
+import { Link, LinkExpression } from '../links/Links';
 
 function createMockPerspectiveClient(): any {
   return {
@@ -589,5 +590,65 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
     const proxy = createProxy(mockClient);
 
     expect(await proxy.subjectClassTargetClasses()).toEqual([]);
+  });
+});
+
+// ── fix #1008: PerspectiveProxy.remove accepts bare Link ────────────────────
+//
+// PerspectiveClient.removeLink does `delete link.data.__typename` which throws
+// when a bare Link (no .data) is passed. The fix resolves the Link to its stored
+// LinkExpression first, so remove(new Link({...})) must work without error.
+describe('PerspectiveProxy.remove with bare Link', () => {
+  function makeStoredExpression(source: string, predicate: string, target: string): LinkExpression {
+    const expr = new LinkExpression();
+    expr.author = 'did:test:agent';
+    expr.timestamp = '2026-01-01T00:00:00Z';
+    expr.data = new Link({ source, predicate, target });
+    expr.proof = { valid: true, invalid: false, signature: 'sig', key: 'key' } as any;
+    return expr;
+  }
+
+  it('resolves a bare Link to the stored expression and removes it', async () => {
+    const storedExpr = makeStoredExpression('s://a', 'p://b', 't://c');
+    const removeLink = jest.fn().mockResolvedValue(true);
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      // queryLinks is what PerspectiveProxy.get calls
+      queryLinks: jest.fn().mockResolvedValue([storedExpr]),
+      removeLink,
+    };
+    const proxy = createProxy(mockClient);
+
+    const result = await proxy.remove(new Link({ source: 's://a', predicate: 'p://b', target: 't://c' }));
+
+    expect(result).toBe(true);
+    // removeLink must have been called with the resolved expression, not the bare Link
+    expect(removeLink).toHaveBeenCalledWith('test-uuid', storedExpr, undefined);
+  });
+
+  it('throws a descriptive error when no stored expression matches the bare Link', async () => {
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      queryLinks: jest.fn().mockResolvedValue([]),
+    };
+    const proxy = createProxy(mockClient);
+
+    await expect(
+      proxy.remove(new Link({ source: 'missing://src', predicate: 'p://pred', target: 'missing://tgt' }))
+    ).rejects.toThrow('PerspectiveProxy.remove: no stored LinkExpression matches');
+  });
+
+  it('passes a full LinkExpressionInput through unchanged', async () => {
+    const storedExpr = makeStoredExpression('s://x', 'p://y', 't://z');
+    const removeLink = jest.fn().mockResolvedValue(true);
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      removeLink,
+    };
+    const proxy = createProxy(mockClient);
+
+    await proxy.remove(storedExpr as any);
+    // Should NOT have called queryLinks — no bare Link resolution needed
+    expect(removeLink).toHaveBeenCalledWith('test-uuid', storedExpr, undefined);
   });
 });
