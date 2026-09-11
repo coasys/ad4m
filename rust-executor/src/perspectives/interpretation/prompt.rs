@@ -13,7 +13,7 @@ use std::collections::HashMap;
 /// `{ "classes": [{ "name", "hint",
 ///                  "existing": [{ "id", "title", "class" }, …],
 ///                  "fields": [{ "name", "required", "hint" }],
-///                  "relations": [{ "name", "targetClass", "hint" }] }],
+///                  "relations": [{ "name", "targetClass", "cardinality", "hint" }] }],
 ///    "transcript": [{ "speaker", "text", "timestamp"? }] }`.
 ///
 /// `existing` maps a class's local name to the instances already in the graph
@@ -94,8 +94,10 @@ pub fn build_interpretation_input(
                 // `belongsToMany` are inherently reverse (target class holds
                 // the outbound edge), so writing them requires resolving the
                 // inverse predicate — out of scope until Phase 3. Forward
-                // `hasOne` and `hasMany` both surface here; cardinality is
-                // enforced downstream when the planner resolves refs.
+                // `hasOne` and `hasMany` both surface here, and each one now
+                // *declares* its cardinality (below) as well as having it
+                // enforced downstream when the planner resolves refs —
+                // enforcement alone was not enough, see #1005.
                 .filter(|r| r.direction == "forward")
                 .map(|r| {
                     // Collision-aware label (CodeRabbit #881 review): the
