@@ -21,8 +21,7 @@ use super::types::{
     ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, ShapeResolver, WhereCondition,
 };
 use super::utils::{
-    escape_sparql_string, format_literal_number, is_inlinable_iri, looks_like_absolute_iri,
-    validate_iri,
+    escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
 };
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -67,8 +66,7 @@ pub(super) async fn resolve_projections(
     let parent_ids: Vec<String> = instances
         .iter()
         .filter_map(|inst| inst["id"].as_str())
-        .filter(|id| is_inlinable_iri(id))
-        .map(|id| id.to_string())
+        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
         .collect();
 
     if parent_ids.is_empty() {

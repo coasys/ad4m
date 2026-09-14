@@ -22,7 +22,7 @@ use super::query::execute_model_query_inner;
 use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
-use super::utils::{is_inlinable_iri, validate_iri};
+use super::utils::validate_iri;
 use crate::perspectives::sparql_store::SparqlStore;
 
 /// Resolve reverse relations (`@BelongsTo`) for all instances in a batch.
@@ -43,8 +43,7 @@ pub fn resolve_reverse_relations(
     let instance_iris: Vec<String> = instances
         .iter()
         .filter_map(|inst| inst["id"].as_str())
-        .filter(|id| is_inlinable_iri(id))
-        .map(|id| id.to_string())
+        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
         .collect();
 
     if instance_iris.is_empty() {
@@ -547,7 +546,7 @@ async fn resolve_reverse_include(
 
     let id_list = all_ids
         .iter()
-        .filter(|id| is_inlinable_iri(id))
+        .filter(|id| validate_iri(id).is_ok())
         .map(|id| format!("<{id}>"))
         .collect::<Vec<_>>()
         .join(", ");

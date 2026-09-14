@@ -93,18 +93,28 @@ pub fn is_safe_iri_target(s: &str) -> bool {
     looks_like_absolute_iri(s)
 }
 
-/// Validate a value for use inside an IRI `<…>`.  Rejects characters that
-/// would break or inject into a SPARQL IRI token, including all control and
-/// whitespace characters (e.g. `\n`, `\r`, `\t`, U+00A0) which `validate_iri`
-/// previously let through and which would emit malformed `<…>` IRIREFs.
+/// Validate a value for use inside an IRI `<…>`.
 ///
-/// Deliberately a character gate and nothing more. It feeds
-/// [`looks_like_absolute_iri`] and therefore [`is_safe_iri_target`], which the
-/// **write** path uses to decide whether a value becomes a raw `NamedNode` or a
-/// wrapped `literal:*` URI. Tightening this function silently re-routes writes
-/// and changes how already-stored values are matched, so if you want a stricter
-/// check for a specific call site, use [`is_inlinable_iri`] there instead of
-/// changing this.
+/// Two gates, and the second one matters more than it looks:
+///
+/// 1. Reject characters that would break or inject into a SPARQL IRI token —
+///    all control and whitespace characters (e.g. `\n`, `\r`, `\t`, U+00A0),
+///    and the delimiters `<` `>` `{` `}` `"`.
+/// 2. Reject anything oxigraph's own IRI parser rejects, by parsing it.
+///
+/// Gate 2 exists because gate 1 alone was a character blacklist wearing the
+/// name of a validator, and callers filtered on it believing unusable ids were
+/// excluded. They were not. `literal://string:h4o520cifomi2pgilz3l160u` — the
+/// legacy double-slash id form written by pre-normalisation clients — contains
+/// no blacklisted character, so it passed, was inlined as `<…>`, and then
+/// oxigraph rejected the whole query: `expected IRI parsing failed`. In RFC
+/// 3986 terms the `//` makes `string:h4o520…` an authority, so `h4o520…` is
+/// parsed as a port and must be numeric.
+///
+/// One such id anywhere in an enumeration therefore killed every class-wide
+/// read of that class (see issue #1014). Validating with the same parser the
+/// query will be handed means a filtering caller now actually filters, and the
+/// bad id is skipped rather than poisoning its neighbours.
 pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
     if s.chars().any(|c| c.is_control() || c.is_whitespace())
         || s.contains('>')
@@ -115,34 +125,12 @@ pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
     {
         return Err(anyhow!("Invalid IRI component: '{}'", s));
     }
+    // Parse with oxigraph rather than approximating its grammar here: this is
+    // the parser that will see the query, so agreeing with it is the point.
+    if oxigraph::model::NamedNode::new(s).is_err() {
+        return Err(anyhow!("Not a valid IRI: '{}'", s));
+    }
     Ok(s)
-}
-
-/// Whether an **instance id** can be inlined into a `VALUES ?source { <…> }`
-/// clause — i.e. whether oxigraph will parse it as an IRI.
-///
-/// Why this is separate from [`validate_iri`]: that function is a character
-/// blacklist, and the id-enumeration sites used to filter on it believing
-/// unusable ids were excluded. They were not.
-/// `literal://string:h4o520cifomi2pgilz3l160u` — the legacy double-slash id
-/// form written by pre-normalisation clients — contains no blacklisted
-/// character, so it passed, was inlined, and oxigraph then rejected the
-/// **whole** query: `expected IRI parsing failed`. In RFC 3986 terms the `//`
-/// makes `string:h4o520…` an authority, so `h4o520…` parses as a port and must
-/// be numeric. One such id anywhere in an enumeration killed every class-wide
-/// read of that class (issue #1014).
-///
-/// Parse with oxigraph rather than approximating its grammar: this is the
-/// parser that will see the query, so agreeing with it is the point.
-///
-/// Scoped to id inlining on purpose. An earlier attempt at this fix put the
-/// parser check inside `validate_iri` itself, which also tightened
-/// `is_safe_iri_target` on the write path and broke the harness e2e — a value
-/// that used to be stored as a raw `NamedNode` started being wrapped as a
-/// literal instead. Skipping an unusable id is a read-side concern and must
-/// not change what writes produce.
-pub(super) fn is_inlinable_iri(s: &str) -> bool {
-    validate_iri(s).is_ok() && oxigraph::model::NamedNode::new(s).is_ok()
 }
 
 /// Maximum recursion depth for include resolution to prevent stack overflow.
@@ -356,30 +344,29 @@ mod tests {
     }
 
     /// Issue #1014. These ids exist in live neighbourhoods, written by clients
-    /// before id normalisation. They contain no blacklisted character, so
-    /// `validate_iri` returns Ok for them; when an enumeration inlined one as
-    /// `<…>`, oxigraph rejected the *whole* query with `expected IRI parsing
-    /// failed`, killing every class-wide read of that class.
+    /// before id normalisation. They contain no blacklisted character, so the
+    /// character-only version of `validate_iri` returned Ok for them; they were
+    /// then inlined as `<…>` and oxigraph rejected the *whole* query with
+    /// `expected IRI parsing failed`. One such id anywhere in an enumeration
+    /// killed every class-wide read of that class.
     ///
     /// The `//` makes `string:h4o520…` an authority, so `h4o520…` is parsed as
-    /// a port and must be numeric.
+    /// a port and must be numeric. Callers filter on this function, so it has
+    /// to agree with the parser that will see the query — not approximate it.
     #[test]
-    fn is_inlinable_iri_rejects_legacy_double_slash_literal_ids() {
+    fn test_validate_iri_rejects_legacy_double_slash_literal_ids() {
         // Observed verbatim in the three-bots-static-test neighbourhood.
-        assert!(!is_inlinable_iri(
-            "literal://string:h4o520cifomi2pgilz3l160u"
-        ));
-        assert!(!is_inlinable_iri(
-            "literal://string:c5imvsfc8j8r9v3ve01zzobs"
-        ));
+        assert!(validate_iri("literal://string:h4o520cifomi2pgilz3l160u").is_err());
+        assert!(validate_iri("literal://string:c5imvsfc8j8r9v3ve01zzobs").is_err());
         // The single-colon form is what normalisation produces, and is valid.
-        assert!(is_inlinable_iri("literal:string:h4o520cifomi2pgilz3l160u"));
+        assert!(validate_iri("literal:string:h4o520cifomi2pgilz3l160u").is_ok());
     }
 
-    /// `is_inlinable_iri` must agree with the parser that will see the query.
-    /// Approximating oxigraph's grammar by hand is what created #1014.
+    /// Guard the general property rather than just the two known ids: whatever
+    /// `validate_iri` accepts must be constructible as a `NamedNode`, because
+    /// that is what the accepted value is used as.
     #[test]
-    fn is_inlinable_iri_agrees_with_the_sparql_iri_parser() {
+    fn test_validate_iri_agrees_with_the_sparql_iri_parser() {
         for candidate in [
             "task://status",
             "literal:string:hello",
@@ -391,34 +378,14 @@ mod tests {
             "not-absolute",
             "literal://",
         ] {
-            let inlinable = is_inlinable_iri(candidate);
+            let accepted = validate_iri(candidate).is_ok();
             let parseable = oxigraph::model::NamedNode::new(candidate).is_ok();
             assert_eq!(
-                inlinable, parseable,
-                "is_inlinable_iri and NamedNode::new disagree on {candidate:?}: \
-                 inlinable={inlinable}, parseable={parseable}"
+                accepted, parseable,
+                "validate_iri and NamedNode::new disagree on {candidate:?}: \
+                 accepted={accepted}, parseable={parseable}"
             );
         }
-    }
-
-    /// The strictness must NOT leak into the write path. `validate_iri` feeds
-    /// `looks_like_absolute_iri` → `is_safe_iri_target`, which decides whether
-    /// a value is stored as a raw `NamedNode` or wrapped as a `literal:*` URI.
-    ///
-    /// Regression guard: the first attempt at #1014 put the parser check
-    /// inside `validate_iri`, which silently re-routed writes and broke the
-    /// harness e2e (`basedOn` came back empty). Read-side skipping of an
-    /// unusable id must not change what writes produce.
-    #[test]
-    fn tightening_inlinability_does_not_move_the_write_side_gate() {
-        let legacy = "literal://string:h4o520cifomi2pgilz3l160u";
-        // Not inlinable into SPARQL…
-        assert!(!is_inlinable_iri(legacy));
-        // …but still classified exactly as before by the write-side predicates,
-        // so stored values keep round-tripping the way they always did.
-        assert!(validate_iri(legacy).is_ok());
-        assert!(looks_like_absolute_iri(legacy));
-        assert!(is_safe_iri_target(legacy));
     }
 
     // ---------------------------------------------------------------------
