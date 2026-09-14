@@ -110,6 +110,30 @@ fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String>
     Ok(())
 }
 
+/// The link filters `query_links` should try, in order.
+///
+/// Always the filter exactly as the caller gave it; plus the normalised filter
+/// when normalisation changes anything. See the comment in `query_links` for
+/// why both are needed rather than just the normalised one.
+type LinkFilter = (Option<String>, Option<String>, Option<String>);
+fn link_filter_variants(
+    source: &Option<String>,
+    predicate: &Option<String>,
+    target: &Option<String>,
+) -> Vec<LinkFilter> {
+    let normalize =
+        |v: &Option<String>| v.as_ref().map(|s| normalize_legacy_literal(s).into_owned());
+
+    let as_given = (source.clone(), predicate.clone(), target.clone());
+    let normalized = (normalize(source), normalize(predicate), normalize(target));
+
+    if normalized == as_given {
+        vec![as_given]
+    } else {
+        vec![as_given, normalized]
+    }
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -239,39 +263,73 @@ impl Ad4mMcpHandler {
 
     /// Query links in a perspective
     #[tool(
-        description = "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination — omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values."
+        description = "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination — omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values. A `literal://x:y` filter also matches the canonical `literal:x:y` spelling and vice versa, so a link written through add_link (which normalises) is found by the string it was written with."
     )]
     pub async fn query_links(&self, params: Parameters<QueryLinksParams>) -> String {
         let p = &params.0;
 
+        // `add_link` normalises `literal://x:y` to `literal:x:y` on the way in
+        // (above), so a caller that writes the legacy spelling and then reads
+        // back with the *same string it just wrote successfully* used to get an
+        // empty array and no error — it looks like the write failed, and it did
+        // not.
+        //
+        // The obvious fix — normalise the filter — is wrong: links that a peer
+        // or an older client actually stored in the legacy form still exist
+        // byte-for-byte in the store (nothing normalises on sync; see #1014),
+        // and a normalised-only filter can no longer find them. That would
+        // break the very query that diagnosed #1014.
+        //
+        // So match *either* spelling: the filter as given, plus the normalised
+        // filter when it differs. Storage is untouched and both populations
+        // remain reachable. Mixing spellings across fields in one call is not
+        // expanded combinatorially — the two passes are all-as-given and
+        // all-normalised, which covers a caller using one spelling.
+        let filters = link_filter_variants(&p.source, &p.predicate, &p.target);
+
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
-                let query = LinkQuery {
-                    source: p.source.clone(),
-                    predicate: p.predicate.clone(),
-                    target: p.target.clone(),
-                    ..Default::default()
-                };
+                let mut result: Vec<serde_json::Value> = Vec::new();
+                let mut seen: std::collections::HashSet<(String, String, String, String)> =
+                    std::collections::HashSet::new();
 
-                match perspective.get_links(&query).await {
-                    Ok(links) => {
-                        let result: Vec<serde_json::Value> = links
-                            .iter()
-                            .map(|l| {
-                                json!({
-                                    "source": l.data.source,
-                                    "predicate": l.data.predicate,
-                                    "target": l.data.target,
-                                    "timestamp": l.timestamp,
-                                    "author": l.author,
-                                })
-                            })
-                            .collect();
-                        serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
+                for (source, predicate, target) in filters {
+                    let query = LinkQuery {
+                        source,
+                        predicate,
+                        target,
+                        ..Default::default()
+                    };
+
+                    let links = match perspective.get_links(&query).await {
+                        Ok(links) => links,
+                        Err(e) => return format!("Error querying links: {}", e),
+                    };
+
+                    for l in &links {
+                        // Two filters can match the same link only if the store
+                        // holds both spellings; dedupe so the caller never sees
+                        // a row twice because of how it spelled the filter.
+                        let key = (
+                            l.data.source.clone(),
+                            l.data.predicate.clone().unwrap_or_default(),
+                            l.data.target.clone(),
+                            l.timestamp.clone(),
+                        );
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        result.push(json!({
+                            "source": l.data.source,
+                            "predicate": l.data.predicate,
+                            "target": l.data.target,
+                            "timestamp": l.timestamp,
+                            "author": l.author,
+                        }));
                     }
-                    Err(e) => format!("Error querying links: {}", e),
                 }
+
+                serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
             Err(e) => e,
         }
@@ -319,7 +377,7 @@ impl Ad4mMcpHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_class_name, validate_class_name};
+    use super::{link_filter_variants, local_class_name, validate_class_name};
 
     fn shape(target_class: &str) -> String {
         format!(r#"{{"target_class":"{}","properties":[]}}"#, target_class)
@@ -363,5 +421,41 @@ mod tests {
     fn invalid_json_is_rejected() {
         let err = validate_class_name("Task", "not json").unwrap_err();
         assert!(err.contains("not valid JSON"), "{}", err);
+    }
+
+    fn some(v: &str) -> Option<String> {
+        Some(v.to_string())
+    }
+
+    /// `add_link` normalises `literal://` on the way in, so a caller reading
+    /// back with the string it just wrote must still find the row — while a
+    /// link a peer genuinely stored in the legacy form stays findable too.
+    /// Both populations exist at once, so both filters have to run.
+    #[test]
+    fn legacy_filter_also_tries_the_normalised_spelling() {
+        let variants = link_filter_variants(&some("literal://string:lalpoisontest"), &None, &None);
+        assert_eq!(
+            variants,
+            vec![
+                (some("literal://string:lalpoisontest"), None, None),
+                (some("literal:string:lalpoisontest"), None, None),
+            ],
+            "as-given must come first, so a genuinely legacy row is still reachable"
+        );
+    }
+
+    /// The canonical spelling is not rewritten into the legacy one: that would
+    /// invent a filter the caller did not ask for.
+    #[test]
+    fn canonical_filter_runs_once() {
+        let variants =
+            link_filter_variants(&some("literal:string:x"), &some("ad4m://has_child"), &None);
+        assert_eq!(variants.len(), 1);
+    }
+
+    /// No filter at all is still exactly one query, not two identical ones.
+    #[test]
+    fn empty_filter_runs_once() {
+        assert_eq!(link_filter_variants(&None, &None, &None).len(), 1);
     }
 }
