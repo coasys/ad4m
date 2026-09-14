@@ -50,6 +50,15 @@ export interface WakerSubscriptionManagerOptions {
   /** How long to wait before re-attempting a subscription the executor rejected
    *  (default 30000). 0 disables re-attempts. */
   retryPendingMs?: number;
+  /**
+   * How long the executor gets to answer the subscribe handshake before the
+   * attempt is abandoned and queued for re-attempt (default 15000). 0 removes
+   * the bound. Covers both `proxy.subscribe()` and `proxy.initialized`: when
+   * the executor accepts the socket but never answers, neither settles, and
+   * without a deadline the subscription ended up neither active nor pending,
+   * so the re-attempt cycle never saw it (#1016).
+   */
+  subscribeTimeoutMs?: number;
 }
 
 /**
@@ -61,7 +70,33 @@ export function hintFor(msg: string): string {
   if (/main key not found/i.test(msg)) {
     return " — the executor's wallet is locked (keys are held in memory only); unlock the agent and subscribe again";
   }
+  if (/timed out after \d+ms/i.test(msg)) {
+    return " — the executor accepted the waker's connection but never answered; check that the waker is pointed at the right executor host and API port (executorUrl in the plugin config) and that the node is unlocked";
+  }
   return "";
+}
+
+/**
+ * Reject `promise` after `ms` instead of waiting forever.
+ *
+ * The pending set only catches rejections. A handshake that hangs — the
+ * executor accepted the socket but never answers — settles nothing, so the
+ * subscription was recorded nowhere and the caller's tool invocation died at
+ * the harness timeout instead (#1016). The underlying promise is left as is:
+ * the caller disposes the proxy, so a late answer backs out on its own.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export class WakerSubscriptionManager {
@@ -73,6 +108,7 @@ export class WakerSubscriptionManager {
   private QuerySubscriptionProxyCtor: any;
   private previousSeenMessages: Record<string, string[]>;
   private retryPendingMs: number;
+  private subscribeTimeoutMs: number;
 
   private proxies = new Map<string, any>();
   private activeSubscriptions = new Map<string, WakerSubscription>();
@@ -105,6 +141,7 @@ export class WakerSubscriptionManager {
     this.QuerySubscriptionProxyCtor = options.QuerySubscriptionProxy ?? null;
     this.previousSeenMessages = options.previousSeenMessages ?? {};
     this.retryPendingMs = options.retryPendingMs ?? 30000;
+    this.subscribeTimeoutMs = options.subscribeTimeoutMs ?? 15000;
   }
 
   /** A token identifying this attempt at subscribing `id`. */
@@ -150,13 +187,26 @@ export class WakerSubscriptionManager {
     if (proxy.initialized && typeof proxy.initialized.catch === "function") {
       proxy.initialized.catch(() => {});
     }
+    // One deadline for the whole handshake: `proxy.subscribe()` and the
+    // `initialized` promise it resolves share the budget, so a hang in either
+    // surfaces as the same loud-but-recoverable failure a rejection does.
+    const budgetMs = this.subscribeTimeoutMs;
+    const startedAt = Date.now();
+    const bounded = <T>(step: Promise<T>, what: string): Promise<T> =>
+      budgetMs > 0
+        ? withTimeout(
+            step,
+            Math.max(0, budgetMs - (Date.now() - startedAt)),
+            `${what} timed out after ${budgetMs}ms`,
+          )
+        : step;
     try {
-      await proxy.subscribe();
+      await bounded(proxy.subscribe(), "subscribe handshake");
       if (this.isStale(sub.id, token)) {
         try { proxy.dispose(); } catch {}
         return;
       }
-      await proxy.initialized;
+      await bounded(proxy.initialized, "subscription initialization");
     } catch (err: any) {
       const msg = err?.message ?? String(err);
       this.logger.warn(
@@ -172,7 +222,8 @@ export class WakerSubscriptionManager {
       this.seenMessages.delete(sub.id);
       this.persist();
       // Keep it pending and re-attempt: the usual cause (locked wallet, executor
-      // mid-restart) clears on its own, and the caller asked to be enrolled.
+      // mid-restart, a handshake the executor never answered) clears on its
+      // own, and the caller asked to be enrolled.
       this.pendingSubscriptions.set(sub.id, sub);
       this.scheduleRetry();
       // Throw so callers can report the real outcome. Background callers
