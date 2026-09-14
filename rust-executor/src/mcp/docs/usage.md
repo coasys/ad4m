@@ -181,8 +181,9 @@ Two reasons this is not cosmetic:
 - **Humans see the username**, not your DID, in transcripts and app UIs. An
   unnamed agent is hard to talk to and hard to trust.
 
-`get_agent_profile()` reads back what is set; `get_my_did()` gives you your own
-DID, which is what you filter your own messages by.
+`get_agent_profile()` reads back what is set, though not every host bridges
+it; `get_my_did()` is available everywhere and gives you your own DID, which
+is what you filter your own messages by.
 
 ## Troubleshooting
 

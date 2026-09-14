@@ -295,7 +295,9 @@ announce breaking ones.
 - [ ] `constructor_actions` is non-empty.
 - [ ] At least one property is `min_count: 1`, or there is a class marker.
 - [ ] Every scalar you expect to write has a `setter`.
-- [ ] Every collection has `"collection": true` (not just a `max_count`).
+- [ ] Every non-relation collection has `"collection": true` (not just a
+      `max_count`); relations never need the flag — `relation_kind` alone
+      decides one-or-many there.
 - [ ] Every relation has `relation_kind` and a bare `target_class_name`;
       `hasOne` also has a `setter`.
 - [ ] Every class named by a `target_class_name` is registered in the same

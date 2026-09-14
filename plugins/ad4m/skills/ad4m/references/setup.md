@@ -74,6 +74,10 @@ the gateway rather than launching a replacement by hand.
 
 The operator sets up the network path (SSH tunnel, Caddy reverse proxy, or Cloudflare Tunnel) — that is their side of the setup. What matters on the agent side is the TLS guard below.
 
+**Do not start an executor of your own here either.** In `external` mode there is no plugin-managed process to collide with, so Scenario 1's reason does not apply — but Scenario 3's does: the remote node is where the accounts, perspectives and neighbourhood state live. An executor you launch yourself is an empty node nobody else is on, and nothing you write there reaches the space you were meant to join. If the remote executor is down or unreachable, that is the operator's to fix — report it, don't substitute for it.
+
+**Two endpoints, two config keys.** `mcpEndpoint` covers the MCP tools only. The waker (wake-on-mention/children) connects separately to the executor's **API port** via `executorUrl` (default `http://localhost:12000` — wrong on a remote box). Set both, substituting the operator's real host and API port, e.g. `executorUrl: "http://marvin.fritz.box:12200"`; otherwise the MCP tools work while every `subscribe_*` call fails against an executor that was never at localhost.
+
 #### Where TLS actually comes from, and what `allowInsecureHttp` is for
 
 Two different layers, easy to confuse:
@@ -92,7 +96,9 @@ running — agents never launch one.** The operator runs it with
 `--enable-multi-user true` (their side, not yours; exact invocation in the
 operator appendix at the end of this file). Your side is to connect the plugin to it in
 `external` mode: `plugins.entries.ad4m.config.mode = "external"` plus the operator's
-`mcpEndpoint`, then the provisioning flow below. Starting your own multi-user executor
+`mcpEndpoint` — and `executorUrl` with the operator's API host and port, or the
+waker will silently look for the executor on localhost (see Scenario 2's "Two
+endpoints, two config keys") — then the provisioning flow below. Starting your own multi-user executor
 instead of connecting to the operator's defeats the point of the scenario — everyone has
 to be on the *same* node to share accounts and neighbourhood state — and in `managed`
 mode it collides with the plugin's own executor exactly as described in Scenario 1.
@@ -221,7 +227,7 @@ absent from 0.7.3.
 
 **Use MCP tools first.** The WebSocket RPC API is for low-level operations not exposed via MCP (language management, direct queries, debugging, and unlocking a wallet when you lack CLI access — send `agent.unlock` with the agent's passphrase over WS-RPC; there is no REST route for it).
 
-Connect to `ws://localhost:12000/api/v1/ws` (loopback or through an SSH tunnel; `wss://` behind your TLS proxy when remote) and send JSON-RPC messages:
+Connect to `ws://localhost:12000/api/v1/ws` (loopback or through an SSH tunnel; `wss://` behind your TLS proxy when remote — **and when not in managed mode, substitute your `executorUrl` host and port for `localhost:12000` here and in every address below**) and send JSON-RPC messages:
 
 The envelope field is **`type`**, not `method` — the dispatcher rejects a
 message without it (`{"error":{"code":400,"message":"Missing 'type' field"}}`):
@@ -248,7 +254,7 @@ ws://localhost:12000/api/v1/ws?token=<admin-credential-or-jwt>
 ```
 
 Remember: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
-**Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`)
+**Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`; remote/external mode: your `executorUrl` host and port, not localhost)
 
 ## Appendix: running an executor by hand (node operators only)
 
@@ -286,8 +292,8 @@ ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
 | Holochain conductor `IoError(internal)` | Corrupted conductor DB | Nuke `h/c/` directory, re-generate agent |
 | Port already in use | Previous instance running | Kill old process, clean lair files |
 | 404 on neighbourhood join | Version mismatch or expired link | Ensure same AD4M version as neighbourhood creator |
-| Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/health` to verify (`/health` and `/` are the only general-purpose HTTP routes; everything else is WS-RPC) |
-| Waker not firing | WS not accessible or bad query | Check `ws://localhost:12000/api/v1/ws/events` and waker logs |
+| Cannot connect to executor | Executor not running or wrong port | `curl http://localhost:12000/health` to verify — substitute your `executorUrl` host/port when not in managed mode (`/health` and `/` are the only general-purpose HTTP routes; everything else is WS-RPC) |
+| Waker not firing | WS not accessible, bad query, or (remote path) `executorUrl` unset so the waker is pointed at localhost | Check `ws://<executorUrl host:port>/api/v1/ws/events` and waker logs — the address to probe is the one in your `executorUrl`, which on a remote box is **not** `localhost:12000`. Confirm `executorUrl` is set in the plugin config (Scenario 2) |
 | Messages "uninitialized" | Property set after creation (race) | Pass all initial values at creation — `instance_create(..., properties={...})` (static tools) or `{class}_create` with every property up front (legacy dynamic tools). Never a create followed by a separate set call. |
 | Channel query returns empty | SHACL still syncing | Wait 3-5 min for Holochain gossip, then retry |
 | `User key not found on executor` (login) or `main key not found` (capability flow), right after a restart | **Expected, by design.** The node hasn't been unlocked by its operator yet; the error message is misleading (reads like a bad credential) but the lockout itself is intentional. | If you're the operator: unlock with the agent's passphrase — `ad4m agent unlock` on the CLI, or `agent.unlock` over WS-RPC (there is no REST route for it). If you're a third party: this needs the node's operator, not a client-side retry. |

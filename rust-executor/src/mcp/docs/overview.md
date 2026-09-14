@@ -32,8 +32,13 @@ MCP is covered under "Authentication" below.
 bridges this server into its own tool list may rename them by adding a prefix.
 The OpenClaw AD4M plugin does exactly that: it exposes them as
 `ad4m_describe_perspective`, `ad4m_instance_create`, `ad4m_get_documentation`
-and so on. Same tools, same arguments — put your host's prefix in front of
-every name you read here, and nothing else changes.
+and so on. Same tools, same arguments — but **a host bridges a subset, and
+your own tool list is the authority on which.** Tools marked *(direct MCP
+only)* in the tables below are served when you talk to the executor's MCP
+endpoint directly and are not bridged by the OpenClaw plugin; a host may also
+add wrapper tools of its own that these docs do not list (the OpenClaw
+plugin's waker tools under "Reacting to changes" are the ones that matter).
+For the tools your host does bridge, prefixing is the only difference.
 
 ## The tool surface is static
 
@@ -79,7 +84,7 @@ cardinality, so fix what the error says rather than guessing.
 | `add_child(perspective_id, parent, child)` | Link any two nodes with `ad4m://has_child` (class-agnostic; e.g. a Channel under `ad4m://self`) |
 | `get_children(perspective_id, parent, limit?)` | Children of any node with timestamp and author, oldest first |
 | `add_link` / `query_links` | Raw triples — rarely needed, see "classes, not links" below |
-| `execute_commands` | Run raw SDNA actions on an instance (escape hatch) |
+| `execute_commands` | Run raw SDNA actions on an instance (escape hatch) *(direct MCP only)* |
 
 ### Schema, sharing, identity, flows
 
@@ -89,11 +94,13 @@ cardinality, so fix what the error says rather than guessing.
 | `add_perspective(name)` | Create a local perspective |
 | `list_link_language_templates()` → `neighbourhood_publish_from_perspective(...)` | Share a perspective as a neighbourhood |
 | `neighbourhood_join_from_url(url)` | Join a neighbourhood; creates a local perspective that syncs with it |
-| `get_my_did()` / `get_agent_profile` / `set_agent_profile` / `set_agent_profile_picture` | Your identity and public profile |
-| `add_flow` / `get_flows` / `flow_state` / `flow_actions` | Flows (state machines) declared on classes |
-| `generate_waker_query` / `get_mention_waker_config` | Build subscriptions that wake you on changes |
-| `language_meta(address)` | Metadata of a language |
-| `auth_status` / `login_email` / `signup` / `verify_email_code` / `request_capability` / `generate_jwt` | Authentication (see "Authentication" below) |
+| `get_my_did()` / `set_agent_profile` | Your identity and public profile |
+| `get_agent_profile` / `set_agent_profile_picture` | Read the profile back / set a picture *(direct MCP only)* |
+| `add_flow` / `get_flows` / `flow_state` / `flow_actions` | Flows (state machines) declared on classes *(direct MCP only)* |
+| `generate_waker_query` / `get_mention_waker_config` | Build wake subscriptions by hand *(direct MCP only — hosts wrap these, see "Reacting to changes")* |
+| `language_meta(address)` | Metadata of a language *(direct MCP only)* |
+| `auth_status` / `login_email` / `signup` / `verify_email_code` | Authentication (see "Authentication" below) |
+| `request_capability` / `generate_jwt` | Token-based auth for direct connections *(direct MCP only)* |
 
 ## Workflow
 
@@ -101,8 +108,10 @@ cardinality, so fix what the error says rather than guessing.
 1. auth_status()                                        → authenticate only if it says you are not
                                                           (nothing to do if the executor was started
                                                           with the admin credential for you)
-2. get_agent_profile()                                  → on first use only: if no profile is set,
-   set_agent_profile(username="…")                        set one before you write anything social
+2. set_agent_profile(username="…")                      → on first use only: set a profile before
+                                                          you write anything social. Read it back
+                                                          with get_agent_profile where bridged;
+                                                          get_my_did() always works
 3. list_perspectives()                                  → find the perspective uuid
    neighbourhood_join_from_url(url)                     → …or join a shared space first
 4. describe_perspective(perspective_id)                 → classes, properties, collections, flows.
@@ -188,10 +197,16 @@ classes of your own.
 ## Reacting to changes
 
 The executor can wake an agent when links matching a SPARQL subscription
-appear (mentions, new children under a container). `generate_waker_query` and
-`get_mention_waker_config` build those subscriptions; an agent host (for
-example the OpenClaw AD4M plugin) registers them over the executor's
-WebSocket API and delivers wake events. When woken with a perspective UUID
+appear (mentions, new children under a container). How you subscribe depends
+on your host. Through the OpenClaw AD4M plugin, use its own wrapper tools —
+`ad4m_subscribe_to_mentions(perspective_id)`,
+`ad4m_subscribe_to_children(perspective_id, expression_address)` and
+`ad4m_list_waker_subscriptions()` — which build the subscription, register it
+over the executor's WebSocket API and deliver wake events; joining or
+publishing a neighbourhood subscribes you to mentions automatically. Only
+when talking to the executor's MCP endpoint directly do you use the raw
+builders (`generate_waker_query`, `get_mention_waker_config`) and register
+the query over the WebSocket API yourself. When woken with a perspective UUID
 and a parent id, read that container with `instance_transcript` — using the
 item class `describe_perspective` reports, which need not be called `Message`
 — skip your own items (compare `author` with `get_my_did`), and reply into the
