@@ -106,11 +106,7 @@ impl Ad4mMcpHandler {
 
         let query = if let Some(ref parent) = p.parent {
             // Scope to children of a specific parent
-            let parent_encoded = if parent.contains("://") {
-                parent.clone()
-            } else {
-                Self::encode_literal(parent)
-            };
+            let parent_encoded = Self::wrap_bare_as_literal(parent);
             if let Err(e) = validate_sparql_iri(&parent_encoded) {
                 return json!({"error": format!("Invalid parent: {}", e)}).to_string();
             }
@@ -507,5 +503,33 @@ mod tests {
     fn test_validate_sparql_iri_rejects_injection_chars() {
         assert!(validate_sparql_iri(r#"ad4m://x" || true || ""#).is_err());
         assert!(validate_sparql_iri(r"ad4m://x\n").is_err());
+    }
+
+    /// A children-subscription parent in the store's canonical single-colon
+    /// spelling must be watched verbatim. The old `contains("://")` check
+    /// re-wrapped it into `literal:string:literal%3Astring%3A…` — a node no
+    /// link ever points at — so the subscription matched nothing and never
+    /// fired (found live in the 2026-09-15 wake test).
+    #[test]
+    fn test_waker_parent_wrapping_is_idempotent_for_stored_ids() {
+        use crate::mcp::tools::Ad4mMcpHandler;
+        let stored = "literal:string:wake-test-general";
+        let once = Ad4mMcpHandler::wrap_bare_as_literal(stored);
+        assert_eq!(once, stored, "already-wrapped parent must pass through");
+        // And what add_child stores for a bare name is exactly what a later
+        // subscribe call produces for the same bare name — one spelling, both
+        // directions.
+        let wrapped_bare = Ad4mMcpHandler::wrap_bare_as_literal("wake-test-general");
+        assert_eq!(wrapped_bare, stored);
+        assert_eq!(Ad4mMcpHandler::wrap_bare_as_literal(&wrapped_bare), stored);
+        // Other id shapes pass through untouched.
+        assert_eq!(
+            Ad4mMcpHandler::wrap_bare_as_literal("ad4m://obj/abc"),
+            "ad4m://obj/abc"
+        );
+        assert_eq!(
+            Ad4mMcpHandler::wrap_bare_as_literal("did:key:z6Mk123"),
+            "did:key:z6Mk123"
+        );
     }
 }

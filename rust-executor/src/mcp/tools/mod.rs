@@ -626,6 +626,19 @@ impl Ad4mMcpHandler {
             .unwrap_or_else(|_| format!("literal:string:{}", value))
     }
 
+    /// Wrap a bare string as a literal URI; pass an already-URI value through.
+    ///
+    /// The canonical literal spelling is single-colon (`literal:string:…`), so
+    /// a `contains("://")` check does NOT recognise it and re-wraps it into
+    /// `literal:string:literal%3Astring%3A…` — a node nothing else in the
+    /// graph points at. That double-wrap made `subscribe_to_children` watch a
+    /// parent that never gets children (found live 2026-09-15). Delegates to
+    /// [`instances::link_target`], the one place that owns the URI-or-bare
+    /// decision (including legacy `literal://` normalisation).
+    pub(crate) fn wrap_bare_as_literal(value: &str) -> String {
+        instances::link_target(value)
+    }
+
     /// Get the SHACL name literal for a class, trying both encoded and raw formats.
     /// Flux's TypeScript Literal doesn't URL-encode inner URIs, producing
     /// "literal:string:shacl://Class", while Rust's Literal produces
