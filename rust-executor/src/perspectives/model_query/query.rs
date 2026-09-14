@@ -65,7 +65,6 @@ pub(super) async fn execute_model_query_inner(
         return Ok(ModelQueryResult {
             instances: vec![],
             total_count: 0,
-            unreadable_ids: vec![],
         });
     }
 
@@ -87,7 +86,6 @@ pub(super) async fn execute_model_query_inner(
             return Ok(ModelQueryResult {
                 instances: vec![],
                 total_count: count,
-                unreadable_ids: vec![],
             });
         }
     }
@@ -242,11 +240,6 @@ pub(super) async fn execute_model_query_inner(
     // so we can restore it after hydration (which uses BTreeMap, alphabetical order).
     let mut pagination_source_order: Option<Vec<String>> = None;
 
-    // Ids in the selected page that `is_inlinable_iri` rejects.  They are
-    // dropped from the property query below, so they never reach hydration and
-    // would otherwise vanish without a trace.  Reported on the result instead.
-    let mut unreadable_ids: Vec<String> = Vec::new();
-
     let raw_results: Vec<Value> = match query_plan {
         InstanceQueryPlan::Single(sparql) => {
             let result_json = store.query_async(&sparql).await?;
@@ -265,23 +258,6 @@ pub(super) async fn execute_model_query_inner(
                     .filter_map(|r| r["source"].as_str().map(|s| s.to_string()))
                     .collect(),
             );
-
-            unreadable_ids.extend(
-                page_results
-                    .iter()
-                    .filter_map(|r| r["source"].as_str())
-                    .filter(|s| !is_inlinable_iri(s))
-                    .map(|s| s.to_string()),
-            );
-            if !unreadable_ids.is_empty() {
-                log::warn!(
-                    "model_query('{}'): {} of {} ids in this page are not parsable IRIs and were skipped: {}",
-                    shape.target_class,
-                    unreadable_ids.len(),
-                    page_results.len(),
-                    unreadable_ids.join(", ")
-                );
-            }
 
             if page_results.is_empty() {
                 vec![]
@@ -460,7 +436,6 @@ pub(super) async fn execute_model_query_inner(
     Ok(ModelQueryResult {
         instances: final_instances,
         total_count,
-        unreadable_ids,
     })
 }
 

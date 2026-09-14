@@ -88,7 +88,7 @@ fn render_text(instance: &Value, text_property: &str) -> String {
 impl Ad4mMcpHandler {
     /// Read the most recent children of one class under a node as a transcript.
     #[tool(
-        description = "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. A '(… skipped: id is not a parsable IRI …)' line means instances in that window could not be rendered, so the transcript is partial rather than complete. Use instance_query for the full property maps or for filters."
+        description = "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
     )]
     pub async fn instance_transcript(
         &self,
@@ -174,32 +174,13 @@ impl Ad4mMcpHandler {
             "order": [["timestamp", "desc"]],
             "limit": limit,
         });
-        let outcome = match run_model_query(&perspective, &class_name, &query).await {
+        let (mut instances, total) = match run_model_query(&perspective, &class_name, &query).await
+        {
             Ok(v) => v,
             Err(e) => return error_json(format!("Error reading {class_name} instances: {e}")),
         };
-        let total = outcome.total_count;
-        let mut instances = outcome.instances;
-        // Say why when rows were dropped.  Without this an all-skipped window
-        // reads as "(no instances)" — a confident empty for a space that is not
-        // empty, which is the failure a caller has no way to tell apart.
-        let skipped_note = if outcome.unreadable_ids.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "({} {} instance(s) skipped: id is not a parsable IRI, so they cannot be \
-                 rendered — {})",
-                outcome.unreadable_ids.len(),
-                class_name,
-                outcome.unreadable_ids.join(", ")
-            )
-        };
         if instances.is_empty() {
-            return if skipped_note.is_empty() {
-                format!("(no {class_name} instances under {parent})")
-            } else {
-                format!("(no readable {class_name} instances under {parent})\n{skipped_note}")
-            };
+            return format!("(no {class_name} instances under {parent})");
         }
         // Newest-first from the query so `limit` keeps the most recent;
         // present oldest-first like a conversation reads.
@@ -215,7 +196,7 @@ impl Ad4mMcpHandler {
             }
         }
 
-        let mut lines: Vec<String> = Vec::with_capacity(instances.len() + 2);
+        let mut lines: Vec<String> = Vec::with_capacity(instances.len() + 1);
         if total > instances.len() {
             lines.push(format!(
                 "(showing last {} of {} {} instances under {})",
@@ -224,9 +205,6 @@ impl Ad4mMcpHandler {
                 class_name,
                 parent
             ));
-        }
-        if !skipped_note.is_empty() {
-            lines.push(skipped_note);
         }
         for inst in &instances {
             let did = inst.get("author").and_then(Value::as_str).unwrap_or("");

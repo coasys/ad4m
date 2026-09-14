@@ -47,7 +47,7 @@ pub struct InstanceGetParams {
 impl Ad4mMcpHandler {
     /// Query instances of any subject class, with typed property values.
     #[tool(
-        description = "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"…\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to ad4m://has_child children of one instance (e.g. messages of a channel). Paginate with limit (default 100) and offset; total_count reports the full match count. If the response carries skipped_unreadable/unreadable_ids, that many matching instances could not be hydrated because their id is not a parsable IRI: they are counted in total_count but missing from instances, so a small count is not proof the space is empty. Each instance has id (its base_uri), author, timestamp, and one key per property."
+        description = "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"…\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to ad4m://has_child children of one instance (e.g. messages of a channel). Paginate with limit (default 100) and offset; total_count reports the full match count. Each instance has id (its base_uri), author, timestamp, and one key per property."
     )]
     pub async fn instance_query(&self, params: Parameters<InstanceQueryParams>) -> String {
         let p = &params.0;
@@ -79,29 +79,12 @@ impl Ad4mMcpHandler {
         }
 
         match run_model_query(&perspective, &class_name, &query).await {
-            Ok(outcome) => {
-                let mut response = json!({
-                    "class_name": class_name,
-                    "count": outcome.instances.len(),
-                    "total_count": outcome.total_count,
-                    "instances": outcome.instances,
-                });
-                // Only present when something was dropped, so the ordinary
-                // response shape is unchanged — but when it is present the
-                // caller gets the ids, which is what makes the cause findable.
-                if !outcome.unreadable_ids.is_empty() {
-                    response["skipped_unreadable"] = json!(outcome.unreadable_ids.len());
-                    response["unreadable_ids"] = json!(outcome.unreadable_ids);
-                    response["note"] = json!(format!(
-                        "{} instance(s) matched this query but were skipped: their id is not a \
-                         parsable IRI, so they cannot be hydrated. They are counted in \
-                         total_count and absent from instances. This is data written by a \
-                         pre-normalisation client, not an empty result.",
-                        outcome.unreadable_ids.len()
-                    ));
-                }
-                pretty(&response)
-            }
+            Ok((instances, total)) => pretty(&json!({
+                "class_name": class_name,
+                "count": instances.len(),
+                "total_count": total,
+                "instances": instances,
+            })),
             Err(e) => error_json(format!("Error querying {class_name} instances: {e}")),
         }
     }

@@ -325,17 +325,6 @@ pub struct ModelQueryInput {
 pub struct ModelQueryResult {
     pub instances: Vec<Value>,
     pub total_count: usize,
-    /// Ids that matched the query but could not be hydrated because they are
-    /// not parsable IRIs, so inlining them would make the property query
-    /// invalid SPARQL (see `is_inlinable_iri`).  They are silently absent from
-    /// `instances`, and `total_count` still counts them — without this field a
-    /// caller cannot tell a partial page from a complete one, and a page whose
-    /// every id is unreadable is indistinguishable from an empty space.
-    ///
-    /// Omitted from the serialised result when empty, so the ordinary response
-    /// shape is unchanged.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub unreadable_ids: Vec<String>,
 }
 
 /// Parameters for SPARQL-side pagination (pushed ORDER BY + LIMIT + OFFSET).
