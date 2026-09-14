@@ -276,6 +276,24 @@ fn estimate_turn_tokens(turn: &ChatTurn) -> usize {
     estimate_token_count(&turn.content) + calls + answered_call
 }
 
+/// Estimated completion tokens for a reply that may carry tool calls.
+///
+/// A call is output the model generated and the caller pays for, so its name
+/// and arguments count alongside the text. Its id does not: the provider
+/// assigns it, and the model never generates it. `estimate_turn_tokens` does
+/// count the id when the call is sent back, because then it is input.
+fn estimate_reply_tokens(reply: &ChatReply) -> usize {
+    let calls: usize = reply
+        .tool_calls
+        .iter()
+        .map(|call| {
+            estimate_token_count(&call.name) + estimate_token_count(&call.arguments.to_string())
+        })
+        .sum();
+
+    estimate_token_count(&reply.text) + calls
+}
+
 /// The turn list for a task-shaped prompt: the task's system prompt, its
 /// examples as alternating user/assistant turns, then the live prompt.
 ///
@@ -1508,14 +1526,7 @@ impl AIService {
 
         let reply = result_rx.await??;
 
-        // A tool call is output the model generated and the caller pays for,
-        // so its arguments count towards completion tokens alongside the text.
-        let completion_tokens = estimate_token_count(&reply.text)
-            + reply
-                .tool_calls
-                .iter()
-                .map(|call| estimate_token_count(&call.arguments.to_string()))
-                .sum::<usize>();
+        let completion_tokens = estimate_reply_tokens(&reply);
 
         log::debug!(
             "🤖 prompt_with_tools model={} text={:?} calls={}",
@@ -2635,6 +2646,23 @@ mod tests {
         );
 
         assert_eq!(estimate_turn_tokens(&two), estimate_turn_tokens(&one) * 2);
+    }
+
+    #[test]
+    fn a_replied_call_bills_its_name_and_arguments_but_not_its_id() {
+        let reply = |calls| super::ChatReply {
+            text: String::new(),
+            tool_calls: calls,
+            usage: Default::default(),
+        };
+        let arguments = serde_json::json!({ "a": 1 });
+        let expected = super::estimate_token_count("update_schema")
+            + super::estimate_token_count(&arguments.to_string());
+
+        assert_eq!(
+            super::estimate_reply_tokens(&reply(vec![call(arguments)])),
+            expected
+        );
     }
 
     use super::*;
