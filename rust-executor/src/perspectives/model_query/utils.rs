@@ -117,6 +117,13 @@ pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
 /// `STR()`-match fine — but emitting them inside `<…>` makes the whole query
 /// fail to parse.  Callers must fall back to a `FILTER(STR(…))` form for
 /// values that fail this check.
+///
+/// Note this gate is NOT the XSD literal round-trip: `target_to_storage_term`
+/// only folds the single-colon `literal:<kind>:…` spelling (and only on
+/// object position) into typed literals; the `//` form always stays a
+/// NamedNode, as do all subjects.  Do not "fix" such ids by routing them
+/// through the XSD translator — an XSD literal cannot be a subject, and the
+/// `STR()` fallback below would stop matching the wire id.
 pub(super) fn emittable_iri(s: &str) -> bool {
     validate_iri(s).is_ok() && oxigraph::model::NamedNode::new(s).is_ok()
 }
