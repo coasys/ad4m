@@ -39,6 +39,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
+#[cfg(test)]
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -499,6 +501,17 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// Test-only fault injection for [`Self::add_link_expression`] (#981).
+    /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
+    /// `0` means the *next* call returns an error instead of writing, then
+    /// resets to `-1` so later calls in the same test succeed normally; a
+    /// positive `n` counts down without failing until it reaches `0`. Lets a
+    /// test force a batch write to fail partway through — after a subject is
+    /// already staged, or after some of its collection links have landed —
+    /// without a real store fault, to assert `discard_batch` actually leaves
+    /// nothing behind.
+    #[cfg(test)]
+    fail_add_link_after: Arc<AtomicI64>,
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -559,7 +572,24 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            fail_add_link_after: Arc::new(AtomicI64::new(-1)),
         }
+    }
+
+    /// Test seam (#981): make the *next* [`Self::add_link_expression`] call
+    /// fail instead of writing, then resume normal behaviour. `after_n_calls`
+    /// lets calls that must succeed first (e.g. staging the subject itself)
+    /// through before the induced failure — `0` fails immediately, `1` lets
+    /// one call through first, and so on. Never called from production code;
+    /// exists so a test can prove a partial batch write actually rolls back
+    /// rather than only reading the `discard_batch` call sites and trusting
+    /// they run. The backing field only exists in test builds (`cfg(test)`),
+    /// so this seam has zero footprint in production.
+    #[cfg(test)]
+    pub(crate) fn fail_next_add_link(&self, after_n_calls: i64) {
+        self.fail_add_link_after
+            .store(after_n_calls, Ordering::SeqCst);
     }
 
     /// Look up a cached `ModelShape` for the given class name, loading it
@@ -1749,6 +1779,23 @@ impl PerspectiveInstance {
         status: LinkStatus,
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        // Test seam (#981) — see `fail_add_link_after`'s doc comment. The
+        // field (and this check) only exist in test builds, so this is
+        // entirely compiled out in production.
+        #[cfg(test)]
+        match self.fail_add_link_after.load(Ordering::SeqCst) {
+            0 => {
+                self.fail_add_link_after.store(-1, Ordering::SeqCst);
+                return Err(anyhow!(
+                    "injected fault (test seam): add_link_expression failed"
+                ));
+            }
+            n if n > 0 => {
+                self.fail_add_link_after.store(n - 1, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+
         link_expression.data.validate()?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
