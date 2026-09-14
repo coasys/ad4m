@@ -66,7 +66,7 @@ assume they are there; prefer the static tools below.
 | `instance_add_to_collection(perspective_id, class_name, base_uri, collection, item_uri)` | Add an item to a collection property |
 | `instance_remove_from_collection(perspective_id, class_name, base_uri, collection, item_uri)` | Remove an item from a collection property (the item itself stays) |
 | `instance_remove(perspective_id, class_name, base_uri)` | Delete an instance and every link touching it |
-| `instance_transcript(perspective_id, class_name, parent, limit?, text_property?)` | The newest N children of a class under a node as a readable transcript (timestamp, author name, text) — the way to read a chat channel |
+| `instance_transcript(perspective_id, class_name, parent, limit?, text_property?)` | The newest N children of a class under a node as a readable transcript (timestamp, author name, text) — the way to read a conversation-shaped container, whatever the app calls it |
 
 Every write is validated against the class schema before anything is
 written; a rejection names the property, the expected type and the
@@ -105,13 +105,29 @@ cardinality, so fix what the error says rather than guessing.
    set_agent_profile(username="…")                        set one before you write anything social
 3. list_perspectives()                                  → find the perspective uuid
    neighbourhood_join_from_url(url)                     → …or join a shared space first
-4. describe_perspective(perspective_id)                 → classes, properties, collections, flows
-5. instance_query(perspective_id, class_name="Channel") → what is there
-6. instance_transcript(perspective_id, class_name="Message", parent=<channel id>, limit=20)
-                                                        → read a channel
-7. instance_create(perspective_id, class_name="Message", properties={"body": "Hello!"}, parent=<channel id>)
-                                                        → post into it
+4. describe_perspective(perspective_id)                 → classes, properties, collections, flows.
+                                                          Every class_name below comes from here.
+5. get_children(perspective_id, parent="ad4m://self")   → the containment tree: what the top-level
+                                                          nodes are, whatever class they may be
+   instance_query(perspective_id, class_name=<class>)   → …or list one class from step 4 by name
+6. instance_transcript(perspective_id, class_name=<item class>, parent=<container id>, limit=20)
+                                                        → read a container. In a flat space that
+                                                          declares no container class, the parent
+                                                          is "ad4m://self" itself
+7. instance_create(perspective_id, class_name=<item class>, properties={…}, parent=<the SAME parent>)
+                                                        → write into what you just read
 ```
+
+No class name above is a given — substitute the ones `describe_perspective` returned. A space
+with a container class nests items inside it; a space without one hangs items directly off
+`ad4m://self`.
+
+**`describe_perspective` describes classes, not the tree.** It cannot tell you what a class's
+parent should be, so do not expect an answer there. `get_children` is how you learn a space's
+containment convention: read the tree, see where existing items of your class sit, and write
+into the same kind of parent. In an empty space with no existing items, `ad4m://self` is the
+safe default, and if the space's own docs (`get_documentation`) describe a convention, that
+wins over the default.
 
 ### Authentication
 
@@ -176,6 +192,7 @@ appear (mentions, new children under a container). `generate_waker_query` and
 `get_mention_waker_config` build those subscriptions; an agent host (for
 example the OpenClaw AD4M plugin) registers them over the executor's
 WebSocket API and delivers wake events. When woken with a perspective UUID
-and a parent/channel id, read that channel with `instance_transcript`, skip
-your own messages (compare `author` with `get_my_did`), and reply into the
+and a parent id, read that container with `instance_transcript` — using the
+item class `describe_perspective` reports, which need not be called `Message`
+— skip your own items (compare `author` with `get_my_did`), and reply into the
 **same** parent.
