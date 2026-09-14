@@ -173,6 +173,23 @@ enum Domain {
         /// Useful for test harnesses that need targeted process cleanup.
         #[arg(long)]
         pid_file: Option<String>,
+        /// Local DID for this SFU node in a cascade cluster.  Required
+        /// alongside `--sfu-cascade-listen` to enable cascade gossip.
+        #[arg(long)]
+        sfu_local_did: Option<String>,
+        /// Capacity hint published by this SFU node in every announce.
+        #[arg(long)]
+        sfu_max_participants_per_node: Option<u32>,
+        /// Local `host:port` the cascade gossip listener binds.
+        #[arg(long)]
+        sfu_cascade_listen: Option<String>,
+        /// Peer SFU nodes as `did=host:port`, comma separated.
+        #[arg(long, value_delimiter = ',')]
+        sfu_cascade_peers: Option<Vec<String>>,
+        /// IP address the SFU media server binds its UDP socket to.
+        /// Defaults to 127.0.0.1 (loopback).
+        #[arg(long)]
+        sfu_bind_addr: Option<String>,
     },
 }
 
@@ -226,6 +243,11 @@ async fn main() -> Result<()> {
         enable_mcp,
         mcp_port,
         pid_file,
+        sfu_local_did,
+        sfu_max_participants_per_node,
+        sfu_cascade_listen,
+        sfu_cascade_peers,
+        sfu_bind_addr,
     } = args.domain
     {
         let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
@@ -267,6 +289,11 @@ async fn main() -> Result<()> {
                 enable_mcp,
                 mcp_port,
                 pid_file,
+                sfu_local_did,
+                sfu_max_participants_per_node,
+                sfu_cascade_listen,
+                sfu_cascade_peers,
+                sfu_bind_addr,
                 ..Default::default()
             })
             .await;

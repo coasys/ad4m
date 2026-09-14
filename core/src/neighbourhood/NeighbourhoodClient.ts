@@ -6,6 +6,15 @@ import { Perspective, PerspectiveUnsignedInput } from "../perspectives/Perspecti
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type { JoinNeighbourhoodRequest, PublishNeighbourhoodRequest } from "../generated/api"
+import type {
+    CallSessionInfo,
+    SfuConfig,
+    SfuDataMessage,
+    SfuQualityPreference,
+    SfuRoomInfo,
+    SfuStatus,
+    TrackMapEntry,
+} from "./SfuTypes"
 
 export class NeighbourhoodClient {
     #apiClient: ApiClient
@@ -126,5 +135,299 @@ export class NeighbourhoodClient {
                 }
             }
         }
+    }
+
+    // ── SFU (Selective Forwarding Unit) ─────────────────────────────────
+    //
+    // These wrap the `sfu.*` WS RPC handlers in
+    // `rust-executor/src/api/sfu_ws.rs`.  The transport is the same
+    // shared `ApiClient`; the only twist is that `callJoin` returns a
+    // structured `CallSessionInfo` (SDP answer + optional cascade
+    // redirect + stream mapping).
+
+    async sfuStartRoom(neighbourhoodUrl: string, roomName: string): Promise<SfuRoomInfo> {
+        return this.#apiClient.call<SfuRoomInfo>("sfu.startRoom", { neighbourhoodUrl, roomName })
+    }
+
+    async sfuStopRoom(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.stopRoom", { neighbourhoodUrl, roomName })
+    }
+
+    async sfuListRooms(): Promise<SfuRoomInfo[]> {
+        return this.#apiClient.call<SfuRoomInfo[]>("sfu.listRooms", {})
+    }
+
+    async sfuCallJoin(
+        neighbourhoodUrl: string,
+        roomName: string,
+        sdpOffer: string,
+    ): Promise<CallSessionInfo> {
+        return this.#apiClient.call<CallSessionInfo>("sfu.callJoin", {
+            neighbourhoodUrl,
+            roomName,
+            sdpOffer,
+        })
+    }
+
+    async sfuCallLeave(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.callLeave", { neighbourhoodUrl, roomName })
+    }
+
+    async sfuCallSetQualityPreference(
+        neighbourhoodUrl: string,
+        roomName: string,
+        preference: SfuQualityPreference,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.callSetQualityPreference", {
+            neighbourhoodUrl,
+            roomName,
+            preference,
+        })
+    }
+
+    async sfuCallAnswerServerOffer(
+        neighbourhoodUrl: string,
+        roomName: string,
+        sdpAnswer: string,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.callAnswerServerOffer", {
+            neighbourhoodUrl,
+            roomName,
+            sdpAnswer,
+        })
+    }
+
+    async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
+        return this.#apiClient.call<SfuConfig>("sfu.getConfig", { neighbourhoodUrl })
+    }
+
+    async sfuSetConfig(neighbourhoodUrl: string, config: SfuConfig): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.setConfig", { neighbourhoodUrl, config })
+    }
+
+    async sfuPeerForNeighbourhood(neighbourhoodUrl: string): Promise<string | null> {
+        return this.#apiClient.call<string | null>("sfu.sfuPeerForNeighbourhood", {
+            neighbourhoodUrl,
+        })
+    }
+
+    async sfuPeersForNeighbourhood(neighbourhoodUrl: string): Promise<string[]> {
+        return this.#apiClient.call<string[]>("sfu.sfuPeersForNeighbourhood", { neighbourhoodUrl })
+    }
+
+    // ── Trickle ICE ───────────────────────────────────────────────────
+
+    /**
+     * Add a remote ICE candidate to an existing SFU call.  Enables
+     * trickle ICE: the client sends its SDP offer immediately after
+     * `setLocalDescription` and then calls this method for each
+     * candidate as it arrives, rather than waiting for gathering to
+     * complete (which can take up to 8 seconds on restrictive
+     * networks).
+     */
+    async sfuAddIceCandidate(
+        neighbourhoodUrl: string,
+        roomName: string,
+        candidate: string,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.addIceCandidate", {
+            neighbourhoodUrl,
+            roomName,
+            candidate,
+        })
+    }
+
+    // ── Data channel relay ────────────────────────────────────────────
+
+    /**
+     * Send data through the SFU to all other participants in the room.
+     * The server relays it to their matching data channel and
+     * publishes it on the `sfu-data` events_ws topic.
+     */
+    async sfuSendData(
+        neighbourhoodUrl: string,
+        roomName: string,
+        channelLabel: string,
+        data: string,
+        binary: boolean = false,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.sendData", {
+            neighbourhoodUrl,
+            roomName,
+            channelLabel,
+            data,
+            binary,
+        })
+    }
+
+    /**
+     * Subscribe to SFU data channel messages.  Returns an unsubscribe
+     * function.  Messages arrive for every participant in the room;
+     * filter by `senderDid` if needed.
+     */
+    subscribeSfuDataChannel(
+        callback: (message: SfuDataMessage) => void,
+    ): () => void {
+        return this.#apiClient.subscribe((data: any) => {
+            if (data?.type !== "sfu-data") return
+            callback(data as SfuDataMessage)
+        })
+    }
+
+    /**
+     * Subscribe to server-pushed SFU SDP renegotiation offers.  The
+     * server publishes `sfu-call-renegotiation-offer` events on the
+     * events_ws every time the relay's outbound track set changes for
+     * `targetDid`.  Callers apply the offer to their `RTCPeerConnection`,
+     * generate an answer, and post it via `sfuCallAnswerServerOffer`.
+     *
+     * The events_ws fanout already filters per-DID; this subscription
+     * additionally double-filters on `targetDid` for safety.  Returns
+     * an unsubscribe function.
+     */
+    subscribeSfuCallRenegotiationOffer(
+        targetDid: string,
+        callback: (payload: {
+            targetDid: string
+            neighbourhoodUrl: string
+            roomName: string
+            sdpOffer: string
+            trackMapping?: TrackMapEntry[]
+        }) => void,
+    ): () => void {
+        return this.#apiClient.subscribe((data: any) => {
+            if (data?.type !== "sfu-call-renegotiation-offer") return
+            const payload = data as {
+                type: string
+                targetDid: string
+                neighbourhoodUrl: string
+                roomName: string
+                sdpOffer: string
+                trackMapping?: TrackMapEntry[]
+            }
+            if (payload.targetDid !== targetDid) return
+            callback({
+                targetDid: payload.targetDid,
+                neighbourhoodUrl: payload.neighbourhoodUrl,
+                roomName: payload.roomName,
+                sdpOffer: payload.sdpOffer,
+                trackMapping: payload.trackMapping,
+            })
+        })
+    }
+
+    /**
+     * Subscribe to cascade rebalance migration events for `targetDid`.
+     * The server publishes `sfu-migrate` events on the events_ws when
+     * the cascade rebalancer decides a participant should move to a
+     * less-loaded node.  Returns an unsubscribe function.
+     */
+    subscribeSfuMigrateEvent(
+        targetDid: string,
+        callback: (payload: {
+            targetDid: string
+            neighbourhoodUrl: string
+            roomName: string
+            migrateToDid: string
+        }) => void,
+    ): () => void {
+        return this.#apiClient.subscribe((data: any) => {
+            if (data?.type !== "sfu-migrate") return
+            const payload = data as {
+                type: string
+                targetDid: string
+                neighbourhoodUrl: string
+                roomName: string
+                migrateToDid: string
+            }
+            if (payload.targetDid !== targetDid) return
+            callback({
+                targetDid: payload.targetDid,
+                neighbourhoodUrl: payload.neighbourhoodUrl,
+                roomName: payload.roomName,
+                migrateToDid: payload.migrateToDid,
+            })
+        })
+    }
+
+    // ── SFU discovery ──────────────────────────────────────────────────
+
+    /**
+     * Discover SFU-capable nodes in a neighbourhood by scanning online
+     * agents' presence links for the `ad4m://sfu/available` predicate.
+     *
+     * Returns an array of `{ did, bindAddress }` for each agent whose
+     * executor advertises a publicly reachable SFU.  Empty when no
+     * agents with public SFU capability appear in the neighbourhood.
+     *
+     * @param perspectiveId  The neighbourhood's perspective handle UUID.
+     */
+    async availableSfuNodes(
+        perspectiveId: string,
+    ): Promise<{ did: string; bindAddress: string }[]> {
+        const SFU_PREDICATE = "ad4m://sfu/available"
+        const agents = await this.onlineAgents(perspectiveId)
+        const nodes: { did: string; bindAddress: string }[] = []
+        for (const agent of agents) {
+            const status = agent.status
+            if (!status?.links) continue
+            for (const link of status.links) {
+                const l = (link as any).data ?? link
+                if (l.predicate === SFU_PREDICATE && l.target) {
+                    nodes.push({ did: agent.did, bindAddress: l.target })
+                }
+            }
+        }
+        return nodes
+    }
+
+    // ── SFU diagnostic / test-harness endpoints ────────────────────────
+
+    /**
+     * Read-only: SFU service status including public reachability.
+     * Returns whether this executor can relay media to remote
+     * participants (public), sits behind NAT (nat), or could not
+     * determine its reachability (unknown).
+     */
+    async sfuStatus(): Promise<SfuStatus> {
+        return this.#apiClient.call<SfuStatus>("sfu.status", {})
+    }
+
+    /**
+     * Read-only: how many SFU↔SFU pipe transports are fully established,
+     * plus the list of pipes.  Useful for diagnostics and wind-tunnel
+     * assertions.
+     */
+    async sfuCascadeStatus(): Promise<{
+        establishedCount: number
+        pipes: { roomId: string; remoteDid: string }[]
+    }> {
+        return this.#apiClient.call("sfu.cascadeStatus", {})
+    }
+
+    /**
+     * Read-only: per-participant quality preferences the SFU event loop
+     * currently holds.  Returns `[{participantId, preference}, ...]`.
+     */
+    async sfuQualityPreferences(): Promise<
+        { participantId: string; preference: string }[]
+    > {
+        return this.#apiClient.call("sfu.qualityPreferences", {})
+    }
+
+    /**
+     * Register a DID as a neighbourhood member on this executor.
+     * In production the neighbourhood join flow handles this
+     * automatically; this RPC exists for test harnesses and bridge
+     * deployments.
+     */
+    async sfuEnsureMembership(
+        neighbourhoodUrl: string,
+        did: string,
+    ): Promise<boolean> {
+        return this.#apiClient.call<boolean>("sfu.ensureMembership", {
+            neighbourhoodUrl,
+            did,
+        })
     }
 }
