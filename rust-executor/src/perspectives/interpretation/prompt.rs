@@ -13,7 +13,7 @@ use std::collections::HashMap;
 /// `{ "classes": [{ "name", "hint",
 ///                  "existing": [{ "id", "title", "class" }, …],
 ///                  "fields": [{ "name", "required", "hint" }],
-///                  "relations": [{ "name", "targetClass", "hint" }] }],
+///                  "relations": [{ "name", "targetClass", "cardinality", "hint" }] }],
 ///    "transcript": [{ "speaker", "text", "timestamp"? }] }`.
 ///
 /// `existing` maps a class's local name to the instances already in the graph
@@ -94,8 +94,10 @@ pub fn build_interpretation_input(
                 // `belongsToMany` are inherently reverse (target class holds
                 // the outbound edge), so writing them requires resolving the
                 // inverse predicate — out of scope until Phase 3. Forward
-                // `hasOne` and `hasMany` both surface here; cardinality is
-                // enforced downstream when the planner resolves refs.
+                // `hasOne` and `hasMany` both surface here, and each one now
+                // *declares* its cardinality (below) as well as having it
+                // enforced downstream when the planner resolves refs —
+                // enforcement alone was not enough, see #1005.
                 .filter(|r| r.direction == "forward")
                 .map(|r| {
                     // Collision-aware label (CodeRabbit #881 review): the
@@ -117,9 +119,22 @@ pub fn build_interpretation_input(
                         .find(|s| !s.shape_uri.is_empty() && s.shape_uri == r.target_class_uri)
                         .map(|s| class_label(&s.target_class, shapes))
                         .unwrap_or_else(|| r.target_class_name.clone());
+                    // Cardinality is the difference between "attach the one
+                    // target" and "attach every target that applies", and the
+                    // model cannot infer it from the name or the hint. Without
+                    // it a `hasMany` relation has no valid shape to express two
+                    // targets in, so the model improvises — in the case that
+                    // produced #1005 it emitted the same key twice and
+                    // last-wins silently dropped one side of a tension.
+                    //
+                    // `kind` is already carried on the shape
+                    // (`ShapeRelation::kind`); only forward relations reach
+                    // here, so it is `hasMany` or `hasOne`.
+                    let cardinality = if r.kind == "hasMany" { "many" } else { "one" };
                     serde_json::json!({
                         "name": r.name,
                         "targetClass": target_class_label,
+                        "cardinality": cardinality,
                         "hint": rel_hint_by_pred.get(r.predicate.as_str()).and_then(|h| *h),
                     })
                 })
@@ -298,8 +313,8 @@ You receive a JSON object with these fields:
   - `classes`: available subject classes. Each has a `name`, a natural-language
     `hint` describing when to instantiate it, a list of `fields` (each with a
     `name`, optional `hint`, and `required` flag), a `relations` list of
-    forward instance-reference slots (each with a `name`, `targetClass`, and
-    optional `hint`), and an `existing` array of instances already present in
+    forward instance-reference slots (each with a `name`, `targetClass`,
+    `cardinality`, and optional `hint`), and an `existing` array of instances already present in
     the graph for that class. Each existing entry is `{id, title, class}`, and
     may also carry a `properties` object holding the instance's current
     secondary-scalar values (e.g. a rolling summary). `id` is the stable
@@ -366,6 +381,9 @@ Relations (linking instances together):
   - Only set a relation when the transcript clearly identifies the target;
     omit the relation field otherwise. Never invent an `id`, and never emit a
     `\"new:<Class>:<n>\"` ref for which no matching output element exists.
+  - Each relation's `cardinality` fixes the shape of its value: `\"many\"`
+    takes an ARRAY of refs even for a single target, `\"one\"` takes a bare
+    ref. Never repeat a key to add a second target — JSON keeps only the last.
 
 Worked examples follow (as prior turns) before your real input — study how
 every co-present item is captured, then apply the same to your input.
@@ -524,9 +542,14 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
              "hint":"An edge that tags a Message with a Topic and a relevance score.",
              "existing":[],
              "fields":[{"name":"relevance","required":true,"hint":"0..1 confidence that the tag applies."}],
+             // `cardinality` mirrors what the generated descriptor now carries
+             // (#1005). Both of these are genuinely single-valued, and the
+             // outputs below emit bare refs accordingly — an example whose
+             // shape disagreed with its declared cardinality would teach the
+             // model to ignore the field.
              "relations":[
-                 {"name":"tag","targetClass":"Topic","hint":"The topic being tagged."},
-                 {"name":"expression","targetClass":"Message","hint":"The message the topic tags."}
+                 {"name":"tag","targetClass":"Topic","cardinality":"one","hint":"The topic being tagged."},
+                 {"name":"expression","targetClass":"Message","cardinality":"one","hint":"The message the topic tags."}
              ]}
         ],
         "transcript":[
@@ -1149,6 +1172,134 @@ mod tests {
         assert!(p.contains("copied from active_flows[i].instance"));
         assert!(p.contains("one of that instance's nextStates[j].name"));
         assert!(p.contains("At most one proposal"));
+    }
+
+    #[test]
+    /// Every rendered relation must declare its cardinality (#1005).
+    ///
+    /// Without it the model has no valid shape for a second target on a
+    /// `hasMany` relation. What it does instead is improvise: the run that
+    /// produced #1005 emitted `{"between": "a", "between": "b"}`, and JSON
+    /// last-wins silently dropped one side of a tension. The value is never
+    /// absent and is never anything but the two legal words.
+    #[test]
+    fn every_rendered_relation_declares_its_cardinality() {
+        let examples = interpretation_examples();
+        let mut checked = 0usize;
+        for ex in &examples {
+            let v: serde_json::Value = serde_json::from_str(&ex.input).unwrap();
+            for class in v["classes"].as_array().unwrap() {
+                // Few-shot inputs are hand-written fixtures; a class with no
+                // relations simply omits the key rather than carrying `[]`.
+                let Some(rels) = class["relations"].as_array() else {
+                    continue;
+                };
+                for rel in rels {
+                    let card = rel["cardinality"].as_str().unwrap_or_else(|| {
+                        panic!(
+                            "relation {:?} on class {:?} renders no `cardinality`",
+                            rel["name"], class["name"]
+                        )
+                    });
+                    assert!(
+                        card == "one" || card == "many",
+                        "cardinality must be \"one\" or \"many\", got {card:?} for {:?}",
+                        rel["name"]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no relations rendered in any few-shot example — this test would pass vacuously"
+        );
+    }
+
+    /// The few-shot outputs must not teach the opposite of the rule the
+    /// preamble states.
+    ///
+    /// This is the cheapest way for the #1005 fix to be silently undone: the
+    /// instruction says a `many` relation takes an array, and an example three
+    /// paragraphs later shows a bare string. Models weight the demonstration
+    /// over the instruction, so a contradiction here is worse than saying
+    /// nothing at all.
+    #[test]
+    fn few_shot_outputs_match_the_declared_cardinality() {
+        for ex in interpretation_examples() {
+            let input: serde_json::Value = serde_json::from_str(&ex.input).unwrap();
+            // class name -> relation name -> cardinality
+            let mut card: std::collections::HashMap<(String, String), String> =
+                std::collections::HashMap::new();
+            for class in input["classes"].as_array().unwrap() {
+                let cname = class["name"].as_str().unwrap_or_default().to_string();
+                let Some(rels) = class["relations"].as_array() else {
+                    continue;
+                };
+                for rel in rels {
+                    card.insert(
+                        (
+                            cname.clone(),
+                            rel["name"].as_str().unwrap_or_default().to_string(),
+                        ),
+                        rel["cardinality"].as_str().unwrap_or_default().to_string(),
+                    );
+                }
+            }
+            let Ok(out) = serde_json::from_str::<serde_json::Value>(&ex.output) else {
+                continue; // non-JSON example output (e.g. the empty-array case)
+            };
+            let Some(items) = out.as_array() else {
+                continue;
+            };
+            for item in items {
+                let Some(obj) = item.as_object() else {
+                    continue;
+                };
+                let cname = obj
+                    .get("class")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                for (key, val) in obj {
+                    let Some(kind) = card.get(&(cname.clone(), key.clone())) else {
+                        continue; // a scalar field, not a relation
+                    };
+                    match kind.as_str() {
+                        "many" => assert!(
+                            val.is_array(),
+                            "{cname}.{key} is cardinality \"many\" but the example emits {val} — \
+                             a bare value here teaches the model to ignore the array rule"
+                        ),
+                        "one" => assert!(
+                            !val.is_array(),
+                            "{cname}.{key} is cardinality \"one\" but the example emits an array {val}"
+                        ),
+                        other => panic!("unexpected cardinality {other:?} for {cname}.{key}"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// The preamble must actually state the value shape, not merely ship the
+    /// field. A `cardinality` the model is never told how to act on buys
+    /// nothing.
+    #[test]
+    fn system_prompt_states_the_cardinality_value_shape() {
+        let p = INTERPRETATION_SYSTEM_PROMPT;
+        assert!(
+            p.contains("`cardinality`") || p.contains("cardinality"),
+            "system prompt must introduce `cardinality`"
+        );
+        assert!(
+            p.contains("ARRAY of references") || p.contains("takes an ARRAY"),
+            "system prompt must say a `many` relation takes an array"
+        );
+        assert!(
+            p.contains("Never repeat a key"),
+            "system prompt must forbid the duplicate-key form that caused #1005"
+        );
     }
 
     #[test]
