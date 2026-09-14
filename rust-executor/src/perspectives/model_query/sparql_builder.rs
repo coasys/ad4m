@@ -22,7 +22,8 @@ use super::types::{
     SparqlPagination, WhereCondition,
 };
 use super::utils::{
-    escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
+    emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
+    validate_iri,
 };
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -307,12 +308,32 @@ pub(super) fn build_query_patterns(
 ) -> (String, String) {
     let mut conformance_patterns = Vec::new();
 
+    // Subject position for a parent id: inline `<id>` when it is a parseable
+    // IRI, else a variable bound by the pattern plus a STR() filter — Flux ids
+    // like `literal://string:x` exist as store terms but cannot appear inside
+    // `<…>` (see `emittable_iri`).
+    fn parent_subject(id: &str) -> (String, Option<String>) {
+        if emittable_iri(id) {
+            (format!("<{id}>"), None)
+        } else {
+            (
+                "?_parentSubj".to_string(),
+                Some(format!(
+                    "    FILTER(STR(?_parentSubj) = \"{}\")",
+                    escape_sparql_string(id)
+                )),
+            )
+        }
+    }
+
     // Parent filter
     if let Some(ref parent) = query.parent {
         match parent {
             Scope::Raw { id, predicate } => {
                 if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
-                    conformance_patterns.push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
+                    let (subj, filter) = parent_subject(safe_id);
+                    conformance_patterns.push(format!("    {subj} <{safe_pred}> ?source ."));
+                    conformance_patterns.extend(filter);
                 } else {
                     log::warn!(
                         "Skipping parent scope: invalid IRI in id='{}' or predicate='{}'",
@@ -331,14 +352,18 @@ pub(super) fn build_query_patterns(
                 };
                 if let Some(ref f) = field {
                     if let Ok(safe_f) = validate_iri(f) {
-                        conformance_patterns.push(format!("    <{safe_id}> <{safe_f}> ?source ."));
+                        let (subj, filter) = parent_subject(safe_id);
+                        conformance_patterns.push(format!("    {subj} <{safe_f}> ?source ."));
+                        conformance_patterns.extend(filter);
                     } else {
                         log::warn!("Skipping parent scope: invalid IRI in field='{}'", f);
                     }
                 } else {
                     let safe_model = escape_sparql_string(model);
                     let hash_model = format!("#{safe_model}");
-                    conformance_patterns.push(format!("    <{safe_id}> ?_parentPred ?source ."));
+                    let (subj, filter) = parent_subject(safe_id);
+                    conformance_patterns.push(format!("    {subj} ?_parentPred ?source ."));
+                    conformance_patterns.extend(filter);
                     conformance_patterns.push(format!(
                         "    FILTER(STRENDS(STR(?_parentPred), \"/{safe_model}\") || STRENDS(STR(?_parentPred), \"{hash_model}\"))",
                     ));
@@ -657,7 +682,7 @@ fn compile_leaf_condition(
     if prop_name == "base" || prop_name == "id" {
         match condition {
             WhereCondition::String(val) => {
-                if validate_iri(val).is_ok() {
+                if emittable_iri(val) {
                     // `VALUES` rather than `FILTER(?source = <val>)`:
                     // it binds `?source` instead of merely testing it,
                     // which is what lets an `id` condition stand alone
@@ -675,7 +700,7 @@ fn compile_leaf_condition(
             WhereCondition::StringArray(vals) => {
                 let valid: Vec<&str> = vals
                     .iter()
-                    .filter(|v| validate_iri(v).is_ok())
+                    .filter(|v| emittable_iri(v))
                     .map(|v| v.as_str())
                     .collect();
                 if valid.len() == vals.len() {
@@ -726,7 +751,7 @@ fn compile_leaf_condition(
         let direction = prop.direction.as_deref().unwrap_or("forward");
         match condition {
             WhereCondition::String(val) => {
-                if validate_iri(val).is_ok() {
+                if emittable_iri(val) {
                     if direction == "reverse" {
                         out.push(format!("    <{val}> <{safe_pred}> ?source ."));
                     } else {
@@ -754,7 +779,7 @@ fn compile_leaf_condition(
                     "{}_{leaf_id}",
                     prop_name.replace(|c: char| !c.is_alphanumeric(), "_")
                 );
-                let all_valid = vals.iter().all(|v| validate_iri(v).is_ok());
+                let all_valid = vals.iter().all(|v| emittable_iri(v));
                 if all_valid {
                     let iris = vals
                         .iter()
