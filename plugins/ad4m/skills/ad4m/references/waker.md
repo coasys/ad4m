@@ -27,7 +27,7 @@ The AD4M waker watches perspectives for data changes via WebSocket subscriptions
 | `ad4m_subscribe_to_children(perspective_id, expression_address)`     | Watch for new children under a parent (messages in a channel, tasks on a board, …) |
 | `ad4m_unsubscribe_from_mentions(perspective_id)`                     | Stop watching mentions in a neighbourhood                           |
 | `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching that parent                                           |
-| `ad4m_list_waker_subscriptions()`                                    | List all active subscriptions                                       |
+| `ad4m_list_waker_subscriptions()`                                    | List active subscriptions, plus any still pending re-attempt        |
 
 The subscribe tools call the MCP tools `ad4m_get_mention_waker_config` / `ad4m_generate_waker_query` internally to build the SPARQL queries — you don't need to construct queries manually.
 

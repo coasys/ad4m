@@ -220,7 +220,7 @@ In addition to the bridged MCP tools, the plugin registers:
 | `ad4m_subscribe_to_children(perspective_id, expression_address)` | Watch for new messages in a channel |
 | `ad4m_unsubscribe_from_mentions(perspective_id)` | Stop watching mentions |
 | `ad4m_unsubscribe_from_children(perspective_id, expression_address)` | Stop watching a channel |
-| `ad4m_list_waker_subscriptions()` | List all active subscriptions |
+| `ad4m_list_waker_subscriptions()` | List active subscriptions, plus any still pending re-attempt |
 | `ad4m_set_profile_picture_from_file(file_path)` | Set your agent's profile picture |
 
 ## Troubleshooting
