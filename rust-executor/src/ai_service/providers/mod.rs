@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 pub mod anthropic;
+pub mod http;
 pub mod ollama;
 pub mod openai;
 
@@ -45,47 +46,21 @@ pub async fn list_models(
     }
 }
 
-/// Resolve a configured base URL to a versioned endpoint, e.g.
-/// `https://api.anthropic.com` plus `messages` gives
-/// `https://api.anthropic.com/v1/messages`.
-///
-/// Accepts the base URL with or without a `/v1` already on it, because both
-/// spellings appear in provider documentation and therefore both are what gets
-/// pasted into a model form. A path prefix survives, so a gateway that mounts a
-/// provider under one keeps working.
-pub(crate) fn versioned_endpoint(base_url: url::Url, path: &str) -> String {
-    let trimmed = base_url.as_str().trim_end_matches('/').to_string();
-    let root = trimmed
-        .strip_suffix("/v1")
-        .map(|s| s.to_string())
-        .unwrap_or(trimmed);
-    format!("{root}/v1/{path}")
-}
-
-/// Both providers answer a model listing as `{"data": [{"id": …}, …]}`.
-/// Entries without an `id` are skipped rather than failing the listing — a
-/// partially-understood response is still useful to somebody filling in a form.
-pub(crate) fn model_ids_from_data(json: &serde_json::Value) -> Vec<String> {
-    json.get("data")
-        .and_then(|d| d.as_array())
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.get("id")?.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Whether a wire protocol can carry tool definitions and return tool calls
-/// as structured data.
+/// Whether this executor's client for an API type passes tools as data.
 ///
 /// The same fact as [`RemoteChat::supports_native_tools`], asked of a model
 /// config rather than of a built client — the harness has to decide how to
 /// render tools *before* anything reaches a worker thread, so it cannot ask
 /// the instance. Kept beside the trait, and covered by a test asserting the
 /// two agree, because two answers drifting apart would route a model down a
-/// path its provider cannot serve.
+/// path its client cannot serve.
+///
+/// `OpenAi => false` is about [`openai::OpenAiChat`] and not about the OpenAI
+/// wire format, which carries tools perfectly well. That client could support
+/// them and does not yet, so every OpenAI-shaped model takes the prompt-
+/// injection path. Flipping this arm alone is not enough to make it work — it
+/// would also need building `tools[]` in `OpenAiChat::chat`, which is why that
+/// method refuses a request carrying tools instead of ignoring them.
 pub fn api_type_supports_native_tools(api_type: &crate::types::ModelApiType) -> bool {
     match api_type {
         crate::types::ModelApiType::Anthropic => true,
@@ -274,8 +249,18 @@ pub trait RemoteChat: Send + Sync {
     /// model is handed a schema instead of a description of one, and the calls
     /// come back as data rather than as text that happens to look like data.
     ///
-    /// Answering this wrongly is the one way a provider can break a caller, so
-    /// it is a plain fact about the wire format, never a preference.
+    /// It is a fact about *this implementation*, not about the protocol it
+    /// speaks. The OpenAI wire format carries `tools[]` and answers with
+    /// `tool_calls` — it is one of the two formats that defined the shape —
+    /// and [`super::openai::OpenAiChat`] still answers `false`, because it
+    /// does not build them. Read a `false` as "this client does not pass
+    /// tools as data", never as "this protocol cannot".
+    ///
+    /// Answering it wrongly is the one way a provider can break a caller: a
+    /// `true` from a client that then drops `ChatRequest::tools` hands the
+    /// model no tools, and the empty `tool_calls` that comes back reads as
+    /// "done" on the first turn. So a client answering `false` must refuse a
+    /// request carrying tools rather than ignore them.
     fn supports_native_tools(&self) -> bool {
         false
     }
@@ -293,6 +278,14 @@ pub trait RemoteChat: Send + Sync {
     ///
     /// The returned [`ChatReply`] always carries the complete text whether or
     /// not it streamed, because the caller bills on it.
+    ///
+    /// Tools are *not* promised here, even on a provider whose
+    /// [`Self::supports_native_tools`] is true. Reading structured calls out of
+    /// a stream means reassembling them from partial JSON, which no
+    /// implementation does yet. An implementation that cannot must answer a
+    /// request carrying tools with an error rather than a reply with none —
+    /// an empty `tool_calls` is indistinguishable from a model that chose not
+    /// to call anything.
     async fn chat_stream(
         &self,
         request: ChatRequest,
@@ -340,72 +333,5 @@ mod tests {
                 "disagreement for {api_type:?}"
             );
         }
-    }
-
-    #[test]
-    fn an_endpoint_is_built_from_a_bare_host() {
-        assert_eq!(
-            versioned_endpoint(url("https://api.anthropic.com"), "messages"),
-            "https://api.anthropic.com/v1/messages"
-        );
-        assert_eq!(
-            versioned_endpoint(url("https://api.openai.com"), "models"),
-            "https://api.openai.com/v1/models"
-        );
-    }
-
-    #[test]
-    fn a_base_url_already_carrying_v1_does_not_get_a_second_one() {
-        assert_eq!(
-            versioned_endpoint(url("https://api.anthropic.com/v1"), "messages"),
-            "https://api.anthropic.com/v1/messages"
-        );
-        assert_eq!(
-            versioned_endpoint(url("https://api.groq.com/openai/v1"), "models"),
-            "https://api.groq.com/openai/v1/models"
-        );
-    }
-
-    #[test]
-    fn a_trailing_slash_is_tolerated() {
-        assert_eq!(
-            versioned_endpoint(url("https://api.anthropic.com/v1/"), "messages"),
-            "https://api.anthropic.com/v1/messages"
-        );
-    }
-
-    #[test]
-    fn a_proxy_path_prefix_survives() {
-        // A gateway may mount a provider under a path. That prefix has to
-        // survive, which is why this appends rather than rewriting the path.
-        assert_eq!(
-            versioned_endpoint(url("https://gateway.internal/anthropic"), "messages"),
-            "https://gateway.internal/anthropic/v1/messages"
-        );
-    }
-
-    #[test]
-    fn model_ids_are_read_out_of_the_data_array() {
-        let json = serde_json::json!({
-            "object": "list",
-            "data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}],
-        });
-        assert_eq!(model_ids_from_data(&json), vec!["gpt-4o", "gpt-4o-mini"]);
-    }
-
-    #[test]
-    fn an_entry_without_an_id_is_skipped_rather_than_failing_the_listing() {
-        // A half-understood response is still useful to somebody filling in a
-        // form; refusing the whole list because one row is odd is not.
-        let json = serde_json::json!({ "data": [{"id": "a"}, {"object": "model"}, {"id": "b"}] });
-        assert_eq!(model_ids_from_data(&json), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn a_response_with_no_data_array_lists_nothing() {
-        assert_eq!(
-            model_ids_from_data(&serde_json::json!({ "error": "nope" })),
-            Vec::<String>::new()
-        );
     }
 }

@@ -45,7 +45,10 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// `max_tokens` is mandatory on this API — unlike the OpenAI path, where
 /// omitting it lets the server pick. 16k is large enough that a long
 /// interpretation answer is not clipped and small enough to bound a runaway.
-/// Model options override it (`ModelApi.options.max_tokens`).
+///
+/// Nothing overrides it. `ModelApi` carries no options, and the `max_tokens`
+/// a client sends to the compat surface is dropped before it reaches either
+/// provider. Threading that through is worth doing and is not done here.
 const DEFAULT_MAX_TOKENS: u32 = 16_384;
 
 /// A completion can legitimately run for minutes on a long prompt. Without a
@@ -63,12 +66,15 @@ pub struct AnthropicChat {
 impl AnthropicChat {
     pub fn new(api_key: &str, base_url: Url) -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .timeout(REQUEST_TIMEOUT)
+            // `expect` rather than `unwrap_or_default`: the default client
+            // follows redirects, so falling back to it would quietly drop the
+            // policy. It cannot build either when this fails, and
+            // `Client::new` panics the same way.
+            http: super::http::credentialed_http(REQUEST_TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                .expect("the HTTP client builds"),
             api_key: api_key.to_string(),
-            endpoint: super::versioned_endpoint(base_url, "messages"),
+            endpoint: super::http::versioned_endpoint(base_url, "messages"),
         }
     }
 }
@@ -79,9 +85,11 @@ impl AnthropicChat {
 /// with different auth: an `x-api-key` header and the pinned wire version
 /// rather than a bearer token.
 pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
-    let endpoint = super::versioned_endpoint(base_url, "models");
+    let endpoint = super::http::versioned_endpoint(base_url, "models");
 
-    let response = reqwest::Client::new()
+    let response = super::http::credentialed_http(super::http::DISCOVERY_TIMEOUT)
+        .build()
+        .map_err(|e| anyhow!("Could not build an HTTP client: {e}"))?
         .get(&endpoint)
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -100,7 +108,7 @@ pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
         .await
         .map_err(|e| anyhow!("Could not read the model list: {e}"))?;
 
-    Ok(super::model_ids_from_data(&json))
+    Ok(super::http::model_ids_from_data(&json))
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +390,42 @@ fn read_content(blocks: &[ContentBlock]) -> (String, Vec<ToolCall>) {
     (text, tool_calls)
 }
 
+/// Put the provider's exact counts in the log.
+///
+/// Caching is the reason this client exists rather than routing Claude through
+/// the OpenAI-shaped shim, and it fails silently: a breakpoint that stops
+/// landing reports nothing and shows up only as a larger bill.
+/// `cache_read_tokens` is the observation that says it worked, and until
+/// billing moves off `estimate_token_count` the log is the only place it can
+/// be seen outside the `#[ignore]`d e2e suite.
+///
+/// A completion that touched the cache logs at `info`, because the default
+/// log config is `rust_executor=info` and a `debug` line would not reach any
+/// node nobody has reconfigured. Everything else stays at `debug`. So a
+/// cached model writes one line per completion, an uncached one writes
+/// nothing, and a breakpoint that stops landing shows up as lines that stop.
+fn log_usage(model: &str, streamed: bool, usage: &ChatUsage) {
+    log::log!(
+        usage_log_level(usage),
+        "Anthropic usage ({model}{}): in={:?} out={:?} cache_read={:?} cache_write={:?}",
+        if streamed { ", streamed" } else { "" },
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+    );
+}
+
+fn usage_log_level(usage: &ChatUsage) -> log::Level {
+    let cached =
+        usage.cache_read_tokens.unwrap_or(0) > 0 || usage.cache_write_tokens.unwrap_or(0) > 0;
+    if cached {
+        log::Level::Info
+    } else {
+        log::Level::Debug
+    }
+}
+
 #[async_trait]
 impl RemoteChat for AnthropicChat {
     fn supports_native_tools(&self) -> bool {
@@ -412,11 +456,13 @@ impl RemoteChat for AnthropicChat {
         }
 
         let (text, tool_calls) = read_content(&parsed.content);
+        let usage = parsed.usage.map(ChatUsage::from).unwrap_or_default();
+        log_usage(&body.model, false, &usage);
 
         Ok(ChatReply {
             text,
             tool_calls,
-            usage: parsed.usage.map(ChatUsage::from).unwrap_or_default(),
+            usage,
         })
     }
 
@@ -426,6 +472,25 @@ impl RemoteChat for AnthropicChat {
         tokens: mpsc::UnboundedSender<String>,
     ) -> Result<ChatReply> {
         use futures::StreamExt;
+
+        // `build_body` is shared so the two calls cannot drift in what they
+        // send — which means tools go out on this path too, and the read side
+        // has no matching half: a `tool_use` block arrives as a run of
+        // `input_json_delta` events that nothing here accumulates. `text_delta`
+        // correctly refuses to treat them as text, so the call does not corrupt
+        // the reply; it disappears, and the caller sees a successful completion
+        // with no calls, which reads as "the model chose not to call anything".
+        //
+        // Refuse loudly instead. Accumulating the deltas per
+        // `content_block_index` and flushing on `content_block_stop` is the
+        // real fix and needs its own tests. Nothing streams with tools today.
+        if !request.tools.is_empty() {
+            return Err(anyhow!(
+                "Streaming with native tools is not supported on this provider yet: \
+                 tool_use blocks arrive as input_json_delta and are not accumulated. \
+                 Use the non-streaming call for a turn that carries tools."
+            ));
+        }
 
         let body = self.build_body(request, true);
         let response = self.send(&body).await?;
@@ -470,6 +535,7 @@ impl RemoteChat for AnthropicChat {
                     if tokens.send(delta).is_err() {
                         // Consumer hung up. Stop reading rather than
                         // draining a response nobody will see.
+                        log_usage(&body.model, true, &usage);
                         return Ok(ChatReply {
                             text,
                             tool_calls: Vec::new(),
@@ -479,6 +545,8 @@ impl RemoteChat for AnthropicChat {
                 }
             }
         }
+
+        log_usage(&body.model, true, &usage);
 
         Ok(ChatReply {
             text,
@@ -864,6 +932,35 @@ mod tests {
     }
 
     #[test]
+    fn a_completion_that_touched_the_cache_logs_where_a_default_node_can_see_it() {
+        // The default config is `rust_executor=info`.
+        let read = ChatUsage {
+            cache_read_tokens: Some(7_120),
+            ..Default::default()
+        };
+        let write = ChatUsage {
+            cache_write_tokens: Some(7_120),
+            ..Default::default()
+        };
+        assert_eq!(usage_log_level(&read), log::Level::Info);
+        assert_eq!(usage_log_level(&write), log::Level::Info);
+    }
+
+    #[test]
+    fn a_completion_that_did_not_touch_the_cache_stays_at_debug() {
+        // Silence on an uncached model is what lets "the breakpoint stopped
+        // landing" read as lines that stopped appearing.
+        let zero = ChatUsage {
+            input_tokens: Some(10),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(usage_log_level(&zero), log::Level::Debug);
+        assert_eq!(usage_log_level(&ChatUsage::default()), log::Level::Debug);
+    }
+
+    #[test]
     fn an_absent_system_prompt_is_omitted_rather_than_sent_empty() {
         let body = MessagesRequest {
             model: "claude-opus-5".to_string(),
@@ -1079,6 +1176,40 @@ mod wire_tests {
     }
 
     #[tokio::test]
+    async fn streaming_with_tools_is_refused_rather_than_dropping_the_calls() {
+        let mut server = mockito::Server::new_async().await;
+        // No `.expect(0)` on a mock here: the assertion is that nothing is
+        // posted at all, so any request to the server is an unmatched one and
+        // the request never leaves the client.
+        let mock = server
+            .mock("POST", "/v1/messages")
+            .expect(0)
+            .with_status(200)
+            .create_async()
+            .await;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client = AnthropicChat::new("sk-test", Url::parse(&server.url()).unwrap());
+        let error = client
+            .chat_stream(
+                ChatRequest::new("claude-opus-5", turns()).with_tools(vec![ToolSpec {
+                    name: "search".into(),
+                    description: "find things".into(),
+                    parameters: json!({ "type": "object" }),
+                }]),
+                tx,
+            )
+            .await
+            .expect_err("a streamed turn carrying tools is refused");
+
+        assert!(
+            error.to_string().contains("not supported"),
+            "the error names the gap: {error}"
+        );
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
     async fn a_multi_byte_character_split_across_chunks_survives() {
         // mockito sends the body in one piece, so the split is forced here by
         // driving the same reader the stream loop uses. Decoding per chunk
@@ -1086,7 +1217,21 @@ mod wire_tests {
         // U+FFFD, and no later buffering could repair it.
         let whole = "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"café\"}}\n";
         let bytes = whole.as_bytes();
-        let split = bytes.len() - 4; // lands inside the two-byte é
+        // Between the two bytes of the é. The tail after it is `"}}\n`, so a
+        // split counted from the end has to step over those four bytes first.
+        let split = whole.find('é').expect("the test line has an é") + 1;
+
+        // The split has to be one a per-chunk decoder would get wrong, or the
+        // assertions below pass whether or not the reader buffers bytes.
+        let per_chunk = format!(
+            "{}{}",
+            String::from_utf8_lossy(&bytes[..split]),
+            String::from_utf8_lossy(&bytes[split..])
+        );
+        assert!(
+            per_chunk.contains('\u{FFFD}'),
+            "the split does not land inside the character"
+        );
 
         let mut buffer: Vec<u8> = Vec::new();
         let mut text = String::new();
@@ -1166,5 +1311,64 @@ mod wire_tests {
 
         assert!(error.to_string().contains("401"));
         assert!(error.to_string().contains("invalid x-api-key"));
+    }
+
+    /// A second server standing in for whatever host a redirect names. The
+    /// two mock servers listen on different ports, which is a different host
+    /// as far as reqwest's redirect handling is concerned.
+    async fn collector(method: &str) -> (mockito::ServerGuard, mockito::Mock) {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock(method, Matcher::Any)
+            .expect(0)
+            .with_status(200)
+            .create_async()
+            .await;
+        (server, mock)
+    }
+
+    #[tokio::test]
+    async fn a_completion_does_not_follow_a_redirect_with_the_key() {
+        // `x-api-key` is not a header reqwest strips on a cross-host redirect,
+        // so following one would re-send the key to the host it points at.
+        let (collector, collected) = collector("POST").await;
+        let mut origin = mockito::Server::new_async().await;
+        origin
+            .mock("POST", "/v1/messages")
+            .with_status(307)
+            .with_header("location", &format!("{}/v1/messages", collector.url()))
+            .create_async()
+            .await;
+
+        let client = AnthropicChat::new("sk-test", Url::parse(&origin.url()).unwrap());
+        let error = client
+            .chat(ChatRequest::new("claude-test", turns()))
+            .await
+            .expect_err("a redirect is an error rather than a hop");
+
+        assert!(error.to_string().contains("307"), "got: {error}");
+        collected.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn listing_models_does_not_follow_a_redirect_with_the_key() {
+        // The sharper case: discovery checks the scheme of the URL it was
+        // given, and a redirect is how an https host would send the key on
+        // somewhere that check never saw.
+        let (collector, collected) = collector("GET").await;
+        let mut origin = mockito::Server::new_async().await;
+        origin
+            .mock("GET", "/v1/models")
+            .with_status(302)
+            .with_header("location", &format!("{}/v1/models", collector.url()))
+            .create_async()
+            .await;
+
+        let error = list_models("sk-test", Url::parse(&origin.url()).unwrap())
+            .await
+            .expect_err("a redirect is an error rather than a hop");
+
+        assert!(error.to_string().contains("302"), "got: {error}");
+        collected.assert_async().await;
     }
 }

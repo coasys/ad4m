@@ -1212,37 +1212,37 @@ fn tool_result_with_an_empty_id_renders_the_bare_tag() {
 }
 
 // ---------------------------------------------------------------------------
-// ai.discoverModels — a credential must not travel in the clear
+// ai.addModel / ai.updateModel — a saved key must not travel in the clear
 // ---------------------------------------------------------------------------
 
-fn safe(url: &str) -> bool {
-    super::super::ai_ws::is_transport_safe(&url::Url::parse(url).expect("parses"))
+fn model_at(base_url: &str, api_key: &str) -> crate::types::ModelInput {
+    crate::types::ModelInput {
+        name: "m".into(),
+        api: Some(crate::types::ModelApiInput {
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            model: "m".into(),
+            api_type: "ANTHROPIC".into(),
+        }),
+        ..Default::default()
+    }
 }
 
 #[test]
-fn https_may_carry_a_credential_anywhere() {
-    assert!(safe("https://api.openai.com/v1"));
-    assert!(safe("https://gateway.internal/openai/v1"));
+fn a_saved_model_may_not_send_its_key_over_plain_http() {
+    // Discovery sends a key once; a saved model sends it on every completion.
+    use super::super::ai_ws::refuse_cleartext_credential as refuse;
+    let error = refuse(&model_at("http://api.anthropic.com", "sk-ant")).expect_err("refused");
+    assert!(error.message.contains("plain HTTP"), "{}", error.message);
 }
 
 #[test]
-fn plain_http_on_loopback_may_carry_a_credential() {
-    // A local Ollama, vLLM or gateway is reached over http by design, and
-    // nothing leaves the machine.
-    assert!(safe("http://localhost:11434"));
-    assert!(safe("http://127.0.0.1:12000/api/v1"));
-    assert!(safe("http://[::1]:11434"));
-}
-
-#[test]
-fn plain_http_to_a_remote_host_may_not() {
-    assert!(!safe("http://api.openai.com/v1"));
-    assert!(!safe("http://192.168.1.10:11434"));
-}
-
-#[test]
-fn a_hostname_that_merely_looks_local_is_not_loopback() {
-    // `localhost.example.com` resolves wherever its owner points it.
-    assert!(!safe("http://localhost.example.com/v1"));
-    assert!(!safe("http://notlocalhost/v1"));
+fn a_saved_model_is_held_to_the_same_exemptions_as_discovery() {
+    use super::super::ai_ws::refuse_cleartext_credential as refuse;
+    assert!(refuse(&model_at("https://api.anthropic.com", "sk-ant")).is_ok());
+    assert!(refuse(&model_at("http://localhost:11434/v1", "ollama")).is_ok());
+    // Keyless over plain HTTP carries nothing to leak.
+    assert!(refuse(&model_at("http://192.168.1.10:11434/v1", "")).is_ok());
+    // A local model has no endpoint at all.
+    assert!(refuse(&crate::types::ModelInput::default()).is_ok());
 }

@@ -276,6 +276,24 @@ fn estimate_turn_tokens(turn: &ChatTurn) -> usize {
     estimate_token_count(&turn.content) + calls + answered_call
 }
 
+/// Estimated completion tokens for a reply that may carry tool calls.
+///
+/// A call is output the model generated and the caller pays for, so its name
+/// and arguments count alongside the text. Its id does not: the provider
+/// assigns it, and the model never generates it. `estimate_turn_tokens` does
+/// count the id when the call is sent back, because then it is input.
+fn estimate_reply_tokens(reply: &ChatReply) -> usize {
+    let calls: usize = reply
+        .tool_calls
+        .iter()
+        .map(|call| {
+            estimate_token_count(&call.name) + estimate_token_count(&call.arguments.to_string())
+        })
+        .sum();
+
+    estimate_token_count(&reply.text) + calls
+}
+
 /// The turn list for a task-shaped prompt: the task's system prompt, its
 /// examples as alternating user/assistant turns, then the live prompt.
 ///
@@ -749,7 +767,20 @@ impl AIService {
     /// Which protocol is spoken is decided here, once, from the model's
     /// `api_type` — everything downstream holds a `dyn RemoteChat` and does
     /// not know or care. See `ai_service::providers`.
-    async fn build_remote_client(model_id: String, api: ModelApi) -> Box<dyn RemoteChat> {
+    ///
+    /// Refuses a key that would cross the network in the clear. The WS
+    /// handlers refuse it too, but a model saved before they did still loads
+    /// through here, and would otherwise send its key with every completion.
+    /// The refusal fails this one model and shows in its status.
+    async fn build_remote_client(model_id: String, api: ModelApi) -> Result<Box<dyn RemoteChat>> {
+        if !api.api_key.is_empty() && !providers::http::is_transport_safe(&api.base_url) {
+            return Err(anyhow!(
+                "{} ({})",
+                providers::http::CLEARTEXT_KEY_REFUSAL,
+                api.base_url
+            ));
+        }
+
         publish_model_status(model_id.clone(), 0.0, "Initializing", false, false).await;
         let client: Box<dyn RemoteChat> = match api.api_type {
             ModelApiType::OpenAi => Box::new(providers::openai::OpenAiChat::new(
@@ -766,7 +797,7 @@ impl AIService {
             )),
         };
         publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
-        client
+        Ok(client)
     }
 
     async fn spawn_llm_model(
@@ -805,10 +836,9 @@ impl AIService {
                                 .map(LlmModel::Local)
                         } else if let Some(api) = model_config.api {
                             let model_string = api.model.clone();
-                            Ok(LlmModel::Remote((
-                                Self::build_remote_client(model_id, api).await,
-                                model_string
-                            )))
+                            Self::build_remote_client(model_id, api)
+                                .await
+                                .map(|client| LlmModel::Remote((client, model_string)))
                         } else {
                             Err(anyhow!("AI model definition {} doesn't have a body, and this error should have been caught above", model_config.name))
                         }
@@ -1500,14 +1530,7 @@ impl AIService {
 
         let reply = result_rx.await??;
 
-        // A tool call is output the model generated and the caller pays for,
-        // so its arguments count towards completion tokens alongside the text.
-        let completion_tokens = estimate_token_count(&reply.text)
-            + reply
-                .tool_calls
-                .iter()
-                .map(|call| estimate_token_count(&call.arguments.to_string()))
-                .sum::<usize>();
+        let completion_tokens = estimate_reply_tokens(&reply);
 
         log::debug!(
             "🤖 prompt_with_tools model={} text={:?} calls={}",
@@ -2629,9 +2652,55 @@ mod tests {
         assert_eq!(estimate_turn_tokens(&two), estimate_turn_tokens(&one) * 2);
     }
 
+    #[test]
+    fn a_replied_call_bills_its_name_and_arguments_but_not_its_id() {
+        let reply = |calls| super::ChatReply {
+            text: String::new(),
+            tool_calls: calls,
+            usage: Default::default(),
+        };
+        let arguments = serde_json::json!({ "a": 1 });
+        let expected = super::estimate_token_count("update_schema")
+            + super::estimate_token_count(&arguments.to_string());
+
+        assert_eq!(
+            super::estimate_reply_tokens(&reply(vec![call(arguments)])),
+            expected
+        );
+    }
+
     use super::*;
     use crate::types::{AIPromptExamplesInput, LocalModelInput};
     use tokio::time::{sleep, Duration};
+
+    fn remote_at(base_url: &str, api_key: &str) -> ModelApi {
+        ModelApi {
+            base_url: url::Url::parse(base_url).expect("test URL parses"),
+            api_key: api_key.to_string(),
+            model: "claude-test".to_string(),
+            api_type: ModelApiType::Anthropic,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_saved_model_with_a_key_over_plain_http_is_not_built() {
+        // The load path: a model saved before the WS handlers refused this
+        // reaches client construction without passing through them.
+        let error = match AIService::build_remote_client(
+            "m".to_string(),
+            remote_at("http://192.168.1.10:8080", "sk-ant"),
+        )
+        .await
+        {
+            Ok(_) => panic!("a key over plain http to a remote host is refused"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("plain HTTP"), "{error}");
+        assert!(
+            error.to_string().contains("192.168.1.10"),
+            "names the URL: {error}"
+        );
+    }
 
     #[tokio::test]
     async fn test_progress_rate_limiting() {

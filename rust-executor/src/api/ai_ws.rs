@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
+use crate::ai_service::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
 use crate::types::{AITask, AITaskInput, ModelInput, ModelType, RequestContext};
@@ -57,6 +58,17 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 /// but it makes an outbound request to an arbitrary URL with an
 /// arbitrary key, which is the same authority adding a model carries and more
 /// than reading the models already configured.
+///
+/// That includes the failure body. `list_models` puts the upstream response
+/// verbatim into its error, so a caller can point `baseUrl` at a host this
+/// node can reach and read what it answers. Deliberate, on two grounds: a
+/// holder of AI_CREATE can already name an arbitrary URL and send it
+/// credentials, so this widens reach and not authority; and the body is the
+/// reason the endpoint is worth having, because a status alone does not
+/// separate a bad key from a bad model name from a host that is not an LLM.
+/// Revisit it if AI_CREATE is ever granted more widely than to the operator of
+/// the node — the reach is a cleaner read primitive than `addModel` plus a
+/// prompt, needing no model and no completion.
 async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
@@ -88,9 +100,7 @@ async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     // against any host stays available, which is the case that made this
     // endpoint worth having.
     if !api_key.is_empty() && !is_transport_safe(&base_url) {
-        return Err(WsRpcError::bad_request(
-            "Refusing to send an API key over plain HTTP. Use https, or omit the key.",
-        ));
+        return Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL));
     }
 
     let models = crate::ai_service::providers::list_models(&api_type, api_key, base_url)
@@ -100,21 +110,25 @@ async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     Ok(serde_json::to_value(models)?)
 }
 
-/// Whether a credential may be sent to this URL.
+/// Refuse a model whose key would cross the network in the clear.
 ///
-/// True for https anywhere, and for http on loopback only. A hostname that
-/// merely looks local is not enough: `localhost.example.com` resolves
-/// wherever its owner points it.
-pub(super) fn is_transport_safe(url: &url::Url) -> bool {
-    if url.scheme() == "https" {
-        return true;
+/// The same rule as discovery, applied where it matters more: discovery sends
+/// a key once, and a saved model sends it with every completion for as long as
+/// the model exists. A base URL that does not parse is left for the service to
+/// reject with its own error.
+///
+/// `AIService::build_remote_client` refuses the same model again. This check
+/// is the one that keeps it out of the database and answers the caller.
+pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRpcError> {
+    let Some(api) = &model.api else {
+        return Ok(());
+    };
+    if api.api_key.is_empty() {
+        return Ok(());
     }
-
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
-        None => false,
+    match url::Url::parse(&api.base_url) {
+        Ok(url) if !is_transport_safe(&url) => Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL)),
+        _ => Ok(()),
     }
 }
 
@@ -125,6 +139,7 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
@@ -146,6 +161,7 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
