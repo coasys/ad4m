@@ -106,10 +106,6 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     ("flow_actions", SideEffect::Read),
     ("flow_proposal_accept", SideEffect::Write),
     ("flow_proposal_reject", SideEffect::Write),
-    // ── children.rs ─────────────────────────────────────────────────
-    ("add_child", SideEffect::Write),
-    ("get_children", SideEffect::Read),
-    ("get_children_body_parsed", SideEffect::Read),
     // ── subscriptions.rs ────────────────────────────────────────────
     // Both tools construct a query string / return config metadata; the
     // actual subscription is a separate transport-level concern outside
