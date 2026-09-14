@@ -17,7 +17,7 @@ use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
     ShapeResolver, SortKey, SparqlPagination,
 };
-use super::utils::{is_inlinable_iri, MAX_INCLUDE_DEPTH};
+use super::utils::{validate_iri, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::Error;
 use serde_json::Value;
@@ -265,7 +265,7 @@ pub(super) async fn execute_model_query_inner(
                 let source_values: String = page_results
                     .iter()
                     .filter_map(|r| r["source"].as_str())
-                    .filter(|s| is_inlinable_iri(s))
+                    .filter_map(|s| validate_iri(s).ok())
                     .map(|s| format!("<{s}>"))
                     .collect::<Vec<_>>()
                     .join(" ");
