@@ -7,32 +7,29 @@ through here — `LlmModel::Local` is a different thing entirely.
 
 | File | Content |
 |---|---|
-| `mod.rs` | `RemoteChat` trait + the neutral `ChatRole`/`ChatTurn`/`ChatRequest`/`ChatReply` DTOs. Declarations only. |
-| `openai.rs` | OpenAI-shaped HTTP (`chat_gpt_lib_rs`): OpenAI, Groq, OpenRouter, Google compat, Ollama `/v1`, vLLM. |
+| `mod.rs` | `RemoteChat` trait, the neutral `ChatRole`/`ChatTurn`/`ChatRequest`/`ChatReply`/`ChatUsage`/`ToolSpec`/`ToolCall` types, and the per-`ModelApiType` dispatch (`list_models`, `api_type_supports_native_tools`). No wire format. |
+| `http.rs` | Sending a credential over HTTP: `credentialed_http` (no redirects), `is_transport_safe`, and the endpoint helpers both providers share. |
+| `openai.rs` | OpenAI-shaped HTTP (`chat_gpt_lib_rs`): OpenAI, Groq, OpenRouter, Google compat, Ollama `/v1`, vLLM. Tools are not passed natively. |
+| `anthropic.rs` | Messages API on `reqwest`: prompt caching, SSE streaming, native `tool_use`/`tool_result`. |
+| `anthropic_e2e.rs` | `#[ignore]`d tests against the real API; need `ANTHROPIC_API_KEY` and cost money. |
 
 ## Entry points
 
-- `OpenAiChat::new(api_key, base_url)` / `AnthropicChat::new(..)` — built once
-  per model by `ai_service::AIService::build_remote_client`, then owned by that
-  model's worker thread for its lifetime.
-- `RemoteChat::chat` / `chat_stream` — called from the `LLMTaskRequest::Prompt`
-  and `PromptStream` arms of that thread's loop. `chat_stream` has a default
-  that answers in one chunk; override it only where the upstream really streams.
-- `list_models(api_type, api_key, base_url)` — free function, not a trait
-  method, because discovery happens *before* a model is configured: there is no
-  instance and no worker thread. Reached over WS as `ai.discoverModels`.
+- `OpenAiChat::new` / `AnthropicChat::new`: built once per model by
+  `AIService::build_remote_client`, owned by that model's worker thread.
+- `RemoteChat::chat` / `chat_stream`: called from that thread's loop.
+  `chat_stream` defaults to one chunk; tools are not promised on it.
+- `list_models(api_type, api_key, base_url)`: a free function, because
+  discovery happens before a model exists. Reached as `ai.discoverModels`.
 
 ## Invariants
 
-- One instance per configured model, reused across prompts: hold a connection
-  pool if you like, never per-request state.
-- `ChatRole` has no tool role on purpose. Tool calls and tool results reach us
-  already rendered into text by `api::openai_compat` (`flatten_message`,
-  `harness_bridge`), so a provider that cannot express tools structurally never
-  has to invent a representation. A provider that can, reconstructs them.
-- Billing is the caller's: these types carry no token counts and no
-  `AgentContext`. `ai_service` estimates and bills around the call
-  (`bill_prompt_if_authed`). Do not add a billing hook here.
+- One instance per configured model: a connection pool is fine, per-request state is not.
+- Every client that sends a key is built from `http::credentialed_http`.
+- A client answering `supports_native_tools() == false` refuses a request
+  carrying tools rather than dropping them.
+- Billing is the caller's. `ChatUsage` reports the provider's counts;
+  `ai_service` estimates and bills around the call. Do not add a billing hook here.
 
 ## Do not
 

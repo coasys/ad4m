@@ -74,9 +74,9 @@ fn chat_base(base_url: Url) -> String {
 /// own 401 instead of surfacing as a puzzling failure on the first real
 /// completion, which is where it used to surface.
 pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
-    let endpoint = super::versioned_endpoint(base_url, "models");
+    let endpoint = super::http::versioned_endpoint(base_url, "models");
 
-    let mut request = super::credentialed_http()
+    let mut request = super::http::credentialed_http()
         .build()
         .map_err(|e| anyhow!("Could not build an HTTP client: {e}"))?
         .get(&endpoint);
@@ -100,7 +100,7 @@ pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
         .await
         .map_err(|e| anyhow!("Could not read the model list: {e}"))?;
 
-    Ok(super::model_ids_from_data(&json))
+    Ok(super::http::model_ids_from_data(&json))
 }
 
 fn to_wire_role(role: ChatRole) -> Role {
@@ -223,7 +223,7 @@ mod wire_tests {
             "https://api.groq.com/openai/v1/chat/completions"
         );
         assert_eq!(
-            super::super::versioned_endpoint(configured, "models"),
+            super::super::http::versioned_endpoint(configured, "models"),
             "https://api.groq.com/openai/v1/models"
         );
     }

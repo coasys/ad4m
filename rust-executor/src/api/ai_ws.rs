@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
+use crate::ai_service::providers::http::is_transport_safe;
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
 use crate::types::{AITask, AITaskInput, ModelInput, ModelType, RequestContext};
@@ -111,28 +112,6 @@ async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
 const CLEARTEXT_KEY_REFUSAL: &str =
     "Refusing to send an API key over plain HTTP. Use https, or omit the key.";
-
-/// Whether a credential may be sent to this URL.
-///
-/// True for https anywhere, and for http on loopback only. A hostname that
-/// merely looks local is not enough: `localhost.example.com` resolves
-/// wherever its owner points it.
-///
-/// Checked wherever a key arrives with a URL: discovery, and adding or
-/// updating a model. A model saved before the check existed is not re-checked
-/// when it loads.
-pub(super) fn is_transport_safe(url: &url::Url) -> bool {
-    if url.scheme() == "https" {
-        return true;
-    }
-
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
-        None => false,
-    }
-}
 
 /// Refuse a model whose key would cross the network in the clear.
 ///

@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 pub mod anthropic;
+pub mod http;
 pub mod openai;
 
 #[cfg(test)]
@@ -41,55 +42,6 @@ pub async fn list_models(
         crate::types::ModelApiType::OpenAi => openai::list_models(api_key, base_url).await,
         crate::types::ModelApiType::Anthropic => anthropic::list_models(api_key, base_url).await,
     }
-}
-
-/// An HTTP client for a request that carries a credential. It follows no
-/// redirects.
-///
-/// reqwest strips `Authorization` when a redirect crosses hosts, but not a
-/// custom header such as Anthropic's `x-api-key`, and nothing checks the scheme
-/// a redirect points at. Following one hands the key to whichever host the
-/// first one names, over whatever transport it names — which walks around the
-/// https check discovery makes on the URL it was given. No provider API
-/// redirects a well-formed request, so refusing costs nothing, and the failure
-/// is a visible status error.
-///
-/// The OpenAI chat path is not built here: `chat_gpt_lib_rs` owns its client.
-/// It sends the key as a bearer token, which is the header reqwest does strip.
-pub(crate) fn credentialed_http() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
-}
-
-/// Resolve a configured base URL to a versioned endpoint, e.g.
-/// `https://api.anthropic.com` plus `messages` gives
-/// `https://api.anthropic.com/v1/messages`.
-///
-/// Accepts the base URL with or without a `/v1` already on it, because both
-/// spellings appear in provider documentation and therefore both are what gets
-/// pasted into a model form. A path prefix survives, so a gateway that mounts a
-/// provider under one keeps working.
-pub(crate) fn versioned_endpoint(base_url: url::Url, path: &str) -> String {
-    let trimmed = base_url.as_str().trim_end_matches('/').to_string();
-    let root = trimmed
-        .strip_suffix("/v1")
-        .map(|s| s.to_string())
-        .unwrap_or(trimmed);
-    format!("{root}/v1/{path}")
-}
-
-/// Both providers answer a model listing as `{"data": [{"id": …}, …]}`.
-/// Entries without an `id` are skipped rather than failing the listing — a
-/// partially-understood response is still useful to somebody filling in a form.
-pub(crate) fn model_ids_from_data(json: &serde_json::Value) -> Vec<String> {
-    json.get("data")
-        .and_then(|d| d.as_array())
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.get("id")?.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Whether this executor's client for an API type passes tools as data.
@@ -373,72 +325,5 @@ mod tests {
                 "disagreement for {api_type:?}"
             );
         }
-    }
-
-    #[test]
-    fn an_endpoint_is_built_from_a_bare_host() {
-        assert_eq!(
-            versioned_endpoint(url("https://api.anthropic.com"), "messages"),
-            "https://api.anthropic.com/v1/messages"
-        );
-        assert_eq!(
-            versioned_endpoint(url("https://api.openai.com"), "models"),
-            "https://api.openai.com/v1/models"
-        );
-    }
-
-    #[test]
-    fn a_base_url_already_carrying_v1_does_not_get_a_second_one() {
-        assert_eq!(
-            versioned_endpoint(url("https://api.anthropic.com/v1"), "messages"),
-            "https://api.anthropic.com/v1/messages"
-        );
-        assert_eq!(
-            versioned_endpoint(url("https://api.groq.com/openai/v1"), "models"),
-            "https://api.groq.com/openai/v1/models"
-        );
-    }
-
-    #[test]
-    fn a_trailing_slash_is_tolerated() {
-        assert_eq!(
-            versioned_endpoint(url("https://api.anthropic.com/v1/"), "messages"),
-            "https://api.anthropic.com/v1/messages"
-        );
-    }
-
-    #[test]
-    fn a_proxy_path_prefix_survives() {
-        // A gateway may mount a provider under a path. That prefix has to
-        // survive, which is why this appends rather than rewriting the path.
-        assert_eq!(
-            versioned_endpoint(url("https://gateway.internal/anthropic"), "messages"),
-            "https://gateway.internal/anthropic/v1/messages"
-        );
-    }
-
-    #[test]
-    fn model_ids_are_read_out_of_the_data_array() {
-        let json = serde_json::json!({
-            "object": "list",
-            "data": [{"id": "gpt-4o"}, {"id": "gpt-4o-mini"}],
-        });
-        assert_eq!(model_ids_from_data(&json), vec!["gpt-4o", "gpt-4o-mini"]);
-    }
-
-    #[test]
-    fn an_entry_without_an_id_is_skipped_rather_than_failing_the_listing() {
-        // A half-understood response is still useful to somebody filling in a
-        // form; refusing the whole list because one row is odd is not.
-        let json = serde_json::json!({ "data": [{"id": "a"}, {"object": "model"}, {"id": "b"}] });
-        assert_eq!(model_ids_from_data(&json), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn a_response_with_no_data_array_lists_nothing() {
-        assert_eq!(
-            model_ids_from_data(&serde_json::json!({ "error": "nope" })),
-            Vec::<String>::new()
-        );
     }
 }
