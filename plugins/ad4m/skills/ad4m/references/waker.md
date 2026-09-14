@@ -50,7 +50,7 @@ The `Mentioned messages` section lists each message that triggered the wake:
 - **Message** — the base expression address of the message containing the mention
 - **Parents** — all parent containers this message belongs to (channels, conversation threads, etc.)
 
-A message can have multiple parents because Flux auto-generates conversation threads. Use `ad4m_channel_list` to identify which parent is the actual channel, and respond there.
+A message can have multiple parents when an app derives further containers from it (auto-generated summary threads, for example). Reply into the parent the wake event names; if several are listed, `ad4m_get_children(parent=…)` on each tells you which one holds the conversation. Some containers must not be written into — the executor's docs for the app that made the space say which (`ad4m_get_documentation(topic="flux")` for a Flux space). There is no `ad4m_channel_list` on the static surface.
 
 ### Channel-messages events
 

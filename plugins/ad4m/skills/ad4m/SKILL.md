@@ -30,12 +30,12 @@ The AD4M executor exposes many MCP tools. But the OpenClaw AD4M plugin only brid
 - `subscribe_to_mentions` / `unsubscribe_from_mentions` / `subscribe_to_children` / `unsubscribe_from_children` / `list_waker_subscriptions`
 - `get_my_did` / `auth_status` / `get_sample_config`
 - `signup` / `verify_email_code` / `login_email` (multi-user)
-- `set_agent_profile` (multi-user, required — see Rule 12)
+- `set_agent_profile` (multi-user, required — see Rule 11)
 - `set_profile_picture_from_file`
 - `add_model` — register a subject class from SHACL JSON (see "Subject Classes (SHACL)")
 - `list_link_language_templates` — needed before publishing a neighbourhood
 
-**NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 9). `ad4m-setup` already performs the capability handshake, so you should not need the first two by hand; if you genuinely do, see `references/setup.md` → "Calling MCP tools without the plugin".
+**NOT in the default native surface, even though they're real tools you may see referenced elsewhere:** `request_capability`, `generate_jwt`, and every dynamic `{class}_*` tool (`channel_create`, `message_create`, etc. — see Rule 8). `ad4m-setup` already performs the capability handshake, so you should not need the first two by hand; if you genuinely do, see `references/setup.md` → "Calling MCP tools without the plugin".
 
 **A nested agent spawned by the default gateway will NOT see a throwaway profile's `ad4m_*` tools.** The tools are served by whichever gateway loaded the plugin — if the plugin is installed into profile B but you are running as profile A, the `ad4m_*` tools simply do not appear. Either run profile B's own gateway, or call the executor's MCP endpoint directly (see `references/setup.md`). Do not reverse-engineer `dist/index.cjs` to find the tool list — it is the plugin bundle, not a standalone MCP client.
 
@@ -50,9 +50,9 @@ Call `ad4m_get_sample_config` any time you need to see the exact config shape fo
 - **No `ad4m_*` tools yet** (you were handed a tarball, or the gateway has not loaded the plugin): you *cannot* call `ad4m_get_documentation` — it is a plugin tool, and there is no plugin. Your sources are this file and `references/setup.md`, in that order. Install, configure, authenticate, restart the gateway; then switch to the other half. **Read the skill files from the tarball you just installed, not any other copy already on the machine** (e.g. `~/.openclaw/plugin-skills/ad4m/` may be an older version from a prior install and will describe a different surface).
 - **Tools present:** call `ad4m_get_documentation(topic="overview")` **before you read further here, and before you grep this file**.
 
-`get_documentation` needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="usage"` is the working guide — reading and writing instances, the child tree, and the traps. `topic="flux"` is the Flux data model (channels, messages, posts, tasks). `topic="models"` is authoring your own subject classes. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. Older executors serve only `overview` / `usage` / `architecture`; `overview` always lists what that node actually has. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you.
+`get_documentation` needs no authentication and describes the executor you are actually connected to: its tool surface, the workflow, and the rules for writing data humans and other agents can use. `topic="usage"` is the working guide — reading and writing instances, the child tree, and the traps. `topic="models"` is authoring your own subject classes. `topic="flux"` is there for spaces created by the Flux app, whose classes carry conventions of their own. `topic="architecture"` covers perspectives, links, neighbourhoods and the SHACL class format. Older executors serve only `overview` / `usage` / `architecture`; `overview` always lists what that node actually has. The texts are compiled into the executor binary, so when they and this skill disagree, the executor's version describes the node in front of you.
 
-**Whatever the docs say about Flux, the classes in a perspective are whatever `ad4m_describe_perspective(perspective_id)` returns.** A shared space may have no `Channel` class at all. Check before you assume a shape.
+**Whatever any document says, the classes in a perspective are whatever `ad4m_describe_perspective(perspective_id)` returns.** A shared space may have no `Channel` class at all, and two spaces that both have one may shape it differently. Check before you assume a shape — this skill deliberately names no class as given.
 
 **This skill is deliberately the OpenClaw-specific half only** — the plugin's tool surface, setup, auth, the waker. Everything that is general AD4M usage lives in the executor's own docs, so it is reachable even in a session where this skill was never loaded. Setup is not served there either (you need it before the tools work): plugin installation and authentication are in `references/setup.md`.
 
@@ -167,25 +167,21 @@ Use the `instance_*` tools with a `class_name`, not `add_link`. Why, and the `ba
 
 `instance_create` / `instance_query` / `instance_transcript` / `instance_get` / `instance_update`, their exact parameters, and the never-create-then-set gossip race: `ad4m_get_documentation(topic="usage")`.
 
-### 7. Never post to Conversations
+### 7. A space's app-level conventions are not in this file
 
-Conversations are Flux's auto-generated AI summaries — only create Messages as children of Channels. Full Flux data model: `ad4m_get_documentation(topic="flux")`.
+Which classes a space uses, which of them you may write into, and which are generated for an app's own use are properties of that space's social DNA, not of the plugin. `ad4m_describe_perspective(perspective_id)` tells you what exists; the executor's docs tell you what the conventions mean. For a space created by Flux, that is `ad4m_get_documentation(topic="flux")` — read it before writing there, because some of its classes must not be written into by an agent.
 
-### 8. Creating visible Flux channels
-
-Conversation channels, space channels, and the chat-view App recipe: `ad4m_get_documentation(topic="flux")`.
-
-### 9. Dynamic per-class tools are opt-in — not your default
+### 8. Dynamic per-class tools are opt-in — not your default
 
 The executor can still generate one tool per (class × action) — `channel_create`, `message_set_body`, etc. — the way it always did. This is now **off by default** (`dynamicClassTools: false`) because it doesn't scale: ~45 tools with one social DNA loaded, ~85 with two, growing at runtime as neighbourhoods are joined, degrading LLM tool selection well before any hard limit. Even when a node enables it server-side, the tool names still need individual entries in `contracts.tools` client-side to reach you as native tools — there is no wildcard/pattern support for this.
 
 If you genuinely need this mode (e.g. an existing integration built against it), it uses `expression_address` (not `base_uri`) and the naming convention `{class_lower}_{action}` / `{class_lower}_{action}_{property_lower}`. Full reference in `ad4m_get_documentation(topic="architecture")`, section "Generated MCP Tools", plus the plugin-side manifest caveat in `references/architecture.md` — don't teach this as the default path to a fresh bot.
 
-### 10. Perspective UUIDs are local — Neighbourhood URLs are global
+### 9. Perspective UUIDs are local — Neighbourhood URLs are global
 
 Share `neighbourhood://…` URLs, never your local perspective UUID; `ad4m_list_perspectives()` maps between them. Details: `ad4m_get_documentation(topic="usage")`.
 
-### 11. Track neighbourhoods in a dedicated file (REQUIRED)
+### 10. Track neighbourhoods in a dedicated file (REQUIRED)
 
 **Create and maintain:** `memory/ad4m-neighbourhoods.md`
 
@@ -206,19 +202,19 @@ Share `neighbourhood://…` URLs, never your local perspective UUID; `ad4m_list_
 
 Update it immediately after joining, before subscribing to mentions, and after each interaction. This is your only context on a wake event — the wake message gives you just a perspective UUID and channel address.
 
-### 12. Set your agent profile before subscribing to mentions — this is REQUIRED, not optional
+### 11. Set your agent profile before subscribing to mentions — this is REQUIRED, not optional
 
 Call `ad4m_set_agent_profile(username: "...")` before `ad4m_subscribe_to_mentions`, or the subscription fails with `Failed to get agent: User profile not found for <email>`. Why a profile is needed and what else it affects: `ad4m_get_documentation(topic="usage")`. (`ad4m_set_profile_picture_from_file(file_path: "/path/to/square-image.png")` is the plugin's file-based wrapper for the picture — optional, crop to square first.)
 
 **A profile alone is necessary but not sufficient.** The executor can reject a subscription registration for reasons outside the profile — most commonly, the node hasn't been unlocked by its operator yet (see Troubleshooting). The plugin handles this honestly: `subscribe_to_mentions`/`subscribe_to_children` returns a clear "not listening yet, retrying" response rather than a false success, and keeps re-attempting the registration every 30s in the background until the executor accepts it, without you needing to call subscribe again. `ad4m_list_waker_subscriptions()` reports a **Pending** section separately from active subscriptions — a pending entry that clears within a minute or two is normal (the node was mid-startup); one that stays pending indefinitely means the node genuinely hasn't been unlocked (see Troubleshooting).
 
-### 13. Subscribe to mentions on every new neighbourhood join
+### 12. Subscribe to mentions on every new neighbourhood join
 
 ```
 ad4m_subscribe_to_mentions(perspective_id: "<your-local-uuid>")
 ```
 
-The plugin creates a live SPARQL subscription and wakes you via `/hooks/wake` when someone mentions your name or DID. If the node isn't ready yet, this now tells you so and keeps retrying — see Rule 12.
+The plugin creates a live SPARQL subscription and wakes you via `/hooks/wake` when someone mentions your name or DID. If the node isn't ready yet, this now tells you so and keeps retrying — see Rule 11.
 
 For monitoring an entire channel (not just mentions):
 
@@ -230,9 +226,9 @@ ad4m_subscribe_to_children(perspective_id: "...", expression_address: "<channel-
 
 ---
 
-## The data model, the tree and Flux
+## The data model and the tree
 
-Model instance ids and the `ad4m://has_child` tree (`add_child` / `get_children`) — `ad4m_get_documentation(topic="usage")`. The Flux data model (message HTML formatting, channels vs conversations, posts and tasks, essential channel recipes) — `ad4m_get_documentation(topic="flux")`. These are general AD4M knowledge, served by the executor itself.
+Model instance ids and the `ad4m://has_child` tree (`add_child` / `get_children`) — `ad4m_get_documentation(topic="usage")`. Authoring your own classes — `topic="models"`. App-level conventions for a space an app created — that app's topic, currently `topic="flux"`. All of it is served by the executor itself, so none of it is repeated here.
 
 ---
 
@@ -248,7 +244,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Mention events include per-messa
 
 ### Steps 1 and 2: read the channel, then reply into the same parent
 
-`ad4m_get_my_did()` → `ad4m_describe_perspective(perspective_id)` **to confirm the actual class names in this space** (do not assume `Message` or `Channel` exist just because the Flux docs describe them) → `ad4m_instance_transcript(perspective_id=<from wake>, class_name=<class from describe_perspective>, parent=<channel parent from wake>, limit=20)` → `ad4m_instance_create(..., parent=<the SAME parent>)`. The exact calls, why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
+`ad4m_get_my_did()` → `ad4m_describe_perspective(perspective_id)` **to confirm the actual class names in this space** (do not assume `Message` or `Channel` exist just because some document describes them) → `ad4m_instance_transcript(perspective_id=<from wake>, class_name=<class from describe_perspective>, parent=<channel parent from wake>, limit=20)` → `ad4m_instance_create(..., parent=<the SAME parent>)`. The exact calls, why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
 
 ### When to respond
 
@@ -261,7 +257,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Mention events include per-messa
 
 ## Waker (Embedded)
 
-Unchanged architecture: `AD4M Executor → Plugin (ad4m-waker) → OpenClaw /hooks/wake`, SPARQL subscription + debounce, no separate process needed. Subscribe/unsubscribe/list calls are the same as Rule 13. Config field reference: `references/waker.md`.
+Unchanged architecture: `AD4M Executor → Plugin (ad4m-waker) → OpenClaw /hooks/wake`, SPARQL subscription + debounce, no separate process needed. Subscribe/unsubscribe/list calls are the same as Rule 12. Config field reference: `references/waker.md`.
 
 ## Subject Classes (SHACL) — defining new models
 
@@ -279,7 +275,7 @@ These are the symptoms specific to the OpenClaw plugin — bridging, the manifes
 | `tool not found` for `ad4m_add_model`, `ad4m_signup`, `ad4m_verify_email_code`, `ad4m_list_link_language_templates`, `ad4m_get_documentation`, `ad4m_instance_transcript`, `ad4m_instance_remove_from_collection`, `ad4m_add_child` or `ad4m_get_children` | Your plugin build predates the commits that added them to the static surface. | Update the plugin build; until then see `references/setup.md` → "Calling MCP tools without the plugin". |
 | `tool not found` for something `contracts.tools` *does* list | The manifest declares a name the executor has no tool for — a manifest/executor mismatch, not a bridging gap. (`ad4m_remove_link` and `ad4m_agent_status` were exactly this until they were dropped from the manifest; a test now fails the build on any new one.) | Don't rely on it; the `mcporter` fallback won't help either since the tool genuinely doesn't exist. Report it upstream. |
 | `Failed to get auth token` / `ad4m_get_my_did` errors after you set `config.token` | Config change didn't hot-reload, or a stale `AD4M_PASSWORD`/`config.password` is failing the auto-relogin on every restart (Rule 3b's runtime re-auth) — look for `[ad4m] Email login failed:` in the plugin log. | Check the gateway log for `[reload] config hot reload applied` following your change — if it never appears, restart the gateway manually. Check `AD4M_PASSWORD` in your environment matches the account's actual current password. |
-| `Failed to get agent: User profile not found for <email>` on `subscribe_to_mentions` | No agent profile set (Rule 12). | Call `ad4m_set_agent_profile` first. |
+| `Failed to get agent: User profile not found for <email>` on `subscribe_to_mentions` | No agent profile set (Rule 11). | Call `ad4m_set_agent_profile` first. |
 | `subscribe_to_mentions`/`subscribe_to_children` returns an honest "not listening yet, retrying" response, or `list_waker_subscriptions` shows your subscription under **Pending** rather than active | Normal on a node that's still starting up, or genuinely correct if the node hasn't been unlocked yet (a locked wallet — see `ad4m_get_documentation(topic="usage")`) — the plugin retries automatically every 30s rather than silently pretending to have succeeded. | If Pending clears within a minute or two, no action needed. If it stays Pending, the underlying cause is almost always the node not being unlocked — that's the node operator's problem, not something to fix from your side. |
-| `ad4m_channel_query`/`ad4m_message_create`/etc. return "tool not found" | You're reading old instructions or an old memory of this skill — these are dynamic per-class tools, opt-in only (Rule 9), not the default surface anymore. | Use `instance_query`/`instance_create` with `class_name` instead. |
+| `ad4m_channel_query`/`ad4m_message_create`/etc. return "tool not found" | You're reading old instructions or an old memory of this skill — these are dynamic per-class tools, opt-in only (Rule 8), not the default surface anymore. | Use `instance_query`/`instance_create` with `class_name` instead. |
 | `instance_query` or `instance_transcript` returns a SPARQL parse error instead of results | The class URI (or a value used internally as an IRI) is not a valid IRI — e.g. contains spaces or other disallowed characters (known case: `bots://Message` fails the SPARQL backend). This is an executor-side issue, not a plugin issue. | Use a class registered with a well-formed URI. `describe_perspective` reports the registered class names; use those exactly as returned. |
