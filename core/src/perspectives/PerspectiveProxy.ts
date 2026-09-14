@@ -1767,6 +1767,38 @@ export class PerspectiveProxy {
         }
     }
 
+    /**
+     * Return the full target-class URIs of every registered SubjectClass.
+     *
+     * Unlike {@link subjectClasses}, which strips the namespace and returns bare
+     * names (`"Space"`, `"Channel"`), this method returns the complete URIs
+     * (`"we://Space"`, `"flux://Channel"`).  The full URI is the key that
+     * `load_shape` resolves against, so it is the only collision-safe identifier
+     * — two apps can both declare a class called `"Template"` under different
+     * namespaces, and the bare name cannot distinguish them.
+     *
+     * Callers that need to check whether a *set* of models are already
+     * registered should call this once and test membership against the returned
+     * set, rather than issuing one `queryLinks` per model.
+     *
+     * One `queryLinks` round trip, no executor-side changes.
+     */
+    async subjectClassTargetClasses(): Promise<string[]> {
+        try {
+            const classLinks = await this.get(new LinkQuery({
+                predicate: "rdf://type",
+                target: "ad4m://SubjectClass"
+            }));
+            const uris = classLinks
+                .map(l => l.data.source)
+                .filter(source => source.length > 0);
+            return [...new Set(uris)];
+        } catch (e) {
+            console.warn('subjectClassTargetClasses: lookup failed:', e);
+            return [];
+        }
+    }
+
     async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
         if(typeof subjectClass === "string")
             return subjectClass

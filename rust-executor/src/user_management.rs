@@ -8,6 +8,25 @@ use crate::agent::capabilities::{
 };
 use crate::agent::AgentService;
 use crate::db::Ad4mDb;
+use crate::wallet::wallet_backend;
+
+/// Returns `Err` with an operator-facing message when the executor wallet is locked.
+///
+/// After a restart, in-memory keys are gone until the admin calls `unlockAgent`. Any
+/// call to `AgentService::user_exists` before that point returns `false`, which would
+/// otherwise surface as "User key not found" — indistinguishable from a deleted account.
+/// Calling this guard first gives callers a clear, actionable message.
+fn check_executor_unlocked() -> Result<(), String> {
+    if !wallet_backend().is_unlocked() {
+        return Err(
+            "Executor is locked: its admin has not unlocked the agent yet (keys are held in \
+             memory only, so this happens after every restart). Ask the executor operator to \
+             call unlockAgent, then retry."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
 
 /// Check if multi-user mode is enabled.
 pub fn is_multi_user_enabled() -> bool {
@@ -162,6 +181,8 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
 /// Verify user credentials (email + password). Returns Ok(()) on success.
 /// Falls back to shared DB when the user record only exists on another executor.
 pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
+    check_executor_unlocked()?;
+
     // Try local DB first
     let local_result = Ad4mDb::with_global_instance(|db| db.verify_user_password(email, password));
 
@@ -275,6 +296,7 @@ pub fn verify_and_login(
     if !is_multi_user_enabled() {
         return Err("Multi-user mode is not enabled".to_string());
     }
+    check_executor_unlocked()?;
     let verified = verify_code(email, code, verification_type)?;
     if !verified {
         return Err("Invalid verification code".to_string());
@@ -287,6 +309,7 @@ pub fn verify_and_login(
 
 /// Check if a user exists in both DB and AgentService.
 pub fn user_exists(email: &str) -> Result<(), String> {
+    check_executor_unlocked()?;
     let db_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
     if !db_exists {
         return Err("User not found".to_string());
