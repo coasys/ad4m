@@ -402,14 +402,35 @@ pub(super) async fn run_model_query(
 
 /// Fetch one hydrated instance by URI, or `None` if no instance of that class
 /// lives at `base_uri`.
+///
+/// Tries the counterpart `literal:` spelling when the first lookup misses.
+/// `instance_uri` normalises a caller's id to the single-colon form before we
+/// get here, but a node written before that normalisation existed is stored
+/// under the double-slash form, so the normalised lookup is well-formed and
+/// finds nothing — the instance reads as absent rather than as differently
+/// spelled. `get_children` hands back exactly those stored ids, so the id an
+/// agent just received can be the one that misses.
+///
+/// The second query only runs on a miss, and only for ids that have a
+/// counterpart spelling at all.
 pub(crate) async fn fetch_instance(
     perspective: &PerspectiveInstance,
     class_name: &str,
     base_uri: &str,
 ) -> Result<Option<Value>, String> {
-    let query = json!({ "where": { "id": base_uri }, "limit": 1 });
-    let (instances, _) = run_model_query(perspective, class_name, &query).await?;
-    Ok(instances.into_iter().next())
+    let lookup = |uri: String| async move {
+        let query = json!({ "where": { "id": uri }, "limit": 1 });
+        let (instances, _) = run_model_query(perspective, class_name, &query).await?;
+        Ok::<Option<Value>, String>(instances.into_iter().next())
+    };
+
+    if let Some(instance) = lookup(base_uri.to_string()).await? {
+        return Ok(Some(instance));
+    }
+    match other_literal_spelling(base_uri) {
+        Some(counterpart) => lookup(counterpart).await,
+        None => Ok(None),
+    }
 }
 
 pub(super) fn not_found(class_name: &str, base_uri: &str) -> String {
@@ -503,6 +524,24 @@ pub(super) fn normalize_legacy_literal(value: &str) -> Cow<'_, str> {
         Some(rest) if rest.contains(':') => Cow::Owned(format!("literal:{rest}")),
         _ => Cow::Borrowed(value),
     }
+}
+
+/// The *other* spelling of a `literal:` URI, or `None` if there isn't one.
+///
+/// The two spellings are mutually derivable — `literal://<kind>:<v>` ⇄
+/// `literal:<kind>:<v>` — and a store that was written across the
+/// normalisation boundary holds both for the same node, so a filter has to be
+/// tried in both directions. Anything that is not a two-part `literal:` URI
+/// (`ad4m://obj/…`, `did:key:…`, a bare `literal://`) has no counterpart and
+/// yields `None`, so no second query is spent on it.
+pub(super) fn other_literal_spelling(value: &str) -> Option<String> {
+    if let Some(rest) = value.strip_prefix("literal://") {
+        // Mirrors `normalize_legacy_literal`: `literal://` alone is not the
+        // `literal://<kind>:<value>` shape.
+        return rest.contains(':').then(|| format!("literal:{rest}"));
+    }
+    let rest = value.strip_prefix("literal:")?;
+    rest.contains(':').then(|| format!("literal://{rest}"))
 }
 
 /// URI-or-literal encoding for link targets, shared with the per-class tools.
