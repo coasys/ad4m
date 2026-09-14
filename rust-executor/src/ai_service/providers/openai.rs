@@ -76,7 +76,7 @@ fn chat_base(base_url: Url) -> String {
 pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
     let endpoint = super::http::versioned_endpoint(base_url, "models");
 
-    let mut request = super::http::credentialed_http()
+    let mut request = super::http::credentialed_http(super::http::DISCOVERY_TIMEOUT)
         .build()
         .map_err(|e| anyhow!("Could not build an HTTP client: {e}"))?
         .get(&endpoint);

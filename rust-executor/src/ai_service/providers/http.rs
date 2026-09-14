@@ -2,8 +2,18 @@
 //! the transports it may travel over, and the endpoint shapes both providers
 //! share.
 
+use std::time::Duration;
+
+/// How long model discovery waits for an answer.
+///
+/// Discovery is an operator waiting on a form. reqwest sets no timeout by
+/// default, so a host that accepts the connection and never answers would
+/// leave `ai.discoverModels` pending for as long as the socket stays open. A
+/// model listing is one small JSON document, so half a minute is generous.
+pub(crate) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// An HTTP client for a request that carries a credential. It follows no
-/// redirects.
+/// redirects, and it gives up after `timeout`.
 ///
 /// reqwest strips `Authorization` when a redirect crosses hosts, but not a
 /// custom header such as Anthropic's `x-api-key`, and nothing checks the scheme
@@ -13,10 +23,15 @@
 /// redirects a well-formed request, so refusing costs nothing, and the failure
 /// is a visible status error.
 ///
+/// The timeout is a parameter rather than something a caller may add, because
+/// reqwest's default is none at all.
+///
 /// The OpenAI chat path is not built here: `chat_gpt_lib_rs` owns its client.
 /// It sends the key as a bearer token, which is the header reqwest does strip.
-pub(crate) fn credentialed_http() -> reqwest::ClientBuilder {
-    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+pub(crate) fn credentialed_http(timeout: Duration) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
 }
 
 /// Resolve a configured base URL to a versioned endpoint, e.g.
@@ -79,6 +94,30 @@ mod tests {
 
     fn url(s: &str) -> url::Url {
         url::Url::parse(s).expect("test URL parses")
+    }
+
+    #[tokio::test]
+    async fn a_host_that_accepts_and_never_answers_times_out() {
+        // The failure the timeout exists for: the connection succeeds, so
+        // nothing about connecting ever fails, and no response ever arrives.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("binds");
+        let address = listener.local_addr().expect("has an address");
+        let _held = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accepts");
+            std::future::pending::<()>().await;
+        });
+
+        let error = credentialed_http(Duration::from_millis(200))
+            .build()
+            .expect("builds")
+            .get(format!("http://{address}/v1/models"))
+            .send()
+            .await
+            .expect_err("gives up rather than waiting");
+
+        assert!(error.is_timeout(), "got: {error}");
     }
 
     #[test]

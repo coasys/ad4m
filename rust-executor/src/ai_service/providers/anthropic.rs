@@ -70,8 +70,7 @@ impl AnthropicChat {
             // follows redirects, so falling back to it would quietly drop the
             // policy. It cannot build either when this fails, and
             // `Client::new` panics the same way.
-            http: super::http::credentialed_http()
-                .timeout(REQUEST_TIMEOUT)
+            http: super::http::credentialed_http(REQUEST_TIMEOUT)
                 .build()
                 .expect("the HTTP client builds"),
             api_key: api_key.to_string(),
@@ -88,7 +87,7 @@ impl AnthropicChat {
 pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
     let endpoint = super::http::versioned_endpoint(base_url, "models");
 
-    let response = super::http::credentialed_http()
+    let response = super::http::credentialed_http(super::http::DISCOVERY_TIMEOUT)
         .build()
         .map_err(|e| anyhow!("Could not build an HTTP client: {e}"))?
         .get(&endpoint)
