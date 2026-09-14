@@ -2,7 +2,7 @@
 //!
 //! Tools for managing perspectives (knowledge graphs) and raw links.
 
-use super::instances::normalize_legacy_literal;
+use super::instances::{normalize_legacy_literal, other_literal_spelling};
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
 use crate::perspectives::perspective_instance::SdnaType;
@@ -108,24 +108,6 @@ fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String>
     }
 
     Ok(())
-}
-
-/// The *other* spelling of a `literal:` URI, or `None` if there isn't one.
-///
-/// The two spellings are mutually derivable — `literal://<kind>:<v>` ⇄
-/// `literal:<kind>:<v>` — and a store that was written across the
-/// normalisation boundary holds both for the same node, so a filter has to be
-/// tried in both directions. Anything that is not a two-part `literal:` URI
-/// (`ad4m://obj/…`, `did:key:…`, a bare `literal://`) has no counterpart and
-/// yields `None`, so no second query is spent on it.
-fn other_literal_spelling(value: &str) -> Option<String> {
-    if let Some(rest) = value.strip_prefix("literal://") {
-        // Mirrors `normalize_legacy_literal`: `literal://` alone is not the
-        // `literal://<kind>:<value>` shape.
-        return rest.contains(':').then(|| format!("literal:{rest}"));
-    }
-    let rest = value.strip_prefix("literal:")?;
-    rest.contains(':').then(|| format!("literal://{rest}"))
 }
 
 /// The link filters `query_links` should try, in order.
