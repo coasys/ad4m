@@ -76,7 +76,10 @@ fn chat_base(base_url: Url) -> String {
 pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
     let endpoint = super::versioned_endpoint(base_url, "models");
 
-    let mut request = reqwest::Client::new().get(&endpoint);
+    let mut request = super::credentialed_http()
+        .build()
+        .map_err(|e| anyhow!("Could not build an HTTP client: {e}"))?
+        .get(&endpoint);
     if !api_key.is_empty() {
         request = request.bearer_auth(api_key);
     }

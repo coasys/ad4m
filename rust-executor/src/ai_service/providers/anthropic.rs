@@ -66,10 +66,14 @@ pub struct AnthropicChat {
 impl AnthropicChat {
     pub fn new(api_key: &str, base_url: Url) -> Self {
         Self {
-            http: reqwest::Client::builder()
+            // `expect` rather than `unwrap_or_default`: the default client
+            // follows redirects, so falling back to it would quietly drop the
+            // policy. It cannot build either when this fails, and
+            // `Client::new` panics the same way.
+            http: super::credentialed_http()
                 .timeout(REQUEST_TIMEOUT)
                 .build()
-                .unwrap_or_default(),
+                .expect("the HTTP client builds"),
             api_key: api_key.to_string(),
             endpoint: super::versioned_endpoint(base_url, "messages"),
         }
@@ -84,7 +88,9 @@ impl AnthropicChat {
 pub async fn list_models(api_key: &str, base_url: Url) -> Result<Vec<String>> {
     let endpoint = super::versioned_endpoint(base_url, "models");
 
-    let response = reqwest::Client::new()
+    let response = super::credentialed_http()
+        .build()
+        .map_err(|e| anyhow!("Could not build an HTTP client: {e}"))?
         .get(&endpoint)
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
@@ -1246,5 +1252,64 @@ mod wire_tests {
 
         assert!(error.to_string().contains("401"));
         assert!(error.to_string().contains("invalid x-api-key"));
+    }
+
+    /// A second server standing in for whatever host a redirect names. The
+    /// two mock servers listen on different ports, which is a different host
+    /// as far as reqwest's redirect handling is concerned.
+    async fn collector(method: &str) -> (mockito::ServerGuard, mockito::Mock) {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock(method, Matcher::Any)
+            .expect(0)
+            .with_status(200)
+            .create_async()
+            .await;
+        (server, mock)
+    }
+
+    #[tokio::test]
+    async fn a_completion_does_not_follow_a_redirect_with_the_key() {
+        // `x-api-key` is not a header reqwest strips on a cross-host redirect,
+        // so following one would re-send the key to the host it points at.
+        let (collector, collected) = collector("POST").await;
+        let mut origin = mockito::Server::new_async().await;
+        origin
+            .mock("POST", "/v1/messages")
+            .with_status(307)
+            .with_header("location", &format!("{}/v1/messages", collector.url()))
+            .create_async()
+            .await;
+
+        let client = AnthropicChat::new("sk-test", Url::parse(&origin.url()).unwrap());
+        let error = client
+            .chat(ChatRequest::new("claude-test", turns()))
+            .await
+            .expect_err("a redirect is an error rather than a hop");
+
+        assert!(error.to_string().contains("307"), "got: {error}");
+        collected.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn listing_models_does_not_follow_a_redirect_with_the_key() {
+        // The sharper case: discovery checks the scheme of the URL it was
+        // given, and a redirect is how an https host would send the key on
+        // somewhere that check never saw.
+        let (collector, collected) = collector("GET").await;
+        let mut origin = mockito::Server::new_async().await;
+        origin
+            .mock("GET", "/v1/models")
+            .with_status(302)
+            .with_header("location", &format!("{}/v1/models", collector.url()))
+            .create_async()
+            .await;
+
+        let error = list_models("sk-test", Url::parse(&origin.url()).unwrap())
+            .await
+            .expect_err("a redirect is an error rather than a hop");
+
+        assert!(error.to_string().contains("302"), "got: {error}");
+        collected.assert_async().await;
     }
 }

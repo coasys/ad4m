@@ -43,6 +43,23 @@ pub async fn list_models(
     }
 }
 
+/// An HTTP client for a request that carries a credential. It follows no
+/// redirects.
+///
+/// reqwest strips `Authorization` when a redirect crosses hosts, but not a
+/// custom header such as Anthropic's `x-api-key`, and nothing checks the scheme
+/// a redirect points at. Following one hands the key to whichever host the
+/// first one names, over whatever transport it names — which walks around the
+/// https check discovery makes on the URL it was given. No provider API
+/// redirects a well-formed request, so refusing costs nothing, and the failure
+/// is a visible status error.
+///
+/// The OpenAI chat path is not built here: `chat_gpt_lib_rs` owns its client.
+/// It sends the key as a bearer token, which is the header reqwest does strip.
+pub(crate) fn credentialed_http() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+}
+
 /// Resolve a configured base URL to a versioned endpoint, e.g.
 /// `https://api.anthropic.com` plus `messages` gives
 /// `https://api.anthropic.com/v1/messages`.
