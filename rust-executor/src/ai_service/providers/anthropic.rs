@@ -1217,7 +1217,21 @@ mod wire_tests {
         // U+FFFD, and no later buffering could repair it.
         let whole = "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"café\"}}\n";
         let bytes = whole.as_bytes();
-        let split = bytes.len() - 4; // lands inside the two-byte é
+        // Between the two bytes of the é. The tail after it is `"}}\n`, so a
+        // split counted from the end has to step over those four bytes first.
+        let split = whole.find('é').expect("the test line has an é") + 1;
+
+        // The split has to be one a per-chunk decoder would get wrong, or the
+        // assertions below pass whether or not the reader buffers bytes.
+        let per_chunk = format!(
+            "{}{}",
+            String::from_utf8_lossy(&bytes[..split]),
+            String::from_utf8_lossy(&bytes[split..])
+        );
+        assert!(
+            per_chunk.contains('\u{FFFD}'),
+            "the split does not land inside the character"
+        );
 
         let mut buffer: Vec<u8> = Vec::new();
         let mut text = String::new();
