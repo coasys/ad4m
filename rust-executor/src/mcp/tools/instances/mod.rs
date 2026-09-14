@@ -376,12 +376,23 @@ pub(crate) async fn resolve_class(
     )))
 }
 
-/// Run a model query for `class_name` and return `(instances, total_count)`.
+/// What a model query returned, plus what it could not return.
+pub(super) struct QueryOutcome {
+    pub instances: Vec<Value>,
+    pub total_count: usize,
+    /// Ids the query matched but could not hydrate (unparsable IRIs).  Empty in
+    /// the normal case.  Carried up so the tool response can say so: a skipped
+    /// row is otherwise indistinguishable from a row that does not exist, and a
+    /// page in which every row is skipped looks like an empty space.
+    pub unreadable_ids: Vec<String>,
+}
+
+/// Run a model query for `class_name`.
 pub(super) async fn run_model_query(
     perspective: &PerspectiveInstance,
     class_name: &str,
     query: &Value,
-) -> Result<(Vec<Value>, usize), String> {
+) -> Result<QueryOutcome, String> {
     let raw = perspective
         .model_query(class_name, &query.to_string())
         .await
@@ -392,12 +403,25 @@ pub(super) async fn run_model_query(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let total = parsed
+    let total_count = parsed
         .get("totalCount")
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(instances.len());
-    Ok((instances, total))
+    let unreadable_ids = parsed
+        .get("unreadableIds")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(QueryOutcome {
+        instances,
+        total_count,
+        unreadable_ids,
+    })
 }
 
 /// Fetch one hydrated instance by URI, or `None` if no instance of that class
@@ -408,8 +432,8 @@ pub(crate) async fn fetch_instance(
     base_uri: &str,
 ) -> Result<Option<Value>, String> {
     let query = json!({ "where": { "id": base_uri }, "limit": 1 });
-    let (instances, _) = run_model_query(perspective, class_name, &query).await?;
-    Ok(instances.into_iter().next())
+    let outcome = run_model_query(perspective, class_name, &query).await?;
+    Ok(outcome.instances.into_iter().next())
 }
 
 pub(super) fn not_found(class_name: &str, base_uri: &str) -> String {

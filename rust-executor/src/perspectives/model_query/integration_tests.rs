@@ -7532,3 +7532,97 @@ async fn test_ordered_collection_without_entries_falls_back_to_timestamps() {
         .collect();
     assert_eq!(children, vec!["we://x/a", "we://x/b"]);
 }
+
+/// A page containing a legacy double-slash id must report that id rather than
+/// dropping it in silence (#1014).
+///
+/// The write path uses `NamedNode::new_unchecked`, so ids that the SPARQL
+/// parser will later refuse do reach the store — this is how the live rows were
+/// created.  Reading them back, `is_inlinable_iri` excludes them from the
+/// property query so the rest of the page survives, and `unreadable_ids` is the
+/// only thing that distinguishes a partial page from a complete one.
+#[tokio::test]
+async fn test_unreadable_ids_are_reported_not_silently_dropped() {
+    let store = SparqlStore::new(None).unwrap();
+
+    // `//` makes `string:h4o520…` an authority, so `h4o520…` parses as a port
+    // and must be numeric — `NamedNode::new` rejects it.
+    let legacy = "literal://string:h4o520cifomi2pgilz3l160u";
+    let modern = "literal:string:modernmessage";
+
+    for (base, body, ts) in [
+        (legacy, "written%20before%20normalisation", "1700000000000"),
+        (modern, "written%20after", "1700000000001"),
+    ] {
+        store
+            .add_link(&make_link(base, "ad4m://type", "bots://Message", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                base,
+                "bots://body",
+                &format!("literal:string:{body}"),
+                ts,
+            ))
+            .unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Message",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "bots://Message"
+            },
+            "body": {
+                "predicate": "bots://body",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // A window wide enough for both: the modern row still hydrates, and the
+    // legacy row is named rather than vanishing.
+    let both = ModelQueryInput {
+        limit: Some(10),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Message", &both, shape_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        result.instances.len(),
+        1,
+        "the readable row must survive its unreadable neighbour"
+    );
+    assert_eq!(result.total_count, 2, "both rows still match the query");
+    assert_eq!(
+        result.unreadable_ids,
+        vec![legacy.to_string()],
+        "the skipped id must be reported"
+    );
+
+    // The dangerous case: a window that contains only unreadable rows. Without
+    // `unreadable_ids` this is byte-identical to querying an empty space.
+    let oldest_only = ModelQueryInput {
+        limit: Some(1),
+        order: Some(vec![("timestamp".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Message", &oldest_only, shape_json)
+        .await
+        .unwrap();
+    assert!(
+        result.instances.is_empty(),
+        "the only row in this window is unreadable"
+    );
+    assert_eq!(
+        result.unreadable_ids,
+        vec![legacy.to_string()],
+        "an all-skipped page must not look like an empty space"
+    );
+}
