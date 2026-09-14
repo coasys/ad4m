@@ -79,6 +79,48 @@ describe("shipped bundle", () => {
     expect(manager.getPending().map((s: any) => s.id)).toEqual(["bundle-fail"]);
   });
 
+  it("ships a manager that times out a hung handshake and keeps it pending (#1016)", async () => {
+    const { WakerSubscriptionManager } = bundle;
+    const proxy = {
+      initialized: Promise.resolve(),
+      // The executor accepted the socket but never answers the subscribe RPC.
+      subscribe: vi.fn(() => new Promise<void>(() => {})),
+      dispose: vi.fn(),
+      onResult: vi.fn(),
+    };
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: {
+        querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] } })),
+      },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      QuerySubscriptionProxy: vi.fn(function () {
+        return proxy;
+      }),
+      debounceMs: 10,
+      subscribeTimeoutMs: 50,
+      retryPendingMs: 60_000,
+      onWake: () => {},
+      onPersist: () => {},
+    });
+
+    // A released manager without the deadline never settles here, and the
+    // subscription ends up in neither the active nor the pending list.
+    await expect(
+      manager.subscribe({
+        id: "bundle-hang",
+        type: "mention",
+        perspective: "fake-uuid",
+        channel: "",
+        query: "SELECT * FROM link",
+      }),
+    ).rejects.toThrow(/timed out after 50ms/);
+
+    expect(manager.getActive()).toHaveLength(0);
+    expect(manager.getPending().map((s: any) => s.id)).toEqual(["bundle-hang"]);
+    manager.disposeAll();
+  });
+
   it("resolves @coasys/ad4m at build time, not from the installing host", () => {
     // `dependencies` is empty, so anything left as a runtime require would be
     // unresolvable after `npm install @coasys/openclaw-ad4m` — and if it did

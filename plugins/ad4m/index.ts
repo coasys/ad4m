@@ -132,6 +132,13 @@ let _wakerGeneration = 0;
 const WAKER_CONNECT_TIMEOUT_MS = 10_000;
 /** How long to wait before retrying a failed waker connect. */
 const WAKER_RETRY_MS = 30_000;
+/**
+ * How long the executor gets to answer a subscribe handshake before the
+ * subscription is queued for re-attempt instead of hanging the tool call.
+ * Same treatment as `WAKER_CONNECT_TIMEOUT_MS`: a socket the executor accepts
+ * but never answers on must fail loudly and recoverably (#1016).
+ */
+const WAKER_SUBSCRIBE_TIMEOUT_MS = 15_000;
 
 /**
  * Reject after `ms` instead of waiting forever.
@@ -209,6 +216,22 @@ export function closeWakerClient(client: any, logger?: any): void {
       `[ad4m-waker] Error closing discarded client: ${err?.message ?? err}`,
     );
   }
+}
+
+/**
+ * Name the executor the waker is talking to in a subscribe failure, so a
+ * wrong `executorUrl` (the waker's own key, separate from `mcpEndpoint`) is
+ * visible in the tool result rather than only in startup logs (#1016).
+ */
+export function withWakerTarget(message: string, executorUrl: string): string {
+  return `${message} (waker executor: ${executorUrl})`;
+}
+
+/** @internal Inject a subscription manager, for tests that cannot connect a real waker. */
+export function _setSubscriptionManagerForTests(
+  manager: WakerSubscriptionManager | null,
+): void {
+  _subscriptionManager = manager;
 }
 
 /** @internal Reset module-level state between tests. */
@@ -509,7 +532,14 @@ export default function ad4mPlugin(api: any) {
         "Waker service not connected. Ensure ad4m-executor is running and wakerEnabled is true.",
       );
     }
-    await _subscriptionManager.subscribe(sub);
+    try {
+      await _subscriptionManager.subscribe(sub);
+    } catch (err: any) {
+      // The waker connects to the executor's API port via executorUrl, not
+      // to mcpEndpoint; say which one it used so a wrong host is visible
+      // in the tool result, not only in the startup log.
+      throw new Error(withWakerTarget(err?.message ?? String(err), executorUrl));
+    }
   }
 
   /**
@@ -946,8 +976,8 @@ Notes:
     name: "ad4m_list_waker_subscriptions",
     description:
       "List waker subscriptions: the active ones, plus any the executor " +
-      "rejected that are still being re-attempted. Use this to confirm that a " +
-      "subscribe call actually enrolled.",
+      "rejected or never answered that are still being re-attempted. Use this " +
+      "to confirm that a subscribe call actually enrolled.",
     parameters: { type: "object", properties: {}, required: [] },
     async execute() {
       const subs = _subscriptionManager?.getActive() ?? [];
@@ -962,7 +992,7 @@ Notes:
       ];
       if (pending.length > 0) {
         sections.push(
-          `Pending — rejected by the executor, being re-attempted (${pending.length}):\n` +
+          `Pending — not accepted by the executor yet (rejected, or no answer before the timeout), being re-attempted (${pending.length}):\n` +
             pending.map(describe).join("\n") +
             "\nThese are NOT listening yet.",
         );
@@ -1247,6 +1277,7 @@ Notes:
       logger,
       QuerySubscriptionProxy,
       debounceMs: config.debounceMs,
+      subscribeTimeoutMs: config.subscribeTimeoutMs ?? WAKER_SUBSCRIBE_TIMEOUT_MS,
       previousSeenMessages: savedState.seenMessages,
       onWake: (sub, _result, mentions) => {
         postWake(config, sub, _pluginAgentDid, logger, mentions);

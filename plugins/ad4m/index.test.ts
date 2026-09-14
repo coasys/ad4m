@@ -62,7 +62,10 @@ import {
   explainCapabilityFailure,
 } from "./index";
 
-import ad4mPlugin, { _resetModuleState } from "./index";
+import ad4mPlugin, {
+  _resetModuleState,
+  _setSubscriptionManagerForTests,
+} from "./index";
 import { STATIC_TOOL_DEFS } from "./staticToolDefs";
 import { WakerSubscriptionManager, hintFor } from "./wakerSubscriptionManager";
 
@@ -1969,6 +1972,120 @@ describe("ad4mPlugin", () => {
     );
   });
 
+  it("a hung subscribe handshake fails loudly, names the waker's executor, and shows as Pending in list_waker_subscriptions (#1016)", async () => {
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, opts) => {
+      const body = JSON.parse((opts as any).body as string);
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { serverInfo: { name: "ad4m" } },
+          }),
+          {
+            status: 200,
+            headers: {
+              "Content-Type": "application/json",
+              "Mcp-Session-Id": "sess-1",
+            },
+          },
+        );
+      }
+      if (body.method === "notifications/initialized") {
+        return new Response(null, { status: 200 });
+      }
+      if (
+        body.method === "tools/call" &&
+        body.params?.name === "get_mention_waker_config"
+      ) {
+        return fakeJsonResponse({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  query: "SELECT * FROM link WHERE ...",
+                  names: ["TestAgent"],
+                  did: "did:key:zTest",
+                }),
+              },
+            ],
+          },
+        });
+      }
+      return fakeJsonResponse({ jsonrpc: "2.0", id: body.id, result: {} });
+    });
+
+    const mockApi = {
+      pluginConfig: {
+        mode: "external",
+        mcpEndpoint: "http://localhost:3001/mcp",
+        token: "test-cred",
+        // The waker's own target, separate from mcpEndpoint — the remote
+        // setup in which the hang was observed.
+        executorUrl: "http://marvin.example:12200",
+      },
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+    };
+
+    await ad4mPlugin(mockApi);
+
+    // A connected waker whose executor accepted the socket but never answers
+    // the subscribe RPC: the subscribe tools used to hang here with no trace.
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { querySparql: vi.fn() },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function () {
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => new Promise<void>(() => {})),
+          dispose: vi.fn(),
+          onResult: vi.fn(),
+        };
+      }),
+      debounceMs: 10,
+      subscribeTimeoutMs: 50,
+      retryPendingMs: 60_000,
+      onWake: () => {},
+    });
+    _setSubscriptionManagerForTests(manager);
+
+    try {
+      const subscribeTool = registeredTools.find(
+        (t) => t.name === "ad4m_subscribe_to_mentions",
+      );
+      expect(subscribeTool).toBeDefined();
+      const result = await subscribeTool!.execute("call-1", {
+        perspective_id: "persp-uuid-1",
+      });
+      const text: string = result.content[0].text;
+      expect(text).toMatch(
+        /^Error: Waker subscription mention-persp-uuid-1 failed: subscribe handshake timed out after 50ms/,
+      );
+      expect(text).toContain("re-attempting every 60s");
+      expect(text).toContain("(waker executor: http://marvin.example:12200)");
+
+      // ...and it is not in limbo: the list tool shows it as Pending.
+      const listTool = registeredTools.find(
+        (t) => t.name === "ad4m_list_waker_subscriptions",
+      );
+      const listed: string = (await listTool!.execute("call-2", {})).content[0].text;
+      expect(listed).toContain("No active waker subscriptions.");
+      expect(listed).toContain("Pending");
+      expect(listed).toContain("mention-persp-uuid-1");
+    } finally {
+      manager.disposeAll();
+      _setSubscriptionManagerForTests(null);
+    }
+  });
+
   it("ad4m_unsubscribe_from_mentions reports 'No mention subscription found' when nothing matches", async () => {
     const registeredTools: Array<{ name: string; execute: Function }> = [];
 
@@ -3240,6 +3357,80 @@ describe("WakerSubscriptionManager", () => {
     const attemptsAfterDispose = mock.proxy.subscribe.mock.calls.length;
     await manager.retryPending();
     expect(mock.proxy.subscribe.mock.calls.length).toBe(attemptsAfterDispose);
+  });
+
+  it("times out a subscribe handshake the executor never answers, and keeps it pending (#1016)", async () => {
+    const mock = makeMockProxy();
+    // The executor accepted the socket but never replies to the subscribe
+    // RPC. Nothing rejects, so before the deadline existed this await never
+    // settled: the sub was neither active nor pending, the 30s re-attempt
+    // never saw it, and the tool call died at the harness timeout instead.
+    mock.proxy.subscribe = vi.fn(() => new Promise<void>(() => {}));
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      subscribeTimeoutMs: 50,
+      retryPendingMs: 60_000,
+      onWake: () => {},
+    });
+
+    const sub = {
+      id: "mention-hang",
+      type: "mention" as const,
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    };
+    await expect(manager.subscribe(sub)).rejects.toThrow(
+      /timed out after 50ms[\s\S]*re-attempting every/,
+    );
+
+    expect(manager.has("mention-hang")).toBe(false);
+    expect(manager.getActive()).toHaveLength(0);
+    expect(manager.getPending().map((s) => s.id)).toEqual(["mention-hang"]);
+    // The proxy is dropped so a late answer backs out instead of registering.
+    expect(mock.proxy.dispose).toHaveBeenCalled();
+    manager.disposeAll();
+  });
+
+  it("re-attempts a timed-out subscription and enrolls it once the executor answers", async () => {
+    const mock = makeMockProxy();
+    let attempt = 0;
+    mock.proxy.subscribe = vi.fn(() => {
+      attempt += 1;
+      // Hangs the first time, answers on the re-attempt.
+      return attempt === 1 ? new Promise<void>(() => {}) : Promise.resolve();
+    });
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: mockPerspectiveClientSimple,
+      logger: { ...noopLogger },
+      QuerySubscriptionProxy: mock.ProxyClass,
+      debounceMs: 10,
+      subscribeTimeoutMs: 30,
+      retryPendingMs: 30,
+      onWake: () => {},
+    });
+
+    const sub = {
+      id: "mention-hang-retry",
+      type: "mention" as const,
+      perspective: "fake-uuid",
+      channel: "",
+      query: "SELECT * FROM link",
+    };
+    await expect(manager.subscribe(sub)).rejects.toThrow(/timed out/);
+    expect(manager.getPending()).toHaveLength(1);
+
+    await vi.waitFor(() => {
+      expect(manager.has("mention-hang-retry")).toBe(true);
+    });
+    expect(manager.getPending()).toHaveLength(0);
+    expect(attempt).toBe(2);
+    manager.disposeAll();
   });
 
   it("should hint at a locked wallet on a main-key 403 only", () => {
