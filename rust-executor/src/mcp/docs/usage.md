@@ -70,6 +70,14 @@ shape — fix what the error tells you.
 Property order in the returned `properties` / `collections` arrays is **not**
 declaration order and must not be relied on. Match by `name`, not by position.
 
+A reference property points at instances of another class, and the class it
+names is not guaranteed to exist here — a perspective can be registered with
+one end of a reference missing. Where that happened, the property is marked as
+unresolved and carries a note saying so. Do not try to create the thing it
+points at: no `class_name` will accept it. Point the property at a URI you
+already have, or leave it unset and report the gap — `add_model` on the missing
+class closes it (`get_documentation(topic="models")`).
+
 ## Creating and reading instances
 
 ```

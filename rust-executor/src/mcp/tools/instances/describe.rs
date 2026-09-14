@@ -12,6 +12,7 @@ use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 /// Parameters for describing a perspective's data model
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -20,20 +21,54 @@ pub struct DescribePerspectiveParams {
     pub perspective_id: String,
 }
 
+/// A relation may name a `target_class` the perspective never registered —
+/// the shape only carries the name, nothing checks it resolves. That is a dead
+/// end for a caller: `describe_perspective` is the authority on what it may
+/// write, so an unregistered target reads as "create one of these" when no
+/// `class_name` will accept it. Say it on the property rather than leaving the
+/// caller to diff `target_class` against `classes` itself.
+fn flag_unresolved_relation_targets(props: &mut [Value], registered: &BTreeSet<&str>) {
+    for prop in props {
+        let Some(target) = prop.get("target_class").and_then(Value::as_str) else {
+            continue;
+        };
+        if registered.contains(target) {
+            continue;
+        }
+        let note = format!(
+            "`{target}` is not registered in this perspective — it is absent from `classes`, so \
+             no instance_* call will accept it as a class_name. Point this property at an \
+             existing URI if you have one; otherwise leave it unset and report the gap. \
+             Registering the missing class with add_model is what makes the target reachable."
+        );
+        prop["target_class_registered"] = json!(false);
+        prop["target_class_note"] = json!(note);
+    }
+}
+
 /// Describe one class as data: hint, single-valued `properties`, multi-valued
 /// `collections`, and which property (if any) is the dedup identity.
-pub(crate) fn describe_class(class_name: &str, shape: &ModelShape) -> Value {
+///
+/// `registered` is every class name the perspective declares, used to mark
+/// relation targets that do not resolve to one of them.
+pub(crate) fn describe_class(
+    class_name: &str,
+    shape: &ModelShape,
+    registered: &BTreeSet<&str>,
+) -> Value {
     let infos = class_properties(shape);
-    let properties: Vec<Value> = infos
+    let mut properties: Vec<Value> = infos
         .iter()
         .filter(|i| !i.flag() && !i.collection())
         .map(PropView::to_json)
         .collect();
-    let collections: Vec<Value> = infos
+    let mut collections: Vec<Value> = infos
         .iter()
         .filter(|i| !i.flag() && i.collection())
         .map(PropView::to_json)
         .collect();
+    flag_unresolved_relation_targets(&mut properties, registered);
+    flag_unresolved_relation_targets(&mut collections, registered);
     let identity = infos
         .iter()
         .find(|i| i.identity())
@@ -122,10 +157,12 @@ pub(crate) async fn describe_perspective_value(
     class_names.sort();
     class_names.dedup();
 
+    let registered: BTreeSet<&str> = class_names.iter().map(String::as_str).collect();
+
     let mut classes = Vec::with_capacity(class_names.len());
     for name in &class_names {
         match perspective.get_shape(name) {
-            Ok(shape) => classes.push(describe_class(name, &shape)),
+            Ok(shape) => classes.push(describe_class(name, &shape, &registered)),
             // Never drop a class silently — an agent that can't see a class
             // can't tell a missing class from a broken shape.
             Err(e) => classes.push(json!({ "name": name, "error": format!("{e:#}") })),

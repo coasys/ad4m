@@ -190,6 +190,11 @@ Line by line, the parts that are easy to get wrong:
   full rules and the two ways this fails).
 - `tags` is a collection because of `"collection": true`, and it holds
   literals (`datatype`), not references, so no `target_class_name`.
+- Register `User` too. `add_model` accepts a `target_class_name` naming a class
+  the perspective does not have, and the relation then points nowhere a caller
+  can reach: `describe_perspective` marks it `"target_class_registered": false`
+  and an agent is told not to write it. Every class you name on the other end
+  of a relation needs its own `add_model` call.
 
 Then verify, in this order — registration success proves almost nothing:
 
@@ -293,6 +298,9 @@ announce breaking ones.
 - [ ] Every collection has `"collection": true` (not just a `max_count`).
 - [ ] Every relation has `relation_kind` and a bare `target_class_name`;
       `hasOne` also has a `setter`.
+- [ ] Every class named by a `target_class_name` is registered in the same
+      perspective (`describe_perspective` shows no `target_class_registered:
+      false`).
 - [ ] The class and its non-obvious properties have an `interpretation_hint`.
 - [ ] `describe_perspective` shows what you expected.
 - [ ] You have actually created, queried and updated one instance.

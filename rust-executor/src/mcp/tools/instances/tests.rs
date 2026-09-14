@@ -322,6 +322,54 @@ async fn validation_names_property_type_and_cardinality() {
     assert_eq!(payload["validation_errors"][0]["property"], "messages");
 }
 
+/// A relation may name a `target_class` the perspective never registered
+/// (issue #1015). Describing the *same* shape in two perspectives — one
+/// without `User`, one with it — shows the marker follows the perspective's
+/// class set rather than anything in the shape itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_perspective_marks_unregistered_relation_targets() {
+    async fn post_class(classes: &[(&str, &str)]) -> Value {
+        let (handler, uuid, _guard) = setup_with(classes, false).await;
+        let desc = parse(
+            &handler
+                .describe_perspective(Parameters(DescribePerspectiveParams {
+                    perspective_id: uuid.clone(),
+                }))
+                .await,
+        );
+        find(desc["classes"].as_array().expect("classes array"), "Post").clone()
+    }
+
+    // Post on its own: `writer` (hasOne) and `reviewers` (hasMany) both point
+    // at User, which no class in this perspective declares.
+    let post = post_class(&[("Post", POST_SDNA)]).await;
+    let writer = find(post["properties"].as_array().unwrap(), "writer");
+    assert_eq!(writer["target_class"], "User", "{writer}");
+    assert_eq!(writer["target_class_registered"], false, "{writer}");
+    assert!(
+        writer["target_class_note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not registered"),
+        "{writer}"
+    );
+    let reviewers = find(post["collections"].as_array().unwrap(), "reviewers");
+    assert_eq!(reviewers["target_class_registered"], false, "{reviewers}");
+
+    // Same shape, User registered alongside it: nothing to warn about, and the
+    // keys are absent rather than present-and-true.
+    let post = post_class(&[("User", USER_SDNA), ("Post", POST_SDNA)]).await;
+    let writer = find(post["properties"].as_array().unwrap(), "writer");
+    assert_eq!(writer["target_class"], "User", "{writer}");
+    assert!(writer.get("target_class_registered").is_none(), "{writer}");
+    assert!(writer.get("target_class_note").is_none(), "{writer}");
+    let reviewers = find(post["collections"].as_array().unwrap(), "reviewers");
+    assert!(
+        reviewers.get("target_class_registered").is_none(),
+        "{reviewers}"
+    );
+}
+
 /// Relation-typed properties through the generic tools: schema exposure,
 /// URI-gated writes on a forward hasOne, rejection of non-URI values, and
 /// read-only enforcement on a belongsTo (reverse) relation.
