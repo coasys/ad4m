@@ -66,15 +66,20 @@ pub(crate) fn model_ids_from_data(json: &serde_json::Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// What an operator is told when [`is_transport_safe`] refuses their key.
+pub(crate) const CLEARTEXT_KEY_REFUSAL: &str =
+    "Refusing to send an API key over plain HTTP. Use https, or omit the key.";
+
 /// Whether a credential may be sent to this URL.
 ///
 /// True for https anywhere, and for http on loopback only. A hostname that
 /// merely looks local is not enough: `localhost.example.com` resolves
 /// wherever its owner points it.
 ///
-/// Checked wherever a key arrives with a URL: discovery, and adding or
-/// updating a model. A model saved before the check existed is not re-checked
-/// when it loads.
+/// Checked at discovery, when a model is added or updated, and when a remote
+/// client is built. The last one is the check that holds: it covers a model
+/// saved before the others existed. The earlier ones turn the same refusal
+/// into an error on the request that caused it.
 pub(crate) fn is_transport_safe(url: &url::Url) -> bool {
     if url.scheme() == "https" {
         return true;

@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
-use crate::ai_service::providers::http::is_transport_safe;
+use crate::ai_service::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
 use crate::types::{AITask, AITaskInput, ModelInput, ModelType, RequestContext};
@@ -110,15 +110,15 @@ async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     Ok(serde_json::to_value(models)?)
 }
 
-const CLEARTEXT_KEY_REFUSAL: &str =
-    "Refusing to send an API key over plain HTTP. Use https, or omit the key.";
-
 /// Refuse a model whose key would cross the network in the clear.
 ///
 /// The same rule as discovery, applied where it matters more: discovery sends
 /// a key once, and a saved model sends it with every completion for as long as
 /// the model exists. A base URL that does not parse is left for the service to
 /// reject with its own error.
+///
+/// `AIService::build_remote_client` refuses the same model again. This check
+/// is the one that keeps it out of the database and answers the caller.
 pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRpcError> {
     let Some(api) = &model.api else {
         return Ok(());
