@@ -802,7 +802,7 @@ function printConfigSnippet(
   );
   logger.info(`[ad4m-setup]`);
 
-  const snippet = JSON.stringify(config, null, 2);
+  const snippet = JSON.stringify(redactForDisplay(config), null, 2);
   for (const line of snippet.split("\n")) {
     logger.info(`[ad4m-setup] ${line}`);
   }
@@ -810,17 +810,17 @@ function printConfigSnippet(
   logger.info(`[ad4m-setup]`);
 
   // The snippet above may hold a live credential — a JWT, the hooks wakeToken,
-  // or a real agent passphrase — and OpenClaw's logger elides those, so what
-  // you read is `"eyJ0eX…kf94"` rather than a usable value. Printing them
-  // unredacted would only move credentials into terminal scrollback, so the
-  // copyable copy goes to a 0600 file instead and we print the path. Only a
+  // or a real agent passphrase. We redact those ourselves before printing (see
+  // redactForDisplay) rather than relying on the logger to do it, because the
+  // logger's elision keys on the value's shape and misses some real secrets.
+  // The copyable copy goes to a 0600 file instead and we print the path. Only a
   // snippet with nothing secret in it is safe to print as one copy-paste line.
   if (hasLiveCredential(config)) {
     const written = writeConfigSnippetFile(config);
     if (written) {
       logger.info(
-        `[ad4m-setup] Credentials above are elided by the logger. The full ` +
-          `config is in ${written} (mode 0600).`,
+        `[ad4m-setup] Credentials above are redacted. The full config is in ` +
+          `${written} (mode 0600).`,
       );
       logger.info(
         `[ad4m-setup] Copy its contents into openclaw.json under ` +
@@ -828,9 +828,9 @@ function printConfigSnippet(
       );
     } else {
       logger.warn(
-        `[ad4m-setup] Credentials above are elided by the logger and the full ` +
-          `config could not be written to disk. Re-run with OPENCLAW_CONFIG_PATH ` +
-          `set, or obtain a JWT from the executor yourself.`,
+        `[ad4m-setup] Credentials above are redacted and the full config could ` +
+          `not be written to disk. Re-run with OPENCLAW_CONFIG_PATH set, or ` +
+          `obtain a JWT from the executor yourself.`,
       );
     }
   } else {
@@ -860,6 +860,56 @@ const PASSPHRASE_PLACEHOLDERS = [
   "<enter-your-existing-passphrase>",
   "<run setup again after fixing executor>",
 ] as const;
+
+/**
+ * The exact strings this file writes into `token` when it has no real JWT to
+ * give. Instructions, not secrets — printing them is the point.
+ *
+ * Exact literals rather than a bracket-shaped pattern, for the same reason as
+ * PASSPHRASE_PLACEHOLDERS above: a shape test would classify a real credential
+ * that happens to keep the brackets as a placeholder, and print it.
+ */
+const TOKEN_PLACEHOLDERS = [
+  "<paste-your-jwt-here>",
+  "<unlock the executor first, then re-run ad4m-setup>",
+] as const;
+
+/** Keys whose values are credentials rather than settings. */
+const CREDENTIAL_KEYS = [
+  "token",
+  "wakeToken",
+  "password",
+  "agentPassphrase",
+] as const;
+
+const REDACTED = "<redacted — copy it from the 0600 file below>";
+
+/**
+ * A copy of the snippet with every live credential replaced by a fixed mask,
+ * for printing. Placeholders survive, because they are instructions.
+ *
+ * Why this exists rather than trusting the logger: the previous version printed
+ * the real snippet and relied on OpenClaw's logger to elide the secrets, and
+ * that assumption is false. Verified against a locked executor on 2026-09-14:
+ * the logger elided the harmless `token` PLACEHOLDER to `<unloc…tup>` while
+ * printing a real 48-char `wakeToken` in full. The elision is incidental to the
+ * value's shape, not keyed on whether it is secret, so a caller cannot rely on
+ * it for anything. We redact before handing the string over.
+ */
+export function redactForDisplay(
+  config: Record<string, any>,
+): Record<string, any> {
+  const shown: Record<string, any> = { ...config };
+  for (const key of CREDENTIAL_KEYS) {
+    const value = shown[key];
+    if (typeof value !== "string" || value.length === 0) continue;
+    const isPlaceholder =
+      (TOKEN_PLACEHOLDERS as readonly string[]).includes(value) ||
+      (PASSPHRASE_PLACEHOLDERS as readonly string[]).includes(value);
+    if (!isPlaceholder) shown[key] = REDACTED;
+  }
+  return shown;
+}
 
 /**
  * Whether a config snippet carries a value that must not reach terminal

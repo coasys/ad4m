@@ -93,6 +93,7 @@ export {
   runSetup,
   loginViaEmailVerification,
   hasLiveCredential,
+  redactForDisplay,
   explainCapabilityFailure,
 } from "./setup";
 

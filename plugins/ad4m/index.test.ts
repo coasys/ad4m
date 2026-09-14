@@ -57,6 +57,7 @@ import {
   insecureEndpointReason,
   closeWakerClient,
   hasLiveCredential,
+  redactForDisplay,
   isLoopbackEndpoint,
   explainCapabilityFailure,
 } from "./index";
@@ -2910,13 +2911,21 @@ describe("ad4mPlugin", () => {
       ...setupLogger.warn.mock.calls.map((c: any[]) => c[0]),
     ];
 
-    // The config snippet should contain the token and email
-    expect(allMsgs.some((m: string) => m.includes("jwt-secret"))).toBe(true);
+    // The printed snippet must NOT carry the live token. This assertion used
+    // to be inverted — it required "jwt-secret" to appear, on the stated
+    // assumption that "the real OpenClaw logger elides the token in every line
+    // it prints". Running setup against a locked executor on 2026-09-14 showed
+    // that assumption is false: the logger elided a harmless placeholder and
+    // printed a real 48-char wakeToken in full. So the plugin redacts before
+    // logging (redactForDisplay) and the log is asserted clean here.
+    expect(allMsgs.some((m: string) => m.includes("jwt-secret"))).toBe(false);
+    expect(allMsgs.some((m: string) => m.includes("wake-tok"))).toBe(false);
+    // The email is a setting, not a credential — it stays readable, otherwise
+    // the snippet is not useful to the operator.
     expect(allMsgs.some((m: string) => m.includes("bot@test.local"))).toBe(true);
 
-    // The copyable config goes to a file, because the real OpenClaw logger
-    // elides the token in every line it prints. The file is the thing a user
-    // actually pastes from, so the password guard has to hold there too.
+    // The copyable config goes to a file. The file is the thing a user actually
+    // pastes from, so the password guard has to hold there too.
     const snippetPath = path.join(snippetDir, "ad4m-setup-config.json");
     expect(fs.existsSync(snippetPath)).toBe(true);
     const written = fs.readFileSync(snippetPath, "utf-8");
@@ -3775,5 +3784,84 @@ describe("hasLiveCredential", () => {
     expect(hasLiveCredential({ agentPassphrase: "<aRealGeneratedPassphrase>" })).toBe(true);
     expect(hasLiveCredential({ agentPassphrase: "<enter-your-existing-passphrase> hunter2" })).toBe(true);
     expect(hasLiveCredential({ agentPassphrase: "<>" })).toBe(true);
+  });
+});
+
+describe("redactForDisplay", () => {
+  // Found by running `openclaw ad4m-setup` against a locked executor on
+  // 2026-09-14, not by reading the code. hasLiveCredential correctly sent this
+  // snippet down the 0600-file branch, but the multi-line print still handed
+  // the REAL config to the logger and trusted it to elide. It did not: the
+  // harmless `token` placeholder came out as `<unloc…tup>` while a real 48-char
+  // `wakeToken` printed in full. Elision keys on shape, not on secrecy.
+  const realWakeToken = "ec066fed2525d2654ac9cdbd33eb0ec51f4ebf6313826f1c";
+
+  it("redacts a real wakeToken", () => {
+    const shown = redactForDisplay({
+      mode: "external",
+      mcpEndpoint: "http://example.invalid:3002/mcp",
+      wakeToken: realWakeToken,
+    });
+    expect(shown.wakeToken).not.toBe(realWakeToken);
+    expect(JSON.stringify(shown)).not.toContain(realWakeToken);
+    // Non-credential settings must survive, or the snippet stops being useful.
+    expect(shown.mcpEndpoint).toBe("http://example.invalid:3002/mcp");
+    expect(shown.mode).toBe("external");
+  });
+
+  it("redacts every credential key, not just the JWT", () => {
+    const shown = redactForDisplay({
+      token: "eyJhbGciOiJIUzI1NiJ9.real",
+      wakeToken: realWakeToken,
+      password: "hunter2",
+      agentPassphrase: "aRealGeneratedPassphrase",
+    });
+    const serialized = JSON.stringify(shown);
+    for (const secret of [
+      "eyJhbGciOiJIUzI1NiJ9.real",
+      realWakeToken,
+      "hunter2",
+      "aRealGeneratedPassphrase",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  });
+
+  it("keeps placeholders visible, because they are instructions", () => {
+    const shown = redactForDisplay({
+      token: "<paste-your-jwt-here>",
+      agentPassphrase: "<enter-your-existing-passphrase>",
+    });
+    expect(shown.token).toBe("<paste-your-jwt-here>");
+    expect(shown.agentPassphrase).toBe("<enter-your-existing-passphrase>");
+  });
+
+  it("keeps the locked-executor token placeholder visible", () => {
+    // This is the string a locked node produces, and it is the one the logger
+    // elided to `<unloc…tup>` — destroying an instruction while leaking a real
+    // secret in the same output.
+    const placeholder = "<unlock the executor first, then re-run ad4m-setup>";
+    expect(redactForDisplay({ token: placeholder }).token).toBe(placeholder);
+  });
+
+  it("treats a bracket-wrapped real token as live, not as a placeholder", () => {
+    // Same trap as the passphrase case: brackets are not evidence.
+    expect(
+      redactForDisplay({ token: "<eyJhbGciOiJIUzI1NiJ9.real>" }).token,
+    ).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+  });
+
+  it("leaves a snippet with nothing secret untouched", () => {
+    const clean = { mode: "managed", ad4mBinaryPath: "/usr/bin/ad4m-executor" };
+    expect(redactForDisplay(clean)).toEqual(clean);
+  });
+
+  it("does not mutate the config it is given", () => {
+    // The caller writes the REAL config to the 0600 file after printing, so a
+    // mutating redaction would write masks to disk and leave the operator with
+    // an unusable file.
+    const config = { mode: "external", wakeToken: realWakeToken };
+    redactForDisplay(config);
+    expect(config.wakeToken).toBe(realWakeToken);
   });
 });
