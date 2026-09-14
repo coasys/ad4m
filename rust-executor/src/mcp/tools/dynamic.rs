@@ -478,18 +478,8 @@ impl Ad4mMcpHandler {
             Ok(_) => {
                 // If parent is provided, add as child
                 if let Some(parent_addr) = parent {
-                    // Only encode if not already a URI — avoids double-encoding
-                    // values like "literal://string:abc" into "literal://string:literal%3A..."
-                    let parent_encoded = if parent_addr.contains("://") {
-                        parent_addr.clone()
-                    } else {
-                        Self::encode_literal(&parent_addr)
-                    };
-                    let child_encoded = if expression_address.contains("://") {
-                        expression_address.clone()
-                    } else {
-                        Self::encode_literal(&expression_address)
-                    };
+                    let parent_encoded = Self::wrap_bare_as_literal(&parent_addr);
+                    let child_encoded = Self::wrap_bare_as_literal(&expression_address);
 
                     let link = Link {
                         source: parent_encoded,
@@ -664,11 +654,7 @@ impl Ad4mMcpHandler {
         };
 
         // First get all children of the parent via ad4m://has_child
-        let parent_encoded = if parent.contains("://") {
-            parent.clone()
-        } else {
-            Self::encode_literal(&parent)
-        };
+        let parent_encoded = Self::wrap_bare_as_literal(&parent);
         let child_links = match perspective
             .get_links(&LinkQuery {
                 source: Some(parent_encoded),
@@ -1370,13 +1356,7 @@ impl Ad4mMcpHandler {
         };
 
         // Find and remove the link with matching target
-        let target = if (value.starts_with("literal://") || value.starts_with("literal:"))
-            || value.contains("://")
-        {
-            value.clone()
-        } else {
-            Self::encode_literal(&value)
-        };
+        let target = Self::wrap_bare_as_literal(&value);
 
         match perspective
             .get_links(&LinkQuery {
