@@ -2,7 +2,7 @@
 
 > **Scope.** This file covers what has to happen *before* the MCP tools work: installing the plugin, connecting to an executor, and authenticating. Once you are connected, the executor documents itself — `ad4m_get_documentation(topic="overview")` (tool surface, workflow, authentication over MCP, data rules) and `topic="architecture"` (data model, SHACL format) need no authentication and are compiled into the binary, so they always describe the node in front of you. Setup is deliberately *not* served there: an agent that can call the tool is already past it, which is why this file lives in the skill.
 
-If you need to stand up your own executor — downloading, initializing, running, unlocking — that is node-operator work outside this skill's scope.
+Standing up an executor — downloading, initializing, running, unlocking — is node-operator work, and in the plugin's default `managed` mode it is already done for you. Do not start an executor yourself; it conflicts with the one the plugin manages (Scenario 1 explains how). The raw invocations live in the operator appendix at the end of this file, for humans and explicit troubleshooting only.
 
 ## Installing the plugin itself
 
@@ -57,12 +57,18 @@ Two consequences worth knowing before you touch an install:
 
 Agent and executor on the same machine. No TLS needed.
 
-```bash
-export AD4M_ADMIN_CREDENTIAL="$(cat ~/.ad4m/admin-credential)"
-ad4m-executor run --app-data-path ~/.ad4m --port 12000 --enable-mcp true
-# MCP at http://localhost:3001/mcp
-# API at http://localhost:12000
-```
+**You do not start this executor.** The plugin's default `managed` mode downloads the
+binary if needed, starts the executor, generates credentials, and owns the process for
+its whole lifetime. There is no command for you to run: install the plugin, restart the
+gateway, done. MCP ends up at `http://localhost:3001/mcp`, the API at
+`http://localhost:12000`.
+
+Running `ad4m-executor` yourself alongside a managed plugin does not give you a second,
+independent node — it gives you two processes fighting over the same ports and, if you
+point them at the same app-data path, the same lair keystore. The symptoms (`Port
+already in use`, `Failed to spawn Lair keystore`) are in the Troubleshooting table, and
+the cause is almost always this. If you think the managed executor is broken, restart
+the gateway rather than launching a replacement by hand.
 
 ### Scenario 2: Agent connects to remote executor
 
@@ -79,20 +85,24 @@ Two different layers, easy to confuse:
 
 ### Scenario 3: Multi-user (humans via a browser app + agents via MCP)
 
-Requires `--enable-multi-user true`. Each user (human or agent) authenticates as their own account.
+Each user (human or agent) authenticates as their own account.
 
-**⚠️ A browser app (WE, Flux) REQUIRES TLS for non-localhost.** Browsers block mixed content and WebSocket connections to insecure origins. You MUST use one of:
+**A multi-user executor is infrastructure a human operator stands up and keeps
+running — agents never launch one.** The operator runs it with
+`--enable-multi-user true` (their side, not yours; exact invocation in the
+operator appendix at the end of this file). Your side is to connect the plugin to it in
+`external` mode: `plugins.entries.ad4m.config.mode = "external"` plus the operator's
+`mcpEndpoint`, then the provisioning flow below. Starting your own multi-user executor
+instead of connecting to the operator's defeats the point of the scenario — everyone has
+to be on the *same* node to share accounts and neighbourhood state — and in `managed`
+mode it collides with the plugin's own executor exactly as described in Scenario 1.
+
+**⚠️ A browser app (WE, Flux) REQUIRES TLS for non-localhost.** Browsers block mixed content and WebSocket connections to insecure origins. The operator MUST use one of:
 
 - Caddy/nginx reverse proxy with TLS cert
 - Cloudflare Tunnel
 - SSH tunnel (makes it appear as localhost on the client)
 - Self-signed cert via `mkcert` (install CA on all client devices)
-
-```bash
-export AD4M_ADMIN_CREDENTIAL="$(cat ~/.ad4m/admin-credential)"
-ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
-  --enable-mcp true --enable-multi-user true
-```
 
 **Agent provisioning + auth flow (recommended, one command):**
 
@@ -239,6 +249,32 @@ ws://localhost:12000/api/v1/ws?token=<admin-credential-or-jwt>
 
 Remember: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
 **Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`)
+
+## Appendix: running an executor by hand (node operators only)
+
+These invocations exist for a **human node operator** provisioning a standalone or
+multi-user node, or for debugging an executor entirely outside any OpenClaw gateway.
+If you are an agent whose gateway runs the AD4M plugin in `managed` mode, these commands
+are not for you — the plugin already runs an executor, and starting another conflicts
+with it (see Scenario 1). Only reach for them when explicitly asked to test an executor
+manually, and then against a *separate* `--app-data-path` and ports.
+
+Single-user with MCP:
+
+```bash
+export AD4M_ADMIN_CREDENTIAL="$(cat ~/.ad4m/admin-credential)"
+ad4m-executor run --app-data-path ~/.ad4m --port 12000 --enable-mcp true
+# MCP at http://localhost:3001/mcp
+# API at http://localhost:12000
+```
+
+Multi-user (Scenario 3's server side):
+
+```bash
+export AD4M_ADMIN_CREDENTIAL="$(cat ~/.ad4m/admin-credential)"
+ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
+  --enable-mcp true --enable-multi-user true
+```
 
 ## Troubleshooting
 
