@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, HashMap};
 use super::filtering::matches_condition;
 use super::hydration::{reorder_members, ORDERING_STASH_KEY};
 use super::types::{IncludeValue, ModelShape, ShapeProperty};
-use super::utils::{parse_literal_value, validate_iri};
+use super::utils::{is_inlinable_iri, parse_literal_value, validate_iri};
 use crate::perspectives::sparql_store::SparqlStore;
 
 /// Decode a SPARQL getter row's raw string based on the property's
@@ -218,7 +218,8 @@ pub(super) fn evaluate_getters(
     let instance_iris: Vec<String> = instances
         .iter()
         .filter_map(|inst| inst.get("id").and_then(|v| v.as_str()))
-        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
+        .filter(|id| is_inlinable_iri(id))
+        .map(|id| id.to_string())
         .collect();
 
     if instance_iris.is_empty() {
@@ -456,7 +457,7 @@ pub(super) fn apply_where_filter_to_relation(
 
     let values_clause = unique_targets
         .iter()
-        .filter_map(|id| validate_iri(id).ok())
+        .filter(|id| is_inlinable_iri(id))
         .map(|id| format!("<{id}>"))
         .collect::<Vec<_>>()
         .join(" ");
