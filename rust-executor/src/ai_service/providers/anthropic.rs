@@ -399,8 +399,15 @@ fn read_content(blocks: &[ContentBlock]) -> (String, Vec<ToolCall>) {
 /// `cache_read_tokens` is the observation that says it worked, and until
 /// billing moves off `estimate_token_count` the log is the only place it can
 /// be seen outside the `#[ignore]`d e2e suite.
+///
+/// A completion that touched the cache logs at `info`, because the default
+/// log config is `rust_executor=info` and a `debug` line would not reach any
+/// node nobody has reconfigured. Everything else stays at `debug`. So a
+/// cached model writes one line per completion, an uncached one writes
+/// nothing, and a breakpoint that stops landing shows up as lines that stop.
 fn log_usage(model: &str, streamed: bool, usage: &ChatUsage) {
-    log::debug!(
+    log::log!(
+        usage_log_level(usage),
         "Anthropic usage ({model}{}): in={:?} out={:?} cache_read={:?} cache_write={:?}",
         if streamed { ", streamed" } else { "" },
         usage.input_tokens,
@@ -408,6 +415,16 @@ fn log_usage(model: &str, streamed: bool, usage: &ChatUsage) {
         usage.cache_read_tokens,
         usage.cache_write_tokens,
     );
+}
+
+fn usage_log_level(usage: &ChatUsage) -> log::Level {
+    let cached =
+        usage.cache_read_tokens.unwrap_or(0) > 0 || usage.cache_write_tokens.unwrap_or(0) > 0;
+    if cached {
+        log::Level::Info
+    } else {
+        log::Level::Debug
+    }
 }
 
 #[async_trait]
@@ -913,6 +930,35 @@ mod tests {
         assert_eq!(merged.input_tokens, Some(12));
         assert_eq!(merged.cache_read_tokens, Some(900));
         assert_eq!(merged.output_tokens, Some(40));
+    }
+
+    #[test]
+    fn a_completion_that_touched_the_cache_logs_where_a_default_node_can_see_it() {
+        // The default config is `rust_executor=info`.
+        let read = ChatUsage {
+            cache_read_tokens: Some(7_120),
+            ..Default::default()
+        };
+        let write = ChatUsage {
+            cache_write_tokens: Some(7_120),
+            ..Default::default()
+        };
+        assert_eq!(usage_log_level(&read), log::Level::Info);
+        assert_eq!(usage_log_level(&write), log::Level::Info);
+    }
+
+    #[test]
+    fn a_completion_that_did_not_touch_the_cache_stays_at_debug() {
+        // Silence on an uncached model is what lets "the breakpoint stopped
+        // landing" read as lines that stopped appearing.
+        let zero = ChatUsage {
+            input_tokens: Some(10),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(usage_log_level(&zero), log::Level::Debug);
+        assert_eq!(usage_log_level(&ChatUsage::default()), log::Level::Debug);
     }
 
     #[test]
