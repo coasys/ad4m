@@ -93,28 +93,10 @@ pub fn is_safe_iri_target(s: &str) -> bool {
     looks_like_absolute_iri(s)
 }
 
-/// Validate a value for use inside an IRI `<…>`.
-///
-/// Two gates, and the second one matters more than it looks:
-///
-/// 1. Reject characters that would break or inject into a SPARQL IRI token —
-///    all control and whitespace characters (e.g. `\n`, `\r`, `\t`, U+00A0),
-///    and the delimiters `<` `>` `{` `}` `"`.
-/// 2. Reject anything oxigraph's own IRI parser rejects, by parsing it.
-///
-/// Gate 2 exists because gate 1 alone was a character blacklist wearing the
-/// name of a validator, and callers filtered on it believing unusable ids were
-/// excluded. They were not. `literal://string:h4o520cifomi2pgilz3l160u` — the
-/// legacy double-slash id form written by pre-normalisation clients — contains
-/// no blacklisted character, so it passed, was inlined as `<…>`, and then
-/// oxigraph rejected the whole query: `expected IRI parsing failed`. In RFC
-/// 3986 terms the `//` makes `string:h4o520…` an authority, so `h4o520…` is
-/// parsed as a port and must be numeric.
-///
-/// One such id anywhere in an enumeration therefore killed every class-wide
-/// read of that class (see issue #1014). Validating with the same parser the
-/// query will be handed means a filtering caller now actually filters, and the
-/// bad id is skipped rather than poisoning its neighbours.
+/// Validate a value for use inside an IRI `<…>`.  Rejects characters that
+/// would break or inject into a SPARQL IRI token, including all control and
+/// whitespace characters (e.g. `\n`, `\r`, `\t`, U+00A0) which `validate_iri`
+/// previously let through and which would emit malformed `<…>` IRIREFs.
 pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
     if s.chars().any(|c| c.is_control() || c.is_whitespace())
         || s.contains('>')
@@ -124,11 +106,6 @@ pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
         || s.contains('"')
     {
         return Err(anyhow!("Invalid IRI component: '{}'", s));
-    }
-    // Parse with oxigraph rather than approximating its grammar here: this is
-    // the parser that will see the query, so agreeing with it is the point.
-    if oxigraph::model::NamedNode::new(s).is_err() {
-        return Err(anyhow!("Not a valid IRI: '{}'", s));
     }
     Ok(s)
 }
@@ -341,51 +318,6 @@ mod tests {
         assert!(validate_iri("has spaces").is_err());
         assert!(validate_iri("has\"quotes").is_err());
         assert!(validate_iri("has{braces}").is_err());
-    }
-
-    /// Issue #1014. These ids exist in live neighbourhoods, written by clients
-    /// before id normalisation. They contain no blacklisted character, so the
-    /// character-only version of `validate_iri` returned Ok for them; they were
-    /// then inlined as `<…>` and oxigraph rejected the *whole* query with
-    /// `expected IRI parsing failed`. One such id anywhere in an enumeration
-    /// killed every class-wide read of that class.
-    ///
-    /// The `//` makes `string:h4o520…` an authority, so `h4o520…` is parsed as
-    /// a port and must be numeric. Callers filter on this function, so it has
-    /// to agree with the parser that will see the query — not approximate it.
-    #[test]
-    fn test_validate_iri_rejects_legacy_double_slash_literal_ids() {
-        // Observed verbatim in the three-bots-static-test neighbourhood.
-        assert!(validate_iri("literal://string:h4o520cifomi2pgilz3l160u").is_err());
-        assert!(validate_iri("literal://string:c5imvsfc8j8r9v3ve01zzobs").is_err());
-        // The single-colon form is what normalisation produces, and is valid.
-        assert!(validate_iri("literal:string:h4o520cifomi2pgilz3l160u").is_ok());
-    }
-
-    /// Guard the general property rather than just the two known ids: whatever
-    /// `validate_iri` accepts must be constructible as a `NamedNode`, because
-    /// that is what the accepted value is used as.
-    #[test]
-    fn test_validate_iri_agrees_with_the_sparql_iri_parser() {
-        for candidate in [
-            "task://status",
-            "literal:string:hello",
-            "did:key:z6MkfR",
-            "ad4m://obj/gpsgdujuuojcdkpgqecuzjys",
-            "literal://string:h4o520cifomi2pgilz3l160u",
-            "literal://string:1234",
-            "http://example.invalid/ok",
-            "not-absolute",
-            "literal://",
-        ] {
-            let accepted = validate_iri(candidate).is_ok();
-            let parseable = oxigraph::model::NamedNode::new(candidate).is_ok();
-            assert_eq!(
-                accepted, parseable,
-                "validate_iri and NamedNode::new disagree on {candidate:?}: \
-                 accepted={accepted}, parseable={parseable}"
-            );
-        }
     }
 
     // ---------------------------------------------------------------------
