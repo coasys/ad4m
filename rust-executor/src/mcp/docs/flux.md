@@ -1,7 +1,9 @@
 # The Flux data model
 
-Flux is the most common neighbourhood app, and its classes are what you will
-find in most shared perspectives. This document is the Flux-specific layer:
+Flux is one neighbourhood app among several, and this document is the only
+app-specific one the executor serves. Read it when `describe_perspective`
+shows you are in a space Flux created; a space any other app created is
+described by its own classes, not by this. The Flux-specific layer:
 what its classes mean, which of them you may write to, and the recipes that
 give humans a usable chat view. The generic working knowledge — reading and
 writing instances, the child tree, the traps — is in

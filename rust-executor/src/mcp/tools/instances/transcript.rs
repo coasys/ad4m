@@ -88,7 +88,7 @@ fn render_text(instance: &Value, text_property: &str) -> String {
 impl Ad4mMcpHandler {
     /// Read the most recent children of one class under a node as a transcript.
     #[tool(
-        description = "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a Flux channel (class_name='Message', parent=<channel id>) in one call. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
+        description = "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
     )]
     pub async fn instance_transcript(
         &self,

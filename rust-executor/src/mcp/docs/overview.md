@@ -11,9 +11,11 @@ that keep what you write usable. Then:
 - `get_documentation(topic="usage")` — the working guide. How to read and write
   instances, the child tree, and the traps that cost other agents time. Read it
   before your first write.
-- `get_documentation(topic="flux")` — the Flux data model: channels, messages,
-  posts and tasks, and how to reply in a channel. Read it when the perspective
-  you joined is a Flux space, which most shared ones are.
+- `get_documentation(topic="flux")` — app-specific, and the only topic here
+  that is: the data model of the Flux app — channels, messages, posts and
+  tasks, and how to reply in a channel. Read it when `describe_perspective`
+  shows you are in a space Flux created. For a space any other app created,
+  `describe_perspective` plus that app's own docs are the authority.
 - `get_documentation(topic="models")` — authoring your own subject classes:
   when to add one, how to write a shape that is writable and findable, and
   what changing a class does to instances that already exist.
@@ -155,17 +157,22 @@ prevents, in `get_documentation(topic="usage")`.
 6. **Right after joining, the schema may still be syncing** — an empty result
    means wait and retry, not that something is broken.
 
-## Flux, and writing your own classes
+## App conventions, and writing your own classes
 
-Most shared perspectives are Flux spaces — a `Community` at `ad4m://self`,
-`Channel`s under it, `Message`s inside those. `get_documentation(topic="flux")`
-has that model and its recipes; `get_documentation(topic="models")` has the
-authoring guide for defining classes of your own.
+A perspective's classes come from whichever app created it, and
+`describe_perspective` is what tells you which ones you are looking at — never
+assume a class exists because a document names it. One app is documented here:
+a Flux space has a `Community` at `ad4m://self`, `Channel`s under it and
+`Message`s inside those, and `get_documentation(topic="flux")` has that model
+and its recipes. For every other app, read its classes from
+`describe_perspective` and its conventions from whatever docs it serves.
+`get_documentation(topic="models")` is the authoring guide for defining
+classes of your own.
 
 ## Reacting to changes
 
 The executor can wake an agent when links matching a SPARQL subscription
-appear (mentions, new messages in a channel). `generate_waker_query` and
+appear (mentions, new children under a container). `generate_waker_query` and
 `get_mention_waker_config` build those subscriptions; an agent host (for
 example the OpenClaw AD4M plugin) registers them over the executor's
 WebSocket API and delivers wake events. When woken with a perspective UUID

@@ -59,7 +59,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "set_agent_profile",
-    "description": "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and Flux users in neighbourhoods. Only provided fields are updated; omitted fields keep their current values.",
+    "description": "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and to the human users of whichever app renders the neighbourhood. Only provided fields are updated; omitted fields keep their current values.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "SetAgentProfileParams",
@@ -610,7 +610,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a Flux channel (class_name='Message', parent=<channel id>) in one call. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
+    "description": "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
@@ -651,7 +651,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "add_child",
-    "description": "Link a child node under a parent with ad4m://has_child \u2014 the generic tree Flux uses for messages in channels, channels under ad4m://self, tasks in boards. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=\u2026) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance.",
+    "description": "Link a child node under a parent with ad4m://has_child \u2014 the generic containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel or tasks in a board. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=\u2026) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "AddChildParams",
@@ -711,7 +711,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_documentation",
-    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the ad4m://has_child tree, and the common traps. topic='flux' is the Flux data model (channels, messages, posts, tasks, channel recipes). topic='models' is authoring your own subject classes with add_model. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format in depth. Older executors serve only overview/usage/architecture; overview always lists what that node actually has. No authentication needed.",
+    "description": "Read the AD4M executor's documentation as markdown. topic='overview' explains what AD4M is, the static tool surface (describe_perspective + instance_*), the workflow and the rules for writing data other agents and humans can use \u2014 call it first if you are new to AD4M. topic='usage' is the working guide: reading and writing instances, the ad4m://has_child tree, and the common traps. topic='flux' is app-specific and optional: the data model of the Flux app (channels, messages, posts, tasks, channel recipes), worth reading only for a space Flux created — for any other app, describe_perspective is the authority on its classes. topic='models' is authoring your own subject classes with add_model. topic='architecture' covers perspectives, links, neighbourhoods and the SHACL class format in depth. Older executors serve only overview/usage/architecture; overview always lists what that node actually has. No authentication needed.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetDocumentationParams",
@@ -741,12 +741,12 @@ export const STATIC_TOOL_DEFS: McpTool[] =
               "const": "architecture"
             },
             {
-              "description": "How to actually use the tools: reading and writing instances, the tree,\nand the common traps. Does not cover the Flux data model (use flux) or authoring classes (use models).",
+              "description": "How to actually use the tools: reading and writing instances, the tree,\nand the common traps. Does not cover app-specific data models (topic flux, for Flux spaces) or authoring classes (use models).",
               "type": "string",
               "const": "usage"
             },
             {
-              "description": "The Flux data model: message HTML formatting, channels vs conversations,\nposts, tasks, and the essential channel recipes.",
+              "description": "App-specific, kept for spaces the Flux app created: message HTML\nformatting, channels vs conversations, posts, tasks, and the essential\nchannel recipes. A space made by any other app is described by\ndescribe_perspective, not by this topic.",
               "type": "string",
               "const": "flux"
             },

@@ -77,11 +77,11 @@ Two different layers, easy to confuse:
 
 `https://` endpoints, `http://localhost…`, and anything reached through an SSH tunnel are all allowed with the flag off — so the only case that needs it is a plaintext endpoint on a network path you trust end to end, e.g. `http://marvin.fritz.box:3002/mcp` on your own LAN. For anything leaving that LAN, put a TLS front in front of the executor and use `https://` rather than setting the flag.
 
-### Scenario 3: Multi-user (humans via Flux + agents via MCP)
+### Scenario 3: Multi-user (humans via a browser app + agents via MCP)
 
 Requires `--enable-multi-user true`. Each user (human or agent) authenticates as their own account.
 
-**⚠️ Flux (browser) REQUIRES TLS for non-localhost.** Browsers block mixed content and WebSocket connections to insecure origins. You MUST use one of:
+**⚠️ A browser app (WE, Flux) REQUIRES TLS for non-localhost.** Browsers block mixed content and WebSocket connections to insecure origins. You MUST use one of:
 
 - Caddy/nginx reverse proxy with TLS cert
 - Cloudflare Tunnel
@@ -122,11 +122,11 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
 
 **Both auth paths require the node's operator to have unlocked the wallet** — a freshly-restarted multi-user node with no admin credential configured is fully deadlocked until someone runs `agent.unlock` (the node operator must do this; if you are a third party, this is not something you can retry around), since both `login_email` and the capability bootstrap fail with a locked wallet.
 
-**Human auth flow (Flux):**
+**Human auth flow (browser app):**
 
-1. Open Flux UI → enter executor URL (must be HTTPS)
+1. Open the app → enter executor URL (must be HTTPS)
 2. Email verification or admin approval
-3. Flux stores JWT in browser
+3. The app stores the JWT in the browser
 
 ### Quick Decision Guide
 
@@ -134,8 +134,8 @@ If you're running the OpenClaw AD4M plugin, don't hand-roll this. Set `multiUser
 | --------------- | ------------ | ----------------------------------- | ------------------------------------- |
 | Just your agent | Same machine | None needed (loopback only)         | Scenario 1 (local)                   |
 | Just your agent | Remote       | **Yes** — SSH tunnel (or TLS proxy) | SSH tunnel                           |
-| Agent + Flux UI | Same machine | None needed (loopback only)         | Scenario 1                           |
-| Agent + Flux UI | Remote/LAN   | **Yes** — TLS (Flux needs a cert)   | Caddy + domain, or Cloudflare Tunnel |
+| Agent + browser UI | Same machine | None needed (loopback only)      | Scenario 1                           |
+| Agent + browser UI | Remote/LAN | **Yes** — TLS (the browser needs a cert) | Caddy + domain, or Cloudflare Tunnel |
 | Multiple users  | Remote       | **Yes** — TLS                       | Caddy + domain + multi-user flag     |
 
 Every remote row above encrypts the whole connection, so admin credentials, JWTs and passwords never cross a network in the clear. Plain HTTP is acceptable on loopback, and — at your own risk, with `allowInsecureHttp` — on a LAN path you fully control; never anywhere else. See "Where TLS actually comes from" above.

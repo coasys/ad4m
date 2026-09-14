@@ -3,8 +3,8 @@
 //!
 //! `instance_create(parent=…)` and `instance_query(parent=…)` cover the
 //! class-aware side of the tree. These two are for the raw link: parents
-//! that are not subject-class instances at all (`ad4m://self`, plain-string
-//! ids Flux hands out), and listing children regardless of class.
+//! that are not subject-class instances at all (`ad4m://self`, the plain-string
+//! ids some apps hand out), and listing children regardless of class.
 
 use super::{
     error_json, link_target, pretty, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, HAS_CHILD,
@@ -63,7 +63,7 @@ pub(super) async fn child_links(
 impl Ad4mMcpHandler {
     /// Link a child node under a parent via `ad4m://has_child`.
     #[tool(
-        description = "Link a child node under a parent with ad4m://has_child — the generic tree Flux uses for messages in channels, channels under ad4m://self, tasks in boards. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=…) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance."
+        description = "Link a child node under a parent with ad4m://has_child — the generic containment tree apps build their structure on: items in a container, containers under ad4m://self, e.g. messages in a channel or tasks in a board. Class-agnostic: neither node needs to be a subject-class instance. Bare strings are wrapped as literal URIs. Prefer instance_create(parent=…) when creating a new instance, and instance_add_to_collection when the parent's class declares the collection; use this for nodes that are not instances (e.g. parent='ad4m://self') or to re-parent an existing instance."
     )]
     pub async fn add_child(&self, params: Parameters<AddChildParams>) -> String {
         let p = &params.0;

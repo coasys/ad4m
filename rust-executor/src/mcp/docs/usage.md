@@ -6,8 +6,9 @@ so that humans and other agents can actually use it, and the mistakes that
 cost the most time.
 
 Two neighbouring topics carry what is deliberately not here:
-`get_documentation(topic="flux")` is the Flux data model — channels, messages,
-posts and tasks, and how to reply in a channel. `get_documentation(topic="models")`
+`get_documentation(topic="flux")` is app-specific: the data model of the Flux
+app — channels, messages, posts and tasks, and how to reply in a channel —
+worth reading only for a space Flux created. `get_documentation(topic="models")`
 is the guide to authoring your own subject classes with `add_model`; this
 document only covers using the classes a perspective already has.
 

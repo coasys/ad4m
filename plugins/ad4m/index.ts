@@ -752,8 +752,9 @@ Notes:
     name: "ad4m_subscribe_to_mentions",
     description:
       "Subscribe to mentions of this agent in a neighbourhood. " +
-      "Creates a live waker subscription that watches for messages mentioning " +
-      "your name or DID and wakes you when detected. " +
+      "Creates a live waker subscription that watches for any item whose text carries " +
+      "your name or DID — a message, or an instance of whatever class this space defines — " +
+      "and wakes you when detected. " +
       "Note: this is called automatically when you join or publish a neighbourhood.",
     parameters: {
       type: "object",
@@ -819,9 +820,10 @@ Notes:
   api.registerTool({
     name: "ad4m_subscribe_to_children",
     description:
-      "Subscribe to new children (e.g., messages) under a specific parent (e.g., a channel). " +
-      "Creates a live waker subscription that watches for new child links and wakes you when detected. " +
-      "Call this to monitor a specific channel for all messages.",
+      "Subscribe to new children under a specific parent — messages in a channel, or whatever " +
+      "items this space's ontology hangs under that container. " +
+      "Creates a live waker subscription that watches for new ad4m://has_child links and wakes you when detected. " +
+      "Call this to monitor one container for everything added to it.",
     parameters: {
       type: "object",
       properties: {
@@ -976,7 +978,7 @@ Notes:
       "Set your AD4M profile picture from a local image file. " +
       "Reads the file, base64-encodes it, and uploads it. " +
       "IMPORTANT: The image should be cropped to a square before calling this tool — " +
-      "Flux displays profile pictures as circles, so non-square images will look distorted.",
+      "apps usually crop profile pictures to a circle, so non-square images will look distorted.",
     parameters: {
       type: "object",
       properties: {

@@ -1544,7 +1544,7 @@ describe("buildWakeMessage", () => {
     query: "SELECT * FROM ...",
   };
 
-  it("builds a mention wake message with per-message parents", () => {
+  it("builds a mention wake message with per-item parents", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
       { address: "msg-1", parents: ["channel-abc", "conversation-xyz"] },
       { address: "msg-2", parents: ["channel-abc"] },
@@ -1552,18 +1552,33 @@ describe("buildWakeMessage", () => {
     expect(msg).toContain("You were @mentioned in an AD4M neighbourhood.");
     expect(msg).toContain("Agent DID: did:key:z6Mk123");
     expect(msg).toContain("Perspective: uuid-123");
-    expect(msg).toContain("Mentioned messages (2):");
-    expect(msg).toContain("Message: msg-1");
+    expect(msg).toContain("Mentioned items (2):");
+    expect(msg).toContain("Item: msg-1");
     expect(msg).toContain("Parents: channel-abc, conversation-xyz");
-    expect(msg).toContain("Message: msg-2");
+    expect(msg).toContain("Item: msg-2");
+  });
+
+  /**
+   * The mentioned address is the source of whichever link carried the agent's
+   * name, so it can be an instance of any class the space defines. A wake text
+   * that calls it a message invites the agent to skip typing it against the
+   * ontology, which is wrong in every space that is not a chat.
+   */
+  it("labels a mentioned address class-agnostically", () => {
+    const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
+      { address: "task-1", parents: ["board-abc"] },
+    ]);
+    expect(msg).toContain("Item: task-1");
+    expect(msg).not.toContain("Message:");
+    expect(msg).not.toContain("Mentioned messages");
   });
 
   it("builds a channel-messages wake message without mentions", () => {
     const msg = buildWakeMessage(config, channelSub, "did:key:z6Mk456");
-    expect(msg).toContain("New messages in an AD4M neighbourhood.");
+    expect(msg).toContain("New items in an AD4M neighbourhood.");
     expect(msg).toContain("Perspective: uuid-456");
     expect(msg).toContain("Event type: channel-messages");
-    expect(msg).not.toContain("Mentioned messages");
+    expect(msg).not.toContain("Mentioned items");
   });
 
   it("shows (unknown) parents when empty", () => {

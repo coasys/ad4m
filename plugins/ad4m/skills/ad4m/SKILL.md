@@ -236,22 +236,34 @@ Model instance ids and the `ad4m://has_child` tree (`add_child` / `get_children`
 
 **If you were woken by the AD4M waker** (wake message mentions "AD4M neighbourhood", a perspective UUID, or a channel address) — follow this procedure.
 
-The waker POSTs to your `/hooks/wake` endpoint. Mention events include per-message details with parent resolution; channel-messages events are simpler. Format unchanged from the dynamic-tools era — parse `Agent DID`, `Perspective`, `Event type`, and for mentions the `Message`/`Parents` list.
+The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`, `Event type`, and for mentions the `Item`/`Parents` list.
 
 **Use `/hooks/wake`, NOT `/hooks/agent`** — `/hooks/wake` enqueues into your main session (with this skill loaded); `/hooks/agent` spawns an isolated sub-agent without it.
 
 **First: read `memory/ad4m-neighbourhoods.md`** for context on this perspective.
 
-### Steps 1 and 2: read the channel, then reply into the same parent
+### The wake event hands you addresses, not types
 
-`ad4m_get_my_did()` → `ad4m_describe_perspective(perspective_id)` **to confirm the actual class names in this space** (do not assume `Message` or `Channel` exist just because some document describes them) → `ad4m_instance_transcript(perspective_id=<from wake>, class_name=<class from describe_perspective>, parent=<channel parent from wake>, limit=20)` → `ad4m_instance_create(..., parent=<the SAME parent>)`. The exact calls, why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
+`Item` is the address of whatever instance carried your name — the mention query matches links, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under. Nothing in the event tells you what any of them are; the space's own ontology does.
+
+### Step 1: work out what you are looking at
+
+`ad4m_get_my_did()` → `ad4m_describe_perspective(perspective_id)` **for the classes this space actually has** (do not assume `Message` or `Channel` exist because some document describes them) → `ad4m_query_links(source=<Item>)` to see its type marker and property predicates, then `ad4m_instance_get` on the class they match.
+
+### Step 2: gather just enough context
+
+Type the parent the same way, then read what else is under it — `ad4m_instance_transcript(class_name=…, parent=<Parent>)` for a text-bearing class, `ad4m_instance_query(class_name=…, parent=<Parent>)` for full property maps, `ad4m_get_children(parent=<Parent>)` when you don't yet know the classes. The sibling instances are usually what makes the mention intelligible. Walk further up (`query_links(target=<Parent>, predicate="ad4m://has_child")`) or down only when the ask is still unclear. The full procedure, including when each hop is worth its call: `references/waker.md`.
+
+### Step 3: answer in the shape the ontology allows
+
+`ad4m_instance_create(..., parent=<the SAME parent>)`, normally as the class the item's siblings are. If no class fits what you want to say, ask rather than invent one. Why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
 
 ### When to respond
 
-- **mention** events: find where you were mentioned, respond
+- **mention** events: understand what was asked of you where you were mentioned, then respond there
 - **channel-messages** events: respond only if relevant
-- Skip your own messages
-- Be conversational — you're chatting, not writing a report
+- Skip your own writes
+- Match the register of the space — a chat wants conversation, a task board wants a task
 
 ---
 
