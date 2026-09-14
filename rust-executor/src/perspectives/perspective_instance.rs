@@ -39,7 +39,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -500,15 +502,15 @@ pub struct PerspectiveInstance {
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
-    /// `-1` (the default, set by every real constructor) means never fail —
-    /// nothing in production code ever changes it away from that. `0` means
-    /// the *next* call returns an error instead of writing, then resets to
-    /// `-1` so later calls in the same test succeed normally; a positive `n`
-    /// counts down without failing until it reaches `0`. Lets a test force a
-    /// batch write to fail partway through — after a subject is already
-    /// staged, or after some of its collection links have landed — without a
-    /// real store fault, to assert `discard_batch` actually leaves nothing
-    /// behind.
+    /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
+    /// `0` means the *next* call returns an error instead of writing, then
+    /// resets to `-1` so later calls in the same test succeed normally; a
+    /// positive `n` counts down without failing until it reaches `0`. Lets a
+    /// test force a batch write to fail partway through — after a subject is
+    /// already staged, or after some of its collection links have landed —
+    /// without a real store fault, to assert `discard_batch` actually leaves
+    /// nothing behind.
+    #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
 }
 
@@ -570,6 +572,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
         }
     }
@@ -581,7 +584,8 @@ impl PerspectiveInstance {
     /// one call through first, and so on. Never called from production code;
     /// exists so a test can prove a partial batch write actually rolls back
     /// rather than only reading the `discard_batch` call sites and trusting
-    /// they run.
+    /// they run. The backing field only exists in test builds (`cfg(test)`),
+    /// so this seam has zero footprint in production.
     #[cfg(test)]
     pub(crate) fn fail_next_add_link(&self, after_n_calls: i64) {
         self.fail_add_link_after
@@ -1775,9 +1779,10 @@ impl PerspectiveInstance {
         status: LinkStatus,
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        // Test seam (#981) — see `fail_add_link_after`'s doc comment. `-1` in
-        // every real perspective, always, so this is a no-op outside a test
-        // that explicitly opted in via `fail_next_add_link`.
+        // Test seam (#981) — see `fail_add_link_after`'s doc comment. The
+        // field (and this check) only exist in test builds, so this is
+        // entirely compiled out in production.
+        #[cfg(test)]
         match self.fail_add_link_after.load(Ordering::SeqCst) {
             0 => {
                 self.fail_add_link_after.store(-1, Ordering::SeqCst);
