@@ -110,27 +110,52 @@ fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String>
     Ok(())
 }
 
+/// The *other* spelling of a `literal:` URI, or `None` if there isn't one.
+///
+/// The two spellings are mutually derivable — `literal://<kind>:<v>` ⇄
+/// `literal:<kind>:<v>` — and a store that was written across the
+/// normalisation boundary holds both for the same node, so a filter has to be
+/// tried in both directions. Anything that is not a two-part `literal:` URI
+/// (`ad4m://obj/…`, `did:key:…`, a bare `literal://`) has no counterpart and
+/// yields `None`, so no second query is spent on it.
+fn other_literal_spelling(value: &str) -> Option<String> {
+    if let Some(rest) = value.strip_prefix("literal://") {
+        // Mirrors `normalize_legacy_literal`: `literal://` alone is not the
+        // `literal://<kind>:<value>` shape.
+        return rest.contains(':').then(|| format!("literal:{rest}"));
+    }
+    let rest = value.strip_prefix("literal:")?;
+    rest.contains(':').then(|| format!("literal://{rest}"))
+}
+
 /// The link filters `query_links` should try, in order.
 ///
-/// Always the filter exactly as the caller gave it; plus the normalised filter
-/// when normalisation changes anything. See the comment in `query_links` for
-/// why both are needed rather than just the normalised one.
+/// Always the filter exactly as the caller gave it, first; plus the filter with
+/// every `literal:` field flipped to its other spelling, when that differs. See
+/// the comment in `query_links` for why both are needed rather than just the
+/// normalised one — and note the flip has to run in *both* directions, because
+/// the direction that matters is the one an agent arrives at by navigating the
+/// graph: newer links store the canonical spelling, while the node those links
+/// point at may carry its own properties under the legacy one. Expanding only
+/// legacy→canonical leaves that node looking like an empty container.
 type LinkFilter = (Option<String>, Option<String>, Option<String>);
 fn link_filter_variants(
     source: &Option<String>,
     predicate: &Option<String>,
     target: &Option<String>,
 ) -> Vec<LinkFilter> {
-    let normalize =
-        |v: &Option<String>| v.as_ref().map(|s| normalize_legacy_literal(s).into_owned());
+    let flip = |v: &Option<String>| {
+        v.as_ref()
+            .map(|s| other_literal_spelling(s).unwrap_or_else(|| s.clone()))
+    };
 
     let as_given = (source.clone(), predicate.clone(), target.clone());
-    let normalized = (normalize(source), normalize(predicate), normalize(target));
+    let flipped = (flip(source), flip(predicate), flip(target));
 
-    if normalized == as_given {
+    if flipped == as_given {
         vec![as_given]
     } else {
-        vec![as_given, normalized]
+        vec![as_given, flipped]
     }
 }
 
@@ -280,11 +305,21 @@ impl Ad4mMcpHandler {
         // and a normalised-only filter can no longer find them. That would
         // break the very query that diagnosed #1014.
         //
-        // So match *either* spelling: the filter as given, plus the normalised
-        // filter when it differs. Storage is untouched and both populations
-        // remain reachable. Mixing spellings across fields in one call is not
-        // expanded combinatorially — the two passes are all-as-given and
-        // all-normalised, which covers a caller using one spelling.
+        // So match *either* spelling: the filter as given, plus the same filter
+        // with its `literal:` fields flipped to the other spelling. Storage is
+        // untouched and both populations remain reachable.
+        //
+        // The flip runs in both directions, and the canonical→legacy one is the
+        // direction that matters most: an agent navigating the graph arrives at
+        // the canonical spelling, because that is what the newer links store,
+        // while the node they point at may carry its own `type`/`body` links
+        // under the legacy spelling. Expanding only legacy→canonical makes such
+        // a node present as an empty container — one `has_child` out, no
+        // content — which is a wrong answer that looks like a complete one.
+        //
+        // Mixing spellings across fields in one call is not expanded
+        // combinatorially — the two passes are all-as-given and all-flipped,
+        // which covers a caller using one spelling.
         let filters = link_filter_variants(&p.source, &p.predicate, &p.target);
 
         match self.get_readable_perspective(&p.perspective_id).await {
@@ -444,13 +479,53 @@ mod tests {
         );
     }
 
-    /// The canonical spelling is not rewritten into the legacy one: that would
-    /// invent a filter the caller did not ask for.
+    /// The direction that matters most: an agent navigating the graph arrives at
+    /// the canonical spelling, because that is what the newer links store, while
+    /// the node those links point at may hold its own `type`/`body` under the
+    /// legacy one. Expanding only legacy→canonical makes that node present as an
+    /// empty container — one `has_child` out and no content.
     #[test]
-    fn canonical_filter_runs_once() {
-        let variants =
-            link_filter_variants(&some("literal:string:x"), &some("ad4m://has_child"), &None);
-        assert_eq!(variants.len(), 1);
+    fn canonical_filter_also_tries_the_legacy_spelling() {
+        let variants = link_filter_variants(
+            &some("literal:string:h4o520"),
+            &some("ad4m://has_child"),
+            &None,
+        );
+        assert_eq!(
+            variants,
+            vec![
+                (
+                    some("literal:string:h4o520"),
+                    some("ad4m://has_child"),
+                    None
+                ),
+                (
+                    some("literal://string:h4o520"),
+                    some("ad4m://has_child"),
+                    None
+                ),
+            ],
+            "non-literal fields must pass through the flip untouched"
+        );
+    }
+
+    /// A value with no counterpart spelling costs no second query.
+    #[test]
+    fn filters_without_a_counterpart_run_once() {
+        for v in [
+            "ad4m://obj/nefoboz",
+            "did:key:z6Mk",
+            // Neither `literal://` nor `literal:x` is the two-part
+            // `literal:<kind>:<value>` shape, in either direction.
+            "literal://",
+            "literal:x",
+        ] {
+            assert_eq!(
+                link_filter_variants(&some(v), &None, &None).len(),
+                1,
+                "{v} should not expand"
+            );
+        }
     }
 
     /// No filter at all is still exactly one query, not two identical ones.
