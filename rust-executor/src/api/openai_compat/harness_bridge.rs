@@ -221,64 +221,88 @@ impl OpenAiCompatBridge {
 ///   id minted by [`to_provider_call`] reachable: a client that omits the id on
 ///   a call omits it on the result too, and order is the only pairing left.
 /// - A result that answers nothing open travels as an ordinary user turn, so
-///   what the tool said still reaches the model.
+///   what the tool said still reaches the model. While calls are open it waits
+///   until their results are in. The API reads consecutive user turns as one
+///   message, and text ahead of a `tool_result` in that message breaks the
+///   pairing as surely as a missing result does.
 /// - A call still open when the next non-tool message arrives is removed from
-///   the turn that made it. Its text stays.
+///   the turn that made it. Its text stays. If it had none, the turn goes too:
+///   an empty assistant message is refused like an unpaired call.
 ///
 /// The harness gives every call an id and appends a result for every call,
 /// budget-exhausted ones included, so on its own conversations none of the
 /// last three cases fires.
 fn structured_turns(messages: &[Value]) -> Result<Vec<ChatTurn>> {
     let mut turns: Vec<ChatTurn> = Vec::with_capacity(messages.len());
-    // The index of the latest assistant turn that made calls, and the ids of
-    // those calls no result has answered yet, in order.
-    let mut open: Option<(usize, VecDeque<String>)> = None;
+    let mut open: Option<OpenCalls> = None;
 
     for m in messages {
         let turn = structured_turn(m)?;
 
         if m.get("role").and_then(|r| r.as_str()) == Some("tool") {
-            turns.push(pair_result(turn, &mut open));
+            match open.as_mut() {
+                Some(calls) => match calls.answer(&turn) {
+                    Some(id) => turns.push(ChatTurn::tool_result(id, turn.content)),
+                    None => calls.unpaired.push(ChatTurn::user(turn.content)),
+                },
+                None => turns.push(ChatTurn::user(turn.content)),
+            }
             continue;
         }
 
-        close_unanswered(&mut turns, open.take());
+        if let Some(calls) = open.take() {
+            calls.close(&mut turns);
+        }
         if !turn.tool_calls.is_empty() {
-            let ids = turn.tool_calls.iter().map(|c| c.id.clone()).collect();
-            open = Some((turns.len(), ids));
+            open = Some(OpenCalls {
+                turn: turns.len(),
+                waiting: turn.tool_calls.iter().map(|c| c.id.clone()).collect(),
+                unpaired: Vec::new(),
+            });
         }
         turns.push(turn);
     }
 
-    close_unanswered(&mut turns, open.take());
+    if let Some(calls) = open.take() {
+        calls.close(&mut turns);
+    }
     Ok(turns)
 }
 
-/// Pair a tool result with an open call, or demote it to text. See
-/// [`structured_turns`] for the rule.
-fn pair_result(turn: ChatTurn, open: &mut Option<(usize, VecDeque<String>)>) -> ChatTurn {
-    let answered = open
-        .as_mut()
-        .and_then(|(_, waiting)| match &turn.tool_result_for {
-            Some(id) => waiting
-                .iter()
-                .position(|w| w == id)
-                .and_then(|i| waiting.remove(i)),
-            None => waiting.pop_front(),
-        });
-
-    match answered {
-        Some(id) => ChatTurn::tool_result(id, turn.content),
-        None => ChatTurn::user(turn.content),
-    }
+/// The latest assistant turn that made calls, while its results arrive.
+struct OpenCalls {
+    /// Its index in the turns built so far.
+    turn: usize,
+    /// Ids of its calls no result has answered yet, in order.
+    waiting: VecDeque<String>,
+    /// Results that answered none of them, held until the run of results ends.
+    unpaired: Vec<ChatTurn>,
 }
 
-/// Remove the calls no result answered from the turn that made them.
-fn close_unanswered(turns: &mut [ChatTurn], open: Option<(usize, VecDeque<String>)>) {
-    if let Some((index, waiting)) = open {
-        if !waiting.is_empty() {
-            turns[index].tool_calls.retain(|c| !waiting.contains(&c.id));
+impl OpenCalls {
+    /// The call this result answers, if any. See [`structured_turns`].
+    fn answer(&mut self, result: &ChatTurn) -> Option<String> {
+        match &result.tool_result_for {
+            Some(id) => {
+                let i = self.waiting.iter().position(|w| w == id)?;
+                self.waiting.remove(i)
+            }
+            None => self.waiting.pop_front(),
         }
+    }
+
+    /// Remove the calls nothing answered, then append the held results.
+    fn close(self, turns: &mut Vec<ChatTurn>) {
+        if !self.waiting.is_empty() {
+            let calling = &mut turns[self.turn];
+            calling.tool_calls.retain(|c| !self.waiting.contains(&c.id));
+            // Only a turn left with no calls can be removed, and a turn with no
+            // calls has no results after it, so no other index moves.
+            if calling.tool_calls.is_empty() && calling.content.trim().is_empty() {
+                turns.remove(self.turn);
+            }
+        }
+        turns.extend(self.unpaired);
     }
 }
 
@@ -924,7 +948,8 @@ mod native_mapping_tests {
         })])
         .expect("maps");
 
-        assert!(turns[0].tool_calls.is_empty());
+        // No calls left and no text, so nothing of the turn remains.
+        assert!(turns.is_empty());
     }
 
     #[test]
@@ -940,12 +965,50 @@ mod native_mapping_tests {
         ])
         .expect("maps");
 
-        assert!(turns[1].tool_result_for.is_none());
+        // The call it did not answer is removed, and with no text the turn
+        // that made it goes too.
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].tool_result_for.is_none());
+        assert_eq!(turns[0].content, "42");
+    }
+
+    #[test]
+    fn a_stray_result_does_not_come_between_a_call_and_its_result() {
+        // Sent where it arrived, the stray text would sit ahead of call_a's
+        // tool_result in the same user message, and the API refuses that.
+        let turns = structured_turns(&[
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{ "id": "call_a", "function": { "name": "search", "arguments": "{}" } }],
+            }),
+            json!({ "role": "tool", "tool_call_id": "call_elsewhere", "content": "stray" }),
+            json!({ "role": "tool", "tool_call_id": "call_a", "content": "42" }),
+        ])
+        .expect("maps");
+
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].tool_calls[0].id, "call_a");
+        assert_eq!(turns[1].tool_result_for.as_deref(), Some("call_a"));
         assert_eq!(turns[1].content, "42");
-        assert!(
-            turns[0].tool_calls.is_empty(),
-            "and the call it did not answer is removed"
-        );
+        assert!(turns[2].tool_result_for.is_none());
+        assert_eq!(turns[2].content, "stray");
+    }
+
+    #[test]
+    fn a_turn_left_with_no_calls_and_no_text_is_removed() {
+        let turns = structured_turns(&[
+            json!({ "role": "user", "content": "find x" }),
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{ "function": { "name": "search", "arguments": "{}" } }],
+            }),
+            json!({ "role": "user", "content": "never mind" }),
+        ])
+        .expect("maps");
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].content, "find x");
+        assert_eq!(turns[1].content, "never mind");
     }
 
     #[test]
