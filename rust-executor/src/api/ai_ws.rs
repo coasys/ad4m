@@ -99,9 +99,7 @@ async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     // against any host stays available, which is the case that made this
     // endpoint worth having.
     if !api_key.is_empty() && !is_transport_safe(&base_url) {
-        return Err(WsRpcError::bad_request(
-            "Refusing to send an API key over plain HTTP. Use https, or omit the key.",
-        ));
+        return Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL));
     }
 
     let models = crate::ai_service::providers::list_models(&api_type, api_key, base_url)
@@ -111,11 +109,18 @@ async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     Ok(serde_json::to_value(models)?)
 }
 
+const CLEARTEXT_KEY_REFUSAL: &str =
+    "Refusing to send an API key over plain HTTP. Use https, or omit the key.";
+
 /// Whether a credential may be sent to this URL.
 ///
 /// True for https anywhere, and for http on loopback only. A hostname that
 /// merely looks local is not enough: `localhost.example.com` resolves
 /// wherever its owner points it.
+///
+/// Checked wherever a key arrives with a URL: discovery, and adding or
+/// updating a model. A model saved before the check existed is not re-checked
+/// when it loads.
 pub(super) fn is_transport_safe(url: &url::Url) -> bool {
     if url.scheme() == "https" {
         return true;
@@ -129,6 +134,25 @@ pub(super) fn is_transport_safe(url: &url::Url) -> bool {
     }
 }
 
+/// Refuse a model whose key would cross the network in the clear.
+///
+/// The same rule as discovery, applied where it matters more: discovery sends
+/// a key once, and a saved model sends it with every completion for as long as
+/// the model exists. A base URL that does not parse is left for the service to
+/// reject with its own error.
+pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRpcError> {
+    let Some(api) = &model.api else {
+        return Ok(());
+    };
+    if api.api_key.is_empty() {
+        return Ok(());
+    }
+    match url::Url::parse(&api.base_url) {
+        Ok(url) if !is_transport_safe(&url) => Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL)),
+        _ => Ok(()),
+    }
+}
+
 async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
@@ -136,6 +160,7 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
@@ -157,6 +182,7 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
