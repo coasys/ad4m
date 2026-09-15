@@ -15,6 +15,24 @@
 //! never to remove them. Superseded and unverifiable proposals therefore
 //! linger until a follow-up marks them (never deletes them); explicit
 //! rejection is a human act and lives elsewhere.
+//!
+//! ## Terms
+//!
+//! - **Replica** — one agent's executor holding its own local copy of the
+//!   shared perspective; every neighbourhood member (human client or bot) is
+//!   one. Replicas receive links in whatever order sync delivers them, so
+//!   each derives state from a view that may still be missing links others
+//!   already hold — which is why the code says "new to *this replica*",
+//!   never just "new".
+//! - **Cache** — the `currentState` property on the `FlowInstance` subject.
+//!   It exists for readers that cannot or should not run the fold: model
+//!   queries filtering on `currentState`, UIs listing flow boards, plain
+//!   graph reads. The fold never takes it as input; this pass heals it
+//!   whenever it lags the derived state.
+//! - **Mark** — a `resolved_as → "fired"` link on each proposal whose votes
+//!   settled an edge. It is a history index for UIs and this pass's "have I
+//!   already recorded this consensus event?" test (so [`FireOutcome`]s are
+//!   emitted once per event per replica). Never an input to the fold.
 
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
