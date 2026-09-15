@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
+use crate::agent::conductor_startup::spawn_conductor_startup;
 use crate::agent::{
     did_document_for_context, AgentContext, AgentService, AgentSignature as InternalAgentSignature,
 };
@@ -293,26 +294,15 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         agent_service.dump().clone()
     });
 
-    // Start Holochain conductor
-    let config = crate::config::get_global_config();
-    let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
-        &config,
-        body.passphrase.clone(),
-    );
-
     let mut init_errors: Vec<String> = Vec::new();
 
-    if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
-        log::error!("Error initializing Holochain: {:?}", e);
-        init_errors.push(format!("Holochain init failed: {}", e));
-    } else {
-        log::info!("Holochain init complete");
-    }
-
+    // The conductor and the languages that need it start in the background; see
+    // `agent::conductor_startup`. Only what the reply depends on is awaited here.
+    let config = crate::config::get_global_config();
     let language_language_only = config.language_language_only.unwrap_or(false);
     let controller = LanguageController::global_instance();
     if let Err(e) = controller
-        .load_system_languages(language_language_only)
+        .load_core_system_languages(language_language_only)
         .await
     {
         log::error!("Error loading system languages: {:?}", e);
@@ -320,6 +310,8 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     } else {
         log::info!("System languages loaded");
     }
+
+    spawn_conductor_startup(body.passphrase.clone());
 
     if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
         log::warn!("Error publishing agent expression: {}", e);
@@ -402,30 +394,13 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .is_unlocked();
 
     if is_unlocked {
-        if crate::holochain_service::maybe_get_holochain_service()
-            .await
-            .is_none()
-        {
-            log::info!("Holochain service not initialized. Initializing...");
-            let config = crate::config::get_global_config();
-            let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
-                &config,
-                body.passphrase.clone(),
-            );
-
-            if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
-                log::error!("Error initializing Holochain: {:?}", e);
-                init_errors.push(format!("Holochain init failed: {}", e));
-            } else {
-                log::info!("Holochain init complete");
-            }
-        }
-
+        // The conductor and the languages that need it start in the background; see
+        // `agent::conductor_startup`. Only what the reply depends on is awaited here.
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
         let controller = LanguageController::global_instance();
         if let Err(e) = controller
-            .load_system_languages(language_language_only)
+            .load_core_system_languages(language_language_only)
             .await
         {
             log::error!("Error loading system languages: {:?}", e);
@@ -433,6 +408,8 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         } else {
             log::info!("System languages loaded");
         }
+
+        spawn_conductor_startup(body.passphrase.clone());
 
         log::info!("AD4M init complete");
 

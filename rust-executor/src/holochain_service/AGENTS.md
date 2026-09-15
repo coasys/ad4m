@@ -15,8 +15,10 @@ item 10 collapses them.
 
 ## Facts
 
-- `HolochainService::init` is invoked from `api/agent_ws.rs` (agent generate/unlock),
-  not from `lib.rs`. Signals are consumed by `lib.rs::holochain_signal_receiver` and
+- `HolochainService::init` is invoked from `agent/conductor_startup.rs`, in a task that
+  agent generate/unlock spawn after replying, not from `lib.rs`. Nothing that runs during
+  or straight after unlock may assume the conductor is up: use `get_holochain_service()`
+  (which waits) or handle `maybe_get_holochain_service()` returning `None`. Signals are consumed by `lib.rs::holochain_signal_receiver` and
   routed to the language runtime registered for that cell.
 - `get_holochain_service()` polls up to 120 s then **panics**; prefer
   `maybe_get_holochain_service()` in anything not on the critical boot path.
