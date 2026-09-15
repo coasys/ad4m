@@ -2445,9 +2445,7 @@ impl LanguageController {
 
         // Check cache for immutable expressions
         if immutable {
-            let cached = crate::db::Ad4mDb::with_global_instance(|db| {
-                db._get_expression(expression_address)
-            });
+            let cached = crate::db_backend::db_backend().get_expression(expression_address);
             if let Ok(Some(expr)) = cached {
                 let mut expr_json = serde_json::to_value(&expr).unwrap_or(JsonValue::Null);
                 // Verify and set proof.valid
@@ -2492,9 +2490,7 @@ impl LanguageController {
             if let Ok(expr) =
                 serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone())
             {
-                let _ = crate::db::Ad4mDb::with_global_instance(|db| {
-                    db._add_expression(expression_address, &expr)
-                });
+                let _ = crate::db_backend::db_backend().add_expression(expression_address, &expr);
             }
         }
 

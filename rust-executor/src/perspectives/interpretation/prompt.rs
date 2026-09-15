@@ -1,7 +1,6 @@
 use super::{
     class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
 };
-use crate::db::Ad4mDb;
 use crate::perspectives::flow_context::{render_consensus_rule, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
@@ -620,23 +619,23 @@ pub(crate) fn register_interpretation_task_for_model(
     model_id: Option<&str>,
 ) -> anyhow::Result<(AITask, bool)> {
     let name = interpretation_task_name_for_model(model_id);
-    if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
+    if let Some(existing) = crate::db_backend::db_backend()
+        .get_tasks()?
         .into_iter()
         .find(|t| t.name == name)
     {
         return Ok((existing, false));
     }
     let db_model_id = model_id.unwrap_or("default").to_string();
-    let task_id = Ad4mDb::with_global_instance(|db| {
-        db.add_task(
-            name.clone(),
-            db_model_id,
-            INTERPRETATION_SYSTEM_PROMPT.to_string(),
-            interpretation_examples(),
-            None,
-        )
-    })?;
-    let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
+    let task_id = crate::db_backend::db_backend().add_task(
+        name.clone(),
+        db_model_id,
+        INTERPRETATION_SYSTEM_PROMPT.to_string(),
+        interpretation_examples(),
+        None,
+    )?;
+    let task = crate::db_backend::db_backend()
+        .get_task(task_id)?
         .ok_or_else(|| anyhow::anyhow!("interpretation task vanished immediately after insert"))?;
     Ok((task, true))
 }

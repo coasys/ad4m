@@ -547,10 +547,10 @@ impl HolochainService {
             // Grab the auth material stashed by setup_bootstrap_auth().
             // Without this the authenticated Unyt bootstrap will refuse the
             // connection. CodeRabbit review PR #907 finding #5.
-            let auth_material =
-                crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
-                    .ok()
-                    .flatten();
+            let auth_material = crate::db_backend::db_backend()
+                .get_setting("unyt_auth_material")
+                .ok()
+                .flatten();
             if auth_material.is_none() {
                 info!(
                     "Applying unyt space override for DNA {} (no auth material \

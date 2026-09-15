@@ -16,7 +16,6 @@
 //! No new dependencies: we reuse the existing `reqwest` client.
 
 use crate::api::auth::AuthContext;
-use crate::db::Ad4mDb;
 use crate::types::{ModelApiType, ModelType};
 
 use super::types::SpeechRequest;
@@ -90,7 +89,8 @@ struct TtsUpstream {
 /// `ModelType::TextToSpeech` enum lands, swap the filter to that type
 /// and remove this comment.
 fn find_tts_upstream(requested_model: &str) -> Result<TtsUpstream, TtsPassthroughError> {
-    let models = Ad4mDb::with_global_instance(|db| db.get_models())
+    let models = crate::db_backend::db_backend()
+        .get_models()
         .map_err(|_| TtsPassthroughError::NotConfigured)?;
 
     // Prefer an exact name match (callers send the upstream model

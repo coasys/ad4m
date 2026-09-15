@@ -8,6 +8,7 @@ use crate::agent::capabilities::{
 };
 use crate::agent::AgentService;
 use crate::db::Ad4mDb;
+use crate::db_backend::DbBackend;
 use crate::wallet::wallet_backend;
 
 /// Whether the wallet holds its keys right now.
@@ -39,25 +40,21 @@ fn check_executor_unlocked() -> Result<(), String> {
 
 /// Check if multi-user mode is enabled.
 pub fn is_multi_user_enabled() -> bool {
-    Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false))
+    crate::db_backend::db_backend()
+        .get_multi_user_enabled()
+        .unwrap_or(false)
 }
 
 /// Create a verification code for the given email and type ("signup" or "login").
 pub fn create_verification_code(email: &str, verification_type: &str) -> Result<String, String> {
-    let db = Ad4mDb::global_instance();
-    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-    db_ref
+    crate::db_backend::db_backend()
         .create_verification_code(email, verification_type)
         .map_err(|e| format!("Failed to create verification code: {}", e))
 }
 
 /// Verify a code for the given email and type.
 pub fn verify_code(email: &str, code: &str, verification_type: &str) -> Result<bool, String> {
-    let db = Ad4mDb::global_instance();
-    let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-    let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-    db_ref
+    crate::db_backend::db_backend()
         .verify_code(email, code, verification_type)
         .map_err(|e| format!("Verification failed: {}", e))
 }
@@ -122,8 +119,29 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
         }
     });
 
-    // Check if user already exists (local DB or shared DB)
-    let user_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+    // Check if user already exists in local DB.
+    // Always use local_db() — the user row must live in local SQLite
+    // regardless of backend mode. In shared mode, the shared upsert
+    // below syncs it for cross-executor access.
+    let local = crate::db_backend::local_db();
+    let user_exists = match local.get_user(email) {
+        Ok(_) => true,
+        Err(e) => {
+            let msg = e.to_string();
+            // FRAGILE: not-found detection by substring. The trait lacks an
+            // explicit NotFound variant, so we match on known error messages.
+            // A reworded error from Ad4mDb turns not-found into an internal
+            // error. See data-bot finding #5 on PR #969.
+            if msg.contains("not found")
+                || msg.contains("No user")
+                || msg.contains("Query returned no rows")
+            {
+                false
+            } else {
+                return Err(format!("Failed to check user: {}", msg));
+            }
+        }
+    };
     if user_exists {
         return Err("User already exists".to_string());
     }
@@ -143,17 +161,14 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
     let password_hash =
         Ad4mDb::hash_password(password).map_err(|e| format!("Failed to hash password: {}", e))?;
 
-    // Add user to local DB
-    {
-        let db = Ad4mDb::global_instance();
-        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-        db_ref
-            .add_user_prehashed(email, &did, &password_hash)
-            .map_err(|e| format!("Failed to add user: {}", e))?;
-    }
+    // Add user to local DB — always via local_db(), never db_backend().
+    // In shared mode, SharedDb::add_user_prehashed returns shared_not_supported!,
+    // which would short-circuit before the shared upsert below ever runs.
+    local
+        .add_user_prehashed(email, &did, &password_hash)
+        .map_err(|e| format!("Failed to add user: {}", e))?;
 
-    // Also store in shared DB for cross-executor access
+    // Sync to shared DB for cross-executor access
     if config.db_backend.as_deref() == Some("shared") {
         let backend = crate::db_backend::db_backend();
         let user_data = serde_json::json!({
@@ -194,8 +209,10 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
 pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
     check_executor_unlocked()?;
 
-    // Try local DB first
-    let local_result = Ad4mDb::with_global_instance(|db| db.verify_user_password(email, password));
+    // Try local DB first — always via local_db(), not db_backend().
+    // In shared mode, SharedDb::verify_user_password returns shared_not_supported!,
+    // which would skip the shared-fallback path below.
+    let local_result = crate::db_backend::local_db().verify_user_password(email, password);
 
     match local_result {
         Ok(true) => {
@@ -244,15 +261,10 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
             .map_err(|e| format!("Failed to create user key: {}", e))?;
     }
 
-    // Import user to local DB for future logins
+    // Import user to local DB for future logins — always via local_db()
     let user_did = user_data.get("did").and_then(|d| d.as_str()).unwrap_or("");
-    {
-        let db = Ad4mDb::global_instance();
-        let db_lock = db.lock().expect("Couldn't get lock on Ad4mDb");
-        let db_ref = db_lock.as_ref().expect("Ad4mDb not initialized");
-        if let Err(e) = db_ref.add_user_prehashed(email, user_did, stored_hash) {
-            log::warn!("Failed to import user to local DB: {}", e);
-        }
+    if let Err(e) = crate::db_backend::local_db().add_user_prehashed(email, user_did, stored_hash) {
+        log::warn!("Failed to import user to local DB: {}", e);
     }
 
     Ok(())
@@ -289,7 +301,8 @@ pub async fn request_login_code(email: &str, app_name: Option<&str>) -> Result<(
     }
     user_exists(email)?;
 
-    Ad4mDb::with_global_instance(|db| db.check_and_update_rate_limit(email))
+    crate::db_backend::db_backend()
+        .check_and_update_rate_limit(email)
         .map_err(|e| e.to_string())?;
 
     let code = create_verification_code(email, "login")?;
@@ -321,7 +334,22 @@ pub fn verify_and_login(
 /// Check if a user exists in both DB and AgentService.
 pub fn user_exists(email: &str) -> Result<(), String> {
     check_executor_unlocked()?;
-    let db_exists = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+    // Always check local DB — user rows live in local SQLite.
+    let db_exists = match crate::db_backend::local_db().get_user(email) {
+        Ok(_) => true,
+        Err(e) => {
+            let msg = e.to_string();
+            // FRAGILE: not-found detection by substring. See comment in create_user.
+            if msg.contains("not found")
+                || msg.contains("No user")
+                || msg.contains("Query returned no rows")
+            {
+                false
+            } else {
+                return Err(format!("Failed to check user: {}", msg));
+            }
+        }
+    };
     if !db_exists {
         return Err("User not found".to_string());
     }

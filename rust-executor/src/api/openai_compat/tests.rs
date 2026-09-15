@@ -574,6 +574,7 @@ fn init_test_db() {
             drop(guard);
             let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
         }
+        crate::db_backend::init_db_backend(std::sync::Arc::new(crate::db_backend::LocalDb));
     });
 }
 
@@ -1045,15 +1046,17 @@ struct DbSettingsGuard {
 
 impl DbSettingsGuard {
     fn set(multi_user: bool, rates: &[(String, f64)]) -> Self {
-        let prev_multi_user = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.get_multi_user_enabled().unwrap_or(false)
-        });
-        let prev_rates =
-            crate::db::Ad4mDb::with_global_instance(|db| db.get_host_rates().unwrap_or_default());
-        let _ = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.set_multi_user_enabled(multi_user)?;
-            db.set_host_rates(rates)
-        });
+        let prev_multi_user = crate::db_backend::db_backend()
+            .get_multi_user_enabled()
+            .unwrap_or(false);
+        let prev_rates = crate::db_backend::db_backend()
+            .get_host_rates()
+            .unwrap_or_default();
+        {
+            let _db = crate::db_backend::db_backend();
+            let _ = _db.set_multi_user_enabled(multi_user);
+            let _ = _db.set_host_rates(rates);
+        }
         Self {
             prev_multi_user,
             prev_rates,
@@ -1063,10 +1066,11 @@ impl DbSettingsGuard {
 
 impl Drop for DbSettingsGuard {
     fn drop(&mut self) {
-        let _ = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.set_multi_user_enabled(self.prev_multi_user)?;
-            db.set_host_rates(&self.prev_rates)
-        });
+        {
+            let _db = crate::db_backend::db_backend();
+            let _ = _db.set_multi_user_enabled(self.prev_multi_user);
+            let _ = _db.set_host_rates(&self.prev_rates);
+        }
     }
 }
 

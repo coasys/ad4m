@@ -663,8 +663,9 @@ async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
-        runtime.add_trusted_agent(body.agents);
-    });
+        runtime.add_trusted_agent(body.agents)
+    })
+    .map_err(|e| WsRpcError::internal(e))?;
 
     let result = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()
@@ -684,8 +685,9 @@ async fn delete_trusted_agents(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
-        runtime.remove_trusted_agent(body.agents);
-    });
+        runtime.remove_trusted_agent(body.agents)
+    })
+    .map_err(|e| WsRpcError::internal(e))?;
 
     let result = crate::runtime_service::RuntimeService::with_global_instance(|runtime| {
         runtime.get_trusted_agents()

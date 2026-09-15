@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use crate::agent::capabilities::*;
 use crate::ai_service::AIService;
-use crate::db::Ad4mDb;
 use crate::types::{AITask, AITaskInput, ModelInput, ModelType, RequestContext};
 use base64::Engine;
 
@@ -13,16 +12,19 @@ use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let global_free = crate::db_backend::db_backend()
+        .get_free_hosting_enabled()
+        .unwrap_or(false);
     if global_free {
         return Ok(());
     }
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+        let free = crate::db_backend::db_backend()
+            .get_user_free_access(email)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+            let credits = crate::db_backend::db_backend()
+                .get_user_credits(email)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             if credits <= 0.0 {
                 return Err(WsRpcError::forbidden("Insufficient compute credits"));
@@ -42,7 +44,8 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
-    let models = Ad4mDb::with_global_instance(|db| db.get_models())
+    let models = crate::db_backend::db_backend()
+        .get_models()
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(models)?)
 }
@@ -135,11 +138,13 @@ async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     let model_type: ModelType = serde_json::from_str(&format!("\"{}\"", model_type_str))
         .map_err(|e| WsRpcError::bad_request(format!("Invalid modelType: {}", e)))?;
 
-    let model_id = Ad4mDb::with_global_instance(|db| db.get_default_model(model_type))
+    let model_id = crate::db_backend::db_backend()
+        .get_default_model(model_type)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let model = if let Some(id) = model_id {
-        Ad4mDb::with_global_instance(|db| db.get_model(id))
+        crate::db_backend::db_backend()
+            .get_model(id)
             .map_err(|e| WsRpcError::internal(e.to_string()))?
     } else {
         None
