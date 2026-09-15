@@ -316,6 +316,7 @@ impl AgentService {
                     hc_bootstrap_url: None,
                     hc_relay_url: None,
                     connect_holochain: None,
+                    run_holochain: None,
                     admin_credential: None,
                     localhost: None,
                     auto_permit_cap_requests: None,

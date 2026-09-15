@@ -18,8 +18,7 @@
         "@coasys/ad4m#build",
         "@coasys/ad4m-connect#build",
         "@coasys/rust-ad4m-executor#build",
-        "@coasys/ad4m-cli#build",
-        "@coasys/link-server#build"
+        "@coasys/ad4m-cli#build"
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },

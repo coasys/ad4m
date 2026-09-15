@@ -235,10 +235,10 @@ RUN rm -rf /home/builder/deno-local /home/builder/rusty_v8-local \
 
 # ── Generate Docker bootstrap seed ────────────────────────────────────
 # Local bootstrap languages replace Holochain-backed ones for standalone mode.
-# docker/ is copied here (not with the source tree above) so that changes
-# to generate-seed.mjs or download-models.sh don't bust the Rust cache.
+# bootstrap-languages/ was already COPY'd with the source tree above.
+# docker/ only holds download-models.sh now.
 COPY --chown=builder:builder docker/ ./docker/
-RUN node docker/generate-seed.mjs docker/bootstrap-languages docker/seed-output
+RUN node bootstrap-languages/local/generate-seed.mjs bootstrap-languages/local docker/seed-output
 
 # =============================================================================
 # Stage 2a: WE web frontend (conditional)
