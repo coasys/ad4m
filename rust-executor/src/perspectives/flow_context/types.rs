@@ -86,7 +86,12 @@ pub struct FlowInstanceRecord {
     /// collision that broke `baseExpression` in the reserved-field
     /// rename fix (commit `e6362e5ca`).
     pub subject: String,
-    /// Current state name (matches a `FlowState.name` on the flow).
+    /// The state name this replica's consensus pass last cached for the
+    /// instance (a `Local` link, #987) — or **empty** when no pass has run
+    /// here yet. Never the authority: the fold over the signed proposals is
+    /// (`flow_instance::derive_states` replaces this field with its
+    /// verdict). Readers that need the live state derive; readers that only
+    /// need the row (spawn dedup, lookups) must tolerate the empty value.
     pub current_state: String,
     /// ISO-8601 timestamp the instance was minted at. Sourced from
     /// `Ad4mModel`'s synthesised `createdAt` (earliest link timestamp on

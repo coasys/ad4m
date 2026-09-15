@@ -89,6 +89,22 @@ impl<'a> FlowTokens<'a> {
         out
     }
 
+    /// Whether `s` still carries any supported token. Same token set as
+    /// [`Self::substitute`], so a caller can assert substitution was total
+    /// without repeating the list. The evaluator uses it to refuse a role
+    /// query whose `$did` never resolved — such a query is identical for
+    /// every candidate and so cannot discriminate between DIDs.
+    pub fn contains_token(s: &str) -> bool {
+        [
+            FLOW_BASE_TOKEN,
+            FLOW_URI_TOKEN,
+            FLOW_INSTANCE_TOKEN,
+            DID_TOKEN,
+        ]
+        .iter()
+        .any(|t| s.contains(t))
+    }
+
     /// Build tokens from a [`FlowContext`]. `did` is left empty — the
     /// prompt path preserves `$did` verbatim; the evaluator fills it in.
     #[allow(dead_code)]
