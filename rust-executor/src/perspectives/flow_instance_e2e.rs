@@ -24,7 +24,7 @@ use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::{fold_read_set, ReadSet};
 use crate::agent::signatures::TestSigner;
-use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
 
 const TASK: &str = "ad4m://task/1";
 
@@ -450,6 +450,90 @@ async fn an_instance_without_a_cache_still_loads_and_the_pass_fills_it() {
         "the pass writes the fold's answer"
     );
     assert_eq!(current_state_links(&f).await[0].status, Some(LinkStatus::Local));
+}
+
+/// Deliver links the way the link language delivers them: through
+/// `diff_from_link_language`, which is where the sync trigger hangs.
+async fn sync_in(f: &Fixture, links: Vec<LinkExpression>) {
+    f.perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(links))
+        .await
+        .expect("diff_from_link_language");
+}
+
+/// Poll the cache until it reads `state` or the budget runs out; `true`
+/// when it got there. The sync-triggered pass is debounced and runs on a
+/// spawned task, so a test cannot await it directly.
+async fn cache_reaches(f: &Fixture, state: &str) -> bool {
+    for _ in 0..50 {
+        if f.cached_state().await == state {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// A peer's vote arriving through sync — not through this replica's own
+/// accept or mint — must bring this replica's cache and marks up to date
+/// by itself: they are `Local`, so nobody else can. No pass is called here;
+/// the one `diff_from_link_language` queues does the work.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_synced_vote_triggers_this_replicas_own_pass() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let minted = f.mint_one().await;
+    assert_eq!(f.cached_state().await, "identified", "1 < n = 2 at mint");
+
+    let bob = TestSigner::generate();
+    let vote = bob.sign(
+        Link {
+            source: minted.clone(),
+            predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+            target: bob.did.clone(),
+        }
+        .normalize(),
+    );
+    sync_in(&f, vec![LinkExpression::from(vote)]).await;
+
+    assert!(
+        cache_reaches(&f, "scoped").await,
+        "the synced vote must trigger the pass that heals the cache"
+    );
+    assert!(
+        f.read_set().await.marked_proposals().contains(&minted),
+        "and that pass marks the settling proposal"
+    );
+    assert_eq!(
+        current_state_links(&f).await.len(),
+        1,
+        "single Local cache link, as always"
+    );
+}
+
+/// A synced chat message queues nothing: the trigger is keyed on the flow
+/// vocabulary, so ordinary traffic never re-derives a flow. Pinned by the
+/// cache staying put where a pass would have healed it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_synced_chat_message_does_not_trigger_a_pass() {
+    let mut f = seed_satisfied_fixture(None).await;
+    forge_cached_state(&mut f, "scoped").await;
+    let bob = TestSigner::generate();
+    let chat = bob.sign(
+        Link {
+            source: "flux://message/1".to_string(),
+            predicate: Some("flux://body".to_string()),
+            target: literal("hello"),
+        }
+        .normalize(),
+    );
+    sync_in(&f, vec![LinkExpression::from(chat)]).await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert_eq!(
+        f.cached_state().await,
+        "scoped",
+        "no pass ran: the wrong cache was not healed"
+    );
 }
 
 // ---------------------------------------------------------------------------

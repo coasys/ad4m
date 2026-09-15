@@ -69,14 +69,15 @@ pub struct FireOutcome {
 /// graph lags the fold, write the cache and the marks in a single batch.
 ///
 /// Never fails: any error is logged and skips the narrowest safe unit
-/// (instance < pass). `instance_filter` narrows the sweep to one instance,
-/// so a single accept does not re-derive every flow on the perspective.
+/// (instance < pass). `instance_filter` narrows the sweep to the named
+/// instances, so a single accept — or a sync burst that touched two flows —
+/// does not re-derive every flow on the perspective.
 pub async fn run_flow_consensus_pass(
     perspective: &mut PerspectiveInstance,
     scope: Option<&Scope>,
     context: &AgentContext,
     flow_filter: Option<&[String]>,
-    instance_filter: Option<&str>,
+    instance_filter: Option<&[String]>,
 ) -> Vec<FireOutcome> {
     let loaded = async {
         let mut flows_by_uri = load_shacl_flows(perspective).await?;
@@ -96,7 +97,7 @@ pub async fn run_flow_consensus_pass(
         }
     };
     if let Some(only) = instance_filter {
-        records.retain(|r| r.instance_uri == only);
+        records.retain(|r| only.contains(&r.instance_uri));
     }
     records.sort_by(|a, b| a.instance_uri.cmp(&b.instance_uri));
 

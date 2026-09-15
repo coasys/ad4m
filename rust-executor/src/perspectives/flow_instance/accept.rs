@@ -133,7 +133,14 @@ pub async fn accept_flow_proposal(
             .await
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
-    Ok(run_flow_consensus_pass(perspective, None, context, None, Some(&instance_uri)).await)
+    Ok(run_flow_consensus_pass(
+        perspective,
+        None,
+        context,
+        None,
+        Some(std::slice::from_ref(&instance_uri)),
+    )
+    .await)
 }
 
 /// Every source-link of a proposal. `Err` when the URI carries none —

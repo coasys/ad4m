@@ -28,6 +28,10 @@ use ad4m_client::literal::Literal;
 pub(crate) const FLOW_INSTANCE_CLASS: &str = "FlowInstance";
 pub(crate) const FLOW_INSTANCE_TARGET_CLASS: &str = "ad4m://FlowInstance";
 pub(crate) const FLOW_INSTANCE_SDNA: &str = include_str!("hardwired_sdna/flow_instance.json");
+/// `FlowInstance → flowUri` — the row's identity: which `SHACLFlow` it runs.
+pub(crate) const FLOW_URI_PREDICATE: &str = "ad4m://flow/flow_uri";
+/// `FlowInstance → subject` — the base expression the flow runs on.
+pub(crate) const FLOW_BASE_PREDICATE: &str = "ad4m://flow/base";
 /// `FlowInstance → currentState` — the engine's per-replica cache of the
 /// derived state. Written [`LinkStatus::Local`] only (see
 /// [`write_local_current_state`]); the fold never reads it.
@@ -340,6 +344,17 @@ mod tests {
                 "FlowInstance SDNA missing '{expected}' property (found {names:?})",
             );
         }
+        // The predicate constants the sync trigger and the direct cache
+        // write use must be the paths the shape declares.
+        let path_of = |name: &str| {
+            props
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .and_then(|p| p["path"].as_str())
+        };
+        assert_eq!(path_of("flowUri"), Some(FLOW_URI_PREDICATE));
+        assert_eq!(path_of("subject"), Some(FLOW_BASE_PREDICATE));
+        assert_eq!(path_of("currentState"), Some(FLOW_CURRENT_STATE_PREDICATE));
     }
 
     #[test]

@@ -61,7 +61,10 @@
 //! [`pass`] writes the cache and the marks, [`accept`] casts this replica's
 //! own vote — re-verifying the proposal's evidence seal against our own graph
 //! before signing, and sweeping the instance afterwards so the new vote is
-//! folded. Nothing in them can move a state the fold did not derive.
+//! folded — and [`trigger`] runs that same sweep when a peer's flow links
+//! sync in, since the cache and the marks are this replica's own and nobody
+//! else can update them. Nothing in them can move a state the fold did not
+//! derive.
 //!
 //! # The read-set is the proof
 //!
@@ -79,6 +82,7 @@ pub mod atom;
 pub mod fold;
 pub mod pass;
 pub mod roles;
+pub mod trigger;
 
 use crate::perspectives::flow_context::FlowInstanceRecord;
 use crate::perspectives::flow_spawn::initial_state_of;
