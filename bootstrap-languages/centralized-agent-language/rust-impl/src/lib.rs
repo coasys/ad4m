@@ -1,7 +1,7 @@
 //! # Centralized Agent Expression Store — Rust ALDK port
 //!
 //! Expression language that stores agent expressions via a centralized
-//! HTTP server (socket.ad4m.dev). Ports the JS implementation at
+//! HTTP server (mock.ad4m.dev). Ports the JS implementation at
 //! `bootstrap-languages/centralized-agent-language/index.ts` onto the
 //! Rust ALDK: same endpoint, same content contract (an Agent object
 //! with `did` + `perspective`).
@@ -11,7 +11,7 @@ use ad4m_ldk::prelude::*;
 use web_sys::console;
 use wasm_bindgen::JsValue;
 
-const ENDPOINT: &str = "https://socket.ad4m.dev/agent";
+const ENDPOINT: &str = "https://mock.ad4m.dev/agent";
 
 fn log(msg: &str) {
     console::log_1(&JsValue::from_str(msg));
@@ -33,7 +33,7 @@ impl Language for CentralizedAgentLanguage {
     fn is_public() -> bool { false }
 
     async fn init() -> LanguageResult<Self> {
-        log("[centralized-agent-language] init: ready (socket.ad4m.dev)");
+        log("[centralized-agent-language] init: ready (mock.ad4m.dev)");
         Ok(CentralizedAgentLanguage)
     }
 }
