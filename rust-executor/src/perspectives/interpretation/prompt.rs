@@ -1174,7 +1174,58 @@ mod tests {
         assert!(p.contains("At most one proposal"));
     }
 
+    /// The renderer itself must declare cardinality, mapped from the shape's
+    /// `kind` (#1005) — this is the test that fails if the `cardinality`
+    /// line is deleted from `build_interpretation_input`.
+    ///
+    /// The two fixture tests below it check the *hand-written few-shot
+    /// examples* agree with the rule; neither calls the renderer, so without
+    /// this test the actual fix was unpinned (Lal's #1013 review). It also
+    /// pins the `kind == "hasMany" → "many"` mapping in both directions,
+    /// which nothing else checks.
     #[test]
+    fn build_interpretation_input_declares_cardinality_from_relation_kind() {
+        const REVIEW_WITH_HAS_ONE_SDNA: &str = r#"{
+          "target_class":"ns://Review",
+          "interpretation_hint":"A review of one task.",
+          "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://review"}],
+          "properties":[
+            {"path":"ns://type","name":"type","has_value":"ns://review","min_count":1,"max_count":1},
+            {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+            {"path":"ns://subject","name":"subject","relation_kind":"hasOne","target_class_name":"Task","class":"ns://TaskShape","interpretation_hint":"The task under review."}
+          ]
+        }"#;
+        let shapes = vec![
+            // `blocks`: hasMany -> Task (shared fixture)
+            shape_from_sdna("Task", TASK_WITH_RELATION_SDNA),
+            // `subject`: hasOne -> Task
+            shape_from_sdna("Review", REVIEW_WITH_HAS_ONE_SDNA),
+        ];
+        let input = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text("Nico", "review the task")],
+            &no_existing(),
+            &[],
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let relation = |class: &str, name: &str| -> serde_json::Value {
+            v["classes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == class)
+                .unwrap_or_else(|| panic!("class {class} not rendered"))["relations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["name"] == name)
+                .unwrap_or_else(|| panic!("relation {class}.{name} not rendered"))
+                .clone()
+        };
+        assert_eq!(relation("Task", "blocks")["cardinality"], "many");
+        assert_eq!(relation("Review", "subject")["cardinality"], "one");
+    }
+
     /// Every rendered relation must declare its cardinality (#1005).
     ///
     /// Without it the model has no valid shape for a second target on a
@@ -1182,8 +1233,12 @@ mod tests {
     /// produced #1005 emitted `{"between": "a", "between": "b"}`, and JSON
     /// last-wins silently dropped one side of a tension. The value is never
     /// absent and is never anything but the two legal words.
+    ///
+    /// Scope: iterates the hand-written few-shot fixtures, not the renderer —
+    /// the renderer end is pinned by
+    /// [`build_interpretation_input_declares_cardinality_from_relation_kind`].
     #[test]
-    fn every_rendered_relation_declares_its_cardinality() {
+    fn every_fixture_relation_declares_its_cardinality() {
         let examples = interpretation_examples();
         let mut checked = 0usize;
         for ex in &examples {
