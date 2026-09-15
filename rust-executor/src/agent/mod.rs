@@ -11,6 +11,7 @@ use crate::types::{Expression, ExpressionProof};
 use crate::wallet::wallet_backend;
 
 pub mod capabilities;
+pub mod kel;
 pub mod signatures;
 
 /// Validate that a user email is safe to use as a filesystem path segment.
