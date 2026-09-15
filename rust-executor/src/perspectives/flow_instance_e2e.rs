@@ -6,11 +6,12 @@
 //! proposal, suppressed a mint or fabricated history with a single link that
 //! any neighbourhood member can write.
 //!
-//! Two of them pin *intended* behaviour that reads like a hole and is not
+//! One of them pins *intended* behaviour that reads like a hole and is not
 //! one: deleting a settled vote regresses the state (the graph is the truth
-//! and the state follows it), and revoking a role can un-settle an old edge
-//! (roles are re-derived live). Both are rulings, and both are visible here
-//! rather than silent.
+//! and the state follows it). The role-revocation tests pin the CORRECT
+//! behaviour introduced by tombstone revocation: a revocation is an explicit
+//! signed link, and eligibility is gated as-of each vote's own timestamp, so
+//! revocation only affects votes cast AFTER it — settled edges stay settled.
 
 use super::flow_classes::{advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE};
 use super::flow_context::load_shacl_flows;
@@ -18,7 +19,8 @@ use super::flow_evaluator::recompute_evidence_hash;
 use super::flow_evaluator_e2e::{literal, seed_flow, seed_satisfied_fixture, Fixture};
 use super::flow_instance::accept::accept_flow_proposal;
 use super::flow_instance::atom::{
-    ACCEPTED_BY_PREDICATE, FIRED_MARK, RESOLVED_AS_PREDICATE, TO_STATE_PREDICATE,
+    ACCEPTED_BY_PREDICATE, FIRED_MARK, RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE,
+    TO_STATE_PREDICATE,
 };
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
@@ -861,13 +863,59 @@ async fn a_non_role_member_vote_does_not_count() {
     );
 }
 
-/// Test 20. The consequence of resolving roles against the CURRENT graph,
-/// pinned so it is visible rather than silent: revoking a voter's role after
-/// an edge settled un-settles it. Fixing this needs platform work (as-of
-/// queries and tombstoned role rows); until then a minted token's backing
-/// records which role rows the verdict rested on.
+/// Test 20. Tombstone revocation: a role revocation is an explicit signed link
+/// (`ad4m://flow/role_grant_revoked`), never a deletion. Because eligibility is
+/// gated as-of each vote's own timestamp, a tombstone written AFTER a vote
+/// cannot un-settle the edge that vote produced. The grant row stays in the
+/// graph, newcomers read the same history, and replicas always converge.
 #[tokio::test(flavor = "multi_thread")]
-async fn removing_a_voters_role_after_settle_unsettles_the_edge() {
+async fn revoking_a_role_after_settlement_does_not_unsettle_the_edge() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(
+        &mut f,
+        "delivery://Delivery.scoped",
+        r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#,
+    )
+    .await;
+    // Grant the role; the vote timestamp will be strictly later (wall-clock).
+    f.link(
+        TASK,
+        "ns://owner",
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
+    f.mint_one().await;
+    consensus_pass(&mut f).await;
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "edge settles while voter holds the role"
+    );
+
+    // Revoke via tombstone (timestamp > vote timestamp — sequential write).
+    f.link(
+        TASK,
+        ROLE_GRANT_REVOKED_PREDICATE,
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
+
+    // A newcomer deriving from scratch must reach the same state.
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "tombstone revocation does not un-settle history: the vote pre-dates the revocation"
+    );
+}
+
+/// Test 21. Newcomer convergence: a replica that first derives AFTER a
+/// tombstone is written reaches the same settled state as one that derived
+/// before. Both are represented by sequential `derived()` calls — the fold
+/// always re-derives from scratch so there is no separate newcomer code path.
+#[tokio::test(flavor = "multi_thread")]
+async fn newcomer_replica_converges_to_same_state_after_revocation() {
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(
         &mut f,
@@ -884,24 +932,98 @@ async fn removing_a_voters_role_after_settle_unsettles_the_edge() {
     .await;
     f.mint_one().await;
     consensus_pass(&mut f).await;
-    assert_eq!(f.derived().await.state, "scoped");
+    let state_before = f.derived().await.state.clone();
+    assert_eq!(state_before, "scoped");
 
-    let owner_links: Vec<LinkExpression> = links_of(&f, TASK)
-        .await
-        .into_iter()
-        .filter(|l| l.data.predicate.as_deref() == Some("ns://owner"))
-        .map(LinkExpression::from)
-        .collect();
-    assert!(!owner_links.is_empty());
-    f.perspective
-        .remove_links(owner_links, None)
-        .await
-        .expect("revoke the role");
+    // Tombstone the role after settlement.
+    f.link(
+        TASK,
+        ROLE_GRANT_REVOKED_PREDICATE,
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
 
+    // Re-derive from scratch: this is what a newcomer does.
+    assert_eq!(
+        f.derived().await.state,
+        state_before,
+        "newcomer convergence: revocation does not rewrite settled history"
+    );
+}
+
+/// Test 22. A vote cast AFTER a tombstone revocation does not count. The
+/// revocation only gates votes whose `at` timestamp follows the tombstone's.
+#[tokio::test(flavor = "multi_thread")]
+async fn late_syncing_revocation_stops_counting_votes_that_arrive_after_it() {
+    let mut f = seed_satisfied_fixture(None).await;
+    // n=2: need two distinct eligible voters to settle.
+    set_consensus_rule(
+        &mut f,
+        "delivery://Delivery.scoped",
+        r#"{"n":2,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#,
+    )
+    .await;
+    let bob = TestSigner::generate();
+
+    // Grant Alice's role and write her proposal (1 vote, need 2 to settle).
+    f.link(
+        TASK,
+        "ns://owner",
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
+    let seal = seal_for(&f, "scoped").await;
+    // write_proposal takes a short ID; the full URI is ad4m://flow/proposal/<id>.
+    let proposal_id = "revoke-timing";
+    let proposal_uri = format!("ad4m://flow/proposal/{proposal_id}");
+    f.write_proposal(
+        proposal_id,
+        "identified",
+        "scoped",
+        &[TASK.to_string()],
+        &seal,
+    )
+    .await;
     assert_eq!(
         f.derived().await.state,
         "identified",
-        "roles are re-derived live, so revoking one un-settles the edge it decided"
+        "1 < n=2, not settled"
+    );
+
+    // Revoke Alice's role (tombstone, after her vote — strictly later wall-clock).
+    f.link(
+        TASK,
+        ROLE_GRANT_REVOKED_PREDICATE,
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
+
+    // Add Bob to the role (grant timestamp > revocation) and have Bob vote.
+    f.link(TASK, "ns://owner", &literal(&bob.did), LinkStatus::Local)
+        .await;
+    let bob_vote = bob.sign(
+        Link {
+            source: proposal_uri.clone(),
+            predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+            target: bob.did.clone(),
+        }
+        .normalize(),
+    );
+    f.perspective
+        .add_link_expression(LinkExpression::from(bob_vote), LinkStatus::Shared, None)
+        .await
+        .expect("sync Bob's vote");
+
+    // Alice's vote: T_alice < T_revoke → still counts (pre-revocation).
+    // Bob's vote: T_bob > T_bob_grant > T_revoke, Bob's grant never revoked → counts.
+    // Two eligible votes → n=2 settled.
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "Alice's pre-revocation vote + Bob's post-grant vote reach n=2"
     );
 }
 
