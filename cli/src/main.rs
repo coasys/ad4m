@@ -167,7 +167,6 @@ enum Domain {
         #[arg(long)]
         pid_file: Option<String>,
     },
-    RunLocalHcServices {},
     Eve {
         #[command(subcommand)]
         command: EveCommands,
@@ -276,6 +275,7 @@ async fn main() -> Result<()> {
                 log_holochain_metrics: None,
                 hc_relay_url: None,
                 smtp_config: None,
+                ..Default::default()
             }).await
         }).await;
         
@@ -293,11 +293,6 @@ async fn main() -> Result<()> {
             sleep(Duration::from_secs(2)).await;
         }
     };
-
-    if let Domain::RunLocalHcServices {} = args.domain {
-        rust_executor::run_local_hc_services().await?;
-        return Ok(());
-    }
 
     if let Domain::Eve { command } = args.domain {
         eve::run(command).await?;
@@ -349,7 +344,6 @@ async fn main() -> Result<()> {
             mcp_port: _,
             pid_file: _,
         } => unreachable!(),
-        Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),
     }
 

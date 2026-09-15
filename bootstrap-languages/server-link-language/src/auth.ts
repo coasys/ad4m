@@ -16,6 +16,10 @@ export interface AuthSession {
 
 let _session: AuthSession | null = null;
 let _x25519PublicKeyHex: string | null = null;
+/** In-flight authenticate() promise — prevents two concurrent callers from
+ * each consuming a fresh challenge (the second would overwrite the first's
+ * token before it's used). */
+let _authInFlight: Promise<AuthSession> | null = null;
 
 /**
  * Decodes a JWT's payload WITHOUT verifying its signature — we only read
@@ -30,7 +34,9 @@ export function parseJwtExpiryMs(token: string): number | null {
     try {
         const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
         const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
-        const payload = JSON.parse(atob(padded)) as { exp?: number };
+        const binary = atob(padded);
+        const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+        const payload = JSON.parse(new TextDecoder().decode(bytes)) as { exp?: number };
         return typeof payload.exp === "number" ? payload.exp * 1000 : null;
     } catch {
         return null;
@@ -53,7 +59,11 @@ export async function authenticate(): Promise<AuthSession> {
 
     const challenge = await api.requestChallenge(config, did);
     const signature = agent.signStringHex(challenge);
-    const token = await api.verifyChallenge(config, did, challenge, signature, myX25519PublicKeyHex());
+    const x25519Hex = myX25519PublicKeyHex();
+    // Sign the X25519 public key to prove it belongs to this DID.
+    // Uses the same SHA-256 hashing convention as agentSignStringHex.
+    const x25519Signature = agent.signStringHex(x25519Hex);
+    const token = await api.verifyChallenge(config, did, challenge, signature, x25519Hex, x25519Signature);
 
     const session: AuthSession = { token, expiresAt: parseJwtExpiryMs(token) };
     _session = session;
@@ -64,12 +74,21 @@ export async function authenticate(): Promise<AuthSession> {
  * Returns a token guaranteed valid for at least `skewMs` more milliseconds
  * (default 30s), transparently re-authenticating if there is no cached
  * session, the cached token is expired, or it's about to expire.
+ *
+ * Uses an in-flight promise cache so two concurrent callers (e.g. WS
+ * reconnect + batched flush) share the same authenticate() round-trip
+ * instead of each consuming a separate challenge.
  */
 export async function getValidToken(skewMs = 30_000): Promise<string> {
     if (_session && (_session.expiresAt === null || _session.expiresAt - Date.now() > skewMs)) {
         return _session.token;
     }
-    const session = await authenticate();
+    if (_authInFlight) {
+        const session = await _authInFlight;
+        return session.token;
+    }
+    _authInFlight = authenticate().finally(() => { _authInFlight = null; });
+    const session = await _authInFlight;
     return session.token;
 }
 
@@ -79,18 +98,8 @@ export function invalidateSession(): void {
     _session = null;
 }
 
-export function currentSession(): AuthSession | null {
-    return _session;
-}
-
-/** Returns this agent's derived X25519 public key (hex). Exposed so
- * index.ts / encryption bootstrapping can reuse the same derivation
- * without re-deriving. */
-export function getX25519PublicKeyHex(): string {
-    return myX25519PublicKeyHex();
-}
-
 export function resetAuth(): void {
     _session = null;
     _x25519PublicKeyHex = null;
+    _authInFlight = null;
 }

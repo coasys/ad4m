@@ -4,8 +4,7 @@ import fs from "fs-extra";
 import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
-import { baseUrl, sleep, startExecutor } from "./utils";
-import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
+import { baseUrl, sleep, startExecutor, runHcLocalServices } from "./utils";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +15,13 @@ const publishLanguagesPath = path.resolve(TEST_DIR, "languages");
 const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootstrapSeed.json');
 const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
 const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
+const serverLinkLanguageHashPath = path.resolve(__dirname, '..', 'scripts', 'server-link-language-hash');
+// Allow env-var override so concurrent CI jobs can each use a unique port range
+// and avoid stomping on each other during the setup phase.
+// Defaults: 15700/15701/15702 (used by integration-tests-js / test-main)
+const apiPort = parseInt(process.env.AD4M_SETUP_API_PORT || '15700', 10);
+const hcAdminPort = parseInt(process.env.AD4M_SETUP_HC_ADMIN_PORT || '15701', 10);
+const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || '15702', 10);
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -23,13 +29,19 @@ const languagesToPublish = {
     "neighbourhood-store": {name: "neighbourhood-store", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-diff-sync": {name: "perspective-diff-sync", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
     "perspective-language": {name: "perspective-language", description: "", possibleTemplateParams: ["uid", "name", "description"]} as LanguageMetaInput,
+    // SERVER_URL + ROOM_ID match the //!@ad4m-template-variable declarations in
+    // bootstrap-languages/server-link-language/index.ts. `name` + `description`
+    // aren't code-templated — they get through to the language meta so tests
+    // can assert on `socialContext.name` the same way they do for p-diff-sync.
+    "server-link-language": {name: "server-link-language", description: "", possibleTemplateParams: ["SERVER_URL", "ROOM_ID", "name", "description"]} as LanguageMetaInput,
 }
 
 const languageHashes = {
     "agentLanguage": "",
     "perspectiveLanguage": "",
     "neighbourhoodLanguage": "",
-    "perspectiveDiffSync": ""
+    "perspectiveDiffSync": "",
+    "serverLinkLanguage": ""
 }
 
 // Kill the listening process on each port (TCP:LISTEN filter ensures we only
@@ -66,22 +78,38 @@ function injectSystemLanguages() {
 
 function injectLangAliasHashes() {
     fs.writeFileSync(perspectiveDiffSyncHashPath, languageHashes["perspectiveDiffSync"]);
+    fs.writeFileSync(serverLinkLanguageHashPath, languageHashes["serverLinkLanguage"]);
 }
 
 async function publish() {
-    // Allocate random free ports to avoid collisions with stale executors
-    // from previous CI jobs on the same self-hosted runner.
-    const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
     const setupPorts = [apiPort, hcAdminPort, hcAppPort];
-    console.log(`Setup ports: ${setupPorts.join('/')}`);
 
-    // Register with the port cleanup registry so cleanup.js can kill the
-    // executor if this process is killed ungracefully (SIGKILL, runner cancel).
-    registerPorts(setupPorts);
+    // Pre-clean: kill any orphaned executor from a previous CI job that may be
+    // squatting on our ports. Self-hosted runners reuse workdirs between jobs
+    // and don't clean up automatically.
+    console.log(`Pre-cleaning ports ${setupPorts.join('/')} before starting executor...`);
+    killExecutorPorts(setupPorts);
+    await sleep(500);
 
     createTestingAgent();
 
-    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, apiPort, hcAdminPort, hcAppPort, true);
+    // Publishing setup runs a temporary LOCAL kitsune2-bootstrap-srv so the
+    // setup executor never talks to dev-test-bootstrap2 (super old). See
+    // Nico's 2026-08-26 voice note + utils.ts:startExecutor comment.
+    const localServices = await runHcLocalServices();
+    if (!localServices.bootstrapUrl || !localServices.proxyUrl) {
+        throw new Error("publishTestLangs: runHcLocalServices did not yield bootstrap/proxy URLs");
+    }
+    const executorProcess = await startExecutor(
+        appDataPath,
+        publishingBootstrapSeedPath,
+        apiPort, hcAdminPort, hcAppPort,
+        true,
+        undefined,
+        localServices.proxyUrl,
+        localServices.bootstrapUrl,
+    );
+    (executorProcess as any).__localServicesProcess = localServices.process;
 
     try {
         const ad4mClient = new Ad4mClient(baseUrl(apiPort));
@@ -104,6 +132,9 @@ async function publish() {
             if (language === "perspective-diff-sync") {
                 languageHashes["perspectiveDiffSync"] = publishedLang.address;
             }
+            if (language === "server-link-language") {
+                languageHashes["serverLinkLanguage"] = publishedLang.address;
+            }
         }
         injectSystemLanguages();
         injectLangAliasHashes();
@@ -123,6 +154,7 @@ async function publish() {
             "neighbourhood-store": "neighbourhoodLanguage",
             "perspective-diff-sync": "perspectiveDiffSync",
             "perspective-language": "perspectiveLanguage",
+            "server-link-language": "serverLinkLanguage",
         };
         for (const [langFolder, hashKey] of Object.entries(langFolderToHash)) {
             const srcBundle = path.join(publishLanguagesPath, langFolder, "build", "bundle.js");
@@ -141,7 +173,6 @@ async function publish() {
         // NOT this node process which has an outbound connection to that port.
         console.log(`Killing executor on ports ${setupPorts.join('/')}...`);
         killExecutorPorts(setupPorts);
-        deregisterPorts(setupPorts);
         await sleep(1000);
     }
 

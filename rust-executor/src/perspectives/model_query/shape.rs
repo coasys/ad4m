@@ -89,7 +89,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             ?getter ?hasValue ?className
             ?relationKind ?targetClassName
             ?whereFilter ?wherePredicates ?filterEnabled
-            ?transform ?interpretationHint ?identity
+            ?transform ?interpretationHint ?identity ?ordering
         WHERE {{
             <{shape_uri}> <sh://property> ?propUri .
             ?propUri <sh://path> ?path .
@@ -103,6 +103,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             OPTIONAL {{ ?propUri <ad4m://writable> ?writable . }}
             OPTIONAL {{ ?propUri <ad4m://local> ?local . }}
             OPTIONAL {{ ?propUri <ad4m://getter> ?getter . }}
+            OPTIONAL {{ ?propUri <ad4m://ordering> ?ordering . }}
             OPTIONAL {{ ?propUri <sh://hasValue> ?hasValue . }}
             OPTIONAL {{ ?propUri <sh://class> ?className . }}
             OPTIONAL {{ ?propUri <ad4m://relationKind> ?relationKind . }}
@@ -156,6 +157,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let writable = parse_bool_literal_target(first["writable"].as_str());
         let local = parse_bool_literal_target(first["local"].as_str());
         let getter = first["getter"].as_str().map(decode_literal_string_target);
+        let ordering = first["ordering"].as_str().map(decode_literal_string_target);
         let has_value = first["hasValue"].as_str().map(decode_literal_target_value);
         let target_class_uri = first["className"].as_str().map(|s| s.to_string());
         let relation_kind = first["relationKind"]
@@ -271,6 +273,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 transform: transform.clone(),
                 interpretation_hint: interpretation_hint.clone(),
                 identity,
+                ordering: ordering.clone(),
             });
 
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
@@ -312,6 +315,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 transform,
                 interpretation_hint,
                 identity,
+                ordering: ordering.clone(),
             });
         }
     }
@@ -588,6 +592,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 transform,
                 interpretation_hint: None,
                 identity: false,
+                ordering: None,
             });
         }
     }
@@ -596,6 +601,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         for (name, rel_meta) in rels {
             let predicate = rel_meta["predicate"].as_str().unwrap_or("").to_string();
             let getter = rel_meta["getter"].as_str().map(|s| s.to_string());
+            let ordering = rel_meta["ordering"].as_str().map(|s| s.to_string());
 
             if predicate.is_empty() && getter.is_none() {
                 continue;
@@ -637,6 +643,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 transform: None,
                 interpretation_hint: None,
                 identity: false,
+                ordering: ordering.clone(),
             });
 
             if rel_meta.get("targetShape").is_some() || rel_meta.get("targetClassName").is_some() {

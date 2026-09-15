@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 /**
- * Shared types for the ADAM Simple Server.
+ * Shared types for the link-server.
  *
  * These mirror AD4M's wire shapes so link-language clients can serialize
  * against this server without translation:
@@ -53,12 +53,18 @@ export interface ExpressionProof {
 }
 
 export interface LinkExpression {
-  /** DID of the signing agent, e.g. "did:key:z6Mk..." */
-  author: string;
-  /** ISO-8601 timestamp */
-  timestamp: string;
+  /** DID of the signing agent — absent for fully-encrypted links. */
+  author?: string;
+  /** ISO-8601 timestamp — absent for fully-encrypted links. */
+  timestamp?: string;
   data: LinkData | EncryptedLinkData;
-  proof: ExpressionProof;
+  /** Expression proof — absent for fully-encrypted links. */
+  proof?: ExpressionProof;
+  /** Client-computed SHA-256 of the canonical plaintext, for OR-Set
+   * dedup/removal when author/timestamp are encrypted away. */
+  link_hash?: string;
+  /** Key version used to encrypt this link (absent → version 1). */
+  key_version?: number;
 }
 
 export interface PerspectiveDiff {
@@ -78,36 +84,34 @@ export type ServerWsMessage =
   | { type: "telepresence-broadcast"; fromDid: string; payload: unknown }
   | { type: "online-agents"; agents: OnlineAgent[] }
   | { type: "peer-joined"; did: string }
-  | { type: "peer-left"; did: string };
+  | { type: "peer-left"; did: string }
+  | { type: "status-changed"; did: string; status: unknown }
+  | { type: "auth-error"; error: string };
 
 /** Client -> server WebSocket messages. */
 export type ClientWsMessage =
+  | { type: "auth"; token: string }
   | { type: "telepresence-signal"; toDid: string; payload: unknown }
   | { type: "telepresence-broadcast"; payload: unknown }
   | { type: "set-online-status"; status: unknown };
 
 /**
- * Canonical, order-stable JSON payload used for both signing and hashing a
- * LinkExpression. For plaintext links this covers {source,predicate,target,
- * author,timestamp}; for encrypted links the ciphertext/nonce stand in for
- * source/predicate/target so the server can still content-address the link
- * (OR-Set merge) without ever seeing plaintext.
+ * Canonical, order-stable JSON payload used for hashing a LinkExpression.
+ * For fully-encrypted links (link_hash present): returns the client-supplied
+ * hash directly — the server cannot compute the canonical form because all
+ * fields are encrypted.
+ * For plaintext links: {source,predicate,target,author,timestamp}.
  */
 export function canonicalLinkPayload(link: LinkExpression): string {
-  if (isEncryptedLinkData(link.data)) {
-    return JSON.stringify({
-      ciphertext: link.data.ciphertext,
-      nonce: link.data.nonce,
-      author: link.author,
-      timestamp: link.timestamp,
-    });
+  if (link.link_hash) {
+    return link.link_hash;
   }
   return JSON.stringify({
-    source: link.data.source,
-    predicate: link.data.predicate ?? null,
-    target: link.data.target,
-    author: link.author,
-    timestamp: link.timestamp,
+    source: (link.data as LinkData).source,
+    predicate: (link.data as LinkData).predicate ?? null,
+    target: (link.data as LinkData).target,
+    author: link.author ?? "",
+    timestamp: link.timestamp ?? "",
   });
 }
 
@@ -115,20 +119,47 @@ export function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }
 
-/** Deterministic content hash of a LinkExpression (used for OR-Set membership). */
+/**
+ * Deterministic content hash of a LinkExpression (used for OR-Set membership).
+ *
+ * TRUST MODEL: For encrypted links the server cannot verify link_hash — it
+ * cannot decrypt the ciphertext. The client-supplied link_hash field gets
+ * trusted directly. A malicious authenticated client can submit a false
+ * hash, causing OR-Set dedup to malfunction (duplicates from distinct
+ * hashes for identical plaintext, or collisions from identical hashes for
+ * distinct plaintext). This follows from the overall trust model:
+ * authenticated clients behave correctly. An attacker needs a valid JWT
+ * (obtained via DID challenge-response) to exploit this, which limits the
+ * attack surface to compromised agents.
+ */
 export function linkHash(link: LinkExpression): string {
+  if (link.link_hash) return link.link_hash;
   return sha256Hex(canonicalLinkPayload(link));
 }
 
+/** Empty-room revision: 64 hex zeros (32 zero bytes). */
+export const EMPTY_REVISION = "0".repeat(64);
+
 /**
- * Content hash of a room's active link set: sha256 of the sorted,
- * comma-joined link hashes. NOT a sequence number — two rooms with the
- * same active links always converge to the same revision regardless of
- * the order links were added/removed in.
+ * XOR a revision with a link hash. XOR is commutative, associative,
+ * and self-inverse, so this gives O(1) incremental revision updates:
+ *   add link:    revision = xorHex(revision, linkHash)
+ *   remove link: revision = xorHex(revision, linkHash)  — XOR undoes itself
+ * Two rooms with the same active links always converge to the same
+ * revision regardless of the order links were added/removed in.
  */
-export function computeRevision(linkHashes: string[]): string {
-  const sorted = [...linkHashes].sort();
-  return sha256Hex(sorted.join(","));
+export function xorHex(a: string, b: string): string {
+  const aBuf = Buffer.from(a, "hex");
+  const bBuf = Buffer.from(b, "hex");
+  const result = Buffer.alloc(32);
+  for (let i = 0; i < 32; i++) {
+    result[i] = aBuf[i] ^ bBuf[i];
+  }
+  return result.toString("hex");
+}
+
+export interface RoomParams {
+  roomId: string;
 }
 
 export interface AuthClaims {
@@ -145,34 +176,3 @@ declare module "fastify" {
   }
 }
 
-export interface FederateRequestBody {
-  diff: PerspectiveDiff;
-  sequence: number;
-  revision: string;
-  serverPublicKey: string;
-  serverSignature: string;
-  serverUrl?: string;
-}
-
-export interface ReconcileRequestBody {
-  revision: string;
-  linkHashes: string[];
-  serverPublicKey: string;
-  serverSignature: string;
-  serverUrl?: string;
-}
-
-export interface ReconcileResponseBody {
-  diffs: PerspectiveDiff[];
-  revision: string;
-  sequence: number;
-}
-
-/** Canonical payload signed by a server's identity key for federation calls. */
-export function canonicalFederationPayload(
-  kind: "federate" | "reconcile",
-  roomId: string,
-  body: Record<string, unknown>
-): string {
-  return JSON.stringify({ kind, roomId, ...body });
-}

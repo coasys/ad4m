@@ -285,7 +285,8 @@ impl OnlineAgent {
 #[hdk_extern]
 pub fn validate(op: Op) -> ExternResult<ValidateCallbackResult> {
     match op {
-        Op::StoreRecord(StoreRecord { record }) => {
+        // HC 0.7 renamed Op::StoreRecord -> Op::CreateRecord (see holochain_integrity_types::op).
+        Op::CreateRecord(CreateRecord { record }) => {
             // Only care about our PerspectiveDiffEntryReference entries
             let maybe_entry = record
                 .entry()

@@ -30,7 +30,7 @@
 use crate::agent::AgentContext;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::{Link, LinkStatus};
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 
 use super::scalar_string;
 use crate::perspectives::hardwired_class::{ensure_subject_class, subject_class_registered};
@@ -58,6 +58,46 @@ fn first_report_for(instance_id: &str) -> bool {
         // A poisoned mutex means another thread panicked mid-report. Log rather than swallow: a
         // repeated line is a smaller problem than a silent one.
         .unwrap_or(true)
+}
+
+/// `processor_id` → the flow selection last logged for it. `load_processors`
+/// runs on every watch tick, so the selection line logs once per processor
+/// (and again on change), not once per tick. Bounded by the number of
+/// distinct processors, like [`REPORTED_BAD_INSTANCES`].
+static REPORTED_FLOW_SELECTIONS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+> = std::sync::OnceLock::new();
+
+/// Log a processor's flow selection when first seen or changed. The empty
+/// case is stated outright because it is the migration surface: every
+/// processor registered before flow selection existed loads `flows: []` and
+/// stops doing flow work, and without this line "flows are off by design"
+/// and "flows regressed" are indistinguishable in a log file.
+fn log_flow_selection_once(cfg: &AutoProcessorConfig) {
+    let Ok(mut seen) = REPORTED_FLOW_SELECTIONS
+        .get_or_init(Default::default)
+        .lock()
+    else {
+        // Poisoned mutex: skip rather than re-log — this line is purely
+        // informational, unlike the failure report above.
+        return;
+    };
+    if seen.get(&cfg.processor_id) != Some(&cfg.flows) {
+        if cfg.flows.is_empty() {
+            log::info!(
+                "load_processors: processor `{}` has no flow selection — flow features are off \
+                 for it",
+                cfg.processor_id
+            );
+        } else {
+            log::info!(
+                "load_processors: processor `{}` flow selection: {:?}",
+                cfg.processor_id,
+                cfg.flows
+            );
+        }
+        seen.insert(cfg.processor_id.clone(), cfg.flows.clone());
+    }
 }
 
 /// Local subject-class name of a processor config.
@@ -90,7 +130,7 @@ const AUTO_PROCESSOR_SDNA: &str = include_str!("../hardwired_sdna/auto_processor
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
 /// auto-processor pass over a source perspective.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AutoProcessorConfig {
     /// Human-meaningful processor name. Also part of the batch-node URI in
     /// [`super::claim::batch_node`], so claims by different processors never
@@ -116,6 +156,14 @@ pub struct AutoProcessorConfig {
     /// to materialize on each pass. Must contain at least one entry;
     /// [`load_processors`] skips otherwise.
     pub interpretation_classes: Vec<String>,
+    /// Canonical flow URIs (`SHACLFlow.flow_uri()`, `{namespace}{name}Flow`)
+    /// this processor is flow-aware of. Flow features — prompt rendering,
+    /// the proposal pass, and auto-spawn — run ONLY on selected flows
+    /// (Nico 2026-09-04: flows are targeted per processor, like the class
+    /// selection above). Empty = flow features off for this processor.
+    /// Absent on pre-flow configs, so hydration defaults to empty rather
+    /// than bailing.
+    pub flows: Vec<String>,
     /// After a new source item lands, wait this long with no further arrivals
     /// before running a pass (batches bursts of typing / imports).
     pub debounce_ms: i64,
@@ -166,6 +214,13 @@ pub struct AutoProcessorConfig {
     /// May differ from [`Self::existing_scope`] — a watcher can read from a
     /// broader subtree than it writes into, or vice-versa.
     pub mint_scope: Option<Scope>,
+    /// Interpretation-pass tool-call budget. `None` or `Some(0)` = the
+    /// original single-shot LLM path (no tools). `Some(N)` with `N > 0` =
+    /// engage the tool-calling harness (see [`crate::ai_service::harness`])
+    /// and let the LLM make up to `N` tool calls per pass before being
+    /// forced to answer. The cap prevents a stuck or adversarial model
+    /// from DoS'ing the extraction pass.
+    pub max_tool_calls: Option<u32>,
     /// When `true`, enables full debug observability for this processor:
     /// 1. Persists the raw LLM prompt + response on the pass's
     ///    `InterpretationRun` node (`debugPrompt`/`debugResponse`) for
@@ -187,7 +242,7 @@ pub fn processor_node(processor_id: &str) -> String {
 }
 
 /// Idempotently register the hard-wired [`AUTO_PROCESSOR_CLASS`] subject class.
-/// Refreshes the SHACL if an older registration predates `source_window_ms`.
+/// Refreshes the SHACL if an older registration predates the `flows` selection.
 pub async fn ensure_auto_processor_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -197,7 +252,7 @@ pub async fn ensure_auto_processor_class(
         AUTO_PROCESSOR_CLASS,
         AUTO_PROCESSOR_TARGET_CLASS,
         AUTO_PROCESSOR_SDNA,
-        Some("ad4m://source_window_ms"),
+        Some("ad4m://flow"),
         context,
     )
     .await
@@ -268,6 +323,9 @@ pub async fn write_processor(
             .map_err(|e| anyhow::anyhow!("write_processor: serialize mint_scope: {e:#}"))?;
         values["mintScope"] = json.into();
     }
+    if let Some(max_tool_calls) = cfg.max_tool_calls {
+        values["maxToolCalls"] = max_tool_calls.to_string().into();
+    }
     if let Some(v) = emit_debug_events_write {
         values["emitDebugEvents"] = v.to_string().into();
     }
@@ -332,6 +390,24 @@ pub async fn write_processor(
                     anyhow::anyhow!("write_processor: add_link(interpretation_class) failed: {e:#}")
                 })?;
         }
+        // Flow selection rides the same way as the class list: links in the
+        // same batch, `Shared` status — a peer whose processor view lacked
+        // the flow set would run flow-blind passes on the same batches.
+        for flow in cfg.flows.iter() {
+            perspective
+                .add_link(
+                    Link {
+                        source: node.clone(),
+                        predicate: Some("ad4m://flow".to_string()),
+                        target: format!("literal:string:{}", flow),
+                    },
+                    LinkStatus::Shared,
+                    Some(batch_id.clone()),
+                    context,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("write_processor: add_link(flow) failed: {e:#}"))?;
+        }
         Ok(())
     }
     .await;
@@ -357,6 +433,73 @@ pub async fn write_processor(
     }
 
     Ok(())
+}
+
+/// Stop a processor by deleting its config instance. Returns whether there was one to delete.
+///
+/// The registration *is* data: [`load_processors`] reads the processor set out of the perspective's
+/// own graph on every watch tick, so deleting the instance is what stops the watch, and there is
+/// nothing else to unregister. Without this the only way to stop a processor was for a client to
+/// work out the node URI and delete the links itself — reaching around a subject class whose whole
+/// purpose is that a processor can be administered through the ordinary model API.
+///
+/// Idempotent, and it reports which case it was rather than treating one as a failure: a caller
+/// tidying up after a processor another peer has already removed is doing the right thing.
+///
+/// The processor's `InterpretationRun` nodes are deliberately left behind. They are both the record
+/// of what it did and the processed-turn cursor keyed on this node (see [`super::cursor`]), so
+/// deleting them would make a processor later registered under the same id re-interpret every turn
+/// the first one had already read.
+///
+/// One batch, so the instance goes away in a single commit. A partial removal would leave a node
+/// that no longer conforms to the class — invisible to [`load_processors`] and therefore stopped,
+/// but stopped by accident rather than by the write, and still carrying whichever links happened to
+/// survive.
+pub async fn remove_processor(
+    perspective: &mut PerspectiveInstance,
+    processor_id: &str,
+    context: &AgentContext,
+) -> anyhow::Result<bool> {
+    let node = processor_node(processor_id);
+    let links = perspective
+        .get_links(&LinkQuery {
+            source: Some(node.clone()),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("remove_processor(`{processor_id}`): get_links failed: {e:#}")
+        })?;
+
+    // Nothing here. Not an error: a processor that was never written and one another peer removed
+    // first are the same state, and neither is a failure of this call.
+    if links.is_empty() {
+        return Ok(false);
+    }
+
+    let batch_id = perspective.create_batch().await;
+    let removal = perspective
+        .remove_links(
+            links.into_iter().map(LinkExpression::from).collect(),
+            Some(batch_id.clone()),
+        )
+        .await;
+
+    if let Err(e) = removal {
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(anyhow::anyhow!(
+            "remove_processor(`{processor_id}`): remove_links failed: {e:#}"
+        ));
+    }
+
+    if let Err(e) = perspective.commit_batch(batch_id.clone(), context).await {
+        let _ = perspective.discard_batch(&batch_id).await;
+        return Err(anyhow::anyhow!(
+            "remove_processor(`{processor_id}`): commit_batch failed: {e:#}"
+        ));
+    }
+
+    Ok(true)
 }
 
 fn class_option() -> SubjectClassOption {
@@ -385,9 +528,9 @@ pub async fn load_processors(
     let query = serde_json::json!({
         "properties": [
             "processorId", "sourceScopeQuery", "basePrefix",
-            "interpretationClasses", "debounceMs", "batchMin", "batchMax",
+            "interpretationClasses", "flows", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
-            "existingScope", "mintScope", "emitDebugEvents",
+            "existingScope", "mintScope", "maxToolCalls", "emitDebugEvents",
         ]
     })
     .to_string();
@@ -401,7 +544,10 @@ pub async fn load_processors(
     let mut out = Vec::new();
     for instance in result["instances"].as_array().into_iter().flatten() {
         match config_from_instance(instance) {
-            Some(cfg) => out.push(cfg),
+            Some(cfg) => {
+                log_flow_selection_once(&cfg);
+                out.push(cfg);
+            }
             /*
                The instance itself, not just the fact that it failed.
 
@@ -462,6 +608,24 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         return None;
     }
 
+    // Flow selection: optional collection, same hydrated-array shape as
+    // `interpretationClasses`. Absent (pre-flow config) → empty = no flow
+    // features. Present-but-malformed bails (`None`) like every other typed
+    // field — `interpretation_classes` above gets the loud `first_report_for`
+    // warn on malformed data, and a silently flow-blind processor must not be
+    // indistinguishable from a deliberately flow-blind one. Sorted + deduped
+    // for the same stable-iteration reason.
+    let mut flows: Vec<String> = match instance.get("flows") {
+        None => Vec::new(),
+        Some(v) => v
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+    };
+    flows.sort();
+    flows.dedup();
+
     // Optional thresholds. Absent `batchMin` → 1 (original behaviour). An
     // absent `maxWaitMs` → `None` (wait indefinitely). A *present but
     // unparseable* value is a config error, so we bail (`None`) exactly like
@@ -520,6 +684,13 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         None => None,
     };
 
+    // `maxToolCalls`: absent → `None` (single-shot, no harness). Present but
+    // unparseable → bail like the other required-shape fields; silently
+    // defaulting to "no tool calls" on a typo would mask the config bug.
+    let max_tool_calls = match scalar("maxToolCalls") {
+        Some(s) => Some(s.parse::<u32>().ok()?),
+        None => None,
+    };
     let parse_bool = |name: &str| -> Option<Option<bool>> {
         match scalar(name) {
             Some(s) => match s.parse::<bool>() {
@@ -539,6 +710,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         source_scope_query: scalar("sourceScopeQuery")?,
         base_prefix: scalar("basePrefix"),
         interpretation_classes,
+        flows,
         debounce_ms,
         batch_min,
         batch_max,
@@ -548,6 +720,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         source_window_ms,
         existing_scope,
         mint_scope,
+        max_tool_calls,
         emit_debug_events,
     })
 }
@@ -585,10 +758,7 @@ mod tests {
             max_wait_ms: Some(60_000),
             claim_ttl_ms: 120_000,
             dedup_strategy_json: Some(r#"{"kind":"normalized"}"#.into()),
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            emit_debug_events: false,
+            ..Default::default()
         }
     }
 
@@ -916,6 +1086,62 @@ mod tests {
         );
     }
 
+    /// Flow selection rides the same write/load path as the class list —
+    /// sorted + deduped on load, and an absent selection (every pre-flow
+    /// config in the wild) loads as empty rather than failing.
+    #[tokio::test]
+    async fn flows_roundtrip_sorted_and_default_empty() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        // No flows set → loads as empty (backwards compatible).
+        let cfg = sample_config("flow-less");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].flows.is_empty(), "absent selection loads empty");
+
+        // Deliberately unsorted + duplicated selection round-trips clean.
+        let mut cfg = sample_config("flow-full");
+        cfg.flows = vec![
+            "delivery://DeliveryFlow".into(),
+            "coasys://DeliberationFlow".into(),
+            "delivery://DeliveryFlow".into(),
+        ];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        let full = loaded
+            .iter()
+            .find(|c| c.processor_id == "flow-full")
+            .expect("flow-full loads");
+        assert_eq!(
+            full.flows,
+            vec![
+                "coasys://DeliberationFlow".to_string(),
+                "delivery://DeliveryFlow".to_string(),
+            ],
+            "flows must load sorted and deduped"
+        );
+
+        // Single-element selection — the shape almost every real config will
+        // have. Guards the hydration edge where a one-element collection
+        // could come back as a scalar instead of a one-element array.
+        let mut cfg = sample_config("flow-one");
+        cfg.flows = vec!["delivery://DeliveryFlow".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        let one = loaded
+            .iter()
+            .find(|c| c.processor_id == "flow-one")
+            .expect("flow-one loads");
+        assert_eq!(one.flows, vec!["delivery://DeliveryFlow".to_string()]);
+    }
+
     /// Duplicate `interpretation_class` targets are collapsed by the loader
     /// (harmless double-write, or two peers seeding overlapping configs).
     #[tokio::test]
@@ -935,6 +1161,134 @@ mod tests {
         assert_eq!(
             loaded[0].interpretation_classes,
             vec!["ns://Question".to_string(), "ns://Task".to_string()]
+        );
+    }
+
+    /// Removing a processor takes it out of the loaded set — which is what stops its watch,
+    /// since the loop reads the set back out of the graph on every tick. Its neighbours are left
+    /// alone: one processor going away must not disturb another on the same perspective.
+    #[tokio::test]
+    async fn remove_processor_deletes_only_that_processor() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        for id in ["keep-me", "remove-me"] {
+            write_processor(&mut p, &sample_config(id), Some(false), &ctx)
+                .await
+                .expect("write");
+        }
+
+        let removed = remove_processor(&mut p, "remove-me", &ctx)
+            .await
+            .expect("remove");
+        assert!(removed, "there was a processor to remove");
+
+        let ids: Vec<String> = load_processors(&p)
+            .await
+            .expect("load")
+            .into_iter()
+            .map(|c| c.processor_id)
+            .collect();
+        assert_eq!(ids, vec!["keep-me"]);
+
+        let leftovers = p
+            .get_links(&LinkQuery {
+                source: Some(processor_node("remove-me")),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(
+            leftovers.is_empty(),
+            "the config node must carry no links, found {leftovers:?}"
+        );
+    }
+
+    /// Removing a processor that is not there answers `false` rather than erroring. A caller
+    /// tidying up after a processor a peer already removed has done the right thing, and a
+    /// teardown path is the worst place to raise an avoidable failure.
+    #[tokio::test]
+    async fn remove_processor_is_idempotent() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config("once"), Some(false), &ctx)
+            .await
+            .expect("write");
+
+        assert!(remove_processor(&mut p, "once", &ctx).await.expect("first"));
+        assert!(!remove_processor(&mut p, "once", &ctx)
+            .await
+            .expect("second"));
+        assert!(
+            !remove_processor(&mut p, "never-existed", &ctx)
+                .await
+                .expect("unknown id"),
+            "an unknown processor id is not an error"
+        );
+    }
+
+    /// Removal really clears the node, so a processor registered again under the same id starts
+    /// from the new config rather than inheriting the old one's classes.
+    ///
+    /// Worth pinning precisely because `write_processor` *appends* to the class collection: the
+    /// only reason a re-registration does not accumulate the previous list is that removal left
+    /// nothing behind. A removal that missed a link would show up here and nowhere else.
+    #[tokio::test]
+    async fn a_removed_processor_can_be_registered_again() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let mut cfg = sample_config("recycled");
+        cfg.interpretation_classes = vec!["ns://Task".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write first");
+        remove_processor(&mut p, "recycled", &ctx)
+            .await
+            .expect("remove");
+
+        cfg.interpretation_classes = vec!["ns://Belief".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write again");
+
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].interpretation_classes,
+            vec!["ns://Belief".to_string()],
+            "a re-registered processor must not inherit the removed one's classes"
+        );
+    }
+
+    /// A processor written with an empty id is unloadable — `scalar_string` reads an empty scalar
+    /// as absent, so `config_from_instance` rejects it — and must still be removable.
+    ///
+    /// `perspective.addAutoProcessor` refuses an empty `processorId` precisely because of the
+    /// first half, but that is a validation on the way *in*: a config written before it existed,
+    /// or by a writer that is not that handler, is exactly the junk removal has to be able to
+    /// clear. Refusing the id on the way out would strand it with nothing able to take it away.
+    #[tokio::test]
+    async fn an_unloadable_empty_id_processor_is_still_removable() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_processor(&mut p, &sample_config(""), Some(false), &ctx)
+            .await
+            .expect("write");
+
+        assert!(
+            load_processors(&p).await.expect("load").is_empty(),
+            "an empty processor_id is read as absent, so the config must not load"
+        );
+
+        assert!(
+            remove_processor(&mut p, "", &ctx).await.expect("remove"),
+            "the config's links are there to remove even though it never loaded"
+        );
+        let leftovers = p
+            .get_links(&LinkQuery {
+                source: Some(processor_node("")),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert!(
+            leftovers.is_empty(),
+            "nothing must be left behind, found {leftovers:?}"
         );
     }
 

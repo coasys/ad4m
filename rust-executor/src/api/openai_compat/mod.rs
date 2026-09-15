@@ -27,10 +27,12 @@ pub(crate) mod billing_amounts;
 pub mod chat;
 pub mod embeddings;
 pub mod errors;
+pub mod harness_bridge;
 pub mod model_selector;
 pub mod models;
 pub mod realtime;
 pub mod router;
+pub mod tool_grammar;
 pub mod tts_passthrough;
 pub mod types;
 

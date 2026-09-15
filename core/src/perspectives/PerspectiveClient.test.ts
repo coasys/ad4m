@@ -188,12 +188,73 @@ describe('PerspectiveClient RPC operations', () => {
         const client = new PerspectiveClient('http://localhost:12000', 'token', false)
         await client.queryLinks('uuid-q', new LinkQuery({ source: 'src', predicate: 'pred', target: 'tgt' }))
 
-        expect(mockCall).toHaveBeenCalledWith('perspective.queryLinks', expect.objectContaining({
-            uuid: 'uuid-q',
-            source: 'src',
-            predicate: 'pred',
-            target: 'tgt',
-        }))
+        expect(mockCall).toHaveBeenCalledWith(
+            'perspective.queryLinks',
+            expect.objectContaining({
+                uuid: 'uuid-q',
+                source: 'src',
+                predicate: 'pred',
+                target: 'tgt',
+            }),
+            undefined,
+        )
+    })
+
+    // ── CallOptions forwarding (AbortSignal plumbing) ──────────────────
+    //
+    // These tests prove the new `options?` parameter on the long-running
+    // query methods reaches `ApiClient.call` as the third argument.  The
+    // wire-protocol behaviour (request.cancel + AbortError rejection) is
+    // covered separately in apiClient.test.ts; here we just verify the
+    // signal propagates through the SDK layer instead of being silently
+    // dropped.
+
+    it('querySparql forwards options to apiClient.call', async () => {
+        mockCall.mockResolvedValue(JSON.stringify([]))
+        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const controller = new AbortController()
+        await client.querySparql('uuid-q', 'SELECT * WHERE { ?s ?p ?o }', { signal: controller.signal })
+        expect(mockCall).toHaveBeenCalledWith(
+            'perspective.querySparql',
+            expect.objectContaining({ uuid: 'uuid-q', query: 'SELECT * WHERE { ?s ?p ?o }' }),
+            { signal: controller.signal },
+        )
+    })
+
+    it('modelQuery forwards options to apiClient.call', async () => {
+        mockCall.mockResolvedValue(JSON.stringify({ instances: [], totalCount: 0 }))
+        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const controller = new AbortController()
+        await client.modelQuery('uuid-q', 'Recipe', '{}', { signal: controller.signal })
+        expect(mockCall).toHaveBeenCalledWith(
+            'perspective.modelQuery',
+            expect.objectContaining({ uuid: 'uuid-q', class_name: 'Recipe' }),
+            { signal: controller.signal },
+        )
+    })
+
+    it('queryLinks forwards options to apiClient.call', async () => {
+        mockCall.mockResolvedValue([])
+        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const controller = new AbortController()
+        await client.queryLinks('uuid-q', new LinkQuery({ source: 'src' }), { signal: controller.signal })
+        expect(mockCall).toHaveBeenCalledWith(
+            'perspective.queryLinks',
+            expect.objectContaining({ uuid: 'uuid-q', source: 'src' }),
+            { signal: controller.signal },
+        )
+    })
+
+    it('queryProlog forwards options to apiClient.call', async () => {
+        mockCall.mockResolvedValue(JSON.stringify([]))
+        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const controller = new AbortController()
+        await client.queryProlog('uuid-q', 'foo(X).', { signal: controller.signal })
+        expect(mockCall).toHaveBeenCalledWith(
+            'perspective.queryProlog',
+            expect.objectContaining({ uuid: 'uuid-q', query: 'foo(X).' }),
+            { signal: controller.signal },
+        )
     })
 })
 

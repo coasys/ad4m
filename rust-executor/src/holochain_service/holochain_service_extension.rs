@@ -179,9 +179,18 @@ impl DecodedZomeCallResponse {
 // The duration to use for timeouts
 const TIMEOUT_DURATION: Duration = Duration::from_secs(90);
 
-const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(20);
+// Bumped 20s → 45s to accommodate the two-stage network-readiness gate
+// added in install_app (see holochain_service/mod.rs): per-cell
+// await_cell_network_join_complete (up to 10s) + per-DNA
+// await_initial_peer_discovery (up to 11s). A single-cell / single-DNA
+// language install on a cold, isolated node routinely sits at ~21s
+// before install_app_bundle + enable_app even execute; the old 20s
+// budget was already tight on dev and would fire the dispatcher
+// timeout under the new gate. 45s gives comfortable headroom while
+// still catching genuinely stuck installs. (Data's PR #907 review item MED-1.)
+const APP_INSTALL_TIMEOUT_DURATION: Duration = Duration::from_secs(45);
 
-#[op2(async)]
+#[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 async fn start_holochain_conductor(
     #[serde] config: LocalConductorConfig,
 ) -> Result<(), AnyhowWrapperError> {
@@ -189,7 +198,7 @@ async fn start_holochain_conductor(
     Ok(())
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
     let res = timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
@@ -205,7 +214,7 @@ async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
     }
 }
 
-#[op2(async)]
+#[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 #[serde]
 async fn install_app(
     #[serde] install_app_payload: InstallAppPayload,
@@ -219,7 +228,7 @@ async fn install_app(
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[serde]
 async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -233,7 +242,7 @@ async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, Anyho
 
 //TODO
 //Have install app use lair to generate the membrane proof
-#[op2(async)]
+#[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 #[serde]
 async fn call_zome_function(
     #[string] app_id: String,
@@ -270,7 +279,7 @@ async fn call_zome_function(
     DecodedZomeCallResponse::from_zome_call_response(response)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[serde]
 async fn agent_infos() -> Result<Vec<String>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -282,7 +291,8 @@ async fn agent_infos() -> Result<Vec<String>, AnyhowWrapperError> {
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+// op2 v2.9 lint: not fast-compatible (Vec<String> serde arg).
+#[op2(async(lazy))]
 async fn add_agent_infos(
     #[serde] agent_infos_payload: Vec<String>,
 ) -> Result<(), AnyhowWrapperError> {
@@ -295,7 +305,7 @@ async fn add_agent_infos(
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 async fn remove_app(#[string] app_id: String) -> Result<(), AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
@@ -306,7 +316,7 @@ async fn remove_app(#[string] app_id: String) -> Result<(), AnyhowWrapperError> 
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[serde]
 async fn sign_string(#[string] data: String) -> Result<Signature, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -318,7 +328,7 @@ async fn sign_string(#[string] data: String) -> Result<Signature, AnyhowWrapperE
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 async fn shutdown() -> Result<(), AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
         let interface = get_holochain_service().await;
@@ -329,7 +339,7 @@ async fn shutdown() -> Result<(), AnyhowWrapperError> {
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[serde]
 async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -341,7 +351,7 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn pack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -353,7 +363,7 @@ async fn pack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> 
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn unpack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -365,7 +375,7 @@ async fn unpack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn pack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {
@@ -377,7 +387,7 @@ async fn pack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError>
     .map_err(AnyhowWrapperError::from)
 }
 
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn unpack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError> {
     timeout(TIMEOUT_DURATION, async {

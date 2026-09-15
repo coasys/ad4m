@@ -83,6 +83,8 @@ export type AutoProcessorStep =
   | "runningInterpretation"
   | "llmRequestSent"
   | "llmResponseReceived"
+  | "toolCall"
+  | "toolResult"
   | "processed"
   | "shapesMissing"
   | "emptyTranscript"
@@ -128,6 +130,24 @@ export interface AutoProcessorEvent {
    *  `llmResponseReceived` events, and only when the processor was
    *  configured with `emitDebugEvents: true`. Never carried on `processed`. */
   llmOutput?: string;
+  /**
+   * Name of the tool the harness LLM invoked (or that just returned).
+   * Present on `toolCall` + `toolResult` events (harness path only).
+   */
+  toolName?: string;
+  /**
+   * JSON-encoded arguments the LLM sent to the tool. Present ONLY on
+   * `toolCall`; absent on `toolResult` where {@link toolResult} carries
+   * the return text instead.
+   */
+  toolArgsJson?: string;
+  /**
+   * The tool's return text. Present ONLY on `toolResult`; may be
+   * pre-truncated by the emitter with an `…[truncated for event]`
+   * marker when the tool returns a large payload (e.g. a `_query`
+   * result). Consumers wanting the full text can re-run the tool.
+   */
+  toolResult?: string;
 }
 
 /**
@@ -224,6 +244,14 @@ export interface AddAutoProcessorConfig {
   basePrefix?: string;
   /** Class URIs (SHACL `target_class`) to materialize each pass. */
   interpretationClasses: string[];
+  /**
+   * Canonical flow URIs (`SHACLFlow` `{namespace}{name}Flow`) this processor
+   * is flow-aware of. Flow features — the flow-aware prompt, the
+   * transition-proposal pass, and auto-spawn on freshly created items — run
+   * only on the flows listed here, mirroring the class selection above.
+   * Omit (or pass `[]`) for no flow processing.
+   */
+  flows?: string[];
   /** Quiet-window (ms) after the last new item before a pass runs. */
   debounceMs: number;
   /** Minimum items before a pass runs (Flux "wait for N inputs"). Default 1. */

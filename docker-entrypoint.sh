@@ -84,12 +84,13 @@ if [ "${ENABLE_MCP:-}" = "true" ]; then
     EXTRA_ARGS+=(--enable-mcp true --mcp-port "${MCP_PORT:-3001}")
 fi
 
-# Only override run_holochain when explicitly set.
+# Only override holochain when explicitly set.
 # Executor default: true (Holochain conductor starts).
+# CLI flag renamed from --run-holochain to --connect-holochain in v2.9.5.
 if [ "${RUN_HOLOCHAIN:-}" = "true" ]; then
-    EXTRA_ARGS+=(--run-holochain true)
+    EXTRA_ARGS+=(--connect-holochain true)
 elif [ "${RUN_HOLOCHAIN:-}" = "false" ]; then
-    EXTRA_ARGS+=(--run-holochain false)
+    EXTRA_ARGS+=(--connect-holochain false)
 fi
 
 # ── Agent auto-generation + auto-unlock ─────────────────────────────────────
@@ -149,6 +150,9 @@ extract_agent_flag() {
     local snake
     snake=$(printf '%s' "${flag_name}" | sed 's/\([A-Z]\)/_\L\1/g')
     local pattern="${snake}"
+    # HACK: the CLI's status output has a known typo: "is_initiliazed"
+    # (missing second 'i'). Match both correct and misspelled forms until
+    # the CLI is fixed upstream. Track: https://github.com/coasys/ad4m/issues/XXX
     [ "${flag_name}" = "isInitialized" ] && pattern="${pattern}|is_initiliazed|initiliazed"
 
     val=$(printf '%s' "${cleaned}" \
@@ -227,14 +231,66 @@ maybe_setup_agent() {
     fi
 }
 
+# Rewrite bootstrap language-language KV meta so Expression.author (and
+# data.author) is the container agent's DID. generate-seed.mjs hashes local
+# bootstrap-language files (own deploy) and cannot know that DID at image
+# build time. Runtime already trusts the local DID via get_trusted_agents();
+# the install path still requires language_author == that DID (or a seed
+# trustedAgent). Empty author fails with AgentIsUntrusted.
+stamp_bootstrap_language_authors() {
+    local kv_file did
+    if [ ! -f /opt/ad4m/language-language-kv/address.txt ]; then
+        return 0
+    fi
+    local ll_addr
+    ll_addr=$(cat /opt/ad4m/language-language-kv/address.txt)
+    kv_file="/data/ad4m/languages/${ll_addr}/ad4m-language-kv.json"
+    if [ ! -f "${kv_file}" ]; then
+        echo "ERROR: language-language KV file not found: ${kv_file}" >&2
+        return 1
+    fi
+
+    local status_output
+    status_output=$(run_ad4m_cli agent status 2>&1 || true)
+    did=$(printf '%s' "${status_output}" | sed $'s/\x1b\\[[0-9;]*m//g' | grep -oE 'did:key:z[A-Za-z0-9]+' | head -1)
+    if [ -z "${did}" ]; then
+        echo "ERROR: could not read agent DID; cannot stamp bootstrap language authors." >&2
+        return 1
+    fi
+
+    if ! jq --arg did "${did}" '
+        to_entries | map(
+            if (.key | test("::meta-")) then
+                .value |= (
+                    (try fromjson catch .) as $expr
+                    | if ($expr | type) == "object" then
+                        ($expr | .author = $did | .data.author = $did | tojson)
+                      else . end
+                )
+            else . end
+        ) | from_entries
+    ' "${kv_file}" > "${kv_file}.tmp"; then
+        echo "ERROR: jq failed to stamp bootstrap language authors with ${did}" >&2
+        rm -f "${kv_file}.tmp"
+        return 1
+    fi
+    mv "${kv_file}.tmp" "${kv_file}"
+    echo "Stamped bootstrap language meta authors as ${did}"
+}
+
 # ── AI model auto-registration ─────────────────────────────────────────────
 # When pre-cached models exist (INCLUDE_MODELS=true at build time), register
 # them with the executor via WebSocket RPC so Flux transcription and
 # summarisation work out of the box.
 ws_rpc() {
     local msg_type="$1" params="$2" msg_id="${3:-1}"
+    # Percent-encode the credential for the query string. Axum's Query
+    # extractor decodes '+' as space (x-www-form-urlencoded), so a raw
+    # credential containing '+' would fail the exact-match check.
+    local encoded_token
+    encoded_token=$(jq -rn --arg t "${ADMIN_CREDENTIAL}" '$t | @uri')
     printf '{"id":"%s","type":"%s","params":%s}\n' "${msg_id}" "${msg_type}" "${params}" \
-        | websocat -n1 "ws://localhost:12000/api/v1/ws?token=${ADMIN_CREDENTIAL}" 2>/dev/null
+        | websocat -n1 "ws://localhost:12000/api/v1/ws?token=${encoded_token}" 2>/dev/null
 }
 
 setup_ai_models() {
@@ -474,19 +530,23 @@ ad4m-executor run \
 
 EXECUTOR_PID=$!
 
-wait_for_executor
-maybe_setup_agent
-setup_ai_models || true
-setup_global_space
-inject_we_auth
-start_we_server
-
 # Forward SIGTERM/SIGINT to all child processes so Docker can stop cleanly.
+# Installed immediately after EXECUTOR_PID assignment so the executor receives
+# graceful shutdown signals during readiness/bootstrap (PID 1 ignores
+# untrapped SIGTERM).
 cleanup() {
     kill -TERM "${EXECUTOR_PID}" 2>/dev/null
     [ -n "${WE_PID}" ] && kill -TERM "${WE_PID}" 2>/dev/null
 }
 trap cleanup TERM INT
+
+wait_for_executor
+maybe_setup_agent
+stamp_bootstrap_language_authors
+setup_ai_models || true
+setup_global_space
+inject_we_auth
+start_we_server
 
 # Wait for executor to exit; propagate its exit code.
 wait "${EXECUTOR_PID}"

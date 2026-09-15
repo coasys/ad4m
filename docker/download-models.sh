@@ -25,6 +25,10 @@ fetch() {
 
     mkdir -p "${dir}"
     echo "  [download] ${repo}/${filename}"
+    # NOTE: no post-download integrity check (sha256/md5). The HF API
+    # supports ETag-based caching but not content hashes in the URL.
+    # For reproducible builds, pin `revision` to a commit SHA rather than
+    # "main" and verify the downloaded file sizes in CI.
     curl -fSL --retry 3 --retry-delay 5 \
         -o "${dest}.partial" "${url}"
     mv "${dest}.partial" "${dest}"

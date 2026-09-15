@@ -79,7 +79,7 @@ ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 RUN git config --global advice.detachedHead false \
     && git config --global http.postBuffer 524288000 \
     && mkdir -p /home/builder/bin \
-    && printf '#!/bin/bash\nif [ "$1" = "fetch" ]; then\n  for arg in "$@"; do\n    case "$arg" in\n      *web-platform-tests*|*nicolo-ribaudo*|*nicol*test262*|*/user/nicol*|*chromium.googlesource.com*) exit 0 ;;\n    esac\n  done\nfi\nif [ "$1" = "submodule" ]; then exit 0; fi\nexec /usr/bin/git "$@"\n' > /home/builder/bin/git \
+    && printf '#!/bin/bash\nif [ "$1" = "fetch" ]; then\n  for arg in "$@"; do\n    case "$arg" in\n      *web-platform-tests*|*nicolo-ribaudo*|*nicol*test262*|*/user/nicol*|*chromium.googlesource.com*) echo "[docker-build] Skipping fetch: $*" >&2; exit 0 ;;\n    esac\n  done\nfi\nif [ "$1" = "submodule" ]; then echo "[docker-build] Skipping submodule command: $*" >&2; exit 0; fi\nexec /usr/bin/git "$@"\n' > /home/builder/bin/git \
     && chmod +x /home/builder/bin/git
 ENV PATH="/home/builder/bin:${PATH}"
 
@@ -88,37 +88,34 @@ RUN curl -fsSL https://deno.land/install.sh | sh
 ENV DENO_INSTALL="/home/builder/.deno"
 ENV PATH="${DENO_INSTALL}/bin:${PATH}"
 
-# ── Prepare Deno/rusty_v8 local clones (bypass submodule hell) ─────────
-# Cloned BEFORE source copy so they cache independently of source changes.
+# ── Pre-clone Deno monorepo (bypass submodule hell) ───────────────────
+# v2.9.5-coasys-4 folds deno_core, deno_v8 (rusty_v8), and all ext crates
+# into one repo. Clone without submodules and strip .gitmodules so
+# libgit2 can't chase stale WPT/chromium refs.
 RUN for i in 1 2 3; do \
-      git clone --depth 1 --single-branch --branch new-v8-dylib-hickory-update \
+      git clone --depth 1 --single-branch --branch v2.9.5-coasys-4 \
         --no-recurse-submodules \
         https://github.com/coasys/deno.git /home/builder/deno-local && break; \
       rm -rf /home/builder/deno-local && sleep 10; \
     done && \
     cd /home/builder/deno-local && \
-    git rm --cached tests/wpt/suite 2>/dev/null || true && \
+    git rm --cached tests/wpt/suite tests/util/std tests/node_compat/runner/suite 2>/dev/null || true && \
     rm -f .gitmodules && \
-    sed -i 's|deno_core = { version = "0.347.0", git = "https://github.com/coasys/deno_core.git", branch = "new-v8-dylib" }|deno_core = { version = "0.347.0", path = "/home/builder/deno_core-local/core" }|' Cargo.toml && \
     git add -A && \
     git -c user.email="build@docker" -c user.name="docker" commit --allow-empty -m "strip submodules"
 
+# ── Pre-clone rusty_v8 (bypass chromium submodule hell) ──────────────
+# deno_v8 depends on v8 crate from coasys/rusty_v8.git. That repo has
+# 10+ submodules (chromium buildtools, V8 source, etc.) with revspecs
+# force-pushed out of upstream. libgit2 tries to fetch them and fails.
+# Pre-clone without submodules, strip .gitmodules, patch in locally.
 RUN for i in 1 2 3; do \
-      git clone --depth 1 --single-branch --branch new-v8-dylib \
-        --no-recurse-submodules \
-        https://github.com/coasys/deno_core.git /home/builder/deno_core-local && break; \
-      rm -rf /home/builder/deno_core-local && sleep 10; \
-    done && \
-    sed -i 's|v8 = { version = "137.1.1", default-features = false, git = "https://github.com/coasys/rusty_v8.git", tag = "v137.1.1" }|v8 = { version = "137.1.1", default-features = false, path = "/home/builder/rusty_v8-local" }|' /home/builder/deno_core-local/Cargo.toml
-
-RUN for i in 1 2 3; do \
-      git clone --depth 1 --single-branch --branch v137.1.1 \
+      git clone --depth 1 --single-branch --branch v150.4.0-coasys \
         --no-recurse-submodules \
         https://github.com/coasys/rusty_v8.git /home/builder/rusty_v8-local && break; \
       rm -rf /home/builder/rusty_v8-local && sleep 10; \
     done && \
     cd /home/builder/rusty_v8-local && \
-    git rm --cached buildtools 2>/dev/null || true && \
     rm -f .gitmodules && \
     git add -A && \
     git -c user.email="build@docker" -c user.name="docker" commit --allow-empty -m "strip submodules"
@@ -154,6 +151,7 @@ COPY --chown=builder:builder dapp/ ./dapp/
 COPY --chown=builder:builder bootstrap-languages/ ./bootstrap-languages/
 COPY --chown=builder:builder ad4m-ldk/ ./ad4m-ldk/
 COPY --chown=builder:builder ad4m-hooks/ ./ad4m-hooks/
+COPY --chown=builder:builder link-server/ ./link-server/
 COPY --chown=builder:builder tests/ ./tests/
 COPY --chown=builder:builder patches/ ./patches/
 COPY --chown=builder:builder hooks/ ./hooks/
@@ -164,6 +162,10 @@ ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
 # ── JS deps + dapp assets ──────────────────────────────────────────────
+# TODO(lockfile): --no-frozen-lockfile bypasses pnpm-lock.yaml integrity.
+# The Deno v2.9.5-coasys-4 migration shuffled workspace packages and the
+# lockfile hasn't been regenerated to match. Land an updated lockfile and
+# switch to `--frozen-lockfile` once the monorepo layout stabilises.
 RUN pnpm install --no-frozen-lockfile
 RUN pnpm build-dapp
 
@@ -172,35 +174,52 @@ RUN pnpm install --no-frozen-lockfile || \
     (echo ">>> Retrying core pnpm install..." && sleep 5 && pnpm install --no-frozen-lockfile)
 WORKDIR /home/builder/ad4m
 
-# Patch Cargo.toml to use local clones
-RUN sed -i 's|deno_runtime = {version = "0.212.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_runtime = {version = "0.212.0", path = "/home/builder/deno-local/runtime"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_resolver = {version = "0.35.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_resolver = {version = "0.35.0", path = "/home/builder/deno-local/resolvers/deno"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_fs = {version = "0.114.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_fs = {version = "0.114.0", path = "/home/builder/deno-local/ext/fs"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_lib = {version = "0.20.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_lib = {version = "0.20.0", path = "/home/builder/deno-local/cli/lib"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_snapshots = {version = "0.19.0", git = "https://github.com/coasys/deno.git", branch = "new-v8-dylib-hickory-update"|deno_snapshots = {version = "0.19.0", path = "/home/builder/deno-local/cli/snapshot"|' rust-executor/Cargo.toml && \
-    sed -i 's|deno_core = {version = "0.347.0", git = "https://github.com/coasys/deno_core.git", branch = "new-v8-dylib"|deno_core = {version = "0.347.0", path = "/home/builder/deno_core-local/core"|' rust-executor/Cargo.toml
+# Patch rust-executor/Cargo.toml to use local deno monorepo clone.
+# All 7 deno crates now come from a single repo (v2.9.5-coasys-4).
+# NOTE: the [patch] section below ALSO redirects these crates. Both are
+# needed: sed rewrites the direct dependency lines (so Cargo sees path deps),
+# [patch] catches transitive references from other workspace crates. Either
+# alone would leave some crates resolving to the git URL, triggering
+# libgit2 submodule fetches that fail in the builder.
+RUN sed -i 's|deno_v8 = { version = "0.2.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_v8 = { version = "0.2.0", path = "/home/builder/deno-local/libs/deno_v8"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_core = { version = "0.410.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_core = { version = "0.410.0", path = "/home/builder/deno-local/libs/core"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_runtime = { version = "0.265.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_runtime = { version = "0.265.0", path = "/home/builder/deno-local/runtime"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_resolver = { version = "0.88.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_resolver = { version = "0.88.0", path = "/home/builder/deno-local/libs/resolver"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_fs = { version = "0.167.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_fs = { version = "0.167.0", path = "/home/builder/deno-local/ext/fs"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_lib = { version = "0.75.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_lib = { version = "0.75.0", path = "/home/builder/deno-local/cli/lib"|' rust-executor/Cargo.toml && \
+    sed -i 's|deno_snapshots = { version = "0.72.0", git = "https://github.com/coasys/deno.git", tag = "v2.9.5-coasys-4"|deno_snapshots = { version = "0.72.0", path = "/home/builder/deno-local/cli/snapshot"|' rust-executor/Cargo.toml
 
-# Workspace-level [patch] to prevent duplicate crate versions
-RUN if ! grep -q '\[patch."https://github.com/coasys/deno_core.git"\]' Cargo.toml; then \
-      printf '\n[patch."https://github.com/coasys/deno_core.git"]\ndeno_core = { path = "/home/builder/deno_core-local/core" }\n' >> Cargo.toml; \
+# Workspace-level [patch] so transitive deps also resolve from the local clone.
+# v2.9.5-coasys-4 monorepo: all deno crates from one git URL.
+# rusty_v8: v8 crate from coasys/rusty_v8.git (deno_v8's transitive dep).
+RUN if ! grep -q '\[patch."https://github.com/coasys/deno.git"\]' Cargo.toml; then \
+      printf '\n[patch."https://github.com/coasys/deno.git"]\ndeno_v8 = { path = "/home/builder/deno-local/libs/deno_v8" }\ndeno_core = { path = "/home/builder/deno-local/libs/core" }\ndeno_runtime = { path = "/home/builder/deno-local/runtime" }\ndeno_resolver = { path = "/home/builder/deno-local/libs/resolver" }\ndeno_fs = { path = "/home/builder/deno-local/ext/fs" }\ndeno_lib = { path = "/home/builder/deno-local/cli/lib" }\ndeno_snapshots = { path = "/home/builder/deno-local/cli/snapshot" }\n' >> Cargo.toml; \
     fi && \
     if ! grep -q '\[patch."https://github.com/coasys/rusty_v8.git"\]' Cargo.toml; then \
       printf '\n[patch."https://github.com/coasys/rusty_v8.git"]\nv8 = { path = "/home/builder/rusty_v8-local" }\n' >> Cargo.toml; \
     fi
 
-# Strip the rusty_v8 git source from Cargo.lock so Cargo resolves v8
-# from the [patch] local path instead of fetching from GitHub (which
-# fails on submodule resolution for chromium buildtools).
-RUN sed -i '/^source = "git+https:\/\/github\.com\/coasys\/rusty_v8/d' Cargo.lock
+# Also patch deno_v8's own Cargo.toml to use the local rusty_v8 clone
+# (it declares rusty_v8 as a git dep — redirect to local path).
+RUN sed -i 's|rusty_v8 = { package = "v8", version = "150.4.0", optional = true, default-features = false, git = "https://github.com/coasys/rusty_v8.git", tag = "v150.4.0-coasys"|rusty_v8 = { package = "v8", version = "150.4.0", optional = true, default-features = false, path = "/home/builder/rusty_v8-local"|' /home/builder/deno-local/libs/deno_v8/Cargo.toml
+
+# Strip git source lines for deno.git and rusty_v8.git from Cargo.lock.
+# This prevents Cargo's libgit2 from attempting recursive submodule fetches.
+# The [patch] sections and local path deps override resolution, so checksum
+# and dependency lines referencing these packages remain inert — Cargo
+# resolves them through the patches, not the (now-missing) git sources.
+RUN sed -i '/^source = "git+https:\/\/github\.com\/coasys\/deno\.git/d' Cargo.lock && \
+    sed -i '/^source = "git+https:\/\/github\.com\/coasys\/rusty_v8\.git/d' Cargo.lock
 
 # ── Build (cargo target cached across rebuilds) ───────────────────────
 # If the v8 binding file is absent (fresh source tree after layer
 # invalidation), clear stale v8 fingerprints so build.rs re-runs and
 # regenerates it.  Only fires when the COPY layers actually changed.
 RUN --mount=type=cache,id=ad4m-cargo,target=/home/builder/ad4m/target,uid=1001,gid=1001 \
-    if [ ! -f /home/builder/rusty_v8-local/gen/src_binding_release_x86_64-unknown-linux-gnu.rs ]; then \
+    if [ ! -f /home/builder/deno-local/libs/deno_v8/gen/src_binding_release_x86_64-unknown-linux-gnu.rs ]; then \
       echo ">>> v8 binding missing — clearing stale build cache"; \
-      rm -rf target/release/build/v8-* target/release/.fingerprint/v8-* 2>/dev/null || true; \
+      rm -rf target/release/build/v8-* target/release/build/deno_v8-* \
+             target/release/.fingerprint/v8-* target/release/.fingerprint/deno_v8-* 2>/dev/null || true; \
     fi && \
     pnpm run build-deno-snapshot
 
@@ -210,7 +229,7 @@ RUN --mount=type=cache,id=ad4m-cargo,target=/home/builder/ad4m/target,uid=1001,g
     && cp target/release/ad4m-executor /home/builder/ad4m-executor-bin
 
 # Free disk space
-RUN rm -rf /home/builder/deno-local /home/builder/deno_core-local /home/builder/rusty_v8-local \
+RUN rm -rf /home/builder/deno-local /home/builder/rusty_v8-local \
     && rm -rf /tmp/rustc* \
     && rm -rf /home/builder/.cargo/registry/cache
 
@@ -219,7 +238,7 @@ RUN rm -rf /home/builder/deno-local /home/builder/deno_core-local /home/builder/
 # docker/ is copied here (not with the source tree above) so that changes
 # to generate-seed.mjs or download-models.sh don't bust the Rust cache.
 COPY --chown=builder:builder docker/ ./docker/
-RUN node bootstrap-languages/local/generate-seed.mjs bootstrap-languages/local docker/seed-output
+RUN node docker/generate-seed.mjs docker/bootstrap-languages docker/seed-output
 
 # =============================================================================
 # Stage 2a: WE web frontend (conditional)

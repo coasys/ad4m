@@ -83,9 +83,12 @@ export class AIClient {
         const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text });
 
         const compressed = base64js.toByteArray(aiEmbed);
-        // Decode to a string via TextDecoder rather than pako's `{ to: 'string' }`
-        // option: newer @types/pako dropped that overload, which broke the build.
-        const decompressed = JSON.parse(new TextDecoder().decode(pako.inflate(compressed)));
+        // NB: pako v1 accepts `{ to: 'string' }`, pako v2 wants `{ toText: true }`,
+        // pako v3 also drops that overload from its bundled types. Call the
+        // version-agnostic form (returns Uint8Array) and decode explicitly so
+        // this works regardless of which pako major the lockfile pins.
+        const inflated = pako.inflate(compressed);
+        const decompressed = JSON.parse(new TextDecoder('utf-8').decode(inflated));
 
         return decompressed;
     }

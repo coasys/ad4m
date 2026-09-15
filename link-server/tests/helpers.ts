@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import * as ed from "@noble/ed25519";
 import WebSocket from "ws";
+import { edwardsToMontgomeryPriv, edwardsToMontgomeryPub } from "@noble/curves/ed25519";
 import { hashMessageForVerify, publicKeyToDid, signHex } from "../src/auth.js";
+import {
+  encryptRoomKeyForRecipient,
+  generateRoomKey,
+  type EncryptedKeyPayload,
+} from "../src/encryption.js";
 import { buildServer, type ServerOptions } from "../src/server.js";
 import {
   canonicalLinkPayload,
@@ -13,6 +19,8 @@ import {
   type LinkData,
   type LinkExpression,
 } from "../src/types.js";
+
+const { hexToBytes } = ed.etc;
 
 /** Everything needed to act as an AD4M agent in tests: identity + signing key. */
 export interface TestAgent {
@@ -33,6 +41,20 @@ export async function signChallenge(agent: TestAgent, challenge: string): Promis
   // the raw message bytes. Match that convention so the server can verify.
   const hashed = hashMessageForVerify(challenge);
   return signHex(agent.privateKey, hashed);
+}
+
+/** Derives the X25519 public key from a test agent's Ed25519 public key
+ *  via the Edwards-to-Montgomery conversion. Used to register the agent's
+ *  E2E public key with the server during auth step 2. */
+export function testAgentX25519PublicKey(agent: TestAgent): string {
+  const x25519Pub = edwardsToMontgomeryPub(agent.publicKey);
+  return Buffer.from(x25519Pub).toString("hex");
+}
+
+/** Derives the X25519 private key from a test agent's Ed25519 private key.
+ *  Matches the public key registered by `testAgentX25519PublicKey`. */
+export function testAgentX25519PrivateKey(agent: TestAgent): Uint8Array {
+  return edwardsToMontgomeryPriv(agent.privateKey);
 }
 
 /** Builds a fully-signed LinkExpression as a real AD4M client would. */
@@ -70,9 +92,6 @@ export async function startTestServer(opts: Partial<ServerOptions> = {}): Promis
   const built = await buildServer({
     dataDir,
     logger: false,
-    // Keep the background reconciliation loop from firing mid-assertion;
-    // federation tests call built.federation.reconcileRoom(...) directly.
-    reconcileIntervalMs: 3_600_000,
     telepresenceGraceMs: 300,
     ...opts,
   });
@@ -136,9 +155,12 @@ export async function authenticateAgent(
     throw new Error(`challenge request failed: ${step1.status} ${JSON.stringify(step1.body)}`);
   }
   const signature = await signChallenge(agent, step1.body.challenge);
+  const x25519PublicKey = testAgentX25519PublicKey(agent);
+  // Sign the X25519 public key to prove it belongs to this DID
+  const x25519Signature = await signHex(agent.privateKey, hashMessageForVerify(x25519PublicKey));
   const step2 = await postJson<{ token?: string; error?: string }>(
     `${serverUrl}/rooms/${roomId}/auth`,
-    { did: agent.did, challenge: step1.body.challenge, signature }
+    { did: agent.did, challenge: step1.body.challenge, signature, x25519PublicKey, x25519Signature }
   );
   if (step2.status !== 200 || !step2.body.token) {
     throw new Error(`auth verify failed: ${step2.status} ${JSON.stringify(step2.body)}`);
@@ -146,8 +168,12 @@ export async function authenticateAgent(
   return step2.body.token;
 }
 
-export function openWs(wsUrl: string, roomId: string, token: string): WebSocket {
-  return new WebSocket(`${wsUrl}/rooms/${roomId}/ws?token=${encodeURIComponent(token)}`);
+/**
+ * Opens a WebSocket to the server without sending the auth message.
+ * Use `openAuthenticatedWs` for the full handshake.
+ */
+export function openWs(wsUrl: string, roomId: string): WebSocket {
+  return new WebSocket(`${wsUrl}/rooms/${roomId}/ws`);
 }
 
 export function waitForOpen(socket: WebSocket): Promise<void> {
@@ -155,6 +181,40 @@ export function waitForOpen(socket: WebSocket): Promise<void> {
     socket.once("open", () => resolve());
     socket.once("error", reject);
   });
+}
+
+/**
+ * Opens a WebSocket, completes first-message auth, and waits for the
+ * `online-agents` acknowledgement. Returns the connected + authenticated socket.
+ */
+export async function openAuthenticatedWs(wsUrl: string, roomId: string, token: string): Promise<WebSocket> {
+  const ws = openWs(wsUrl, roomId);
+  await waitForOpen(ws);
+  ws.send(JSON.stringify({ type: "auth", token }));
+  // Wait for the server to confirm auth with an online-agents message.
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("WS auth timed out")), 5000);
+    const onMsg = (raw: WebSocket.RawData) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === "online-agents") {
+          clearTimeout(timeout);
+          ws.removeListener("message", onMsg);
+          resolve();
+        } else if (msg.type === "auth-error") {
+          clearTimeout(timeout);
+          ws.removeListener("message", onMsg);
+          reject(new Error(`WS auth error: ${msg.error}`));
+        }
+      } catch { /* ignore parse errors */ }
+    };
+    ws.on("message", onMsg);
+    ws.once("close", () => {
+      clearTimeout(timeout);
+      reject(new Error("WS closed during auth"));
+    });
+  });
+  return ws;
 }
 
 export async function waitFor(
@@ -196,5 +256,72 @@ export function collectMessages(socket: WebSocket): MessageCollector {
       await waitFor(() => messages.some((m) => m.type === type), timeoutMs);
       return messages.find((m) => m.type === type)!;
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Client-side E2E key rotation — mirrors production performRotation() flow
+// ---------------------------------------------------------------------------
+
+export interface ClientRotateResult {
+  version: number;
+  recipients: string[];
+  roomKey: Uint8Array;
+  membersNeedingHistoricalKeys?: Array<{
+    did: string;
+    missingVersions: number[];
+    x25519PublicKey: string;
+  }>;
+}
+
+/**
+ * Performs a client-side key rotation: generates the room key locally,
+ * fetches the ACL for X25519 public keys, seals the key to every member,
+ * and POSTs only the sealed envelopes. The plaintext room key never
+ * leaves this function's scope (returned for test assertions only).
+ */
+export async function clientSideRotate(
+  serverUrl: string,
+  roomId: string,
+  adminToken: string,
+): Promise<ClientRotateResult> {
+  const roomKey = generateRoomKey();
+
+  // Fetch ACL to get member X25519 public keys.
+  const aclRes = await getJson<{
+    admin: string;
+    members: Array<{ did: string; x25519PublicKey: string | null }>;
+  }>(`${serverUrl}/rooms/${roomId}/acl`, adminToken);
+  if (aclRes.status !== 200) {
+    throw new Error(`ACL fetch failed: ${aclRes.status} ${JSON.stringify(aclRes.body)}`);
+  }
+
+  // Seal the room key to each member with a registered X25519 public key.
+  const keys = aclRes.body.members
+    .filter((m) => m.x25519PublicKey)
+    .map((m) => ({
+      did: m.did,
+      encryptedKey: encryptRoomKeyForRecipient(roomKey, hexToBytes(m.x25519PublicKey!)),
+    }));
+
+  const rotateRes = await postJson<{
+    version: number;
+    recipients: string[];
+    membersNeedingHistoricalKeys?: Array<{
+      did: string;
+      missingVersions: number[];
+      x25519PublicKey: string;
+    }>;
+  }>(`${serverUrl}/rooms/${roomId}/keys/rotate`, { keys }, adminToken);
+
+  if (rotateRes.status !== 200) {
+    throw new Error(`rotate failed: ${rotateRes.status} ${JSON.stringify(rotateRes.body)}`);
+  }
+
+  return {
+    version: rotateRes.body.version,
+    recipients: rotateRes.body.recipients,
+    roomKey,
+    membersNeedingHistoricalKeys: rotateRes.body.membersNeedingHistoricalKeys,
   };
 }

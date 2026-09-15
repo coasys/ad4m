@@ -374,7 +374,7 @@ impl Ad4mMcpHandler {
 
     /// Create a new subject instance
     #[tool(
-        description = "Create a new subject instance (model object) with optional initial property values. Example: create_subject(perspective_id='abc-123', class_name='Channel', initial_values='{\"name\": \"general\"}') creates a Channel with the given name. Returns the new instance's expression address."
+        description = "Create a new subject instance (model object) with optional initial property values. Example: create_subject(perspective_id='abc-123', class_name='Channel', initial_values='{\"name\": \"general\"}') creates a Channel with the given name. Collection properties accept a JSON array and store one entry per element, e.g. initial_values='{\"tags\": [\"a\", \"b\"]}'. Returns the new instance's expression address."
     )]
     pub async fn create_subject(&self, params: Parameters<CreateSubjectParams>) -> String {
         let p = &params.0;

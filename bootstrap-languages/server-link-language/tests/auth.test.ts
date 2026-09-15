@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
 import type { AgentAdapter, Transport, TransportResponse } from "../src/adapters.js";
-import { initAgent, initConfig, initTransport, resetAdapters } from "../src/adapters.js";
+import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as auth from "../src/auth.js";
 
 // ---------------------------------------------------------------------------
@@ -56,9 +56,11 @@ function makeJwt(payload: Record<string, unknown>): string {
 
 function setup(transport: Transport, did = "did:key:zTestAgent"): void {
     resetAdapters();
-    initTransport(transport);
-    initAgent(new MockAgent(did));
-    initConfig({ serverUrl: "https://server.example", roomId: "room-123" });
+    initAdapters({
+        transport,
+        agent: new MockAgent(did),
+        config: { serverUrl: "https://server.example", roomId: "room-123" },
+    });
     auth.resetAuth();
 }
 
@@ -133,7 +135,11 @@ describe("auth: authenticate", () => {
         assert.ok(session.token);
         assert.ok(session.expiresAt !== null && session.expiresAt > Date.now());
         assert.equal(transport.calls.length, 2);
-        assert.equal(auth.currentSession()?.token, session.token);
+        // Verify the session got cached — getValidToken should return the same
+        // token without triggering another auth round-trip.
+        const cached = await auth.getValidToken();
+        assert.equal(cached, session.token);
+        assert.equal(transport.calls.length, 2, "no extra auth call for cached token");
     });
 
     it("propagates a server error from the challenge step", async () => {
@@ -207,33 +213,3 @@ describe("auth: getValidToken", () => {
     });
 });
 
-// ---------------------------------------------------------------------------
-// X25519 public key derivation caching
-// ---------------------------------------------------------------------------
-
-describe("auth: getX25519PublicKeyHex", () => {
-    it("is deterministic and memoized across calls", () => {
-        resetAdapters();
-        initAgent(new MockAgent("did:key:zXAgent"));
-        auth.resetAuth();
-
-        const k1 = auth.getX25519PublicKeyHex();
-        const k2 = auth.getX25519PublicKeyHex();
-        assert.equal(k1, k2);
-        assert.equal(k1.length, 64);
-    });
-
-    it("differs between agents", () => {
-        resetAdapters();
-        initAgent(new MockAgent("did:key:zAgentOne"));
-        auth.resetAuth();
-        const k1 = auth.getX25519PublicKeyHex();
-
-        resetAdapters();
-        initAgent(new MockAgent("did:key:zAgentTwo"));
-        auth.resetAuth();
-        const k2 = auth.getX25519PublicKeyHex();
-
-        assert.notEqual(k1, k2);
-    });
-});

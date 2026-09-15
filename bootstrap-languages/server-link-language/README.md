@@ -1,7 +1,7 @@
 # Server Link Language
 
 An [AD4M](https://ad4m.dev) link language that syncs a perspective through a
-self-hosted [**link-server**](https://github.com/coasys/link-server)
+self-hosted [**link-server**](../../link-server/README.md)
 instance — HTTP for auth, commit, and catch-up sync; a native WebSocket for
 real-time diff push, presence, and telepresence. Every AD4M link-language capability is implemented:
 `perspective-commit`, `perspective-sync`, `perspective-query`, `peers`, and
@@ -36,13 +36,13 @@ npx tsc --noEmit
 
 #### 1. Run a server
 
-Deploy a [**link-server**](https://github.com/coasys/link-server) instance on your own hardware. One command gets you started:
+Deploy a [**link-server**](../../link-server/README.md) instance on your own hardware. One command gets you started:
 
 ```bash
 npx @coasys/link-server --port 3457 --data ./my-data
 ```
 
-See the [link-server README](https://github.com/coasys/link-server) for Docker setup, access control, federation, and encryption options.
+See the [link-server README](../../link-server/README.md) for Docker setup, access control, and encryption options.
 
 #### 2. Publish the language template (one time)
 
@@ -102,7 +102,7 @@ Once joined, the neighbourhood works like any other. Links you create sync to th
 
 ## The server this language talks to
 
-[`link-server`](https://github.com/coasys/link-server) — a
+[`link-server`](../../link-server/README.md) — a
 self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 
 ### HTTP
@@ -118,7 +118,7 @@ self-hosted HTTP+WebSocket server. One "room" = one AD4M neighbourhood.
 | `GET /rooms/:roomId/acl` | `{admin, members}` |
 | `GET /rooms/:roomId/keys` | This agent's sealed room key → `{encryptedKey, version}` (E2E rooms only) |
 
-### WebSocket — `/rooms/:roomId/ws?token=<jwt>`
+### WebSocket — `/rooms/:roomId/ws`
 
 Server → client: `diff`, `telepresence-signal`, `telepresence-broadcast`,
 `online-agents`, `peer-joined`, `peer-left`.
@@ -198,9 +198,9 @@ summary:
   public key rides along as an additive `x25519PublicKey` field on step 2 of
   the auth flow — the one point the agent already proves DID ownership to
   the server. A server that doesn't care about E2E just ignores the field.
-- **Room key distribution.** `GET /rooms/:roomId/keys` returns a sealed box
-  (`SealedRoomKeyEnvelope`: ephemeral X25519 public key + AES-GCM nonce +
-  ciphertext, base64(JSON)-framed as the `encryptedKey` string) — the same
+- **Room key distribution.** `GET /rooms/:roomId/keys` returns a
+  `SealedRoomKeyEnvelope` object (JSON with `ephemeralPublicKey`, `nonce`,
+  and `ciphertext` as hex strings) as the `encryptedKey` field — the same
   shape `libsodium`'s `crypto_box_seal` produces. Only the intended
   recipient's derived private key can open it.
 - **Link confidentiality.** Once a room key is available,
@@ -216,11 +216,10 @@ summary:
   wrong key), `commit()` refuses to send plaintext rather than risk leaking
   data into a room that expects encryption.
 
-The exact `encryptedKey` wire framing (base64(JSON) envelope) and the
-`x25519PublicKey` auth field are this **client's own documented convention**
-— `link-server` didn't exist yet when this language was built. Both are
-isolated in `src/encryption.ts` / `src/api.ts` / `src/auth.ts` so they're
-easy to reconcile against the real server implementation later.
+The `encryptedKey` wire framing (JSON `SealedRoomKeyEnvelope`) and the
+`x25519PublicKey` auth field are shared conventions between this client and
+`link-server`. Both are isolated in `src/encryption.ts` / `src/api.ts` /
+`src/auth.ts`.
 
 ## Template variables
 
@@ -235,6 +234,11 @@ const ROOM_ID = "<to-be-filled>";     // UUID, set at neighbourhood creation
 Filled in by the executor at publish time. Until then, `init()` runs in an
 inert mode (logs and returns without attempting any network I/O).
 
+E2E encryption activates automatically — the admin's language instance
+generates the initial room key during `init()` when no E2E exists yet.
+Non-admin members receive keys via the automatic `onPeerJoined` grant flow.
+There is no plaintext mode.
+
 ## Publishing
 
 ```json
@@ -244,7 +248,7 @@ inert mode (logs and returns without attempting any network I/O).
         "name": "server-link-language",
         "description": "AD4M link language syncing through a self-hosted link-server",
         "possibleTemplateParams": ["SERVER_URL", "ROOM_ID"],
-        "sourceCodeLink": "https://github.com/coasys/server-link-language"
+        "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/server-link-language"
     }
 }
 ```
