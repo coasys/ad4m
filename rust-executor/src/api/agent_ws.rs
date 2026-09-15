@@ -296,8 +296,9 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 
     let mut init_errors: Vec<String> = Vec::new();
 
-    // The conductor and the languages that need it start in the background; see
-    // `agent::conductor_startup`. Only what the reply depends on is awaited here.
+    // Start the conductor before loading languages: a seed whose system languages run on
+    // Holochain waits for it in their constructors. See `agent::conductor_startup`.
+    let startup = spawn_conductor_startup(body.passphrase.clone());
     let config = crate::config::get_global_config();
     let language_language_only = config.language_language_only.unwrap_or(false);
     let controller = LanguageController::global_instance();
@@ -310,8 +311,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     } else {
         log::info!("System languages loaded");
     }
-
-    spawn_conductor_startup(body.passphrase.clone());
+    startup.core_languages_loaded();
 
     if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
         log::warn!("Error publishing agent expression: {}", e);
@@ -394,8 +394,9 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .is_unlocked();
 
     if is_unlocked {
-        // The conductor and the languages that need it start in the background; see
-        // `agent::conductor_startup`. Only what the reply depends on is awaited here.
+        // Start the conductor before loading languages: a seed whose system languages run on
+        // Holochain waits for it in their constructors. See `agent::conductor_startup`.
+        let startup = spawn_conductor_startup(body.passphrase.clone());
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
         let controller = LanguageController::global_instance();
@@ -408,8 +409,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         } else {
             log::info!("System languages loaded");
         }
-
-        spawn_conductor_startup(body.passphrase.clone());
+        startup.core_languages_loaded();
 
         log::info!("AD4M init complete");
 

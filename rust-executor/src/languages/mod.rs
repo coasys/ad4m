@@ -651,9 +651,11 @@ impl LanguageController {
     }
 
     /// Load the language language and, unless `language_language_only`, the agent,
-    /// neighbourhood and perspective languages. None of these touch Holochain, so this
-    /// returns without waiting for the conductor. The link and installed languages that do
-    /// are `load_link_and_installed_languages` (`conductor_languages.rs`).
+    /// neighbourhood and perspective languages. With the default seed none of these touch
+    /// Holochain, so this returns without waiting for the conductor; a seed whose system
+    /// languages do (the integration-test agent language) waits for it, so start the
+    /// conductor before calling this. The link and installed languages, which always need
+    /// it, are `load_link_and_installed_languages` (`conductor_languages.rs`).
     pub async fn load_core_system_languages(
         &self,
         language_language_only: bool,

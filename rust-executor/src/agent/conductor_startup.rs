@@ -1,18 +1,25 @@
-//! Starting the Holochain conductor, and the languages that need it, after the main
-//! agent is generated or unlocked — without holding up the reply.
+//! Starting the Holochain conductor, and the languages that need it, when the main agent is
+//! generated or unlocked — without making the reply wait for it unless it has to.
 //!
-//! `agent.generate` and `agent.unlock` used to await the conductor before replying. The
-//! conductor starts one cell per installed app in turn, and each rebuilds its DHT summary
-//! from its local store first, so the wait grows with every neighbourhood joined (an
-//! account with 18 took ~19s offline, 8s of it one cell). Nothing in the reply needs it:
-//! perspectives answer from their local store, the agent, neighbourhood and perspective
-//! languages don't touch Holochain, and a link language calling into Holochain before the
-//! conductor is up already waits for it in `get_holochain_service()`.
+//! `agent.generate` and `agent.unlock` used to await the conductor before loading any
+//! language. The conductor starts one cell per installed app in turn, and each rebuilds its
+//! DHT summary from its local store first, so the wait grows with every link language
+//! installed (18 apps took ~19s offline, 8s of it one cell).
+//!
+//! The handlers now start the conductor first and load the core system languages alongside
+//! it. Whether the reply then waits for the conductor depends on the seed. The default seed's
+//! agent, neighbourhood and perspective languages don't touch Holochain, so the reply goes
+//! out while cells are still starting. A seed whose system languages do (the integration
+//! test seed's agent language registers a DNA in its constructor) waits for the conductor
+//! inside `get_holochain_service()`, as before. That's why the conductor must be started
+//! before those languages load, not after: their constructors would otherwise wait for a
+//! conductor that starts only once they finish.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use log::{error, info};
+use tokio::sync::oneshot;
 
 use crate::agent::AgentService;
 use crate::holochain_service::{
@@ -56,17 +63,38 @@ fn claim(flag: &AtomicBool) -> bool {
         .is_ok()
 }
 
-/// Start the conductor (unless it is already running) and then the link and installed
-/// languages, in the background. Failures are logged and announced as an
-/// `agent-status-changed` event carrying the error, since the reply has already gone.
-pub fn spawn_conductor_startup(passphrase: String) {
+/// A started conductor startup, waiting to be told the core system languages are loaded.
+///
+/// The link and installed languages load only after that: loading installed languages skips
+/// the system ones by their registered addresses, which exist only once the core languages
+/// finish, so running both at once could load the agent language a second time and tear
+/// down the instance being loaded. Dropping this without calling
+/// `core_languages_loaded` (an error path) lets the task carry on.
+pub struct ConductorStartup {
+    core_loaded: Option<oneshot::Sender<()>>,
+}
+
+impl ConductorStartup {
+    pub fn core_languages_loaded(mut self) {
+        if let Some(tx) = self.core_loaded.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Start the conductor (unless it is already running) in the background, and once the
+/// caller reports the core system languages loaded, the link and installed languages.
+/// Call this before loading the core languages. Failures are logged and announced as an
+/// `agent-status-changed` event carrying the error, since the reply may already have gone.
+pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
     if !claim(&STARTUP_IN_FLIGHT) {
         info!("Holochain startup already in progress; not starting another");
-        return;
+        return ConductorStartup { core_loaded: None };
     }
-    // Before spawning, so a request arriving between the reply and the task's first poll
-    // already waits rather than seeing no service and no start.
+    // Before spawning, so a request arriving before the task's first poll already waits
+    // rather than seeing no service and no start.
     CONDUCTOR_STARTING.store(true, Ordering::SeqCst);
+    let (core_loaded_tx, core_loaded_rx) = oneshot::channel();
 
     tokio::spawn(async move {
         let mut errors: Vec<String> = Vec::new();
@@ -86,6 +114,9 @@ pub fn spawn_conductor_startup(passphrase: String) {
         } else {
             CONDUCTOR_STARTING.store(false, Ordering::SeqCst);
         }
+
+        // Err means the handle was dropped without reporting, which is also "go ahead".
+        let _ = core_loaded_rx.await;
 
         let language_language_only = crate::config::get_global_config()
             .language_language_only
@@ -116,6 +147,10 @@ pub fn spawn_conductor_startup(passphrase: String) {
             )
             .await;
     });
+
+    ConductorStartup {
+        core_loaded: Some(core_loaded_tx),
+    }
 }
 
 #[cfg(test)]
