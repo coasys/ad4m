@@ -711,8 +711,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       count: true,
     };
 
+    // Each server dispatch triggers an independent async re-fetch, and those
+    // re-fetches resolve in completion order, not dispatch order. A re-fetch
+    // dispatched *before* a write committed can resolve *after* the re-fetch
+    // that saw the write, silently rolling the consumer back to a stale page —
+    // and no later dispatch ever corrects it. The generation counter drops any
+    // fetch that is no longer the newest one started; the newest fetch always
+    // delivers, so the callback is monotone in dispatch order.
+    let fetchGeneration = 0;
     const processResults = async () => {
+      const generation = ++fetchGeneration;
       const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+      if (generation !== fetchGeneration) {
+        console.debug(`[ModelQueryBuilder.paginateSubscribe] Dropping stale re-fetch result (generation ${generation}, newest ${fetchGeneration})`);
+        return;
+      }
       callback({ results, totalCount, pageSize, pageNumber });
     };
 
