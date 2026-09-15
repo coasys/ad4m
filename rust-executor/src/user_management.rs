@@ -8,6 +8,26 @@ use crate::agent::capabilities::{
 };
 use crate::agent::AgentService;
 use crate::db::Ad4mDb;
+use crate::db_backend::DbBackend;
+use crate::wallet::wallet_backend;
+
+/// Returns `Err` with an operator-facing message when the executor wallet is locked.
+///
+/// After a restart, in-memory keys are gone until the admin calls `unlockAgent`. Any
+/// call to `AgentService::user_exists` before that point returns `false`, which would
+/// otherwise surface as "User key not found" — indistinguishable from a deleted account.
+/// Calling this guard first gives callers a clear, actionable message.
+fn check_executor_unlocked() -> Result<(), String> {
+    if !wallet_backend().is_unlocked() {
+        return Err(
+            "Executor is locked: its admin has not unlocked the agent yet (keys are held in \
+             memory only, so this happens after every restart). Ask the executor operator to \
+             call unlockAgent, then retry."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
 
 /// Check if multi-user mode is enabled.
 pub fn is_multi_user_enabled() -> bool {
@@ -73,6 +93,8 @@ pub async fn send_verification_email(
 
 /// Create a new user: ensure key, get DID, save wallet, add to DB.
 pub fn create_user(email: &str, password: &str) -> Result<String, String> {
+    check_executor_unlocked()?;
+
     // Ensure user key exists
     AgentService::ensure_user_key_exists(email)
         .map_err(|e| format!("Failed to create user key: {}", e))?;
@@ -88,11 +110,19 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
         }
     });
 
-    // Check if user already exists (local DB or shared DB)
-    let user_exists = match crate::db_backend::db_backend().get_user(email) {
+    // Check if user already exists in local DB.
+    // Always use local_db() — the user row must live in local SQLite
+    // regardless of backend mode. In shared mode, the shared upsert
+    // below syncs it for cross-executor access.
+    let local = crate::db_backend::local_db();
+    let user_exists = match local.get_user(email) {
         Ok(_) => true,
         Err(e) => {
             let msg = e.to_string();
+            // FRAGILE: not-found detection by substring. The trait lacks an
+            // explicit NotFound variant, so we match on known error messages.
+            // A reworded error from Ad4mDb turns not-found into an internal
+            // error. See data-bot finding #5 on PR #969.
             if msg.contains("not found")
                 || msg.contains("No user")
                 || msg.contains("Query returned no rows")
@@ -122,12 +152,14 @@ pub fn create_user(email: &str, password: &str) -> Result<String, String> {
     let password_hash =
         Ad4mDb::hash_password(password).map_err(|e| format!("Failed to hash password: {}", e))?;
 
-    // Add user to local DB
-    crate::db_backend::db_backend()
+    // Add user to local DB — always via local_db(), never db_backend().
+    // In shared mode, SharedDb::add_user_prehashed returns shared_not_supported!,
+    // which would short-circuit before the shared upsert below ever runs.
+    local
         .add_user_prehashed(email, &did, &password_hash)
         .map_err(|e| format!("Failed to add user: {}", e))?;
 
-    // Also store in shared DB for cross-executor access
+    // Sync to shared DB for cross-executor access
     if config.db_backend.as_deref() == Some("shared") {
         let backend = crate::db_backend::db_backend();
         let user_data = serde_json::json!({
@@ -166,8 +198,12 @@ pub fn generate_user_jwt(email: &str, app_name: &str) -> Result<String, String> 
 /// Verify user credentials (email + password). Returns Ok(()) on success.
 /// Falls back to shared DB when the user record only exists on another executor.
 pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
-    // Try local DB first
-    let local_result = crate::db_backend::db_backend().verify_user_password(email, password);
+    check_executor_unlocked()?;
+
+    // Try local DB first — always via local_db(), not db_backend().
+    // In shared mode, SharedDb::verify_user_password returns shared_not_supported!,
+    // which would skip the shared-fallback path below.
+    let local_result = crate::db_backend::local_db().verify_user_password(email, password);
 
     match local_result {
         Ok(true) => {
@@ -216,10 +252,9 @@ pub fn verify_credentials(email: &str, password: &str) -> Result<(), String> {
             .map_err(|e| format!("Failed to create user key: {}", e))?;
     }
 
-    // Import user to local DB for future logins
+    // Import user to local DB for future logins — always via local_db()
     let user_did = user_data.get("did").and_then(|d| d.as_str()).unwrap_or("");
-    if let Err(e) = crate::db_backend::db_backend().add_user_prehashed(email, user_did, stored_hash)
-    {
+    if let Err(e) = crate::db_backend::local_db().add_user_prehashed(email, user_did, stored_hash) {
         log::warn!("Failed to import user to local DB: {}", e);
     }
 
@@ -276,6 +311,7 @@ pub fn verify_and_login(
     if !is_multi_user_enabled() {
         return Err("Multi-user mode is not enabled".to_string());
     }
+    check_executor_unlocked()?;
     let verified = verify_code(email, code, verification_type)?;
     if !verified {
         return Err("Invalid verification code".to_string());
@@ -288,10 +324,13 @@ pub fn verify_and_login(
 
 /// Check if a user exists in both DB and AgentService.
 pub fn user_exists(email: &str) -> Result<(), String> {
-    let db_exists = match crate::db_backend::db_backend().get_user(email) {
+    check_executor_unlocked()?;
+    // Always check local DB — user rows live in local SQLite.
+    let db_exists = match crate::db_backend::local_db().get_user(email) {
         Ok(_) => true,
         Err(e) => {
             let msg = e.to_string();
+            // FRAGILE: not-found detection by substring. See comment in create_user.
             if msg.contains("not found")
                 || msg.contains("No user")
                 || msg.contains("Query returned no rows")
@@ -309,4 +348,92 @@ pub fn user_exists(email: &str) -> Result<(), String> {
         return Err("User key not found on executor".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{set_global_config, Ad4mConfig};
+    use crate::wallet::{try_init_wallet_backend, LocalWallet, WalletBackend};
+    use std::sync::Arc;
+
+    /// Initialise the in-process globals that create_user touches.
+    ///
+    /// `AgentService` is initialised deliberately, even though the guard returns
+    /// long before `create_user` reaches it. Without it the *negative* direction —
+    /// the run with the guard deleted, which is what proves the guard is
+    /// load-bearing — panics on "AgentService not initialized" inside
+    /// `ensure_user_key_exists` and never reaches the row assertion. It would
+    /// still go red, but for the wrong reason, and a test that goes red for the
+    /// wrong reason does not defend the claim in #982.
+    fn setup() {
+        set_global_config(Ad4mConfig::default());
+        Ad4mDb::init_global_instance(":memory:").expect("init in-memory DB");
+        // A fresh LocalWallet has no keys → is_unlocked() returns false.
+        // try_init is idempotent: if another test already set the backend it is a no-op.
+        let _ = try_init_wallet_backend(Arc::new(LocalWallet::new()) as Arc<dyn WalletBackend>);
+        crate::test_utils::setup_agent();
+    }
+
+    /// Invariant: create_user on a locked executor must return Err before writing any DB row.
+    ///
+    /// Without the check_executor_unlocked() guard, the wallet-save is silently
+    /// skipped (passphrase is None while locked), but the user row is still written.
+    /// The account is then permanently unusable and the email cannot be re-registered
+    /// (issue #982, found by Lal during #973 round-4 testing).
+    #[test]
+    fn create_user_on_locked_executor_errors_and_leaves_no_row() {
+        setup();
+
+        let backend = wallet_backend();
+
+        // If a prior test left the wallet unlocked, lock it now so the guard
+        // sees the locked-executor state.  lock() is a no-op when keys are None,
+        // but is_unlocked() is already false in that case, so the assert below holds.
+        let was_unlocked = backend.is_unlocked();
+        let test_pass = "test-982-lock-passphrase";
+        if was_unlocked {
+            backend.lock(test_pass);
+        }
+        assert!(
+            !backend.is_unlocked(),
+            "wallet must be locked at the start of this test"
+        );
+
+        let email = "create-user-locked-982@example.com";
+
+        // Act: call create_user while the executor is locked.
+        let result = create_user(email, "any-password");
+
+        // The row is checked FIRST, before the return value, on purpose. The row
+        // is the damage #982 describes; the Err is only how the caller learns of
+        // it. Asserting the return value first would panic before this line in a
+        // run where the guard is missing, so the test would report a wrong return
+        // value and never observe the row that actually bricks the account. In
+        // that order it also stays a real guard if a future refactor moves the
+        // check somewhere that still returns Err but writes the row anyway.
+        let row_written = Ad4mDb::with_global_instance(|db| db.get_user(email).is_ok());
+        assert!(
+            !row_written,
+            "create_user must not write a user row when the executor is locked — \
+             a row here bricks the account: the wallet was never saved, and the \
+             email can never be registered again"
+        );
+
+        // And the caller must be told, with the operator-facing locked message.
+        assert!(
+            result.is_err(),
+            "create_user must return Err when the executor is locked"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Executor is locked"),
+            "error must mention 'Executor is locked'; got: {err}"
+        );
+
+        // Restore wallet state so subsequent tests are not affected.
+        if was_unlocked {
+            backend.unlock(test_pass).expect("restore wallet unlock");
+        }
+    }
 }

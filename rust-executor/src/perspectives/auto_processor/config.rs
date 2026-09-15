@@ -60,6 +60,46 @@ fn first_report_for(instance_id: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// `processor_id` → the flow selection last logged for it. `load_processors`
+/// runs on every watch tick, so the selection line logs once per processor
+/// (and again on change), not once per tick. Bounded by the number of
+/// distinct processors, like [`REPORTED_BAD_INSTANCES`].
+static REPORTED_FLOW_SELECTIONS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+> = std::sync::OnceLock::new();
+
+/// Log a processor's flow selection when first seen or changed. The empty
+/// case is stated outright because it is the migration surface: every
+/// processor registered before flow selection existed loads `flows: []` and
+/// stops doing flow work, and without this line "flows are off by design"
+/// and "flows regressed" are indistinguishable in a log file.
+fn log_flow_selection_once(cfg: &AutoProcessorConfig) {
+    let Ok(mut seen) = REPORTED_FLOW_SELECTIONS
+        .get_or_init(Default::default)
+        .lock()
+    else {
+        // Poisoned mutex: skip rather than re-log — this line is purely
+        // informational, unlike the failure report above.
+        return;
+    };
+    if seen.get(&cfg.processor_id) != Some(&cfg.flows) {
+        if cfg.flows.is_empty() {
+            log::info!(
+                "load_processors: processor `{}` has no flow selection — flow features are off \
+                 for it",
+                cfg.processor_id
+            );
+        } else {
+            log::info!(
+                "load_processors: processor `{}` flow selection: {:?}",
+                cfg.processor_id,
+                cfg.flows
+            );
+        }
+        seen.insert(cfg.processor_id.clone(), cfg.flows.clone());
+    }
+}
+
 /// Local subject-class name of a processor config.
 pub(crate) const AUTO_PROCESSOR_CLASS: &str = "AutoProcessor";
 /// Target-class URI of [`AUTO_PROCESSOR_CLASS`] — used to detect prior
@@ -90,7 +130,7 @@ const AUTO_PROCESSOR_SDNA: &str = include_str!("../hardwired_sdna/auto_processor
 
 /// Everything the executor watcher (P-B2) needs to schedule and run a single
 /// auto-processor pass over a source perspective.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AutoProcessorConfig {
     /// Human-meaningful processor name. Also part of the batch-node URI in
     /// [`super::claim::batch_node`], so claims by different processors never
@@ -116,6 +156,14 @@ pub struct AutoProcessorConfig {
     /// to materialize on each pass. Must contain at least one entry;
     /// [`load_processors`] skips otherwise.
     pub interpretation_classes: Vec<String>,
+    /// Canonical flow URIs (`SHACLFlow.flow_uri()`, `{namespace}{name}Flow`)
+    /// this processor is flow-aware of. Flow features — prompt rendering,
+    /// the proposal pass, and auto-spawn — run ONLY on selected flows
+    /// (Nico 2026-09-04: flows are targeted per processor, like the class
+    /// selection above). Empty = flow features off for this processor.
+    /// Absent on pre-flow configs, so hydration defaults to empty rather
+    /// than bailing.
+    pub flows: Vec<String>,
     /// After a new source item lands, wait this long with no further arrivals
     /// before running a pass (batches bursts of typing / imports).
     pub debounce_ms: i64,
@@ -194,7 +242,7 @@ pub fn processor_node(processor_id: &str) -> String {
 }
 
 /// Idempotently register the hard-wired [`AUTO_PROCESSOR_CLASS`] subject class.
-/// Refreshes the SHACL if an older registration predates `source_window_ms`.
+/// Refreshes the SHACL if an older registration predates the `flows` selection.
 pub async fn ensure_auto_processor_class(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -204,7 +252,7 @@ pub async fn ensure_auto_processor_class(
         AUTO_PROCESSOR_CLASS,
         AUTO_PROCESSOR_TARGET_CLASS,
         AUTO_PROCESSOR_SDNA,
-        Some("ad4m://source_window_ms"),
+        Some("ad4m://flow"),
         context,
     )
     .await
@@ -342,6 +390,24 @@ pub async fn write_processor(
                     anyhow::anyhow!("write_processor: add_link(interpretation_class) failed: {e:#}")
                 })?;
         }
+        // Flow selection rides the same way as the class list: links in the
+        // same batch, `Shared` status — a peer whose processor view lacked
+        // the flow set would run flow-blind passes on the same batches.
+        for flow in cfg.flows.iter() {
+            perspective
+                .add_link(
+                    Link {
+                        source: node.clone(),
+                        predicate: Some("ad4m://flow".to_string()),
+                        target: format!("literal:string:{}", flow),
+                    },
+                    LinkStatus::Shared,
+                    Some(batch_id.clone()),
+                    context,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("write_processor: add_link(flow) failed: {e:#}"))?;
+        }
         Ok(())
     }
     .await;
@@ -462,7 +528,7 @@ pub async fn load_processors(
     let query = serde_json::json!({
         "properties": [
             "processorId", "sourceScopeQuery", "basePrefix",
-            "interpretationClasses", "debounceMs", "batchMin", "batchMax",
+            "interpretationClasses", "flows", "debounceMs", "batchMin", "batchMax",
             "maxWaitMs", "claimTtlMs", "dedupStrategy", "sourceWindowMs",
             "existingScope", "mintScope", "maxToolCalls", "emitDebugEvents",
         ]
@@ -478,7 +544,10 @@ pub async fn load_processors(
     let mut out = Vec::new();
     for instance in result["instances"].as_array().into_iter().flatten() {
         match config_from_instance(instance) {
-            Some(cfg) => out.push(cfg),
+            Some(cfg) => {
+                log_flow_selection_once(&cfg);
+                out.push(cfg);
+            }
             /*
                The instance itself, not just the fact that it failed.
 
@@ -538,6 +607,24 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
     if interpretation_classes.is_empty() {
         return None;
     }
+
+    // Flow selection: optional collection, same hydrated-array shape as
+    // `interpretationClasses`. Absent (pre-flow config) → empty = no flow
+    // features. Present-but-malformed bails (`None`) like every other typed
+    // field — `interpretation_classes` above gets the loud `first_report_for`
+    // warn on malformed data, and a silently flow-blind processor must not be
+    // indistinguishable from a deliberately flow-blind one. Sorted + deduped
+    // for the same stable-iteration reason.
+    let mut flows: Vec<String> = match instance.get("flows") {
+        None => Vec::new(),
+        Some(v) => v
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+    };
+    flows.sort();
+    flows.dedup();
 
     // Optional thresholds. Absent `batchMin` → 1 (original behaviour). An
     // absent `maxWaitMs` → `None` (wait indefinitely). A *present but
@@ -623,6 +710,7 @@ fn config_from_instance(instance: &serde_json::Value) -> Option<AutoProcessorCon
         source_scope_query: scalar("sourceScopeQuery")?,
         base_prefix: scalar("basePrefix"),
         interpretation_classes,
+        flows,
         debounce_ms,
         batch_min,
         batch_max,
@@ -670,11 +758,7 @@ mod tests {
             max_wait_ms: Some(60_000),
             claim_ttl_ms: 120_000,
             dedup_strategy_json: Some(r#"{"kind":"normalized"}"#.into()),
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         }
     }
 
@@ -1000,6 +1084,62 @@ mod tests {
             ],
             "loader must return interpretation_classes sorted alphabetically"
         );
+    }
+
+    /// Flow selection rides the same write/load path as the class list —
+    /// sorted + deduped on load, and an absent selection (every pre-flow
+    /// config in the wild) loads as empty rather than failing.
+    #[tokio::test]
+    async fn flows_roundtrip_sorted_and_default_empty() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        // No flows set → loads as empty (backwards compatible).
+        let cfg = sample_config("flow-less");
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].flows.is_empty(), "absent selection loads empty");
+
+        // Deliberately unsorted + duplicated selection round-trips clean.
+        let mut cfg = sample_config("flow-full");
+        cfg.flows = vec![
+            "delivery://DeliveryFlow".into(),
+            "coasys://DeliberationFlow".into(),
+            "delivery://DeliveryFlow".into(),
+        ];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        let full = loaded
+            .iter()
+            .find(|c| c.processor_id == "flow-full")
+            .expect("flow-full loads");
+        assert_eq!(
+            full.flows,
+            vec![
+                "coasys://DeliberationFlow".to_string(),
+                "delivery://DeliveryFlow".to_string(),
+            ],
+            "flows must load sorted and deduped"
+        );
+
+        // Single-element selection — the shape almost every real config will
+        // have. Guards the hydration edge where a one-element collection
+        // could come back as a scalar instead of a one-element array.
+        let mut cfg = sample_config("flow-one");
+        cfg.flows = vec!["delivery://DeliveryFlow".into()];
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write");
+        let loaded = load_processors(&p).await.expect("load");
+        let one = loaded
+            .iter()
+            .find(|c| c.processor_id == "flow-one")
+            .expect("flow-one loads");
+        assert_eq!(one.flows, vec!["delivery://DeliveryFlow".to_string()]);
     }
 
     /// Duplicate `interpretation_class` targets are collapsed by the loader

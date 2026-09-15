@@ -328,6 +328,15 @@ pub fn db_backend() -> &'static Arc<dyn DbBackend> {
     DB_BACKEND.get().expect("db backend not initialised")
 }
 
+/// Always returns a LocalDb handle that delegates to the in-process
+/// Ad4mDb singleton. Use this for operations that MUST hit local
+/// SQLite regardless of the configured backend — e.g. writing user
+/// rows during signup, setting boot-time flags.
+pub fn local_db() -> &'static LocalDb {
+    static LOCAL: LocalDb = LocalDb;
+    &LOCAL
+}
+
 /// Initialise the global database backend. Returns false if already set.
 pub fn init_db_backend(backend: Arc<dyn DbBackend>) -> bool {
     DB_BACKEND.set(backend).is_ok()

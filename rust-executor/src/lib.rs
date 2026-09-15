@@ -40,6 +40,7 @@ use std::thread::JoinHandle;
 use log::{error, info, warn};
 use tokio::sync::oneshot;
 
+use crate::db_backend::DbBackend;
 use crate::prolog_service::init_prolog_service;
 use crate::{
     agent::AgentService, ai_service::AIService, dapp_server::serve_dapp, db::Ad4mDb,
@@ -435,11 +436,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     )
     .expect("Failed to initialize Ad4mDb");
 
-    // Set multi-user mode before starting services to avoid race condition
+    // Set multi-user mode before starting services to avoid race condition.
+    // Always route through local_db() — this flag lives in local SQLite.
+    // In shared mode, db_backend().set_multi_user_enabled() returns
+    // shared_not_supported!, which would panic on the .expect() below.
     if let Some(enable_multi_user) = config.enable_multi_user {
         if enable_multi_user {
             info!("Enabling multi-user mode...");
-            crate::db_backend::db_backend()
+            crate::db_backend::local_db()
                 .set_multi_user_enabled(true)
                 .expect("Failed to enable multi-user mode");
         }
@@ -497,14 +501,19 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .expect("App data path not set in Ad4mConfig"),
     );
 
-    if let Some(admin_credential) = &config.admin_credential {
-        if admin_credential.is_empty() {
-            warn!(
-                "adminCredential is not set or empty, empty token will possess admin capabilities."
-            );
-        }
-    } else {
-        warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
+    if config
+        .admin_credential
+        .as_deref()
+        .map(|s| s.is_empty())
+        .unwrap_or(true)
+    {
+        warn!("╔══════════════════════════════════════════════════════════════╗");
+        warn!("║  SECURITY WARNING: no adminCredential configured             ║");
+        warn!("║  Every request — including unauthenticated ones — receives  ║");
+        warn!("║  ALL_CAPABILITY (full admin access to this executor).        ║");
+        warn!("║  This mode is intended for local testing ONLY.               ║");
+        warn!("║  Set adminCredential in your config before going to prod.    ║");
+        warn!("╚══════════════════════════════════════════════════════════════╝");
     }
 
     {

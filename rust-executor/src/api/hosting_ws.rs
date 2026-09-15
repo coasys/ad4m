@@ -13,9 +13,11 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
     check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
+    // Fail closed: if the DB read errors, report hosting as non-free
+    // rather than showing every user they have free access.
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
-        .unwrap_or(true);
+        .unwrap_or(false);
     let user_info = if let Some(user_email) = ctx.user_email.clone() {
         let credits = crate::db_backend::db_backend()
             .get_user_credits(&user_email)

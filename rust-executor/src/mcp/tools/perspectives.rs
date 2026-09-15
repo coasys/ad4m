@@ -67,10 +67,54 @@ pub struct QueryLinksParams {
 pub struct AddModelParams {
     /// Perspective UUID
     pub perspective_id: String,
-    /// Subject class name
+    /// Bare subject class name, matching the local name of the shape's
+    /// `target_class` (e.g. `Task` for `target_class: "board://Task"`)
     pub class_name: String,
     /// SHACL shape definition as JSON string
     pub shacl_json: String,
+}
+
+/// Local (bare) name of a `target_class` URI: the segment after the last `/`
+/// or `#`. `board://Task` → `Task`; a bare `Task` is returned unchanged.
+fn local_class_name(target_class: &str) -> &str {
+    target_class
+        .rsplit(['/', '#'])
+        .next()
+        .unwrap_or(target_class)
+}
+
+/// Check that `class_name` is the local name of the shape's `target_class`.
+///
+/// The two are stored independently — `class_name` names the SDNA entry while
+/// `target_class` defines the class URI — and a mismatch registers a class that
+/// looks fine in `describe_perspective` but whose property setters are never
+/// found, so every write fails with "read-only". Rejecting the mismatch up
+/// front turns a silent broken registration into an actionable error.
+fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String> {
+    let shape: serde_json::Value = serde_json::from_str(shacl_json)
+        .map_err(|e| format!("Error: shacl_json is not valid JSON: {}", e))?;
+
+    let target_class = shape
+        .get("target_class")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            "Error: shacl_json has no `target_class` field. Every SHACL shape must declare \
+             the class URI it describes, e.g. \"target_class\": \"board://Task\"."
+                .to_string()
+        })?;
+
+    let expected = local_class_name(target_class);
+    if class_name != expected {
+        return Err(format!(
+            "Error: class_name '{}' does not match the SHACL target_class '{}'. \
+             Pass class_name: \"{}\" — the bare class name, without the namespace. \
+             Registering a mismatched name yields a class whose properties are all \
+             read-only, because its setters are stored under the other name.",
+            class_name, target_class, expected
+        ));
+    }
+
+    Ok(())
 }
 
 /// Parameters for running a Prolog query
@@ -291,6 +335,10 @@ impl Ad4mMcpHandler {
     pub async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;
 
+        if let Err(message) = validate_class_name(&p.class_name, &p.shacl_json) {
+            return message;
+        }
+
         match self.get_writable_perspective(&p.perspective_id).await {
             Ok((mut perspective, agent_context)) => {
                 match perspective
@@ -338,5 +386,54 @@ impl Ad4mMcpHandler {
             }
             Err(e) => e,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{local_class_name, validate_class_name};
+
+    fn shape(target_class: &str) -> String {
+        format!(r#"{{"target_class":"{}","properties":[]}}"#, target_class)
+    }
+
+    #[test]
+    fn local_name_strips_namespace() {
+        assert_eq!(local_class_name("board://Task"), "Task");
+        assert_eq!(local_class_name("http://example.org/ns#Task"), "Task");
+        assert_eq!(local_class_name("Task"), "Task");
+    }
+
+    #[test]
+    fn bare_name_matching_target_class_is_accepted() {
+        assert!(validate_class_name("Task", &shape("board://Task")).is_ok());
+    }
+
+    #[test]
+    fn uri_form_class_name_is_rejected() {
+        // The zombie-schema case: registration used to succeed and produce a
+        // class whose every property was read-only.
+        let err = validate_class_name("board://Task", &shape("board://Task")).unwrap_err();
+        assert!(err.contains("board://Task"), "{}", err);
+        assert!(err.contains("\"Task\""), "{}", err);
+    }
+
+    #[test]
+    fn unrelated_class_name_is_rejected() {
+        let err = validate_class_name("SomethingElse", &shape("board://Comment")).unwrap_err();
+        assert!(err.contains("SomethingElse"), "{}", err);
+        assert!(err.contains("board://Comment"), "{}", err);
+    }
+
+    #[test]
+    fn missing_target_class_is_rejected() {
+        let err = validate_class_name("Task", r#"{"properties":[]}"#).unwrap_err();
+        assert!(err.contains("target_class"), "{}", err);
+    }
+
+    #[test]
+    fn invalid_json_is_rejected() {
+        let err = validate_class_name("Task", "not json").unwrap_err();
+        assert!(err.contains("not valid JSON"), "{}", err);
     }
 }

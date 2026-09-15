@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
+use crate::db_backend::DbBackend;
 use crate::types::RequestContext;
 
 use super::types::*;
@@ -119,7 +120,10 @@ async fn create_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         }));
     }
 
-    let user_exists = match crate::db_backend::db_backend().get_user(&email) {
+    // Always check local DB — user rows live in local SQLite.
+    // FRAGILE: not-found detection by substring. The trait lacks an explicit
+    // NotFound variant. See data-bot finding #5 on PR #969.
+    let user_exists = match crate::db_backend::local_db().get_user(&email) {
         Ok(_) => true,
         Err(e) => {
             let msg = e.to_string();
@@ -300,7 +304,9 @@ async fn request_verification(
         }));
     }
 
-    let user_exists = match crate::db_backend::db_backend().get_user(&email) {
+    // Always check local DB — user rows live in local SQLite.
+    // FRAGILE: not-found detection by substring. See data-bot finding #5 on PR #969.
+    let user_exists = match crate::db_backend::local_db().get_user(&email) {
         Ok(_) => true,
         Err(e) => {
             let msg = e.to_string();

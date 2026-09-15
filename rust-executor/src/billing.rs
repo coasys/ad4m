@@ -198,9 +198,12 @@ pub fn bill_ai_operation(
 /// after the operation via bill_compute with the exact cost.
 /// No-ops (allows) if free hosting is enabled or user has free access.
 pub fn check_compute_credits(email: &str) -> Result<(), anyhow::Error> {
+    // Fail closed: if the DB read errors, deny compute rather than
+    // handing out free resources. unwrap_or(false) ensures a DB error
+    // does not bypass the credit check.
     let global_free = crate::db_backend::db_backend()
         .get_free_hosting_enabled()
-        .unwrap_or(true);
+        .unwrap_or(false);
     if global_free {
         return Ok(());
     }

@@ -460,13 +460,15 @@ impl AIService {
     }
 
     pub async fn add_model(&self, model: ModelInput) -> Result<String> {
-        let model = {
-            let _db = crate::db_backend::db_backend();
-            let id = _db.add_model(&model)?;
-            _db.get_model(id)
-        }
-        .map_err(|e| anyhow::anyhow!("{}", e))?
-        .expect("since we just added it");
+        let backend = crate::db_backend::db_backend();
+        let id = backend.add_model(&model)?;
+        // db_backend() returns a handle, not a scoped lock — each call locks
+        // independently. A concurrent removeModel between add and get could
+        // make this return None, so handle it as an error rather than panicking.
+        let model = backend
+            .get_model(id)
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .ok_or_else(|| anyhow::anyhow!("Model disappeared after add — concurrent removal?"))?;
         self.init_model(model.clone()).await?;
         Ok(model.id)
     }
