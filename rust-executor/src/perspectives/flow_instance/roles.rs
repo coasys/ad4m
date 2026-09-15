@@ -18,6 +18,14 @@
 //! ends the row's validity for that DID from the tombstone's own timestamp.
 //! Both are Shared links on the same trust substrate as the votes.
 //!
+//! This puts one convention on social DNA authors: **role rows are add-only,
+//! and membership ends only through tombstones.** The role query runs against
+//! the *current* graph — only the row's existence is windowed in time — so a
+//! query keyed on a mutable property (`where: { active: true }`) reopens the
+//! deletion problem through the side door: flipping the property makes the
+//! row vanish from historical verdicts too, un-settling edges its votes once
+//! settled. State that changes belongs in new rows, not in edited ones.
+//!
 //! ## As-of gating
 //!
 //! Every vote is gated against the graph *as it stood at the vote's
