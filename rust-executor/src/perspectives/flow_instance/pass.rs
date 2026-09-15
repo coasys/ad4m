@@ -219,14 +219,23 @@ pub async fn run_flow_consensus_pass(
     outcomes
 }
 
-/// Whether this replica has ever cached a state for `instance_uri`: a
-/// `Local` `currentState` link exists. The hydrated record cannot answer
-/// this — it does not carry link status, and a peer's legacy `Shared` value
-/// would read as a cache — so this is a raw query on the row.
-async fn has_local_cache(
+/// Read this replica's own cached state for `instance_uri` — the value
+/// carried by the `Local` `currentState` link, if one is present.
+///
+/// `None` means the cache is absent: either no `currentState` link at all,
+/// or only `Shared` links a peer wrote before #987.  The hydrated record
+/// cannot serve this query because it does not carry link status, so a
+/// peer's legacy `Shared` value is indistinguishable from ours there.
+///
+/// `write_local_current_state` removes all `Local` links before adding one,
+/// so the normal write path never leaves more than one.  If somehow more
+/// than one `Local` link exists (a bug or test artefact), `None` is returned
+/// so the caller falls back to derive, which is always safe.
+pub(crate) async fn local_cached_state(
     perspective: &PerspectiveInstance,
     instance_uri: &str,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Option<String>> {
+    use ad4m_client::literal::{Literal, LiteralValue};
     let links = perspective
         .get_links(&LinkQuery {
             source: Some(instance_uri.to_string()),
@@ -234,7 +243,48 @@ async fn has_local_cache(
             ..Default::default()
         })
         .await?;
-    Ok(links.iter().any(|l| l.status == Some(LinkStatus::Local)))
+    let mut local_targets: Vec<String> = links
+        .into_iter()
+        .filter(|l| l.status == Some(LinkStatus::Local))
+        .map(|l| l.data.target.clone())
+        .collect();
+    match local_targets.len() {
+        0 => Ok(None),
+        1 => {
+            let target = local_targets.remove(0);
+            match Literal::from_url(target.clone())
+                .ok()
+                .and_then(|lit| lit.get().ok())
+            {
+                Some(LiteralValue::String(s)) => Ok(Some(s)),
+                _ => {
+                    log::warn!(
+                        "local_cached_state: {} has a Local currentState link whose target `{}` is not a string literal; treating as absent",
+                        instance_uri,
+                        target
+                    );
+                    Ok(None)
+                }
+            }
+        }
+        n => {
+            log::warn!(
+                "local_cached_state: {} has {} Local currentState links (expected at most 1); treating as absent",
+                instance_uri,
+                n
+            );
+            Ok(None)
+        }
+    }
+}
+
+async fn has_local_cache(
+    perspective: &PerspectiveInstance,
+    instance_uri: &str,
+) -> anyhow::Result<bool> {
+    local_cached_state(perspective, instance_uri)
+        .await
+        .map(|o| o.is_some())
 }
 
 /// Write the cache and the marks in one batch, so a crash between them can
@@ -287,5 +337,84 @@ async fn write_state_and_marks(
             perspective.discard_batch(&batch_id).await;
             Err(anyhow::anyhow!("commit_batch failed: {e:#}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_cached_state;
+    use crate::agent::AgentContext;
+    use crate::perspectives::flow_classes::{
+        advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE,
+    };
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::perspective_instance::PerspectiveInstance;
+    use crate::types::{Link, LinkStatus};
+
+    const INST_URI: &str = "ad4m://flow/instance/cache-test-1";
+
+    async fn write_shared_state(
+        perspective: &mut PerspectiveInstance,
+        state: &str,
+        ctx: &AgentContext,
+    ) {
+        use ad4m_client::literal::Literal;
+        let target = Literal::from_string(state.to_string())
+            .to_url()
+            .expect("encode state");
+        perspective
+            .add_link(
+                Link {
+                    source: INST_URI.to_string(),
+                    predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+                    target,
+                },
+                LinkStatus::Shared,
+                None,
+                ctx,
+            )
+            .await
+            .expect("add Shared currentState link");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_cached_state_absent_when_no_link() {
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+        let result = local_cached_state(&perspective, INST_URI)
+            .await
+            .expect("local_cached_state must not fail on empty graph");
+        assert!(
+            result.is_none(),
+            "no currentState links ⇒ cache is absent, got {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_cached_state_returns_value_for_local_link() {
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        advance_flow_instance_state(&mut perspective, INST_URI, "identified", None, &ctx)
+            .await
+            .expect("write Local currentState link");
+        let result = local_cached_state(&perspective, INST_URI)
+            .await
+            .expect("local_cached_state");
+        assert_eq!(
+            result.as_deref(),
+            Some("identified"),
+            "one Local currentState link ⇒ its value is returned"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_cached_state_absent_when_only_shared_link_present() {
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        write_shared_state(&mut perspective, "scoped", &ctx).await;
+        let result = local_cached_state(&perspective, INST_URI)
+            .await
+            .expect("local_cached_state");
+        assert!(
+            result.is_none(),
+            "only a Shared currentState link (peer-written) ⇒ cache is absent, got {result:?}"
+        );
     }
 }

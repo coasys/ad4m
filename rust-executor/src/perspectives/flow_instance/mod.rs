@@ -84,6 +84,8 @@ pub mod pass;
 pub mod roles;
 pub mod trigger;
 
+pub(crate) use pass::local_cached_state;
+
 use crate::perspectives::flow_context::FlowInstanceRecord;
 use crate::perspectives::flow_spawn::initial_state_of;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
