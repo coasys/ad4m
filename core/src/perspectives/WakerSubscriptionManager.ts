@@ -67,8 +67,13 @@ export interface WakerSubscriptionManagerOptions {
  * executor whose wallet was never unlocked this surfaces as a bare 403.
  */
 export function hintFor(msg: string): string {
-  if (/main key not found/i.test(msg)) {
-    return " — the executor's wallet is locked (keys are held in memory only); unlock the agent and subscribe again";
+  // "Executor is locked" is the current executor's message; "main key not
+  // found" is what older executors (and unrelated key lookups) say for the
+  // same locked state. Either way the caller cannot fix it themselves: keys
+  // live in memory only, so every restart locks the node again and only its
+  // operator can unlock it.
+  if (/executor is locked/i.test(msg) || /main key not found/i.test(msg)) {
+    return " — the executor is locked (its keys live in memory only, so every restart locks it again). Only the node's operator can unlock it: contact them and ask for unlockAgent, then subscribe again — a pending subscription re-attempts on its own once the node is unlocked";
   }
   if (/timed out after \d+ms/i.test(msg)) {
     return " — the executor accepted the waker's connection but never answered; check that the waker is pointed at the right executor host and API port (executorUrl in the plugin config) and that the node is unlocked";

@@ -184,8 +184,16 @@ describe('WakerSubscriptionManager', () => {
     manager.disposeAll();
   });
 
-  it('names the locked wallet as the cause of a main-key 403 only', () => {
-    expect(hintFor('RPC error 403: main key not found')).toContain('wallet is locked');
+  it('names the operator as the fix for a locked executor, on both message shapes', () => {
+    // Current executor message (post-#973) and the older internal error must
+    // both map to the same hint, and the hint must point at the node operator —
+    // a remote agent cannot unlock someone else's node.
+    const current = hintFor('RPC error 403: Executor is locked: the wallet has not been unlocked since the last restart.');
+    const legacy = hintFor('RPC error 403: main key not found');
+    for (const hint of [current, legacy]) {
+      expect(hint).toContain('executor is locked');
+      expect(hint).toContain('operator');
+    }
     expect(hintFor('connection refused')).toBe('');
   });
 });

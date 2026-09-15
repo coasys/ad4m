@@ -3502,8 +3502,13 @@ describe("WakerSubscriptionManager", () => {
     manager.disposeAll();
   });
 
-  it("should hint at a locked wallet on a main-key 403 only", () => {
-    expect(hintFor("RPC error 403: main key not found")).toContain("wallet is locked");
+  it("should hint at the node operator for a locked executor, on both message shapes", () => {
+    const current = hintFor("RPC error 403: Executor is locked: the wallet has not been unlocked since the last restart.");
+    const legacy = hintFor("RPC error 403: main key not found");
+    for (const hint of [current, legacy]) {
+      expect(hint).toContain("executor is locked");
+      expect(hint).toContain("operator");
+    }
     expect(hintFor("connection refused")).toBe("");
   });
 
