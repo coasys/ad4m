@@ -1,5 +1,6 @@
 mod byte_array;
 pub mod capability;
+mod conductor_languages;
 pub mod error;
 pub mod language;
 pub mod language_context;
@@ -14,7 +15,6 @@ use deno_core::error::AnyError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::holochain_service::maybe_get_holochain_service;
 use crate::pubsub::{get_global_pubsub, EXCEPTION_OCCURRED_TOPIC};
 use crate::runtime_service::RuntimeService;
 use crate::types::Address;
@@ -650,25 +650,13 @@ impl LanguageController {
         Ok(())
     }
 
-    /// Load system languages (language language first, then agent/neighbourhood/perspective)
-    pub async fn load_system_languages(
-        &self,
-        language_language_only: bool,
-    ) -> Result<(), LanguageError> {
-        let result = self
-            .load_system_languages_inner(language_language_only)
-            .await;
-
-        if result.is_ok() {
-            info!("All languages loaded and ready");
-        } else {
-            warn!("System language loading had errors");
-        }
-
-        result
-    }
-
-    async fn load_system_languages_inner(
+    /// Load the language language and, unless `language_language_only`, the agent,
+    /// neighbourhood and perspective languages. With the default seed none of these touch
+    /// Holochain, so this returns without waiting for the conductor; a seed whose system
+    /// languages do (the integration-test agent language) waits for it, so start the
+    /// conductor before calling this. The link and installed languages, which always need
+    /// it, are `load_link_and_installed_languages` (`conductor_languages.rs`).
+    pub async fn load_core_system_languages(
         &self,
         language_language_only: bool,
     ) -> Result<(), LanguageError> {
@@ -749,32 +737,6 @@ impl LanguageController {
                 aliases.insert("neighbourhood".to_string(), neighbourhood_language);
                 aliases.insert("perspective".to_string(), perspective_language);
                 info!("Registered language aliases: {:?}", *aliases);
-            }
-
-            // Step 3: Preload known link languages in parallel
-            let known_link_languages =
-                RuntimeService::with_global_instance(|rs| rs.get_know_link_languages());
-            if !known_link_languages.is_empty() {
-                info!(
-                    "Installing {} known link languages in parallel",
-                    known_link_languages.len()
-                );
-                let results = futures::future::join_all(
-                    known_link_languages
-                        .iter()
-                        .map(|addr| self.install_language_from_address(addr, true)),
-                )
-                .await;
-                for (addr, result) in known_link_languages.iter().zip(results) {
-                    if let Err(e) = result {
-                        warn!("Failed to preload known link language {}: {}", addr, e);
-                    }
-                }
-            }
-
-            // Step 4: Load any other installed languages from disk
-            if let Err(e) = self.load_installed_languages().await {
-                warn!("Failed to load installed languages: {}", e);
             }
         }
 
@@ -1291,13 +1253,12 @@ impl LanguageController {
 
         // Unpack hApp bundle
         info!("readAndTemplateHolochainDna: unpacking hApp bundle");
-        let holochain_service =
-            maybe_get_holochain_service()
-                .await
-                .ok_or_else(|| LanguageError::RuntimeError {
-                    address: source_language_hash.to_string(),
-                    message: "Holochain service not available".to_string(),
-                })?;
+        let holochain_service = crate::agent::conductor_startup::holochain_service_once_started()
+            .await
+            .ok_or_else(|| LanguageError::RuntimeError {
+                address: source_language_hash.to_string(),
+                message: "Holochain service not available".to_string(),
+            })?;
 
         let unpack_happ_path = holochain_service
             .unpack_happ(temp_happ_path.to_string_lossy().to_string())
@@ -1640,7 +1601,9 @@ impl LanguageController {
         }
 
         // Remove Holochain DNA for this language
-        if let Some(holochain_service) = maybe_get_holochain_service().await {
+        if let Some(holochain_service) =
+            crate::agent::conductor_startup::holochain_service_once_started().await
+        {
             match holochain_service.remove_app(address.to_string()).await {
                 Ok(()) => {
                     info!("Removed Holochain app for language {}", address);
