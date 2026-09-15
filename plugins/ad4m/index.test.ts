@@ -2113,6 +2113,75 @@ describe("ad4mPlugin", () => {
     );
   });
 
+  it("ad4m_unsubscribe_from_children can cancel a subscription still stuck in Pending", async () => {
+    // Regression: a subscribe whose handshake the executor never answered lands
+    // in the pending queue (#1016), not active. unsubscribe walked only
+    // getActive(), so it reported "not found" and the 30s retry re-fired
+    // forever with no way to stop it (Marvin, 2026-09-15 wake test).
+    const registeredTools: Array<{ name: string; execute: Function }> = [];
+    const mockApi = {
+      pluginConfig: {},
+      logger: makeMockLogger(),
+      registerTool: vi.fn((tool: any) => registeredTools.push(tool)),
+      registerService: vi.fn(),
+      registerCli: vi.fn(),
+    };
+    ad4mPlugin(mockApi);
+
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: { querySparql: vi.fn() },
+      logger: makeMockLogger(),
+      QuerySubscriptionProxy: vi.fn(function () {
+        return {
+          initialized: Promise.resolve(),
+          subscribe: vi.fn(() => new Promise<void>(() => {})),
+          dispose: vi.fn(),
+          onResult: vi.fn(),
+        };
+      }),
+      debounceMs: 10,
+      subscribeTimeoutMs: 50,
+      retryPendingMs: 60_000,
+      onWake: () => {},
+    });
+    _setSubscriptionManagerForTests(manager);
+
+    try {
+      // Drive the manager straight to a Pending channel-messages sub (the
+      // plugin's subscribe_to_children needs a live generate_waker_query MCP
+      // call to build the query, which isn't mocked here; the pending state is
+      // what this test is about, not how it got there).
+      await manager
+        .subscribe({
+          id: "children-persp-uuid-1",
+          type: "channel-messages",
+          perspective: "persp-uuid-1",
+          channel: "literal:string:chan",
+          query: "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+        })
+        .catch(() => {}); // times out into the pending queue, throws to caller
+      // It is Pending, not active.
+      expect(manager.getActive()).toHaveLength(0);
+      expect(manager.getPending().length).toBeGreaterThan(0);
+
+      const unsubscribeTool = registeredTools.find(
+        (t) => t.name === "ad4m_unsubscribe_from_children",
+      )!;
+      const res = await unsubscribeTool.execute("call-2", {
+        perspective_id: "persp-uuid-1",
+        expression_address: "literal:string:chan",
+      });
+      expect(res.content[0].text).toBe(
+        "Unsubscribed from children of literal:string:chan in perspective persp-uuid-1.",
+      );
+      // And it is really gone — no more retries to fire.
+      expect(manager.getPending()).toHaveLength(0);
+    } finally {
+      manager.disposeAll();
+      _setSubscriptionManagerForTests(null);
+    }
+  });
+
   it("mcp-service start connects and registers MCP tools", async () => {
     const registeredTools: Array<{ name: string; execute: Function }> = [];
     const registeredServices: Array<{

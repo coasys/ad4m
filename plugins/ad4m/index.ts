@@ -554,6 +554,23 @@ export default function ad4mPlugin(api: any) {
   }
 
   /**
+   * Every subscription the manager is tracking — active AND pending.
+   *
+   * An unsubscribe has to be able to reach a subscription that failed and is
+   * waiting in the pending queue for a re-attempt (a handshake the executor
+   * never answered, a locked wallet). Walking only `getActive()` left those
+   * un-cancellable: the tool reported "not found" while the 30s retry kept
+   * re-firing forever (found by Marvin in the 2026-09-15 wake test).
+   */
+  function allLiveSubscriptions(): WakerSubscription[] {
+    if (!_subscriptionManager) return [];
+    return [
+      ..._subscriptionManager.getActive(),
+      ..._subscriptionManager.getPending(),
+    ];
+  }
+
+  /**
    * Helper: detect "user not found" errors from the executor.
    */
   function isUserNotFoundError(error: string | undefined): boolean {
@@ -823,9 +840,9 @@ Notes:
       required: ["perspective_id"],
     },
     async execute(_id: string, params: { perspective_id: string }) {
-      // Find subscription by perspective
+      // Find subscription by perspective (active or pending)
       let found = false;
-      for (const sub of (_subscriptionManager?.getActive() ?? [])) {
+      for (const sub of allLiveSubscriptions()) {
         if (
           sub.perspective === params.perspective_id &&
           sub.type === "mention"
@@ -948,7 +965,7 @@ Notes:
       params: { perspective_id: string; expression_address: string },
     ) {
       let found = false;
-      for (const sub of (_subscriptionManager?.getActive() ?? [])) {
+      for (const sub of allLiveSubscriptions()) {
         if (
           sub.perspective === params.perspective_id &&
           sub.channel === params.expression_address &&
