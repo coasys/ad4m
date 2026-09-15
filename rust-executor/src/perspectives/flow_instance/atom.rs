@@ -60,6 +60,12 @@ pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
 pub const RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
 /// The only [`RESOLVED_AS_PREDICATE`] value this engine writes.
 pub const FIRED_MARK: &str = "fired";
+/// Tombstone: role-row → revoked DID. Written by an admin instead of deleting
+/// the grant row; the link's author-asserted timestamp is the revocation time.
+/// Source = role-row URI, target = literal-encoded DID. Authority matches the
+/// grant (admin who controls the role row). Stays in the graph forever so
+/// newcomers can reconstruct the full role-membership history.
+pub const ROLE_GRANT_REVOKED_PREDICATE: &str = "ad4m://flow/role_grant_revoked";
 
 // ---------------------------------------------------------------------------
 // Types
