@@ -40,10 +40,25 @@
 //! other, and — for marks — a way for a forged link to mute another
 //! replica's once-only [`FireOutcome`]. Local, they are exactly what they
 //! say: what *this* replica derived. The fold reads neither.
+//!
+//! ## Catch-up
+//!
+//! Because the marks are per replica, a replica that joins a flow with
+//! history would, on its first pass, find every settled edge unmarked and
+//! report each one as new. It must not: those events happened before this
+//! replica was watching. So the **first** pass this replica runs over an
+//! instance — no `Local` cache and no `Local` mark on it yet, i.e. never
+//! derived here — is a silent catch-up: it marks what has settled and
+//! writes the cache, and emits nothing. From then on the instance *has* a
+//! local cache, so every later pass reports normally. The invariant: **no
+//! event flood on join; no missed events for edges that settle after
+//! catch-up.** The replica that mints an instance writes its cache at the
+//! mint, so its own first pass is not a catch-up and its first settle is
+//! reported. See `first_pass_here` in [`run_flow_consensus_pass`].
 
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
-use crate::perspectives::flow_classes::advance_flow_instance_state;
+use crate::perspectives::flow_classes::{advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE};
 use crate::perspectives::flow_context::{
     load_all_flow_instances, load_flow_instances, load_shacl_flows, retain_selected_flows,
     scope_subject,
@@ -51,7 +66,7 @@ use crate::perspectives::flow_context::{
 use crate::perspectives::flow_instance::atom::{FIRED_MARK, RESOLVED_AS_PREDICATE};
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{Link, LinkStatus};
+use crate::types::{Link, LinkQuery, LinkStatus};
 
 /// One consensus event this replica recorded for the first time: the atoms
 /// that settled an edge, now marked, with the cache advanced to match.
@@ -120,6 +135,26 @@ pub async fn run_flow_consensus_pass(
         let derived = fold_read_set(flow, &read_set);
         let already_marked = read_set.marked_proposals();
 
+        // Catch-up (module doc): never derived here = no Local mark and no
+        // Local cache. Marks are per replica, so on a join every settled
+        // edge is unmarked, and reporting them all would be a flood of
+        // events that happened before this replica watched. The pass still
+        // marks them and ALWAYS writes the cache — that is what makes the
+        // next pass an ordinary one, so an edge settling afterwards is not
+        // missed. Invariant: no event flood on join; no missed events for
+        // edges that settle after catch-up.
+        let first_pass_here = already_marked.is_empty()
+            && match has_local_cache(perspective, &record.instance_uri).await {
+                Ok(cached) => !cached,
+                Err(e) => {
+                    log::warn!(
+                        "run_flow_consensus_pass: reading the cache of {} failed; skipping instance this pass: {e:#}",
+                        record.instance_uri
+                    );
+                    continue;
+                }
+            };
+
         // An edge is new to this replica when some atom that settled it is
         // not yet marked. The mark is bookkeeping, so this comparison can
         // never change the state — only how much of it we still have to note.
@@ -145,7 +180,8 @@ pub async fn run_flow_consensus_pass(
             });
         }
         let stale_cache = record.current_state != derived.state;
-        if !stale_cache && to_mark.is_empty() {
+        let write_cache = stale_cache || first_pass_here;
+        if !write_cache && to_mark.is_empty() {
             continue;
         }
         if stale_cache {
@@ -159,12 +195,18 @@ pub async fn run_flow_consensus_pass(
         match write_state_and_marks(
             perspective,
             &record.instance_uri,
-            stale_cache.then_some(derived.state.as_str()),
+            write_cache.then_some(derived.state.as_str()),
             &to_mark,
             context,
         )
         .await
         {
+            Ok(()) if first_pass_here => log::info!(
+                "run_flow_consensus_pass: first derivation of {} on this replica — caught up silently at `{}` ({} settled edge(s) marked, none reported)",
+                record.instance_uri,
+                derived.state,
+                fresh.len()
+            ),
             Ok(()) => outcomes.extend(fresh),
             Err(e) => log::warn!(
                 "run_flow_consensus_pass: recording {} rolled back (re-runs next pass): {e:#}",
@@ -173,6 +215,26 @@ pub async fn run_flow_consensus_pass(
         }
     }
     outcomes
+}
+
+/// Whether this replica has ever cached a state for `instance_uri`: a
+/// `Local` `currentState` link exists. The hydrated record cannot answer
+/// this — it does not carry link status, and a peer's legacy `Shared` value
+/// would read as a cache — so this is a raw query on the row.
+async fn has_local_cache(
+    perspective: &PerspectiveInstance,
+    instance_uri: &str,
+) -> anyhow::Result<bool> {
+    let links = perspective
+        .get_links(&LinkQuery {
+            source: Some(instance_uri.to_string()),
+            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+            ..Default::default()
+        })
+        .await?;
+    Ok(links
+        .iter()
+        .any(|l| l.status == Some(LinkStatus::Local)))
 }
 
 /// Write the cache and the marks in one batch, so a crash between them can

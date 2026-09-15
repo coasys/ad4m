@@ -536,6 +536,102 @@ async fn a_synced_chat_message_does_not_trigger_a_pass() {
     );
 }
 
+/// The row as sync delivers it to every other replica: no `Local` cache.
+async fn drop_local_cache(f: &mut Fixture) {
+    let cache: Vec<LinkExpression> = current_state_links(f)
+        .await
+        .into_iter()
+        .map(LinkExpression::from)
+        .collect();
+    f.perspective
+        .remove_links(cache, None)
+        .await
+        .expect("drop the local cache");
+}
+
+/// Copy every link of `proposal_uris` from replica `from` into replica
+/// `to`, as sync would (Shared, signatures intact), without going through
+/// the sync trigger so the test controls when the pass runs.
+async fn replicate_proposals(from: &Fixture, to: &mut Fixture, proposal_uris: &[&str]) {
+    for uri in proposal_uris {
+        for link in links_of(from, uri).await {
+            to.perspective
+                .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None)
+                .await
+                .expect("replicate a proposal link");
+        }
+    }
+}
+
+/// Catch-up is silent. A replica joining a flow with history finds every
+/// settled edge unmarked — marks are per replica — and must not report
+/// them all as new. Its first pass over the instance marks them and writes
+/// the cache without emitting; the next edge to settle is reported. The
+/// creating replica is not a newcomer (it wrote its cache at the mint), so
+/// its first settle IS reported — pinned by
+/// `the_pass_writes_the_cache_and_the_marks_and_then_has_nothing_to_do`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
+    let mut a = seed_review_flow().await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+
+    // Replica B: same definition, the instance row as sync delivers it (no
+    // cache), and A's history.
+    let mut b = seed_review_flow().await;
+    drop_local_cache(&mut b).await;
+    replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
+
+    let first = consensus_pass(&mut b).await;
+    assert!(first.is_empty(), "catch-up is silent, got {first:?}");
+    assert_eq!(
+        b.cached_state().await,
+        "review",
+        "but the cache is written (review → changes_requested → review)"
+    );
+    let marked = b.read_set().await.marked_proposals();
+    assert!(
+        marked.contains(&h1) && marked.contains(&h2),
+        "and the settled history is marked: {marked:?}"
+    );
+    assert!(
+        consensus_pass(&mut b).await.is_empty(),
+        "nothing left to record after catch-up"
+    );
+
+    // An edge that settles after catch-up is an event for B.
+    let h3 = settle(&mut a, "h3", "review", "approved").await;
+    replicate_proposals(&a, &mut b, &[&h3]).await;
+    let later = consensus_pass(&mut b).await;
+    assert_eq!(
+        later.len(),
+        1,
+        "an edge settling after catch-up fires here once: {later:?}"
+    );
+    assert_eq!(
+        (later[0].from_state.as_str(), later[0].to_state.as_str()),
+        ("review", "approved")
+    );
+    assert_eq!(b.cached_state().await, "approved");
+    assert!(consensus_pass(&mut b).await.is_empty(), "and only once");
+}
+
+/// A newcomer with nothing to catch up on: the first pass writes the cache
+/// (silently, trivially) and the FIRST edge to settle afterwards is
+/// reported — catch-up must not eat the first real event.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newcomer_with_no_history_reports_the_first_settle_after_its_first_pass() {
+    let mut f = seed_satisfied_fixture(None).await;
+    drop_local_cache(&mut f).await;
+    assert!(consensus_pass(&mut f).await.is_empty());
+    assert_eq!(f.cached_state().await, "identified");
+
+    f.mint_one().await;
+    let outcomes = consensus_pass(&mut f).await;
+    assert_eq!(outcomes.len(), 1, "got {outcomes:?}");
+    assert_eq!(f.cached_state().await, "scoped");
+}
+
 // ---------------------------------------------------------------------------
 // The fired mark is an index
 // ---------------------------------------------------------------------------
