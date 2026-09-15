@@ -877,10 +877,84 @@ const RESERVED_PROPERTY_NAMES: [&str; 6] = [
     "timestamp",
 ];
 
+/// Make the property-shape-level `local: true` authoritative by pushing it
+/// down into every action that writes that property.
+///
+/// Write status is decided in `execute_commands` from the *action's* `local`
+/// field alone — the executor synthesises no default actions, so a
+/// property-shape `local: true` on its own had no effect whatsoever. A class
+/// registered through `add_model` with `"local": true` on a property (and no
+/// hand-copied `"local": true` inside each setter/adder/remover) produced
+/// Shared links, silently. Decorator-generated SHACL only worked because
+/// `shacl-gen.ts` copies the flag into the setter/adder/remover actions — and
+/// even there it omits it from the *constructor* entries, so a `local`
+/// property that is `required` or carries an `initial` value was written
+/// Shared at creation and Local on every later setter write: one property,
+/// two statuses, depending on when it was written.
+///
+/// Doing the propagation once here, at the single ingestion point for SHACL
+/// JSON, means both mechanisms converge before anything is persisted:
+/// `execute_commands` stays untouched, and the link-level SDNA that
+/// `get_shape_actions_from_shacl` reads back already carries the flag.
+///
+/// An action that states `local` explicitly is left alone — an explicit
+/// action-level flag stays the more specific declaration.
+fn propagate_property_local(shape: &mut SHACLShape) {
+    let local_predicates: std::collections::HashSet<String> = shape
+        .properties
+        .iter()
+        .filter(|prop| prop.local == Some(true))
+        .map(|prop| prop.path.clone())
+        .collect();
+
+    if local_predicates.is_empty() {
+        return;
+    }
+
+    // Property-level actions: every action of a `local` property, regardless
+    // of predicate. A collection setter also writes companion entries (e.g.
+    // `ad4m://collection_order`); leaving those Shared would publish the
+    // ordering of a collection whose members stay executor-private.
+    for prop in shape.properties.iter_mut() {
+        if prop.local != Some(true) {
+            continue;
+        }
+        for action in prop
+            .setter
+            .iter_mut()
+            .chain(prop.adder.iter_mut())
+            .chain(prop.remover.iter_mut())
+        {
+            if action.local.is_none() {
+                action.local = Some(true);
+            }
+        }
+    }
+
+    // Class-level actions are shared by all properties, so they are matched by
+    // predicate: only the constructor/destructor entries that actually touch a
+    // `local` property's predicate become local.
+    for action in shape
+        .constructor_actions
+        .iter_mut()
+        .chain(shape.destructor_actions.iter_mut())
+    {
+        if action.local.is_none() && local_predicates.contains(&action.predicate) {
+            action.local = Some(true);
+        }
+    }
+}
+
 /// Parse SHACL JSON to RDF links (Option 3: Named Property Shapes)
 pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Link>, AnyError> {
-    let shape: SHACLShape = serde_json::from_str(shacl_json)
+    let mut shape: SHACLShape = serde_json::from_str(shacl_json)
         .map_err(|e| anyhow::anyhow!("Failed to parse SHACL JSON: {}", e))?;
+
+    // Before a single link is generated: a property-shape `local: true` is a
+    // declaration about the property, not about whichever actions happen to
+    // have been authored with the flag copied in. Push it into the actions so
+    // that the declaration is what the write path honours.
+    propagate_property_local(&mut shape);
 
     // Reject reserved names before generating a single link: a class that
     // registers cleanly but silently shadows one of its own properties on
@@ -1376,6 +1450,172 @@ mod tests {
         // that's the actual claim this error makes and the one worth keeping
         // stable, not the exact phrasing around it.
         assert!(message.contains("overwrit"), "{message}");
+    }
+
+    /// SHACL with `local: true` declared ONLY on the property shape — no
+    /// action carries the flag, which is exactly what an agent registering a
+    /// class through `add_model` writes. Every action that touches the
+    /// property must come out of the parser carrying `local`, because the
+    /// action's flag is the only thing `execute_commands` reads.
+    #[test]
+    fn property_level_local_propagates_into_every_action() {
+        let shacl_json = r#"{
+            "target_class": "cache://Cache",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "cache://Cache"},
+                {"action": "addLink", "source": "this", "predicate": "cache://state", "target": "literal:string:init"}
+            ],
+            "destructor_actions": [
+                {"action": "removeLink", "source": "this", "predicate": "cache://state", "target": "*"},
+                {"action": "removeLink", "source": "this", "predicate": "rdf://type", "target": "*"}
+            ],
+            "properties": [
+                {
+                    "path": "cache://state", "name": "state", "datatype": "xsd://string",
+                    "min_count": 1, "max_count": 1, "writable": true, "local": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "cache://state", "target": "value"}]
+                },
+                {
+                    "path": "cache://mark", "name": "marks", "collection": true,
+                    "writable": true, "local": true,
+                    "adder": [{"action": "addLink", "source": "this", "predicate": "cache://mark", "target": "value"}],
+                    "remover": [{"action": "removeLink", "source": "this", "predicate": "cache://mark", "target": "value"}]
+                },
+                {
+                    "path": "cache://title", "name": "title", "datatype": "xsd://string",
+                    "max_count": 1, "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "cache://title", "target": "value"}]
+                }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Cache").expect("parse SHACL");
+
+        // Helper: the JSON literal stored under `predicate` on the node whose
+        // URI ends in `source_suffix` — the same lookup
+        // `get_shape_actions_from_shacl` does at write time.
+        let actions = |source_suffix: &str, predicate: &str| -> Vec<AD4MAction> {
+            let link = links
+                .iter()
+                .find(|l| {
+                    l.source.ends_with(source_suffix)
+                        && l.predicate.as_deref() == Some(predicate)
+                })
+                .unwrap_or_else(|| panic!("no {predicate} link on ...{source_suffix}"));
+            let json = link
+                .target
+                .strip_prefix("literal:string:")
+                .expect("action literal");
+            serde_json::from_str(json).expect("action JSON")
+        };
+
+        let setter = actions("Cache.state", "ad4m://setter");
+        assert_eq!(setter[0].local, Some(true), "setter of a local property");
+
+        let adder = actions("Cache.marks", "ad4m://adder");
+        assert_eq!(adder[0].local, Some(true), "adder of a local property");
+
+        let remover = actions("Cache.marks", "ad4m://remover");
+        assert_eq!(remover[0].local, Some(true), "remover of a local property");
+
+        // Constructor/destructor are class-level: only the entries on a local
+        // property's predicate flip, the rest stay shared.
+        let constructor = actions("CacheShape", "ad4m://constructor");
+        let state_entry = constructor
+            .iter()
+            .find(|a| a.predicate == "cache://state")
+            .expect("constructor entry for cache://state");
+        assert_eq!(
+            state_entry.local,
+            Some(true),
+            "the initial value of a local property must be written local too, \
+             otherwise creation writes Shared and every later setter writes Local"
+        );
+        let type_entry = constructor
+            .iter()
+            .find(|a| a.predicate == "rdf://type")
+            .expect("constructor entry for rdf://type");
+        assert_eq!(
+            type_entry.local, None,
+            "a predicate no local property declares must stay shared"
+        );
+
+        let destructor = actions("CacheShape", "ad4m://destructor");
+        assert_eq!(
+            destructor
+                .iter()
+                .find(|a| a.predicate == "cache://state")
+                .expect("destructor entry for cache://state")
+                .local,
+            Some(true),
+        );
+
+        // The non-local property is untouched.
+        let title_setter = actions("Cache.title", "ad4m://setter");
+        assert_eq!(title_setter[0].local, None, "shared property stays shared");
+
+        // And the declaration itself is still emitted as a link, which is what
+        // `load_shape` / `describe_perspective` read back.
+        assert!(links.iter().any(|l| l.source.ends_with("Cache.state")
+            && l.predicate.as_deref() == Some("ad4m://local")
+            && l.target == "literal:true"));
+    }
+
+    /// An action stating `local` explicitly is the more specific declaration
+    /// and is left exactly as authored — including `local: false`, which is how
+    /// a single action opts out of a property-level flag.
+    #[test]
+    fn explicit_action_level_local_survives_propagation() {
+        let shacl_json = r#"{
+            "target_class": "cache://Cache",
+            "properties": [
+                {
+                    "path": "cache://state", "name": "state", "writable": true, "local": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "cache://state", "target": "value", "local": false}]
+                }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Cache").expect("parse SHACL");
+        let setter_json = links
+            .iter()
+            .find(|l| {
+                l.source.ends_with("Cache.state")
+                    && l.predicate.as_deref() == Some("ad4m://setter")
+            })
+            .expect("setter link")
+            .target
+            .strip_prefix("literal:string:")
+            .expect("action literal")
+            .to_string();
+        let setter: Vec<AD4MAction> = serde_json::from_str(&setter_json).expect("action JSON");
+        assert_eq!(setter[0].local, Some(false));
+    }
+
+    /// A class with no local property must serialise byte-for-byte as before
+    /// — the propagation is a no-op that returns early.
+    #[test]
+    fn shared_class_is_untouched_by_propagation() {
+        let shacl_json = r#"{
+            "target_class": "cache://Cache",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "cache://Cache"}
+            ],
+            "properties": [
+                {
+                    "path": "cache://title", "name": "title", "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "cache://title", "target": "value"}]
+                }
+            ]
+        }"#;
+
+        let links = parse_shacl_to_links(shacl_json, "Cache").expect("parse SHACL");
+        assert!(
+            !links
+                .iter()
+                .any(|l| l.target.contains("\"local\"") || l.predicate.as_deref() == Some("ad4m://local")),
+            "no local flag anywhere in a class that never declared one"
+        );
     }
 
     /// Every synthetic key `hydrate_one` writes, checked one at a time so a

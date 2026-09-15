@@ -5178,6 +5178,20 @@ impl PerspectiveInstance {
                                             if let Some(pred) = &cmd.predicate {
                                                 if pred == setter_pred {
                                                     cmd.target = Some(target_value.clone());
+                                                    // The constructor command survives this
+                                                    // merge, only its target is replaced — so
+                                                    // without carrying the setter's `local`
+                                                    // across, a property whose setter writes
+                                                    // Local links would be written Shared at
+                                                    // creation and Local on every later
+                                                    // update: the same property with two
+                                                    // different statuses depending on when it
+                                                    // was written. The setter is the
+                                                    // authority for how its own predicate is
+                                                    // stored.
+                                                    if setter_cmd.local.is_some() {
+                                                        cmd.local = setter_cmd.local;
+                                                    }
                                                     overwritten = true;
                                                     break;
                                                 }
@@ -7689,6 +7703,232 @@ mod tests {
             tag_links.len(),
             4,
             "update_subject must append each array element as its own link",
+        );
+    }
+
+    /// Hand-written `add_model` SHACL that declares `"local": true` on the
+    /// property shape and NOWHERE else — no action carries the flag. This is
+    /// what an agent authoring a class over MCP writes, and before the
+    /// property-level flag was propagated at parse time it produced Shared
+    /// links everywhere: the declaration was pure decoration.
+    ///
+    /// All three write paths are checked, because they reach
+    /// `execute_commands` through different command sources: the constructor
+    /// entry (initial value), the setter merged over that entry
+    /// (`create_subject` with a value), a setter on an existing instance
+    /// (`update_subject`), and the collection expansion that runs a setter
+    /// once per array element.
+    #[tokio::test]
+    async fn declarative_local_property_writes_local_links() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "t://Cache",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "t://Cache"},
+                {"action": "addLink", "source": "this", "predicate": "t://state", "target": "literal:string:init"}
+            ],
+            "destructor_actions": [],
+            "properties": [
+                {
+                    "path": "t://state", "name": "state", "datatype": "xsd://string",
+                    "min_count": 1, "max_count": 1, "writable": true, "local": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://state", "target": "value"}]
+                },
+                {
+                    "path": "t://mark", "name": "marks", "collection": true, "writable": true, "local": true,
+                    "setter": [{"action": "addLink", "source": "this", "predicate": "t://mark", "target": "value"}]
+                },
+                {
+                    "path": "t://title", "name": "title", "datatype": "xsd://string",
+                    "max_count": 1, "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://title", "target": "value"}]
+                }
+            ]
+        }"#;
+        let ctx = AgentContext::main_agent();
+        perspective
+            .add_sdna(
+                "Cache".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
+
+        async fn status_of(
+            perspective: &PerspectiveInstance,
+            uri: &str,
+            predicate: &str,
+        ) -> Vec<LinkStatus> {
+            perspective
+                .get_links(&LinkQuery {
+                    source: Some(uri.to_string()),
+                    predicate: Some(predicate.to_string()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links")
+                .into_iter()
+                .map(|l| l.status.clone().unwrap_or(LinkStatus::Shared))
+                .collect()
+        }
+
+        // 1. Initial value only: the `t://state` link comes from the
+        //    constructor action, which the SHACL never marked local.
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Cache".to_string()),
+                    query: None,
+                },
+                "t://cache/1".to_string(),
+                Some(serde_json::json!({ "title": "first" })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "t://state").await,
+            vec![LinkStatus::Local],
+            "the constructor's initial value for a `local: true` property must be local",
+        );
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "t://title").await,
+            vec![LinkStatus::Shared],
+            "a property that declares no `local` must stay shared",
+        );
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "rdf://type").await,
+            vec![LinkStatus::Shared],
+            "a class marker on no local property's predicate must stay shared",
+        );
+
+        // 2. Setter value supplied at creation: `create_subject` merges the
+        //    setter's target INTO the constructor command, keeping that
+        //    command. Same property, same instance — must be local as well,
+        //    or one property ends up with two statuses depending on the call.
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Cache".to_string()),
+                    query: None,
+                },
+                "t://cache/2".to_string(),
+                Some(serde_json::json!({ "state": "running", "marks": ["a", "b"] })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        assert_eq!(
+            status_of(&perspective, "t://cache/2", "t://state").await,
+            vec![LinkStatus::Local],
+            "a setter value merged over the constructor entry must stay local",
+        );
+        let mark_statuses = status_of(&perspective, "t://cache/2", "t://mark").await;
+        assert_eq!(mark_statuses.len(), 2, "both collection elements written");
+        assert!(
+            mark_statuses.iter().all(|s| *s == LinkStatus::Local),
+            "every element added to a local collection must be local, got {mark_statuses:?}",
+        );
+
+        // 3. A later setter write on an existing instance.
+        perspective
+            .update_subject(
+                SubjectClassOption {
+                    class_name: Some("Cache".to_string()),
+                    query: None,
+                },
+                "t://cache/1".to_string(),
+                serde_json::json!({ "state": "updated", "marks": ["c"] }),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("update_subject");
+
+        let state_statuses = status_of(&perspective, "t://cache/1", "t://state").await;
+        assert!(
+            state_statuses.iter().all(|s| *s == LinkStatus::Local),
+            "setter writes on a local property must be local, got {state_statuses:?}",
+        );
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "t://mark").await,
+            vec![LinkStatus::Local],
+        );
+    }
+
+    /// The decorator path: `shacl-gen.ts` copies `local` into the
+    /// setter/adder/remover actions but NOT into the constructor entries it
+    /// emits for an `initial` value or a required writable property. The
+    /// constructor command survives `create_subject`'s merge (only its target
+    /// is replaced), so without carrying the setter's `local` across, the
+    /// creation-time value lands Shared while every later write lands Local.
+    ///
+    /// Declared here without a property-level `local` on purpose: it isolates
+    /// the merge, so this still fails if parse-time propagation is removed.
+    #[tokio::test]
+    async fn action_level_local_survives_the_constructor_merge() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "t://Flow",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "t://Flow"},
+                {"action": "addLink", "source": "this", "predicate": "t://current_state", "target": "literal:string:init"}
+            ],
+            "destructor_actions": [],
+            "properties": [
+                {
+                    "path": "t://current_state", "name": "currentState", "datatype": "xsd://string",
+                    "min_count": 1, "max_count": 1, "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://current_state", "target": "value", "local": true}]
+                }
+            ]
+        }"#;
+        let ctx = AgentContext::main_agent();
+        perspective
+            .add_sdna(
+                "Flow".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
+
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Flow".to_string()),
+                    query: None,
+                },
+                "t://flow/1".to_string(),
+                Some(serde_json::json!({ "currentState": "started" })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        let links = perspective
+            .get_links(&LinkQuery {
+                source: Some("t://flow/1".to_string()),
+                predicate: Some("t://current_state".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].status.clone().unwrap_or(LinkStatus::Shared),
+            LinkStatus::Local,
+            "the setter's `local` must survive being merged into the constructor command",
         );
     }
 
