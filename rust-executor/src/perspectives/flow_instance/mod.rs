@@ -159,8 +159,9 @@ impl ReadSet {
             .collect()
     }
 
-    /// Proposal URIs already carrying a `resolved_as → "fired"` mark.
-    /// Bookkeeping for [`pass`], never an input to the fold.
+    /// Proposal URIs already carrying **this replica's** `Local`
+    /// `resolved_as → "fired"` mark. Bookkeeping for [`pass`], never an
+    /// input to the fold; a peer's `Shared` mark is not counted.
     pub fn marked_proposals(&self) -> HashSet<String> {
         self.proposals
             .iter()

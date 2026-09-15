@@ -33,6 +33,13 @@
 //!   settled an edge. It is a history index for UIs and this pass's "have I
 //!   already recorded this consensus event?" test (so [`FireOutcome`]s are
 //!   emitted once per event per replica). Never an input to the fold.
+//!
+//! Both are written **`Local`** (#987): every replica materialises only its
+//! own derivation. Shared, they were a claim a UI would display unverified,
+//! a value two replicas with different partial views would overwrite in each
+//! other, and — for marks — a way for a forged link to mute another
+//! replica's once-only [`FireOutcome`]. Local, they are exactly what they
+//! say: what *this* replica derived. The fold reads neither.
 
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
@@ -197,7 +204,7 @@ async fn write_state_and_marks(
                         predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
                         target: format!("literal:string:{}", urlencoding::encode(FIRED_MARK)),
                     },
-                    LinkStatus::Shared,
+                    LinkStatus::Local,
                     Some(batch_id.clone()),
                     context,
                 )

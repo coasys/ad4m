@@ -34,7 +34,7 @@
 use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{DecoratedLinkExpression, LinkQuery};
+use crate::types::{DecoratedLinkExpression, LinkQuery, LinkStatus};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -239,15 +239,20 @@ pub fn valid_votes(
     votes
 }
 
-/// Whether some agent whose signature verifies marked this proposal fired.
+/// Whether **this replica** marked this proposal fired: a `Local`
+/// `resolved_as → "fired"` link. Marks are per-replica bookkeeping (#987),
+/// so a peer's mark — which can only ever arrive `Shared` — is not a mark
+/// here: a forged one cannot mute this replica's once-only
+/// [`FireOutcome`](super::pass::FireOutcome).
 ///
 /// **Bookkeeping only.** The fold never reads it: it exists so a UI can list
 /// history and so the consensus pass knows which edges it has already
 /// recorded. A forged mark therefore moves nothing in either direction — it
 /// cannot fabricate history, and it cannot hide a proposal from the fold.
 pub fn marked_fired(links: &[DecoratedLinkExpression]) -> bool {
-    links_on(links, RESOLVED_AS_PREDICATE)
-        .any(|l| l.proof.valid == Some(true) && field_value(&l.data.target) == FIRED_MARK)
+    links_on(links, RESOLVED_AS_PREDICATE).any(|l| {
+        l.status == Some(LinkStatus::Local) && field_value(&l.data.target) == FIRED_MARK
+    })
 }
 
 impl TransitionAtom {
@@ -648,27 +653,45 @@ mod tests {
         );
     }
 
-    /// The mark is read from any author with a valid signature, because it is
-    /// an index rather than an authority — and it never reaches the fold.
+    /// A mark is this replica's own bookkeeping, so only a `Local` link is
+    /// one. A peer's mark arrives `Shared` — however well signed — and must
+    /// not count, or a forged mark could mute this replica's once-only
+    /// `FireOutcome` (#987). The mark never reaches the fold either way.
     #[test]
-    fn a_fired_mark_is_readable_but_needs_a_valid_signature() {
+    fn only_a_local_fired_mark_is_a_mark() {
         let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
         assert!(!marked_fired(&links));
-        links.push(link(
-            RESOLVED_AS_PREDICATE,
-            &literal(FIRED_MARK),
-            MALLORY,
-            false,
-            T3,
-        ));
-        assert!(!marked_fired(&links), "an unverifiable mark is not a mark");
-        links.push(link(
+
+        let mut peer_mark = link(
             RESOLVED_AS_PREDICATE,
             &literal(FIRED_MARK),
             MALLORY,
             true,
             T3,
-        ));
-        assert!(marked_fired(&links));
+        );
+        peer_mark.status = Some(LinkStatus::Shared);
+        links.push(peer_mark);
+        assert!(
+            !marked_fired(&links),
+            "a peer's shared mark is not this replica's mark"
+        );
+
+        let mut own_mark = link(
+            RESOLVED_AS_PREDICATE,
+            &literal(FIRED_MARK),
+            ALICE,
+            true,
+            T3,
+        );
+        own_mark.status = Some(LinkStatus::Local);
+        links.push(own_mark);
+        assert!(marked_fired(&links), "our own local mark is");
+
+        let mut other_value = link(RESOLVED_AS_PREDICATE, &literal("rejected"), ALICE, true, T3);
+        other_value.status = Some(LinkStatus::Local);
+        assert!(
+            !marked_fired(&[other_value]),
+            "only the `fired` value marks a proposal fired"
+        );
     }
 }
