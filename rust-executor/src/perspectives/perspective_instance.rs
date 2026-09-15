@@ -1396,6 +1396,16 @@ impl PerspectiveInstance {
             diff.removals.len(),
         );
 
+        log::debug!(
+            "commit({}): state={:?} link_language={} pending_ids={} adds={} removes={}",
+            handle.uuid,
+            handle.state,
+            self.has_link_language().await,
+            pending_ids.len(),
+            diff.additions.len(),
+            diff.removals.len(),
+        );
+
         let commit_result = if pending_ids.is_empty() {
             // No pending diffs, let's try
             // Clone link_language without holding the lock

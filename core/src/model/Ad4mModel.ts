@@ -538,6 +538,7 @@ export class Ad4mModel {
         ...(options.target !== undefined && { target: options.target }),
         ...(options.filter !== undefined && { filter: options.filter }),
         ...(options.where !== undefined && { where: options.where }),
+        ...(options.ordering !== undefined && { ordering: options.ordering }),
       };
     }
     
@@ -847,10 +848,22 @@ export class Ad4mModel {
       const original = this._snapshot[field];
 
       if (Array.isArray(current) || Array.isArray(original)) {
-        // Order-insensitive comparison (sorted) so reordering alone
-        // doesn't mark a relation as dirty.
-        const a = Array.isArray(current) ? [...current].sort() : [];
-        const b = Array.isArray(original) ? [...original].sort() : [];
+        // For an ordered relation the sequence *is* the state, so a reorder is
+        // the whole change and must mark the field dirty — sorting first would
+        // make `save()` a no-op for the one edit the ordering feature exists to
+        // support.
+        //
+        // Everything else compares order-insensitively, because an unordered
+        // relation is a set: the executor returns its members by link timestamp,
+        // and a caller who assigned the same members in another order has not
+        // changed anything.
+        const ordered = !!(metadata.relations as any)[field]?.ordering;
+        const a = Array.isArray(current) ? [...current] : [];
+        const b = Array.isArray(original) ? [...original] : [];
+        if (!ordered) {
+          a.sort();
+          b.sort();
+        }
         if (a.length !== b.length || a.some((v: any, i: number) => v !== b[i])) {
           changed.push(field);
         }

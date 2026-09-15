@@ -45,8 +45,8 @@ export type PropertyCondition =
  *
  * See design doc §3 principle 2 ("Guards talk about models, not raw graph")
  * and §4.1 for the full field spec. Template variables allowed inside
- * `where` string values: `$flow.base`, `$flow.uri`, `$did` — the engine
- * substitutes at evaluation time.
+ * `where` string values: `$flow.base`, `$flow.uri` (alias:
+ * `$flow.instance`), `$did` — the engine substitutes at evaluation time.
  */
 export interface ModelQuery {
   /** Subject-class URI to search for. */
