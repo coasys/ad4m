@@ -591,3 +591,101 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
     expect(await proxy.subjectClassTargetClasses()).toEqual([]);
   });
 });
+
+describe('PerspectiveProxy.interpretationOverlays cache', () => {
+  const overlayA = [{ base: 'a', kind: 'create', inferred: [] }];
+  const overlayB = [{ base: 'b', kind: 'update', inferred: [] }];
+
+  it('returns cached result within TTL', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return overlayA; }),
+    };
+    const proxy = createProxy(mockClient);
+
+    const first = await proxy.interpretationOverlays();
+    const second = await proxy.interpretationOverlays();
+    expect(first).toEqual(overlayA);
+    expect(second).toBe(first);
+    expect(calls).toBe(1);
+  });
+
+  it('invalidateOverlaysCache forces a fresh fetch', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return calls === 1 ? overlayA : overlayB; }),
+    };
+    const proxy = createProxy(mockClient);
+
+    await proxy.interpretationOverlays();
+    expect(calls).toBe(1);
+
+    proxy.invalidateOverlaysCache();
+    const fresh = await proxy.interpretationOverlays();
+    expect(calls).toBe(2);
+    expect(fresh).toEqual(overlayB);
+  });
+
+  it('does not cache a stale RPC response when invalidated during fetch', async () => {
+    // Simulate: interpretationOverlays() starts an RPC, then invalidateOverlaysCache()
+    // fires before the RPC resolves. The stale response must not repopulate the cache.
+    let resolveFetch: (v: any) => void;
+    let fetchCount = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => {
+        fetchCount++;
+        return new Promise(r => { resolveFetch = r; });
+      }),
+    };
+    const proxy = createProxy(mockClient);
+
+    // Start first fetch (cache empty)
+    const firstPromise = proxy.interpretationOverlays();
+
+    // While the RPC runs, invalidate (e.g. accept happened concurrently)
+    proxy.invalidateOverlaysCache();
+
+    // Resolve the now-stale RPC
+    resolveFetch!(overlayA);
+    const staleResult = await firstPromise;
+
+    // The caller still gets the result (it was in-flight), but the cache must stay empty
+    expect(staleResult).toEqual(overlayA);
+
+    // Next call must hit the RPC again, not return the stale cached value
+    resolveFetch!(overlayB);
+    const freshPromise = proxy.interpretationOverlays();
+    resolveFetch!(overlayB);
+    expect(await freshPromise).toEqual(overlayB);
+    expect(fetchCount).toBe(2);
+  });
+
+  it('acceptInterpretation clears cache and bumps generation', async () => {
+    const resolvers: Array<(v: any) => void> = [];
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
+      acceptInterpretation: jest.fn(async () => true),
+    };
+    const proxy = createProxy(mockClient);
+
+    // Start a fetch
+    const promise = proxy.interpretationOverlays();
+
+    // Accept fires before the fetch resolves
+    await proxy.acceptInterpretation('we://task/1');
+
+    // Stale RPC resolves — must not repopulate cache
+    resolvers[0](overlayA);
+    await promise;
+
+    // Next fetch must go to RPC (cache not repopulated by stale response)
+    const secondPromise = proxy.interpretationOverlays();
+    resolvers[1](overlayB);
+    expect(await secondPromise).toEqual(overlayB);
+    expect(resolvers.length).toBe(2);
+  });
+});

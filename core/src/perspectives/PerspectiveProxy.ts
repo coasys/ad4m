@@ -585,6 +585,11 @@ export class PerspectiveProxy {
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     #ensuredSubjectClasses = new Set<string>()
 
+    /** Cached `interpretationOverlays()` result with TTL-based expiry. */
+    #overlaysCache: { result: InterpretationOverlayInfo[]; cachedAt: number } | null = null
+    #overlaysCacheGen = 0
+    static readonly #OVERLAYS_TTL_MS = 30_000
+
     /**
      * Creates a new PerspectiveProxy instance.
      * Note: Don't create this directly, use ad4m.perspective.add() instead.
@@ -845,9 +850,31 @@ export class PerspectiveProxy {
     /**
      * Pending interpretation overlays on this perspective — LLM suggestions the
      * §4 divergence gate staged rather than applied, awaiting human accept/reject.
+     *
+     * Results are cached for 30 seconds. During peer-sync bursts, multiple callers
+     * (e.g. `proposals()`) may read overlays in rapid succession — the cache avoids
+     * repeating a ~3-second RPC when the result has not changed. Call
+     * {@link invalidateOverlaysCache} to force a fresh fetch on the next call.
      */
     async interpretationOverlays(): Promise<InterpretationOverlayInfo[]> {
-        return await this.#client.interpretationOverlays(this.#handle.uuid)
+        if (this.#overlaysCache && Date.now() - this.#overlaysCache.cachedAt < PerspectiveProxy.#OVERLAYS_TTL_MS) {
+            return this.#overlaysCache.result
+        }
+        const gen = this.#overlaysCacheGen
+        const result = await this.#client.interpretationOverlays(this.#handle.uuid)
+        // Only store when no invalidation happened during the RPC — a concurrent
+        // accept/reject/invalidate bumps the generation, and the stale response
+        // must not repopulate the cache.
+        if (gen === this.#overlaysCacheGen) {
+            this.#overlaysCache = { result, cachedAt: Date.now() }
+        }
+        return result
+    }
+
+    /** Drop the cached overlays so the next call fetches fresh data from the executor. */
+    invalidateOverlaysCache(): void {
+        this.#overlaysCacheGen++
+        this.#overlaysCache = null
     }
 
     /**
@@ -856,6 +883,8 @@ export class PerspectiveProxy {
      * `property` to accept a single predicate; omit it for the whole base.
      */
     async acceptInterpretation(base: string, property?: string): Promise<boolean> {
+        this.#overlaysCacheGen++
+        this.#overlaysCache = null
         return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
     }
 
@@ -865,6 +894,8 @@ export class PerspectiveProxy {
      * rejected `update` drops the overlay and keeps the real value.
      */
     async rejectInterpretation(base: string, property?: string): Promise<boolean> {
+        this.#overlaysCacheGen++
+        this.#overlaysCache = null
         return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
     }
 
