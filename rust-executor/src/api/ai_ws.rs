@@ -13,16 +13,18 @@ use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let bb = crate::billing_backend::billing_backend();
+    let global_free = bb.get_free_hosting_enabled().unwrap_or(true);
     if global_free {
         return Ok(());
     }
     if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
-        let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+        let free = bb
+            .get_user_free_access(email)
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
-            let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+            let credits = bb
+                .get_credits(email)
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
             if credits <= 0.0 {
                 return Err(WsRpcError::forbidden("Insufficient compute credits"));
