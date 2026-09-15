@@ -89,7 +89,12 @@ async fn local_property_hydrates_only_from_local_links() {
     let store = SparqlStore::new(None).unwrap();
     let spoofed = "literal:string:cache_spoofed";
     store
-        .add_link(&make_link(spoofed, "ad4m://type", "cache://Cache", "1700000000000"))
+        .add_link(&make_link(
+            spoofed,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000000",
+        ))
         .unwrap();
     store
         .add_link(&make_link_with_status(
@@ -121,7 +126,12 @@ async fn local_property_hydrates_only_from_local_links() {
     let store2 = SparqlStore::new(None).unwrap();
     let genuine = "literal:string:cache_genuine";
     store2
-        .add_link(&make_link(genuine, "ad4m://type", "cache://Cache", "1700000000000"))
+        .add_link(&make_link(
+            genuine,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000000",
+        ))
         .unwrap();
     store2
         .add_link(&make_link_with_status(
