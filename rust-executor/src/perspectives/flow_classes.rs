@@ -435,6 +435,15 @@ mod tests {
             "the direct write path and the SDNA must agree on the predicate",
         );
         assert_eq!(prop["local"].as_bool(), Some(true), "property must be local");
+        // Optional: a row synced from a peer carries no cache until this
+        // replica's pass runs, and `model_query` only returns instances that
+        // satisfy every `min_count >= 1` property — so a required cache would
+        // hide every remote instance.
+        assert_eq!(
+            prop["min_count"].as_u64(),
+            Some(0),
+            "currentState must be optional (min_count 0)"
+        );
         let setter = prop["setter"].as_array().expect("setter array");
         assert!(
             !setter.is_empty() && setter.iter().all(|a| a["local"].as_bool() == Some(true)),

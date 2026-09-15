@@ -108,9 +108,9 @@ export class FlowInstance {
    *
    * The returned wrapper carries the parsed `SHACLFlow` alongside the
    * on-graph record, so `currentState` / `availableTransitions` /
-   * `proposals` accessors work without further round-trips. The consensus
-   * engine (slice 10.6) will read the record's `currentState` when it
-   * fires transitions.
+   * `proposals` accessors work without further round-trips. The record's
+   * `currentState` is a per-replica cache the executor's consensus engine
+   * writes (as a local link) and never reads back as authority.
    *
    * @param perspective - The perspective the flow instance lives on
    * @param flowName - Name of a `SHACLFlow` already registered on the perspective

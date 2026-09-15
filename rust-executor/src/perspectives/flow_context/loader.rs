@@ -26,12 +26,19 @@ use std::collections::{HashMap, HashSet};
 /// Parse one hydrated `FlowInstance` JSON object (as returned by
 /// [`PerspectiveInstance::model_query`]) into a [`FlowInstanceRecord`].
 ///
-/// Returns `None` when any of `id` / `flow` / `subject` / `currentState`
-/// is missing — an untyped or half-written FlowInstance is silently
-/// skipped rather than failing the whole extraction pass. The typical
-/// cause is a mid-mint crash between constructor and setter writes; the
-/// half-record shows up in the next model_query result and we don't
-/// want that to poison every future extraction until it's hand-cleaned.
+/// Returns `None` when any of `id` / `flow` / `subject` is missing — an
+/// untyped or half-written FlowInstance is silently skipped rather than
+/// failing the whole extraction pass. The typical cause is a mid-mint
+/// crash between constructor and setter writes; the half-record shows up
+/// in the next model_query result and we don't want that to poison every
+/// future extraction until it's hand-cleaned.
+///
+/// `currentState` is **not** required: it is this replica's `Local` cache
+/// of the derived state (#987), so a row that synced in from a peer has
+/// none until the local consensus pass runs. Absence hydrates to an empty
+/// `current_state` — "not yet derived here" — never to a dropped record,
+/// or a remote replica would not see the instance at all (and, say, spawn
+/// a duplicate).
 pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowInstanceRecord> {
     let instance_uri = v.get("id").and_then(|x| x.as_str())?.to_string();
     // Property key `flowUri` on the TS @Model (SHACL predicate
@@ -39,7 +46,11 @@ pub fn parse_flow_instance_from_hydrated(v: &serde_json::Value) -> Option<FlowIn
     // not the bare name (James PR #929 R5).
     let flow_uri = v.get("flowUri").and_then(|x| x.as_str())?.to_string();
     let subject = v.get("subject").and_then(|x| x.as_str())?.to_string();
-    let current_state = v.get("currentState").and_then(|x| x.as_str())?.to_string();
+    let current_state = v
+        .get("currentState")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
     // Ad4mModel synthesises `createdAt` from the earliest link timestamp
     // on hydration (`rust-executor/src/perspectives/model_query/hydration.rs`).
     // When present it's an RFC3339 string; we keep it opaque here.
@@ -558,6 +569,22 @@ mod tests {
             "currentState": "identified",
         });
         assert!(parse_flow_instance_from_hydrated(&v).is_none());
+    }
+
+    /// A row synced from a peer carries no `currentState`: the cache is a
+    /// `Local` link on the replica that derived it (#987). The record must
+    /// still load — with an empty state meaning "not yet derived here" —
+    /// or a remote replica would never see the instance.
+    #[test]
+    fn parse_flow_instance_missing_current_state_is_not_yet_derived() {
+        let v = serde_json::json!({
+            "id": "ad4m://flow/instance/synced",
+            "flowUri": "coasys://DeliveryFlow",
+            "subject": "ad4m://task/foo",
+        });
+        let r = parse_flow_instance_from_hydrated(&v).expect("a synced row still loads");
+        assert_eq!(r.instance_uri, "ad4m://flow/instance/synced");
+        assert_eq!(r.current_state, "", "absent cache reads as empty, not as an error");
     }
 
     #[test]

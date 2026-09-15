@@ -233,15 +233,32 @@ impl Ad4mMcpHandler {
     /// state from exactly one place. Scoped to the single expression URI, so
     /// the loader pushes the filter down to `model_query` instead of sweeping
     /// every instance on the perspective (Model C scope discipline).
+    ///
+    /// The row's `currentState` is this replica's `Local` cache — absent until
+    /// a local consensus pass has run, and never the authority (#987) — so the
+    /// record is returned with the **derived** state, exactly as the prompt
+    /// path does. Only when the definition is gone (instance outlived its
+    /// flow) is the cached value all there is to report.
     async fn flow_instance_for(
         perspective: &PerspectiveInstance,
         expression: &str,
         flow_uri: &str,
     ) -> anyhow::Result<Option<FlowInstanceRecord>> {
         let instances = load_flow_instances(perspective, &[expression.to_string()]).await?;
-        Ok(instances
+        let Some(record) = instances
             .into_iter()
-            .find(|record| record.flow_uri == flow_uri))
+            .find(|record| record.flow_uri == flow_uri)
+        else {
+            return Ok(None);
+        };
+        let flows = load_shacl_flows(perspective).await?;
+        let derived = crate::perspectives::flow_instance::derive_states(
+            perspective,
+            std::slice::from_ref(&record),
+            &flows,
+        )
+        .await;
+        Ok(Some(derived.into_iter().next().unwrap_or(record)))
     }
 
     /// Get available actions for an expression in a flow
