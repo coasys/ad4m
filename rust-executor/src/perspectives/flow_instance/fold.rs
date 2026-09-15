@@ -20,8 +20,11 @@
 //!   much that verdict is worth differs by half: the proposals and votes are
 //!   signed links the verifier re-checks itself, while the `fromRole`
 //!   history — grant times and revocation tombstones, against which each
-//!   vote is gated as of its own timestamp — is what this replica read, cited
-//!   rather than carried — see [`ReadSet`](super::ReadSet).
+//!   vote is gated as of its own timestamp — is what this replica read: the
+//!   read-set carries each row's [`RoleGrantWindow`](super::roles::RoleGrantWindow)
+//!   values but cites the underlying links by id, author and timestamp
+//!   rather than carrying them as signed links — see
+//!   [`ReadSet`](super::ReadSet).
 //! - **A function of the links present now.** Delete a settled vote and the
 //!   fold recomputes without it, so the flow stands where it stood before
 //!   that vote. The graph is the truth and the state follows it.

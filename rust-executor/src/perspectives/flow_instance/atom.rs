@@ -60,10 +60,14 @@ pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
 pub const RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
 /// The only [`RESOLVED_AS_PREDICATE`] value this engine writes.
 pub const FIRED_MARK: &str = "fired";
-/// Tombstone: role-row → revoked DID. Written by an admin instead of deleting
-/// the grant row; the link's author-asserted timestamp is the revocation time.
-/// Source = role-row URI, target = literal-encoded DID. Authority matches the
-/// grant (admin who controls the role row). Stays in the graph forever so
+/// Tombstone: role-row → revoked DID. Written instead of deleting the grant
+/// row; the link's author-asserted timestamp is the revocation time. Source =
+/// role-row URI, target = the DID — literal-encoded or raw, the reader
+/// accepts both (`flow_evaluator::target_names_did`). Authority mirrors the
+/// grant's own rule (`roles::revocation_authorised`): whoever the role
+/// query's `author` condition accepts as granter may revoke, which makes
+/// admin-gated roles admin-revoked, `$did` roles self-revoked, and
+/// open-authorship roles revocable by anyone. Stays in the graph forever so
 /// newcomers can reconstruct the full role-membership history.
 pub const ROLE_GRANT_REVOKED_PREDICATE: &str = "ad4m://flow/role_grant_revoked";
 

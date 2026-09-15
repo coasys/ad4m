@@ -435,6 +435,19 @@ pub trait RequiresQueryable: Send + Sync {
     }
 }
 
+/// Does a link target name this DID? Accepts the raw DID (the flow's own
+/// `proposer` links), the `literal:string:`-encoded form the SDNA setters
+/// write, and the legacy `literal://string:` spelling still minted by Flux's
+/// TypeScript `Literal` and by pre-normalisation peers (#1014).
+///
+/// The legacy spelling matters more here than anywhere else in this file:
+/// every other malformed input in this read path fails *closed* (undated row
+/// → error, non-discriminating query → error), but an unrecognised
+/// *tombstone* spelling would fail open — the revocation simply is not seen.
+fn target_names_did(target: &str, did: &str, did_literal: &str) -> bool {
+    target == did || crate::utils::normalize_legacy_literal(target).as_ref() == did_literal
+}
+
 #[async_trait]
 impl RequiresQueryable for PerspectiveInstance {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
@@ -448,15 +461,12 @@ impl RequiresQueryable for PerspectiveInstance {
         did: &str,
     ) -> anyhow::Result<RoleGrantTimestamps> {
         use ad4m_client::literal::Literal;
-        // Social DNAs store DIDs either `literal:string:`-encoded (the SDNA
-        // setters) or raw (the flow's own `proposer` links do). A grant or a
-        // tombstone written in either form names the same DID.
         let did_literal = Literal::from_string(did.to_string())
             .to_url()
             .map_err(|e| {
                 anyhow::anyhow!("role_grant_timestamps: literal encode DID `{did}`: {e}")
             })?;
-        let names_did = |target: &str| target == did || target == did_literal;
+        let names_did = |target: &str| target_names_did(target, did, &did_literal);
 
         let granted_at = match grant_predicate {
             Some(pred) => self
@@ -957,6 +967,37 @@ mod tests {
     use crate::perspectives::shacl_parser::{FlowState, FlowTransition};
     use std::collections::BTreeMap;
     use std::sync::Mutex;
+
+    #[test]
+    fn target_names_did_accepts_raw_and_both_literal_spellings() {
+        let did = "did:key:zAlice";
+        let lit = "literal:string:did%3Akey%3AzAlice";
+        assert!(target_names_did(did, did, lit));
+        assert!(target_names_did(lit, did, lit));
+        // The legacy double-slash spelling names the same DID — a tombstone
+        // written in it must be seen, or revocation fails open.
+        assert!(target_names_did(
+            "literal://string:did%3Akey%3AzAlice",
+            did,
+            lit
+        ));
+        assert!(!target_names_did(
+            "literal:string:did%3Akey%3AzBob",
+            did,
+            lit
+        ));
+        assert!(!target_names_did("literal://", did, lit));
+    }
+
+    #[test]
+    fn to_url_emits_the_single_colon_spelling_target_names_did_expects() {
+        use ad4m_client::literal::Literal;
+        let url = Literal::from_string("did:key:zAlice".to_string())
+            .to_url()
+            .expect("literal encode");
+        assert!(url.starts_with("literal:") && !url.starts_with("literal://"));
+        assert!(target_names_did(&url, "did:key:zAlice", &url));
+    }
 
     fn mq(class: &str) -> ModelQuery {
         ModelQuery {

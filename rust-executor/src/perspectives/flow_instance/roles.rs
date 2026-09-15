@@ -43,11 +43,12 @@
 //! ## Where the timestamps come from
 //!
 //! - `granted_at` is the earliest `row --didProperty--> did` link, when the
-//!   query names a `didProperty` and that link exists; otherwise the row's
-//!   own timestamp (its earliest link, as `model_query` reports it). That is
-//!   the granularity the platform offers — a property set on a pre-existing
-//!   row dates the grant from the row, not the assignment — and it is never
-//!   "unknown, so always": a row with no timestamp at all is an error.
+//!   query names a `didProperty` and that link exists — there the grant is
+//!   dated from the assignment itself; otherwise the row's own timestamp
+//!   (its earliest link, as `model_query` reports it). Only that fallback is
+//!   coarse: in it, membership acquired on a pre-existing row dates from the
+//!   row, not the acquisition. Neither branch is ever "unknown, so always":
+//!   a row with no timestamp at all is an error.
 //! - `revoked_at` is the tombstone's link timestamp.
 //!
 //! Timestamps are compared as strings, the engine-wide convention (every
@@ -172,6 +173,13 @@ impl RoleGrant {
 /// condition means exactly what it means for the rows. No author condition
 /// anywhere accepts everyone, as the query itself does. A condition that
 /// cannot be read is a refusal, never a pass.
+///
+/// Top-level keys plus `OR` is not a simplification: SHACL `ModelQuery`
+/// grammar has exactly a flat `where` and an `OR` of flat branches — no
+/// `AND`, no `NOT` — and the translator emits the same uppercase `OR` key
+/// `matches_where` reads. A reader who knows `matches_where` also handles
+/// `AND`/`NOT` on other paths should not wait for them here: the role-query
+/// translator cannot produce them.
 pub fn revocation_authorised(translated_query: &Value, author: &str) -> bool {
     fn accepted(where_clause: &Map<String, Value>, author: &str) -> bool {
         let own = match where_clause.get("author") {
@@ -224,11 +232,12 @@ fn row_timestamp(item: &EvidenceItem) -> Option<String> {
 /// translation failure, and a matched row that carries no timestamp at all.
 /// The caller then abandons the read.
 ///
-/// Per matched row the store is asked once
-/// ([`RequiresQueryable::role_grant_timestamps`]) for the grant link and the
-/// signed tombstones; the tombstones are then filtered by
-/// [`revocation_authorised`] against this very query. Nothing here is
-/// queried again by the fold.
+/// Per matched row there is one
+/// [`RequiresQueryable::role_grant_timestamps`] call for the grant link and
+/// the signed tombstones — two `get_links` queries under the live impl, so
+/// the store fan-out is candidates × rows × 2; the tombstones are then
+/// filtered by [`revocation_authorised`] against this very query. Nothing
+/// here is queried again by the fold.
 pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     to_state: &str,
