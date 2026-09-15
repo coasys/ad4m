@@ -16,16 +16,19 @@
 //! **What triggers.** Proposal links (the atom fields and `flow/instance`),
 //! votes (`acceptedBy`) and `FlowInstance` rows (`flow/flow_uri`,
 //! `flow/base`) — additions and removals alike, since deleting a vote
-//! regresses the state and the cache must follow. **What does not.** Chat,
-//! tasks, anything outside the flow vocabulary; and a peer's legacy `Shared`
-//! cache or mark, which this replica neither reads nor mirrors. Role rows
-//! (`fromRole`) are not in the vocabulary either — they are whatever class
-//! the flow author chose — so a role change is folded on the next
-//! flow-relevant diff or local vote rather than the moment it lands.
+//! regresses the state and the cache must follow. A role revocation
+//! tombstone (`flow/role_grant_revoked`, #1027) triggers too, but names a
+//! role row rather than an instance, and any instance's gate may read that
+//! row — so it sweeps every instance. **What does not.** Chat, tasks,
+//! anything outside the flow vocabulary; and a peer's legacy `Shared` cache
+//! or mark, which this replica neither reads nor mirrors. Role rows
+//! themselves (`fromRole` grants) are not in the vocabulary — they are
+//! whatever class the flow author chose — so a new grant is folded on the
+//! next flow-relevant diff or local vote rather than the moment it lands.
 
 use super::atom::{
     ACCEPTED_BY_PREDICATE, EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE,
-    FROM_STATE_PREDICATE, PROPOSER_PREDICATE, TO_STATE_PREDICATE,
+    FROM_STATE_PREDICATE, PROPOSER_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE, TO_STATE_PREDICATE,
 };
 use super::pass::run_flow_consensus_pass;
 use crate::agent::AgentContext;
@@ -52,6 +55,10 @@ pub struct FlowTouch {
     /// Proposal URIs whose instance the diff does not name (a vote, a field
     /// link). Resolved against the store when the pass runs.
     pub proposals: HashSet<String>,
+    /// The diff carried a role revocation tombstone. It names a role row,
+    /// not an instance, and a row can gate any instance's votes — so the
+    /// pass sweeps every instance in the perspective.
+    pub every_instance: bool,
 }
 
 impl FlowTouch {
@@ -72,6 +79,9 @@ impl FlowTouch {
                 | ACCEPTED_BY_PREDICATE => {
                     touch.proposals.insert(link.data.source.clone());
                 }
+                ROLE_GRANT_REVOKED_PREDICATE => {
+                    touch.every_instance = true;
+                }
                 _ => {}
             }
         }
@@ -79,12 +89,13 @@ impl FlowTouch {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.instances.is_empty() && self.proposals.is_empty()
+        self.instances.is_empty() && self.proposals.is_empty() && !self.every_instance
     }
 
     fn absorb(&mut self, other: FlowTouch) {
         self.instances.extend(other.instances);
         self.proposals.extend(other.proposals);
+        self.every_instance |= other.every_instance;
     }
 }
 
@@ -154,6 +165,16 @@ impl PerspectiveInstance {
     /// identity is bookkeeping rather than authority — the same context the
     /// auto-processor's main loop uses.
     async fn run_sync_triggered_flow_pass(&mut self, touch: FlowTouch) {
+        let context = AgentContext::main_agent();
+        if touch.every_instance {
+            log::debug!(
+                "sync-triggered flow pass on {}: a role revocation synced in; sweeping every instance",
+                self.uuid
+            );
+            let outcomes = run_flow_consensus_pass(self, None, &context, None, None).await;
+            log_synced_outcomes(&outcomes);
+            return;
+        }
         let mut instances = touch.instances;
         for proposal in &touch.proposals {
             let query = LinkQuery {
@@ -177,17 +198,20 @@ impl PerspectiveInstance {
         let mut instances: Vec<String> = instances.into_iter().collect();
         instances.sort();
         log::debug!("sync-triggered flow pass on {}: {instances:?}", self.uuid);
-        let context = AgentContext::main_agent();
         let outcomes = run_flow_consensus_pass(self, None, &context, None, Some(&instances)).await;
-        for outcome in &outcomes {
-            log::info!(
-                "🔥 flow settled (synced in): {} {} → {} (by {:?})",
-                outcome.instance_uri,
-                outcome.from_state,
-                outcome.to_state,
-                outcome.voters
-            );
-        }
+        log_synced_outcomes(&outcomes);
+    }
+}
+
+fn log_synced_outcomes(outcomes: &[super::pass::FireOutcome]) {
+    for outcome in outcomes {
+        log::info!(
+            "🔥 flow settled (synced in): {} {} → {} (by {:?})",
+            outcome.instance_uri,
+            outcome.from_state,
+            outcome.to_state,
+            outcome.voters
+        );
     }
 }
 
@@ -275,8 +299,23 @@ mod tests {
             FlowTouch {
                 instances: set(&["ad4m://flow/instance/a", "ad4m://flow/instance/b"]),
                 proposals: set(&["ad4m://flow/proposal/p2", "ad4m://flow/proposal/p3"]),
+                every_instance: false,
             }
         );
+    }
+
+    /// A role revocation names a row, not an instance, and any instance's
+    /// gate may read that row — so it touches every instance (#1027).
+    #[test]
+    fn a_role_revocation_touches_every_instance() {
+        let diff = DecoratedPerspectiveDiff::from_additions(vec![link(
+            "ns://reviewer/1",
+            ROLE_GRANT_REVOKED_PREDICATE,
+            "literal:string:did%3Akey%3Abob",
+        )]);
+        let touch = FlowTouch::of_diff(&diff);
+        assert!(touch.every_instance && !touch.is_empty());
+        assert!(touch.instances.is_empty() && touch.proposals.is_empty());
     }
 
     /// One pass queued at a time: the first touch spawns, later ones merge
@@ -287,10 +326,12 @@ mod tests {
         let first = FlowTouch {
             instances: set(&["ad4m://flow/instance/a"]),
             proposals: HashSet::new(),
+            every_instance: false,
         };
         let second = FlowTouch {
             instances: HashSet::new(),
             proposals: set(&["ad4m://flow/proposal/p"]),
+            every_instance: true,
         };
         assert!(queue.enqueue(first.clone()), "the first touch spawns");
         assert!(!queue.enqueue(second.clone()), "the second rides along");
@@ -298,6 +339,10 @@ mod tests {
         let taken = queue.take();
         assert_eq!(taken.instances, first.instances);
         assert_eq!(taken.proposals, second.proposals);
+        assert!(
+            taken.every_instance,
+            "a sweep-everything touch survives the merge"
+        );
 
         assert!(
             queue.enqueue(first),
