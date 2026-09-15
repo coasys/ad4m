@@ -279,6 +279,12 @@ lazy_static! {
     static ref AGENT_SERVICE: Arc<Mutex<Option<AgentService>>> = Arc::new(Mutex::new(None));
 }
 
+/// Serializes agent publishes. Callers may publish in the background, so two
+/// publishes can overlap; holding this across the read and the write means the
+/// last one to finish always carries the latest stored profile, never an older
+/// snapshot that happened to be slower on the network.
+static AGENT_PUBLISH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 impl AgentService {
     pub fn init_global_instance(app_path: String) {
         let mut agent_instance = AGENT_SERVICE.lock().unwrap();
@@ -552,6 +558,7 @@ impl AgentService {
     /// Works for both the main agent and managed users.
     /// Strips link decorations before publishing.
     pub async fn publish_agent_to_language(context: &AgentContext) -> Result<(), AnyError> {
+        let _publish_guard = AGENT_PUBLISH_LOCK.lock().await;
         let controller = crate::languages::LanguageController::global_instance();
         let agent_lang = controller
             .get_agent_language()
