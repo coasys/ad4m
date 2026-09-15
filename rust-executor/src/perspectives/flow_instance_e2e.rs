@@ -337,7 +337,11 @@ async fn the_cache_and_the_marks_are_local_links() {
     assert_eq!(consensus_pass(&mut f).await.len(), 1);
 
     let healed = current_state_links(&f).await;
-    assert_eq!(healed.len(), 1, "the old cache link is replaced, not joined");
+    assert_eq!(
+        healed.len(),
+        1,
+        "the old cache link is replaced, not joined"
+    );
     assert_eq!(healed[0].status, Some(LinkStatus::Local));
     assert_eq!(f.cached_state().await, "scoped");
 
@@ -440,8 +444,15 @@ async fn an_instance_without_a_cache_still_loads_and_the_pass_fills_it() {
         .expect("drop the creator's local cache");
 
     let records = f.instances().await;
-    assert_eq!(records.len(), 1, "the row is an instance with or without its cache");
-    assert_eq!(records[0].current_state, "", "absent cache = not yet derived");
+    assert_eq!(
+        records.len(),
+        1,
+        "the row is an instance with or without its cache"
+    );
+    assert_eq!(
+        records[0].current_state, "",
+        "absent cache = not yet derived"
+    );
 
     consensus_pass(&mut f).await;
     assert_eq!(
@@ -449,7 +460,10 @@ async fn an_instance_without_a_cache_still_loads_and_the_pass_fills_it() {
         "identified",
         "the pass writes the fold's answer"
     );
-    assert_eq!(current_state_links(&f).await[0].status, Some(LinkStatus::Local));
+    assert_eq!(
+        current_state_links(&f).await[0].status,
+        Some(LinkStatus::Local)
+    );
 }
 
 /// Deliver links the way the link language delivers them: through

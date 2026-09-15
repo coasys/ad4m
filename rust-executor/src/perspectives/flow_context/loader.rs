@@ -584,7 +584,10 @@ mod tests {
         });
         let r = parse_flow_instance_from_hydrated(&v).expect("a synced row still loads");
         assert_eq!(r.instance_uri, "ad4m://flow/instance/synced");
-        assert_eq!(r.current_state, "", "absent cache reads as empty, not as an error");
+        assert_eq!(
+            r.current_state, "",
+            "absent cache reads as empty, not as an error"
+        );
     }
 
     #[test]

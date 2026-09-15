@@ -449,7 +449,11 @@ mod tests {
             Some(FLOW_CURRENT_STATE_PREDICATE),
             "the direct write path and the SDNA must agree on the predicate",
         );
-        assert_eq!(prop["local"].as_bool(), Some(true), "property must be local");
+        assert_eq!(
+            prop["local"].as_bool(),
+            Some(true),
+            "property must be local"
+        );
         // Optional: a row synced from a peer carries no cache until this
         // replica's pass runs, and `model_query` only returns instances that
         // satisfy every `min_count >= 1` property — so a required cache would

@@ -250,9 +250,8 @@ pub fn valid_votes(
 /// recorded. A forged mark therefore moves nothing in either direction — it
 /// cannot fabricate history, and it cannot hide a proposal from the fold.
 pub fn marked_fired(links: &[DecoratedLinkExpression]) -> bool {
-    links_on(links, RESOLVED_AS_PREDICATE).any(|l| {
-        l.status == Some(LinkStatus::Local) && field_value(&l.data.target) == FIRED_MARK
-    })
+    links_on(links, RESOLVED_AS_PREDICATE)
+        .any(|l| l.status == Some(LinkStatus::Local) && field_value(&l.data.target) == FIRED_MARK)
 }
 
 impl TransitionAtom {
@@ -676,13 +675,7 @@ mod tests {
             "a peer's shared mark is not this replica's mark"
         );
 
-        let mut own_mark = link(
-            RESOLVED_AS_PREDICATE,
-            &literal(FIRED_MARK),
-            ALICE,
-            true,
-            T3,
-        );
+        let mut own_mark = link(RESOLVED_AS_PREDICATE, &literal(FIRED_MARK), ALICE, true, T3);
         own_mark.status = Some(LinkStatus::Local);
         links.push(own_mark);
         assert!(marked_fired(&links), "our own local mark is");

@@ -58,7 +58,9 @@
 
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
-use crate::perspectives::flow_classes::{advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE};
+use crate::perspectives::flow_classes::{
+    advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE,
+};
 use crate::perspectives::flow_context::{
     load_all_flow_instances, load_flow_instances, load_shacl_flows, retain_selected_flows,
     scope_subject,
@@ -232,9 +234,7 @@ async fn has_local_cache(
             ..Default::default()
         })
         .await?;
-    Ok(links
-        .iter()
-        .any(|l| l.status == Some(LinkStatus::Local)))
+    Ok(links.iter().any(|l| l.status == Some(LinkStatus::Local)))
 }
 
 /// Write the cache and the marks in one batch, so a crash between them can

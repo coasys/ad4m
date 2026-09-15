@@ -176,13 +176,9 @@ impl PerspectiveInstance {
         }
         let mut instances: Vec<String> = instances.into_iter().collect();
         instances.sort();
-        log::debug!(
-            "sync-triggered flow pass on {}: {instances:?}",
-            self.uuid
-        );
+        log::debug!("sync-triggered flow pass on {}: {instances:?}", self.uuid);
         let context = AgentContext::main_agent();
-        let outcomes =
-            run_flow_consensus_pass(self, None, &context, None, Some(&instances)).await;
+        let outcomes = run_flow_consensus_pass(self, None, &context, None, Some(&instances)).await;
         for outcome in &outcomes {
             log::info!(
                 "🔥 flow settled (synced in): {} {} → {} (by {:?})",
@@ -262,7 +258,11 @@ mod tests {
                     FLOW_INSTANCE_PREDICATE,
                     "ad4m://flow/instance/b",
                 ),
-                link("ad4m://flow/proposal/p2", ACCEPTED_BY_PREDICATE, "did:key:bob"),
+                link(
+                    "ad4m://flow/proposal/p2",
+                    ACCEPTED_BY_PREDICATE,
+                    "did:key:bob",
+                ),
             ],
             removals: vec![link(
                 "ad4m://flow/proposal/p3",
