@@ -259,14 +259,47 @@ pub async fn gather_active_flow_contexts(
             return Vec::new();
         }
     };
-    // Prompt the LLM with the DERIVED state, never the `currentState` cache.
-    // A peer can write that link; believing it would steer the model into
-    // proposing along an edge the flow never reached, and every proposal it
-    // then mints is superseded work paid for in tokens.
-    let records =
-        crate::perspectives::flow_instance::derive_states(perspective, &records, &flows_by_uri)
-            .await;
-    build_flow_contexts(&records, &flows_by_uri)
+    // Cache-first (#987): trust the `Local`-verified `currentState` link when
+    // present — peers cannot write it since #987's Local switch, so it is
+    // exactly what this replica last derived.  Instances whose cache is absent
+    // (never derived yet) fall through to `derive_states`.
+    //
+    // The sync-triggered pass (`trigger.rs`) re-derives on every incoming flow
+    // link, so residual staleness is bounded by the debounce window plus the
+    // role-change gap documented there.
+    let mut resolved: Vec<FlowInstanceRecord> = Vec::with_capacity(records.len());
+    let mut uncached: Vec<FlowInstanceRecord> = Vec::new();
+    for record in records {
+        match crate::perspectives::flow_instance::local_cached_state(
+            perspective,
+            &record.instance_uri,
+        )
+        .await
+        {
+            Ok(Some(cached)) => resolved.push(FlowInstanceRecord {
+                current_state: cached,
+                ..record
+            }),
+            Ok(None) => uncached.push(record),
+            Err(e) => {
+                log::warn!(
+                    "gather_active_flow_contexts: cache read for {} failed, falling back to derive: {e:#}",
+                    record.instance_uri
+                );
+                uncached.push(record);
+            }
+        }
+    }
+    if !uncached.is_empty() {
+        let derived = crate::perspectives::flow_instance::derive_states(
+            perspective,
+            &uncached,
+            &flows_by_uri,
+        )
+        .await;
+        resolved.extend(derived);
+    }
+    build_flow_contexts(&resolved, &flows_by_uri)
 }
 
 /// Derive the flow-filter subject key from an extraction pass `Scope`.
