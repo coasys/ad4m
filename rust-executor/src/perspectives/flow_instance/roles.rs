@@ -1,82 +1,131 @@
-//! Who may vote: resolving a rule's `fromRole` gate to a set of DIDs,
-//! evaluated *as of each vote's own timestamp*.
+//! Who may vote: resolving a rule's `fromRole` gate, **as of each vote's own
+//! timestamp** (#1027).
 //!
-//! ## Tombstone revocation
+//! This is the only step of a state read that touches the store, which is
+//! why it happens in the loader and not in [`fold`](super::fold). It fails
+//! closed in every direction: a store error aborts the read rather than
+//! mis-counting a vote; a role query that cannot tell one DID from another
+//! is an error rather than "everybody passes"; a role row that cannot be
+//! placed in time is an error rather than "granted since forever".
 //!
-//! Role revocation is an explicit signed link (`ad4m://flow/role_grant_revoked`)
-//! on the grant row, never a deletion. This keeps the full membership history
-//! in the replicated graph so every replica — including ones that join after a
-//! revocation — derives the same flow state.
+//! ## What a grant is, and what a revocation is
 //!
-//! ## As-of vote-time gating
+//! A grant is a role row — whatever class the flow author chose — that the
+//! rule's query matches for a DID. A revocation is a signed tombstone link
+//! on that row, [`ROLE_GRANT_REVOKED_PREDICATE`](super::atom::ROLE_GRANT_REVOKED_PREDICATE)
+//! naming the revoked DID,
+//! **never a deletion**. Role rows stay in the graph for good; the tombstone
+//! ends the row's validity for that DID from the tombstone's own timestamp.
+//! Both are Shared links on the same trust substrate as the votes.
 //!
-//! A vote counts only when, at the moment the voter signed it:
+//! ## As-of gating
 //!
-//! 1. A matching grant row existed (`granted_at <= vote.at`), and
-//! 2. No revocation tombstone existed (`revoked_at > vote.at` for all tombstones).
+//! Every vote is gated against the graph *as it stood at the vote's
+//! timestamp*: a row counts toward the rule's `count` for a vote at `t` iff
+//! it was granted at or before `t` and no authorised revocation of it
+//! existed at or before `t` — `granted_at <= t < revoked_at`. Both bounds
+//! are deliberate: a grant written in the same instant as the vote counts,
+//! and a revocation written in the same instant as the vote already gates
+//! it ([`RoleGrantWindow::open_at`]). Eligibility is therefore a function of
+//! graph *content* alone. A newcomer replica deriving from scratch reaches
+//! the state everyone else holds, an edge settled by a then-eligible voter
+//! stays settled after the voter is revoked, and a revocation that syncs in
+//! late heals exactly like a late vote — the fold re-runs and re-derives.
 //!
-//! This makes eligibility a deterministic function of graph *content*, so two
-//! replicas holding the same links derive the same state regardless of when
-//! they first folded. Settlement is permanent once reached: a later revocation
-//! cannot un-settle an edge whose votes were all cast before it.
+//! ## Where the timestamps come from
 //!
-//! ## Backdating caveat (documented, not engineered around)
+//! - `granted_at` is the earliest `row --didProperty--> did` link, when the
+//!   query names a `didProperty` and that link exists; otherwise the row's
+//!   own timestamp (its earliest link, as `model_query` reports it). That is
+//!   the granularity the platform offers — a property set on a pre-existing
+//!   row dates the grant from the row, not the assignment — and it is never
+//!   "unknown, so always": a row with no timestamp at all is an error.
+//! - `revoked_at` is the tombstone's link timestamp.
 //!
-//! Link timestamps are author-asserted, so an admin could backdate a
-//! revocation to retroactively un-settle an edge. This is an escalation of
-//! *timing*, not of *authority* — the admin already controls role membership,
-//! and a backdated revocation achieves nothing a genuinely earlier revocation
-//! would not have. As flows become the source of roles (recursive composition),
-//! the residual shrinks to the admin-authored base case. Worth documenting; not
-//! worth engineering around in v1.
+//! Timestamps are compared as strings, the engine-wide convention (every
+//! link timestamp is millisecond RFC 3339 in UTC, see
+//! [`fold`](super::fold) § *Ordering and time*).
 //!
-//! ## Fallback (backward compatibility)
+//! ## Authority
 //!
-//! When the perspective does not return timestamp info for a grant (the
-//! default for test stubs and legacy code paths), [`eligible_votes`] falls back
-//! to the pre-computed `eligible: bool` on the [`RoleGrant`] — the behaviour
-//! that existed before tombstone revocation.
+//! A tombstone counts only when its signature verifies **and** its author
+//! is one the grant's own rule would accept as a granter: the role query's
+//! `author` condition (top level, and any `or` branch) is applied to the
+//! tombstone's author through `model_query`'s own condition evaluator
+//! ([`revocation_authorised`]). So `where: { author: "did:…admin" }` makes
+//! grants *and* revocations admin-only; `author: "$did"` makes a role
+//! self-granted and self-revoked; and a rule with no author condition lets
+//! anyone grant — and, symmetrically, anyone revoke — which is exactly the
+//! authority that social DNA already declares.
+//!
+//! ## Accepted caveat: author-asserted timestamps
+//!
+//! A tombstone's timestamp is asserted by its author, so an admin could
+//! back-date a revocation and retroactively un-settle an edge. That is an
+//! escalation of *timing* only, within an authority the social DNA already
+//! grants: the admin controls membership, and a back-dated revocation
+//! achieves nothing a genuinely earlier one would not have. Documented, not
+//! engineered around, in v1 (#1027). Roles granted as flow outputs — the
+//! planned recursive composition — will carry a quorum-fixed time no single
+//! party can back-date, shrinking the residual to the admin-authored base
+//! case.
+//!
+//! ## History
+//!
+//! Before #1027 roles were re-derived live against the current graph and
+//! revocation meant deleting the row, so revoking someone later un-settled
+//! an edge their vote had settled and replicas disagreed depending on when
+//! they first derived. The [`RoleGrant`]s in the read-set now carry each
+//! row's [`RoleGrantWindow`] — grant time and the tombstones honoured — so a
+//! minted token's backing names a fully resolvable history.
 
 use super::atom::{TransitionAtom, Vote};
 use crate::perspectives::flow_context::FlowInstanceRecord;
+pub use crate::perspectives::flow_evaluator::RoleRevocation;
 use crate::perspectives::flow_evaluator::{
-    cardinality_satisfied, requires_query_input, run_query, RequiresQueryable, RoleGrantTimestamps,
+    cardinality_satisfied, requires_query_input, run_query, EvidenceItem, RequiresQueryable,
 };
-use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery};
+use crate::perspectives::model_query::{matches_condition, WhereCondition};
+use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery, ModelQueryCount};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
-/// Temporal validity of one matched role row for a specific DID.
+/// One matched role row's history for one DID: when it started to count and
+/// every authorised tombstone that ended it.
 ///
-/// Serialisable so the full history rides in the read-set and a minted token's
-/// backing is a resolvable audit trail — nothing referenced is ever deleted.
+/// Serialisable so the history rides in the read-set: a minted token's
+/// backing names the rows *and* the tombstones its verdict rested on, and
+/// nothing referenced is ever deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleGrantWindow {
-    /// The row that matched the role query for this DID.
+    /// The row the role query matched for this DID.
     pub row_id: String,
-    /// Timestamp of the earliest grant link for this row/DID pair.
-    /// `None` means "unknown"; treated as −∞ (grant pre-dates everything).
-    pub granted_at: Option<String>,
-    /// Timestamps of every revocation tombstone on this row for this DID.
-    pub revoked_at: Vec<String>,
+    /// When the row started to count — see the module doc.
+    pub granted_at: String,
+    /// The authorised, signed tombstones on this row naming this DID,
+    /// earliest first. Usually none or one.
+    pub revocations: Vec<RoleRevocation>,
 }
 
 impl RoleGrantWindow {
-    /// Whether this grant window was open at `vote_at`.
-    pub fn open_at(&self, vote_at: &str) -> bool {
-        // Grant must have existed before the vote (or timestamp is unknown).
-        let grant_ok = self.granted_at.as_deref().map_or(true, |g| g <= vote_at);
-        // No revocation must have preceded the vote.
-        let not_revoked = self.revoked_at.iter().all(|r| r.as_str() > vote_at);
-        grant_ok && not_revoked
+    /// The moment the row stopped counting, if it has.
+    pub fn revoked_at(&self) -> Option<&str> {
+        self.revocations.iter().map(|r| r.at.as_str()).min()
+    }
+
+    /// Whether the row counted for a vote cast at `at`:
+    /// `granted_at <= at < revoked_at`. A revocation stamped with the vote's
+    /// own timestamp already gates it.
+    pub fn open_at(&self, at: &str) -> bool {
+        self.granted_at.as_str() <= at && self.revoked_at().is_none_or(|revoked| at < revoked)
     }
 }
 
-/// One `fromRole` membership verdict, with the role rows that produced it.
+/// The role rows behind one `(target state, DID)` pair, with their history.
 ///
 /// Part of the read-set, so a verdict is auditable after the fact: "Bob
-/// counted toward `approved` because these rows said he was a Reviewer".
-/// Under tombstone revocation the rows are never deleted, so every ID in
-/// `rows` (and every `window` entry) remains resolvable in the graph.
+/// counted toward `approved` at 10:02 because row r1 said he was a Reviewer
+/// from 09:00 and its tombstone is from 11:00".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleGrant {
     /// The state whose rule asked the question — rules are per target state,
@@ -85,19 +134,73 @@ pub struct RoleGrant {
     /// The role query's class, for readability of a serialised read-set.
     pub role_class: String,
     pub did: String,
-    /// Current eligibility (live-graph view: does a non-revoked grant exist
-    /// right now?). Used by [`eligible_votes`] only when `windows` is empty,
-    /// which preserves pre-tombstone behaviour for stubs and legacy callers.
-    pub eligible: bool,
-    /// IDs of the rows the role query matched for this DID.
+    /// IDs of the rows the role query matched for this DID (`windows`, by
+    /// ID).
     pub rows: Vec<String>,
-    /// As-of eligibility windows, one per matched row. Empty when the
-    /// perspective does not return timestamp info (default for test stubs).
-    #[serde(default)]
+    /// One history per matched row, sorted by `(granted_at, row_id)`.
     pub windows: Vec<RoleGrantWindow>,
 }
 
-/// Ask a `fromRole` gate about each candidate and record what it answered.
+impl RoleGrant {
+    /// How many of the matched rows counted at `at`.
+    pub fn rows_open_at(&self, at: &str) -> usize {
+        self.windows.iter().filter(|w| w.open_at(at)).count()
+    }
+
+    /// Whether this DID satisfied the rule's `count` at `at` — the number of
+    /// rows open then, under the same cardinality rule a `requires` guard
+    /// uses (`None` = at least one).
+    pub fn eligible_at(&self, at: &str, count: Option<&ModelQueryCount>) -> bool {
+        cardinality_satisfied(count, self.rows_open_at(at))
+    }
+}
+
+/// Whether `author` could have written a grant the translated role query
+/// accepts — and may therefore revoke one.
+///
+/// Reads only the `author` conditions of the translated `where` (the top
+/// level, and each `OR` branch, of which at least one must accept), and
+/// evaluates each with `model_query`'s own [`matches_condition`], so the
+/// condition means exactly what it means for the rows. No author condition
+/// anywhere accepts everyone, as the query itself does. A condition that
+/// cannot be read is a refusal, never a pass.
+pub fn revocation_authorised(translated_query: &Value, author: &str) -> bool {
+    fn accepted(where_clause: &Map<String, Value>, author: &str) -> bool {
+        let own = match where_clause.get("author") {
+            None => true,
+            Some(cond) => serde_json::from_value::<WhereCondition>(cond.clone())
+                .map(|c| matches_condition(&Value::String(author.to_string()), &c))
+                .unwrap_or(false),
+        };
+        let branches = match where_clause.get("OR") {
+            None => true,
+            Some(Value::Array(alts)) => alts
+                .iter()
+                .any(|alt| alt.as_object().is_some_and(|w| accepted(w, author))),
+            Some(_) => false,
+        };
+        own && branches
+    }
+    match translated_query.get("where") {
+        None => true,
+        Some(Value::Object(w)) => accepted(w, author),
+        Some(_) => false,
+    }
+}
+
+/// The `timestamp` `model_query` reports for a hydrated row: its earliest
+/// link. Absent only for a row hydration could not date.
+fn row_timestamp(item: &EvidenceItem) -> Option<String> {
+    serde_json::from_str::<Value>(&item.content)
+        .ok()?
+        .get("timestamp")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Ask a `fromRole` gate about each candidate and record each matched row's
+/// history, so the fold can gate every vote as of its own timestamp.
 ///
 /// Both role-query shapes collapse into one per-candidate membership check,
 /// because the fold only ever intersects the role set with the DIDs that
@@ -110,12 +213,14 @@ pub struct RoleGrant {
 /// A query that references the DID in neither way cannot discriminate
 /// between candidates, and "I cannot determine membership" must never
 /// degrade to "everyone is a member" — so it is an `Err`, as is any store or
-/// translation failure. The caller then abandons the read.
+/// translation failure, and a matched row that carries no timestamp at all.
+/// The caller then abandons the read.
 ///
-/// For each matched row, [`RequiresQueryable::role_grant_timestamps`] is
-/// called to populate the [`RoleGrantWindow`]s used by the as-of eligibility
-/// check in [`eligible_votes`]. The timestamps are loaded once per read here
-/// and never queried again.
+/// Per matched row the store is asked once
+/// ([`RequiresQueryable::role_grant_timestamps`]) for the grant link and the
+/// signed tombstones; the tombstones are then filtered by
+/// [`revocation_authorised`] against this very query. Nothing here is
+/// queried again by the fold.
 pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     to_state: &str,
@@ -141,33 +246,41 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     for did in candidates {
         let input = requires_query_input(role, record, did)?;
         let matched = run_query(perspective, &role.class_name, &input).await?;
-        let eligible = cardinality_satisfied(role.count.as_ref(), matched.len());
 
-        // Load as-of windows for each matched row. A failure here means we
-        // cannot determine temporal eligibility, but we still have the live
-        // `eligible` flag — propagate the error so the caller can decide
-        // whether to abort or accept the fallback.
         let mut windows = Vec::with_capacity(matched.len());
         for item in &matched {
-            let RoleGrantTimestamps {
-                granted_at,
-                revoked_at,
-            } = perspective
+            let history = perspective
                 .role_grant_timestamps(&item.id, grant_predicate, did)
                 .await?;
+            let Some(granted_at) = history.granted_at.or_else(|| row_timestamp(item)) else {
+                anyhow::bail!(
+                    "resolve_role_grants: role row `{}` (`{}`) carries no timestamp, so the grant cannot be placed in time; refusing to gate (fail-closed)",
+                    item.id,
+                    role.class_name
+                );
+            };
+            // Sorted here, not by the store: the read-set must not depend on
+            // the order a store happens to return links in.
+            let mut revocations: Vec<RoleRevocation> = history
+                .revocations
+                .into_iter()
+                .filter(|r| revocation_authorised(&input, &r.by))
+                .collect();
+            revocations.sort_by(|a, b| (&a.at, &a.by).cmp(&(&b.at, &b.by)));
+            revocations.dedup();
             windows.push(RoleGrantWindow {
                 row_id: item.id.clone(),
                 granted_at,
-                revoked_at,
+                revocations,
             });
         }
+        windows.sort_by(|a, b| (&a.granted_at, &a.row_id).cmp(&(&b.granted_at, &b.row_id)));
 
         grants.push(RoleGrant {
             to_state: to_state.to_string(),
             role_class: role.class_name.clone(),
             did: did.clone(),
-            eligible,
-            rows: matched.into_iter().map(|m| m.id).collect(),
+            rows: windows.iter().map(|w| w.row_id.clone()).collect(),
             windows,
         });
     }
@@ -175,39 +288,25 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
 }
 
 /// The votes on `atom` that its rule admits — pure, so the fold's inputs can
-/// be rebuilt from a serialised read-set.
-///
-/// A rule without a `fromRole` admits every vote. With one:
-///
-/// - If the relevant [`RoleGrant`] has non-empty `windows` (tombstone path):
-///   a vote counts only when at least one of the DID's grant windows was open
-///   at `vote.at` — i.e. the grant pre-dated the vote AND no revocation had
-///   occurred yet at that time.
-/// - If `windows` is empty (fallback / backward-compat path): a vote counts
-///   when the grant's `eligible` flag is `true` (live-graph semantics, same as
-///   the behaviour before tombstone revocation was introduced).
+/// be rebuilt from a serialised read-set. A rule without a `fromRole` admits
+/// every vote; with one, a vote counts only when the grant for that atom's
+/// target state and that voter satisfied the rule's `count` **at the vote's
+/// own timestamp** ([`RoleGrant::eligible_at`]). No grant, no vote.
 pub fn eligible_votes(
     atom: &TransitionAtom,
     rule: &ConsensusRule,
     grants: &[RoleGrant],
 ) -> Vec<Vote> {
-    if rule.from_role.is_none() {
+    let Some(role) = rule.from_role.as_ref() else {
         return atom.votes.clone();
-    }
+    };
     atom.votes
         .iter()
         .filter(|vote| {
             grants.iter().any(|g| {
-                if g.to_state != atom.to_state || g.did != vote.did {
-                    return false;
-                }
-                if g.windows.is_empty() {
-                    // Backward-compat: no temporal info, use current eligibility.
-                    g.eligible
-                } else {
-                    // As-of gating: at least one window open at vote time.
-                    g.windows.iter().any(|w| w.open_at(&vote.at))
-                }
+                g.to_state == atom.to_state
+                    && g.did == vote.did
+                    && g.eligible_at(&vote.at, role.count.as_ref())
             })
         })
         .cloned()
@@ -217,9 +316,24 @@ pub fn eligible_votes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perspectives::flow_evaluator::RoleGrantTimestamps;
     use async_trait::async_trait;
-    use serde_json::{json, Value};
+    use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::Mutex;
+
+    const ALICE: &str = "did:key:alice";
+    const BOB: &str = "did:key:bob";
+    const ADMIN: &str = "did:key:admin";
+    const LEAD: &str = "did:key:lead";
+    const MALLORY: &str = "did:key:mallory";
+    const T0: &str = "2026-01-01T00:00:00.000Z";
+    const T1: &str = "2026-01-02T00:00:00.000Z";
+    const T2: &str = "2026-01-03T00:00:00.000Z";
+    const T3: &str = "2026-01-04T00:00:00.000Z";
+    const T4: &str = "2026-01-05T00:00:00.000Z";
+    /// Later than any grant or tombstone a test writes: "eligible now".
+    const NOW: &str = "2030-01-01T00:00:00.000Z";
 
     fn record() -> FlowInstanceRecord {
         FlowInstanceRecord {
@@ -239,27 +353,46 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
-    fn eligible_of(grants: &[RoleGrant]) -> Vec<&str> {
+    fn revocation(by: &str, at: &str) -> RoleRevocation {
+        RoleRevocation {
+            by: by.into(),
+            at: at.into(),
+        }
+    }
+
+    fn history(granted_at: Option<&str>, revocations: &[(&str, &str)]) -> RoleGrantTimestamps {
+        RoleGrantTimestamps {
+            granted_at: granted_at.map(str::to_string),
+            revocations: revocations
+                .iter()
+                .map(|(by, at)| revocation(by, at))
+                .collect(),
+        }
+    }
+
+    /// The DIDs whose grants satisfy `count` at [`NOW`].
+    fn eligible_now<'g>(grants: &'g [RoleGrant], count: Option<&ModelQueryCount>) -> Vec<&'g str> {
         grants
             .iter()
-            .filter(|g| g.eligible)
+            .filter(|g| g.eligible_at(NOW, count))
             .map(|g| g.did.as_str())
             .collect()
     }
 
     /// Query-aware stub: a call whose JSON mentions one of `member_dids`
-    /// returns `rows_per_match` instances; `unconditional_rows` (for
-    /// DID-independent queries) wins over matching when set; `error` fails
-    /// every call.
+    /// returns `rows_per_match` rows (`r0`, `r1`, …, each dated [`T0`] unless
+    /// `undated_rows`); `unconditional_rows` (for DID-independent queries)
+    /// wins over matching when set; `error` fails every call. `histories`
+    /// is what the store says about each DID's rows.
     #[derive(Default)]
     struct RoleStub {
         member_dids: Vec<String>,
         rows_per_match: usize,
         unconditional_rows: Option<usize>,
+        undated_rows: bool,
         error: Option<String>,
         calls: Mutex<Vec<String>>,
-        /// Per-call timestamp overrides indexed by DID (for as-of tests).
-        timestamps: std::collections::HashMap<String, RoleGrantTimestamps>,
+        histories: HashMap<String, RoleGrantTimestamps>,
     }
 
     #[async_trait]
@@ -280,7 +413,15 @@ mod tests {
                     0
                 }
             });
-            let rows: Vec<Value> = (0..n).map(|i| json!({ "id": format!("r{i}") })).collect();
+            let rows: Vec<Value> = (0..n)
+                .map(|i| {
+                    if self.undated_rows {
+                        json!({ "id": format!("r{i}") })
+                    } else {
+                        json!({ "id": format!("r{i}"), "timestamp": T0, "author": ADMIN })
+                    }
+                })
+                .collect();
             Ok(json!({ "instances": rows, "totalCount": n }).to_string())
         }
 
@@ -290,7 +431,15 @@ mod tests {
             _grant_predicate: Option<&str>,
             did: &str,
         ) -> anyhow::Result<RoleGrantTimestamps> {
-            Ok(self.timestamps.get(did).cloned().unwrap_or_default())
+            Ok(self.histories.get(did).cloned().unwrap_or_default())
+        }
+    }
+
+    fn members(member_dids: &[&str]) -> RoleStub {
+        RoleStub {
+            member_dids: dids(member_dids),
+            rows_per_match: 1,
+            ..Default::default()
         }
     }
 
@@ -302,29 +451,31 @@ mod tests {
         let cases: Vec<(&str, Value, &[&str], &[&str], &[&str], Option<usize>)> = vec![
             ("shape 1: didProperty filters candidates",
              json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
-             &["did:key:alice"], &["did:key:alice", "did:key:bob"], &["did:key:alice"], Some(2)),
+             &[ALICE], &[ALICE, BOB], &[ALICE], Some(2)),
             ("shape 2: $did token substitutes per candidate",
              json!({ "className": "ns://Member", "where": { "member": "$did" } }),
-             &["did:key:bob"], &["did:key:alice", "did:key:bob"], &["did:key:bob"], None),
+             &[BOB], &[ALICE, BOB], &[BOB], None),
             ("one role row does not satisfy count.min = 2",
              json!({ "className": "ns://Reviewer", "didProperty": "agent", "count": { "min": 2 } }),
-             &["did:key:alice"], &["did:key:alice"], &[], None),
+             &[ALICE], &[ALICE], &[], None),
         ];
 
         for (name, role_json, member_dids, candidates, expected, expect_calls) in cases {
-            let stub = RoleStub {
-                member_dids: dids(member_dids), rows_per_match: 1, ..Default::default()
-            };
+            let stub = members(member_dids);
+            let role = role(role_json);
             let grants =
-                resolve_role_grants(&stub, "approved", &role(role_json), &record(), &dids(candidates))
+                resolve_role_grants(&stub, "approved", &role, &record(), &dids(candidates))
                     .await
                     .unwrap();
-            assert_eq!(eligible_of(&grants), expected.to_vec(), "{name}");
+            assert_eq!(eligible_now(&grants, role.count.as_ref()), expected.to_vec(), "{name}");
             assert_eq!(grants.len(), candidates.len(), "{name}: one verdict per candidate");
             for g in &grants {
                 assert_eq!(g.to_state, "approved", "{name}: verdicts are per target state");
-                if g.eligible {
-                    assert!(!g.rows.is_empty(), "{name}: an eligible verdict names its rows");
+                assert_eq!(g.rows, g.windows.iter().map(|w| w.row_id.clone()).collect::<Vec<_>>(),
+                           "{name}: `rows` is the windows' IDs");
+                for w in &g.windows {
+                    assert_eq!(w.granted_at, T0, "{name}: an undated grant link dates from the row");
+                    assert!(w.revocations.is_empty(), "{name}: no tombstones were reported");
                 }
             }
 
@@ -339,7 +490,7 @@ mod tests {
         }
     }
 
-    /// All three failure modes fail CLOSED — error out, never degrade to
+    /// Every failure mode fails CLOSED — error out, never degrade to
     /// "everyone passes". A `fromRole` is a security rule, and a
     /// misconfigured security rule admits nobody.
     #[tokio::test]
@@ -356,10 +507,13 @@ mod tests {
              RoleStub::default(),
              json!({ "className": "ns://Reviewer", "didProperty": "agent",
                      "where": { "status": { "matches": ".*" } } }), ""),
+            ("a role row that cannot be placed in time",
+             RoleStub { undated_rows: true, ..members(&[ALICE]) },
+             json!({ "className": "ns://Reviewer", "didProperty": "agent" }), "no timestamp"),
         ];
 
         for (name, stub, role_json, expect_contains) in cases {
-            let err = resolve_role_grants(&stub, "approved", &role(role_json), &record(), &dids(&["did:key:alice"]))
+            let err = resolve_role_grants(&stub, "approved", &role(role_json), &record(), &dids(&[ALICE]))
                 .await
                 .expect_err(name);
             assert!(err.to_string().contains(expect_contains), "{name}: got {err:#}");
@@ -369,86 +523,10 @@ mod tests {
         let _ = resolve_role_grants(
             &stub, "approved",
             &role(json!({ "className": "ns://Quorum", "where": { "open": true } })),
-            &record(), &dids(&["did:key:alice"]),
+            &record(), &dids(&[ALICE]),
         ).await;
         assert!(stub.calls.lock().unwrap().is_empty(), "no query may run for an undeterminable rule");
     }
-
-    #[test]
-    fn a_rule_without_a_role_admits_every_vote_and_one_with_a_role_admits_only_grantees() {
-        let atom = TransitionAtom {
-            uri: "p1".into(),
-            from_state: "review".into(),
-            to_state: "approved".into(),
-            proposer: "did:key:alice".into(),
-            proposed_at: "t1".into(),
-            evidence_hash: "seal".into(),
-            votes: vec![
-                Vote {
-                    did: "did:key:alice".into(),
-                    at: "t1".into(),
-                },
-                Vote {
-                    did: "did:key:bob".into(),
-                    at: "t2".into(),
-                },
-            ],
-        };
-        let open = ConsensusRule {
-            n: 1,
-            from_role: None,
-        };
-        assert_eq!(eligible_votes(&atom, &open, &[]).len(), 2);
-
-        let gated = ConsensusRule {
-            n: 1,
-            from_role: Some(role(
-                json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
-            )),
-        };
-        assert!(
-            eligible_votes(&atom, &gated, &[]).is_empty(),
-            "no grant, no vote — an unresolved gate admits nobody"
-        );
-        let grants = vec![
-            RoleGrant {
-                to_state: "approved".into(),
-                role_class: "ns://Reviewer".into(),
-                did: "did:key:bob".into(),
-                eligible: true,
-                rows: vec!["r0".into()],
-                windows: vec![],
-            },
-            RoleGrant {
-                to_state: "approved".into(),
-                role_class: "ns://Reviewer".into(),
-                did: "did:key:alice".into(),
-                eligible: false,
-                rows: vec![],
-                windows: vec![],
-            },
-            RoleGrant {
-                to_state: "shipped".into(),
-                role_class: "ns://Reviewer".into(),
-                did: "did:key:alice".into(),
-                eligible: true,
-                rows: vec!["r1".into()],
-                windows: vec![],
-            },
-        ];
-        assert_eq!(
-            eligible_votes(&atom, &gated, &grants)
-                .into_iter()
-                .map(|v| v.did)
-                .collect::<Vec<_>>(),
-            vec!["did:key:bob"],
-            "a grant for another target state is not a grant for this one"
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // As-of gating (tombstone path)
-    // -------------------------------------------------------------------------
 
     fn atom_with_votes(votes: &[(&str, &str)]) -> TransitionAtom {
         let votes: Vec<Vote> = votes
@@ -465,158 +543,217 @@ mod tests {
             proposer: votes.first().map(|v| v.did.clone()).unwrap_or_default(),
             proposed_at: votes.first().map(|v| v.at.clone()).unwrap_or_default(),
             evidence_hash: "seal".into(),
-            votes: votes.clone(),
+            votes,
         }
     }
 
-    fn gated_rule() -> ConsensusRule {
+    fn gated_rule(count: Option<Value>) -> ConsensusRule {
+        let mut q = json!({ "className": "ns://Reviewer", "didProperty": "agent" });
+        if let Some(c) = count {
+            q["count"] = c;
+        }
         ConsensusRule {
             n: 1,
-            from_role: Some(role(
-                json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
-            )),
+            from_role: Some(role(q)),
         }
     }
 
-    fn grant_with_window(did: &str, granted_at: Option<&str>, revoked_at: Vec<&str>) -> RoleGrant {
-        let revoked_at = revoked_at.iter().map(|s| s.to_string()).collect();
+    fn window(row_id: &str, granted_at: &str, revocations: &[(&str, &str)]) -> RoleGrantWindow {
+        RoleGrantWindow {
+            row_id: row_id.into(),
+            granted_at: granted_at.into(),
+            revocations: revocations
+                .iter()
+                .map(|(by, at)| revocation(by, at))
+                .collect(),
+        }
+    }
+
+    fn grant(to_state: &str, did: &str, windows: Vec<RoleGrantWindow>) -> RoleGrant {
         RoleGrant {
-            to_state: "approved".into(),
+            to_state: to_state.into(),
             role_class: "ns://Reviewer".into(),
-            did: did.to_string(),
-            eligible: granted_at.is_some() && revoked_at == Vec::<String>::new(),
-            rows: vec!["r0".into()],
-            windows: vec![RoleGrantWindow {
-                row_id: "r0".into(),
-                granted_at: granted_at.map(|s| s.to_string()),
-                revoked_at,
-            }],
+            did: did.into(),
+            rows: windows.iter().map(|w| w.row_id.clone()).collect(),
+            windows,
         }
     }
 
-    /// A vote cast after the grant and before any revocation is eligible.
     #[test]
-    fn vote_after_grant_before_revocation_is_eligible() {
-        let atom = atom_with_votes(&[("did:key:alice", "T2")]);
-        let grants = vec![grant_with_window("did:key:alice", Some("T1"), vec![])];
-        assert_eq!(
-            eligible_votes(&atom, &gated_rule(), &grants).len(),
-            1,
-            "vote at T2, grant at T1, no revocation → eligible"
-        );
-    }
+    fn a_rule_without_a_role_admits_every_vote_and_one_with_a_role_admits_only_grantees() {
+        let atom = atom_with_votes(&[(ALICE, T1), (BOB, T2)]);
+        let open = ConsensusRule {
+            n: 1,
+            from_role: None,
+        };
+        assert_eq!(eligible_votes(&atom, &open, &[]).len(), 2);
 
-    /// A vote cast before the grant existed does NOT count.
-    #[test]
-    fn vote_before_grant_is_not_eligible() {
-        // Vote at T1, grant only at T2 — voter was not in the role yet.
-        let atom = atom_with_votes(&[("did:key:alice", "T1")]);
-        let grants = vec![grant_with_window("did:key:alice", Some("T2"), vec![])];
+        let gated = gated_rule(None);
         assert!(
-            eligible_votes(&atom, &gated_rule(), &grants).is_empty(),
-            "vote at T1, grant at T2 → not eligible (grant hadn't arrived yet)"
+            eligible_votes(&atom, &gated, &[]).is_empty(),
+            "no grant, no vote — an unresolved gate admits nobody"
+        );
+        let grants = vec![
+            grant("approved", BOB, vec![window("r0", T0, &[])]),
+            grant("approved", ALICE, vec![]),
+            grant("shipped", ALICE, vec![window("r1", T0, &[])]),
+        ];
+        assert_eq!(
+            eligible_votes(&atom, &gated, &grants)
+                .into_iter()
+                .map(|v| v.did)
+                .collect::<Vec<_>>(),
+            vec![BOB],
+            "a grant with no rows admits nobody, and a grant for another target state is not a grant for this one"
         );
     }
 
-    /// A vote cast after a revocation does NOT count, but a vote cast BEFORE
-    /// the revocation on the SAME atom still does. This verifies that the
-    /// revocation gate is per-vote, not per-atom.
+    /// The as-of rule, including both boundaries: a row counts for a vote at
+    /// `t` iff `granted_at <= t < revoked_at`. `(name, vote at, granted at,
+    /// revoked at, counts?)`.
     #[test]
-    fn revocation_gates_only_votes_cast_after_it() {
-        // Two votes on the same atom: Alice voted at T2 (before T3 revocation)
-        // and at T4 (after T3 revocation). Only the T2 vote should count.
-        let atom = atom_with_votes(&[("did:key:alice", "T2"), ("did:key:alice", "T4")]);
-        let grants = vec![grant_with_window("did:key:alice", Some("T1"), vec!["T3"])];
-        let eligible = eligible_votes(&atom, &gated_rule(), &grants);
-        assert_eq!(eligible.len(), 1);
-        assert_eq!(eligible[0].at, "T2", "only the pre-revocation vote counts");
+    #[rustfmt::skip]
+    fn a_vote_counts_only_while_the_grant_was_open_at_its_own_timestamp() {
+        let cases: Vec<(&str, &str, &str, Option<&str>, bool)> = vec![
+            ("vote after grant, never revoked",             T2, T1, None,     true),
+            ("vote before the grant existed",               T1, T2, None,     false),
+            ("vote at exactly the grant's timestamp",       T1, T1, None,     true),
+            ("vote before the revocation",                  T2, T1, Some(T3), true),
+            ("vote after the revocation",                   T4, T1, Some(T3), false),
+            ("vote at exactly the revocation's timestamp",  T3, T1, Some(T3), false),
+            ("revocation back-dated before the grant",      T2, T1, Some(T0), false),
+        ];
+        for (name, vote_at, granted_at, revoked_at, counts) in cases {
+            let revocations: Vec<(&str, &str)> = revoked_at.map(|at| (ADMIN, at)).into_iter().collect();
+            let grants = vec![grant("approved", ALICE, vec![window("r0", granted_at, &revocations)])];
+            let atom = atom_with_votes(&[(ALICE, vote_at)]);
+            assert_eq!(eligible_votes(&atom, &gated_rule(None), &grants).len(), usize::from(counts), "{name}");
+        }
     }
 
-    /// An already-settled edge must survive a later revocation: the fold is
-    /// called with the same votes and the same windows, and only votes-after
-    /// are filtered. Votes-before keep the edge settled. This is the core
-    /// convergence guarantee.
+    /// The gate is per vote, not per atom or per DID: on one atom, the same
+    /// agent's vote before the tombstone counts and their vote after it does
+    /// not — which is what keeps an edge they settled settled.
     #[test]
-    fn settled_edge_survives_revocation_of_voter() {
-        // Alice voted at T2 to settle an edge (n=1). Role revoked at T3.
-        let atom = atom_with_votes(&[("did:key:alice", "T2")]);
-        let grants_before = vec![grant_with_window("did:key:alice", Some("T1"), vec![])];
-        let grants_after = vec![grant_with_window("did:key:alice", Some("T1"), vec!["T3"])];
-        // Before revocation: vote counts.
+    fn a_revocation_gates_only_votes_cast_after_it() {
+        let atom = atom_with_votes(&[(ALICE, T2), (ALICE, T4)]);
+        let before = vec![grant("approved", ALICE, vec![window("r0", T1, &[])])];
+        let after = vec![grant(
+            "approved",
+            ALICE,
+            vec![window("r0", T1, &[(ADMIN, T3)])],
+        )];
+        assert_eq!(eligible_votes(&atom, &gated_rule(None), &before).len(), 2);
+        let eligible = eligible_votes(&atom, &gated_rule(None), &after);
         assert_eq!(
-            eligible_votes(&atom, &gated_rule(), &grants_before).len(),
+            eligible.iter().map(|v| v.at.as_str()).collect::<Vec<_>>(),
+            vec![T2],
+            "the pre-revocation vote survives the revocation; the later one is gated"
+        );
+    }
+
+    /// `count` is evaluated as of the vote too: with `min: 2`, a DID whose
+    /// second row was revoked at T3 still had two rows at T2 and one at T4.
+    #[test]
+    fn the_rules_count_is_evaluated_as_of_the_vote() {
+        let grants = vec![grant(
+            "approved",
+            ALICE,
+            vec![window("r0", T0, &[]), window("r1", T1, &[(ADMIN, T3)])],
+        )];
+        let rule = gated_rule(Some(json!({ "min": 2 })));
+        assert_eq!(
+            eligible_votes(&atom_with_votes(&[(ALICE, T2)]), &rule, &grants).len(),
             1
         );
-        // After revocation: the SAME vote at T2 still counts because T2 < T3.
-        assert_eq!(
-            eligible_votes(&atom, &gated_rule(), &grants_after).len(),
-            1,
-            "a vote cast before the revocation remains eligible even after revocation lands"
-        );
+        assert!(eligible_votes(&atom_with_votes(&[(ALICE, T4)]), &rule, &grants).is_empty());
     }
 
-    /// When `windows` is empty (no temporal info from the perspective), the
-    /// fallback is the pre-tombstone `eligible: bool` — backward compat.
-    #[test]
-    fn empty_windows_fall_back_to_eligible_flag() {
-        let atom = atom_with_votes(&[("did:key:alice", "T1")]);
-        // eligible=true, windows=[] → fallback admits the vote
-        let eligible_grant = RoleGrant {
-            to_state: "approved".into(),
-            role_class: "ns://Reviewer".into(),
-            did: "did:key:alice".into(),
-            eligible: true,
-            rows: vec!["r0".into()],
-            windows: vec![],
-        };
-        assert_eq!(
-            eligible_votes(&atom, &gated_rule(), &[eligible_grant]).len(),
-            1
-        );
-
-        // eligible=false, windows=[] → fallback denies the vote
-        let ineligible_grant = RoleGrant {
-            to_state: "approved".into(),
-            role_class: "ns://Reviewer".into(),
-            did: "did:key:alice".into(),
-            eligible: false,
-            rows: vec![],
-            windows: vec![],
-        };
-        assert!(eligible_votes(&atom, &gated_rule(), &[ineligible_grant]).is_empty());
-    }
-
-    /// `resolve_role_grants` populates windows from the stub's per-DID
-    /// timestamp overrides.
+    /// A tombstone counts only from an author the grant's own rule accepts:
+    /// the role query's `author` condition is applied to the tombstone's
+    /// author. `(name, role query, accepted revokers, rejected revokers)` —
+    /// every revoker writes a tombstone at [`T2`] and the window keeps only
+    /// the accepted ones.
     #[tokio::test]
-    async fn resolve_role_grants_populates_windows_from_timestamps() {
-        let mut timestamps = std::collections::HashMap::new();
-        timestamps.insert(
-            "did:key:alice".to_string(),
-            RoleGrantTimestamps {
-                granted_at: Some("T1".into()),
-                revoked_at: vec!["T3".into()],
-            },
-        );
-        let stub = RoleStub {
-            member_dids: dids(&["did:key:alice"]),
-            rows_per_match: 1,
-            timestamps,
-            ..Default::default()
+    #[rustfmt::skip]
+    async fn a_tombstone_counts_only_from_an_author_the_grants_rule_accepts() {
+        let cases: Vec<(&str, Value, &[&str], &[&str])> = vec![
+            ("no author condition: anyone may grant, so anyone may revoke",
+             json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
+             &[ADMIN, MALLORY, ALICE], &[]),
+            ("admin-only grants are admin-only revocations",
+             json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN } }),
+             &[ADMIN], &[MALLORY, ALICE]),
+            ("a set of authorised granters",
+             json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": { "in": [ADMIN, LEAD] } } }),
+             &[ADMIN, LEAD], &[MALLORY, ALICE]),
+            ("`or` branches: a revoker any branch would accept as granter",
+             json!({ "className": "ns://Reviewer", "didProperty": "agent",
+                     "or": [ { "className": "ns://Reviewer", "where": { "author": ADMIN } },
+                             { "className": "ns://Reviewer", "where": { "author": LEAD } } ] }),
+             &[ADMIN, LEAD], &[MALLORY, ALICE]),
+            ("`author: $did`: a self-granted role is self-revoked",
+             json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": "$did" } }),
+             &[ALICE], &[ADMIN, MALLORY]),
+        ];
+        for (name, role_json, accepted, rejected) in cases {
+            let mut stub = members(&[ALICE]);
+            let revokers: Vec<(&str, &str)> = accepted.iter().chain(rejected).map(|by| (*by, T2)).collect();
+            stub.histories.insert(ALICE.into(), history(Some(T1), &revokers));
+            let grants = resolve_role_grants(&stub, "approved", &role(role_json), &record(), &dids(&[ALICE]))
+                .await
+                .unwrap();
+            let kept: Vec<&str> = grants[0].windows[0].revocations.iter().map(|r| r.by.as_str()).collect();
+            let mut expected: Vec<&str> = accepted.to_vec();
+            expected.sort();
+            assert_eq!(kept, expected, "{name}");
+            assert_eq!(grants[0].eligible_at(T3, None), accepted.is_empty(), "{name}: revoked iff someone authorised did it");
+            assert!(grants[0].eligible_at(T1, None), "{name}: the vote before any tombstone still counts");
+        }
+    }
+
+    /// The window records what the store said, in a deterministic order: the
+    /// grant link's timestamp when there is one, else the row's own; the
+    /// authorised tombstones earliest first.
+    #[tokio::test]
+    async fn windows_carry_the_history_the_store_reported() {
+        let mut stub = RoleStub {
+            rows_per_match: 2,
+            ..members(&[ALICE, BOB])
         };
+        stub.histories.insert(
+            ALICE.into(),
+            history(Some(T1), &[(MALLORY, T3), (ADMIN, T2)]),
+        );
+        // Bob's rows have no `didProperty` link the store could date: they
+        // date from the rows themselves (T0), and nothing revoked them.
         let grants = resolve_role_grants(
             &stub,
             "approved",
             &role(json!({ "className": "ns://Reviewer", "didProperty": "agent" })),
             &record(),
-            &dids(&["did:key:alice"]),
+            &dids(&[ALICE, BOB]),
         )
         .await
         .unwrap();
-        assert_eq!(grants.len(), 1);
-        let g = &grants[0];
-        assert_eq!(g.windows.len(), 1);
-        assert_eq!(g.windows[0].granted_at.as_deref(), Some("T1"));
-        assert_eq!(g.windows[0].revoked_at, vec!["T3"]);
+        let alice = &grants[0];
+        assert_eq!(alice.did, ALICE);
+        assert_eq!(alice.rows, vec!["r0", "r1"]);
+        for w in &alice.windows {
+            assert_eq!(w.granted_at, T1);
+            assert_eq!(
+                w.revocations,
+                vec![revocation(ADMIN, T2), revocation(MALLORY, T3)],
+                "no author condition, so both tombstones count, earliest first"
+            );
+            assert_eq!(w.revoked_at(), Some(T2));
+        }
+        let bob = &grants[1];
+        assert!(bob
+            .windows
+            .iter()
+            .all(|w| w.granted_at == T0 && w.revocations.is_empty()));
+        assert!(bob.eligible_at(NOW, None));
+        assert!(!alice.eligible_at(NOW, None));
     }
 }

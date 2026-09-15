@@ -809,8 +809,10 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
         read_set
             .role_grants
             .iter()
-            .any(|g| g.eligible && g.did == acting_did(&f) && !g.rows.is_empty()),
-        "the role rows the verdict rested on belong in the proof: {read_set:?}"
+            .any(|g| g.did == acting_did(&f)
+                && !g.rows.is_empty()
+                && g.windows.iter().all(|w| !w.granted_at.is_empty())),
+        "the role rows the verdict rested on, and when they were granted, belong in the proof: {read_set:?}"
     );
 
     let json = serde_json::to_string(&read_set).expect("a read-set serialises");

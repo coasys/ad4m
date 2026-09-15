@@ -49,6 +49,7 @@ use crate::perspectives::shacl_parser::{
 use crate::types::LinkQuery;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -374,20 +375,36 @@ fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value
     Ok(json!({ "id": id, "predicate": predicate }))
 }
 
-/// Grant-time and revocation-time metadata for one role-row/DID pair.
+/// One signed revocation tombstone: who wrote it and when.
 ///
-/// Both timestamps are author-asserted ISO-8601 strings. `None` means "no
-/// timestamp available from the perspective" — callers treat a missing
-/// `granted_at` as *−∞* (grant always existed) and an empty `revoked_at` as
-/// "never revoked". This is the backward-compat behaviour for stubs and test
-/// perspectives that do not model revocations.
+/// Rides in the read-set (see `flow_instance::roles::RoleGrantWindow`), so a
+/// verdict names the tombstones it honoured, not merely that "a revocation
+/// existed".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleRevocation {
+    /// The tombstone's author — the DID that signed it.
+    pub by: String,
+    /// The tombstone's link timestamp: the moment the grant stopped counting.
+    pub at: String,
+}
+
+/// What the store knows about one role row's history for one DID: when the
+/// row's `didProperty` link naming the DID was written, and every
+/// **signed** tombstone on the row naming the DID.
+///
+/// Signature is checked here, at the store boundary — the same rule
+/// `flow_instance::atom::signed_by` applies to votes: a link whose stored
+/// verdict is not `valid` is invisible. **Authority is not checked here**:
+/// whether the tombstone's author may revoke depends on the role query, so
+/// `resolve_role_grants` applies that filter. `granted_at` is `None` when
+/// the role query has no `didProperty` or no such link exists; the caller
+/// then falls back to the row's own timestamp and never to "always".
 #[derive(Debug, Clone, Default)]
 pub struct RoleGrantTimestamps {
-    /// Timestamp of the earliest grant link for this row/DID pair.
+    /// Earliest timestamp of a `row --didProperty--> did` link, if any.
     pub granted_at: Option<String>,
-    /// Timestamps of every revocation tombstone (`ad4m://flow/role_grant_revoked`)
-    /// on this row targeting this DID. Usually zero or one.
-    pub revoked_at: Vec<String>,
+    /// Every signed tombstone on this row naming this DID, any author.
+    pub revocations: Vec<RoleRevocation>,
 }
 
 /// The one perspective call the evaluator needs, behind a trait so the
@@ -396,17 +413,18 @@ pub struct RoleGrantTimestamps {
 pub trait RequiresQueryable: Send + Sync {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String>;
 
-    /// Timestamps governing as-of eligibility for one matched role row.
+    /// The store's history of one matched role row for one DID — see
+    /// [`RoleGrantTimestamps`].
     ///
-    /// `row_id` — the instance URI returned by `model_query`.
-    /// `grant_predicate` — the `didProperty` of the role query, if any; `None`
-    ///   for `$did`-style queries where no single property holds the DID alone.
-    /// `did` — plain DID string (not literal-encoded) to match against.
+    /// `row_id` — the instance URI `model_query` returned.
+    /// `grant_predicate` — the role query's `didProperty`, if any; `None`
+    ///   for `$did`-style queries, where no single property carries the DID.
+    /// `did` — the candidate's plain DID.
     ///
-    /// The default returns empty / `None` (no temporal info), which makes
-    /// `eligible_votes` fall back to the current live-graph `eligible` flag —
-    /// the pre-tombstone behaviour, preserved for stubs and tests that do not
-    /// model revocations.
+    /// The default knows nothing (no grant link, no tombstones). A caller
+    /// that gets `granted_at: None` must date the grant from the row itself
+    /// — `resolve_role_grants` does — so a stub that stays on this default
+    /// never turns into "granted since forever".
     async fn role_grant_timestamps(
         &self,
         _row_id: &str,
@@ -430,45 +448,51 @@ impl RequiresQueryable for PerspectiveInstance {
         did: &str,
     ) -> anyhow::Result<RoleGrantTimestamps> {
         use ad4m_client::literal::Literal;
+        // Social DNAs store DIDs either `literal:string:`-encoded (the SDNA
+        // setters) or raw (the flow's own `proposer` links do). A grant or a
+        // tombstone written in either form names the same DID.
         let did_literal = Literal::from_string(did.to_string())
             .to_url()
             .map_err(|e| {
                 anyhow::anyhow!("role_grant_timestamps: literal encode DID `{did}`: {e}")
             })?;
+        let names_did = |target: &str| target == did || target == did_literal;
 
-        // Earliest grant-link timestamp for this row/DID pair.
-        let granted_at = if let Some(pred) = grant_predicate {
-            let links = self
+        let granted_at = match grant_predicate {
+            Some(pred) => self
                 .get_links(&LinkQuery {
                     source: Some(row_id.to_string()),
                     predicate: Some(pred.to_string()),
-                    target: Some(did_literal.clone()),
                     ..Default::default()
                 })
-                .await?;
-            links.into_iter().map(|l| l.timestamp).min()
-        } else {
-            // For $did-style roles there is no single link to pin; treat grant
-            // timestamp as unknown (= −∞, always before any vote).
-            None
+                .await?
+                .into_iter()
+                .filter(|l| names_did(&l.data.target))
+                .map(|l| l.timestamp)
+                .min(),
+            None => None,
         };
 
-        // All revocation tombstones on this row for this DID.
-        let revoked_at = self
+        let revocations: Vec<RoleRevocation> = self
             .get_links(&LinkQuery {
                 source: Some(row_id.to_string()),
                 predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
-                target: Some(did_literal),
                 ..Default::default()
             })
             .await?
             .into_iter()
-            .map(|l| l.timestamp)
+            // The vote rule (`atom::signed_by`): a link whose signature does
+            // not verify is not a link anyone wrote.
+            .filter(|l| l.proof.valid == Some(true) && names_did(&l.data.target))
+            .map(|l| RoleRevocation {
+                by: l.author,
+                at: l.timestamp,
+            })
             .collect();
 
         Ok(RoleGrantTimestamps {
             granted_at,
-            revoked_at,
+            revocations,
         })
     }
 }
