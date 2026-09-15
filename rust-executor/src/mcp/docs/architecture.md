@@ -268,7 +268,23 @@ Two traps around relations and setters:
 | `source`    | string | `"this"` (instance URI) or a literal URI                       |
 | `predicate` | string | Predicate URI for the link                                     |
 | `target`    | string | `"value"` (substituted at runtime) or a literal URI            |
-| `local`     | bool?  | If true, the link is local-only                                |
+| `local`     | bool?  | If true, this action writes a `LinkStatus::Local` link — kept in this executor's store, never gossiped to the neighbourhood |
+
+`local` exists in two positions, and the **property shape is the one to use**:
+
+| Position                        | Scope                                                        |
+| ------------------------------- | ------------------------------------------------------------ |
+| `"local": true` on the property shape | Every action of that property (`setter`/`adder`/`remover`) plus the `constructor_actions`/`destructor_actions` entries on its predicate. `add_model` propagates it at registration time. |
+| `"local": true` on one action   | That action only. Wins over the propagated property-level flag, so it can also be used to opt a single action out. |
+
+Declaring it per-action is what makes a property end up stored inconsistently:
+the constructor entry for an `initial` or `required` value is easy to forget,
+and then the first value written is shared while every later one is local. The
+property-level flag covers both. `describe_perspective` surfaces it as
+`"local": true` on the property.
+
+Local means *executor*-private, not *user*-private: on a multi-user executor
+every user of that node shares the same local links (issue #1024).
 
 ### Generated MCP Tools
 

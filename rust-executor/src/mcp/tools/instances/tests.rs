@@ -219,6 +219,152 @@ async fn describe_perspective_reports_schema_as_data() {
     assert!(desc["usage"].as_str().unwrap().contains("instance_create"));
 }
 
+/// A class whose state is per-replica: `local: true` declared on the property
+/// shapes only, the way an agent writes it through `add_model`. No action
+/// carries the flag.
+const LOCAL_CACHE_SDNA: &str = r#"{
+  "target_class": "cache://Cache",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"cache://Cache"}
+  ],
+  "properties": [
+    {"path":"cache://title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"cache://title","target":"value"}]},
+    {"path":"cache://state","name":"state","datatype":"xsd:string","max_count":1,"writable":true,"local":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"cache://state","target":"value"}]},
+    {"path":"cache://mark","name":"marks","collection":true,"writable":true,"local":true,
+     "adder":[{"action":"addLink","source":"this","predicate":"cache://mark","target":"value"}],
+     "remover":[{"action":"removeLink","source":"this","predicate":"cache://mark","target":"value"}]}
+  ]
+}"#;
+
+/// `describe_perspective` is the only place a client can learn that a property
+/// stays on this node. Until `ShapeProperty` carried `local`, the model-query
+/// layer parsed the flag out of the SHACL graph and threw it away, so the
+/// description could not say it at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn describe_perspective_surfaces_the_local_flag() {
+    let (handler, uuid, _guard) = setup_with(&[("Cache", LOCAL_CACHE_SDNA)], false).await;
+    let desc = parse(
+        &handler
+            .describe_perspective(Parameters(DescribePerspectiveParams {
+                perspective_id: uuid.clone(),
+            }))
+            .await,
+    );
+
+    let cache = find(desc["classes"].as_array().expect("classes"), "Cache");
+    let properties = cache["properties"].as_array().expect("properties");
+
+    let state = find(properties, "state");
+    assert_eq!(state["local"], json!(true));
+    assert!(
+        state["local_note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not shared"),
+        "the flag needs a note saying what it costs: {state:?}"
+    );
+
+    let title = find(properties, "title");
+    assert!(
+        title.get("local").is_none(),
+        "a shared property must not be annotated at all: {title:?}"
+    );
+
+    let marks = find(
+        cache["collections"].as_array().expect("collections"),
+        "marks",
+    );
+    assert_eq!(marks["local"], json!(true));
+
+    // A local property is still writable — only its reach differs.
+    assert!(state.get("read_only").is_none());
+}
+
+/// `instance_create` and `instance_add_to_collection` write collection links
+/// themselves instead of running the class's `adder` action, so they never see
+/// the action's `local` flag and have to resolve it from the property shape.
+/// Without that, a `local` collection is gossiped by exactly these two tools
+/// while its scalar siblings stay local.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_writes_honour_the_local_flag() {
+    use crate::types::{LinkQuery, LinkStatus};
+
+    let (handler, uuid, _guard) = setup_with(&[("Cache", LOCAL_CACHE_SDNA)], false).await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Cache".to_string(),
+                properties: Some(props(&[
+                    ("title", json!("a cache")),
+                    ("state", json!("warm")),
+                    ("marks", json!(["one"])),
+                ])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let base_uri = created["base_uri"]
+        .as_str()
+        .unwrap_or_else(|| panic!("instance_create returned no base_uri: {created}"))
+        .to_string();
+
+    parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Cache".to_string(),
+                base_uri: base_uri.clone(),
+                collection: "marks".to_string(),
+                item_uri: "cache://item/two".to_string(),
+            }))
+            .await,
+    );
+
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    let statuses = |predicate: &'static str| {
+        let perspective = perspective.clone();
+        let base_uri = base_uri.clone();
+        async move {
+            perspective
+                .get_links(&LinkQuery {
+                    source: Some(base_uri),
+                    predicate: Some(predicate.to_string()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links")
+                .into_iter()
+                .map(|l| l.status.clone().unwrap_or(LinkStatus::Shared))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    assert_eq!(
+        statuses("cache://state").await,
+        vec![LinkStatus::Local],
+        "a local scalar written by instance_create",
+    );
+    assert_eq!(
+        statuses("cache://title").await,
+        vec![LinkStatus::Shared],
+        "a shared property is unaffected",
+    );
+    let marks = statuses("cache://mark").await;
+    assert_eq!(
+        marks.len(),
+        2,
+        "one from create, one from add_to_collection"
+    );
+    assert!(
+        marks.iter().all(|s| *s == LinkStatus::Local),
+        "both collection write paths must honour local, got {marks:?}",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn validation_names_property_type_and_cardinality() {
     let (_handler, uuid, _guard) = setup(false).await;

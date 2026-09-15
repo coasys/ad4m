@@ -193,6 +193,14 @@ impl<'a> PropView<'a> {
         self.prop.identity
     }
 
+    /// Declared `local: true` — this property's links are written with
+    /// `LinkStatus::Local` and stay in this executor's store: never gossiped
+    /// to the neighbourhood, invisible to remote agents, and not recoverable
+    /// from the network. Writable as normal; only the reach differs.
+    pub(crate) fn local(&self) -> bool {
+        self.prop.local
+    }
+
     /// Whether an MCP client may write this property at all.
     pub(crate) fn writable(&self) -> bool {
         !self.flag() && !self.reverse() && !self.computed()
@@ -248,6 +256,13 @@ impl<'a> PropView<'a> {
         }
         if self.identity() {
             v["identity"] = json!(true);
+        }
+        if self.local() {
+            v["local"] = json!(true);
+            v["local_note"] = json!(
+                "stored locally in this perspective — links for this property are not shared \
+                 with the neighbourhood, so remote agents cannot read it"
+            );
         }
         if let Some(reason) = self.read_only_reason() {
             v["read_only"] = json!(true);
