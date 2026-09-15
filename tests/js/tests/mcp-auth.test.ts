@@ -323,42 +323,42 @@ describe("MCP Authentication HTTP Tests", function() {
             }
         });
 
-        it("get_models must reject unauthenticated access even with a known perspective UUID", async function() {
+        it("describe_perspective must reject unauthenticated access even with a known perspective UUID", async function() {
             expect(authedPerspectiveUuid).to.be.a('string').with.length.greaterThan(0);
 
             const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
 
             try {
-                const result = await callMcpTool(MCP_BASE_URL, 'get_models', {
+                const result = await callMcpTool(MCP_BASE_URL, 'describe_perspective', {
                     perspective_id: authedPerspectiveUuid,
                 }, unauthSession);
 
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
                 expect(msg).to.include("Authentication required");
-                console.log("Unauthenticated get_models response:", msg.substring(0, 120));
+                console.log("Unauthenticated describe_perspective response:", msg.substring(0, 120));
             } catch (e: any) {
                 expect(e.message).to.include("Authentication required");
-                console.log("Unauthenticated get_models (thrown):", e.message.substring(0, 120));
+                console.log("Unauthenticated describe_perspective (thrown):", e.message.substring(0, 120));
             }
         });
 
-        it("query_subjects must reject unauthenticated access even with a known perspective UUID", async function() {
+        it("instance_query must reject unauthenticated access even with a known perspective UUID", async function() {
             expect(authedPerspectiveUuid).to.be.a('string').with.length.greaterThan(0);
 
             const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
 
             try {
-                const result = await callMcpTool(MCP_BASE_URL, 'query_subjects', {
+                const result = await callMcpTool(MCP_BASE_URL, 'instance_query', {
                     perspective_id: authedPerspectiveUuid,
                     class_name: "Message",
                 }, unauthSession);
 
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
                 expect(msg).to.include("Authentication required");
-                console.log("Unauthenticated query_subjects response:", msg.substring(0, 120));
+                console.log("Unauthenticated instance_query response:", msg.substring(0, 120));
             } catch (e: any) {
                 expect(e.message).to.include("Authentication required");
-                console.log("Unauthenticated query_subjects (thrown):", e.message.substring(0, 120));
+                console.log("Unauthenticated instance_query (thrown):", e.message.substring(0, 120));
             }
         });
     });

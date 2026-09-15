@@ -22,7 +22,8 @@ use super::types::{
     SparqlPagination, WhereCondition,
 };
 use super::utils::{
-    escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
+    emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
+    validate_iri,
 };
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -55,10 +56,14 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     let ont_ts = "ad4m://ontology/timestamp";
 
     if let Some(prop) = shape.properties.iter().find(|p| {
+        // `emittable_iri` on the initial: the value is inlined as `<…>`
+        // below, so an initial that is not a parseable IRI (e.g. "true")
+        // must fall through to the variable-based probes instead of
+        // emitting a term that makes the query fail to parse.
         p.is_flag
             && p.initial_value
                 .as_ref()
-                .map(|v| validate_iri(v).is_ok())
+                .map(|v| emittable_iri(v))
                 .unwrap_or(false)
             && validate_iri(&p.predicate).is_ok()
     }) {
@@ -307,12 +312,34 @@ pub(super) fn build_query_patterns(
 ) -> (String, String) {
     let mut conformance_patterns = Vec::new();
 
+    // Subject position for a parent id: inline `<id>` when it is a parseable
+    // IRI, else a variable bound by the pattern plus a STR() filter — Flux ids
+    // like `literal://string:x` exist as NamedNode subjects (never as XSD
+    // literals; the write path uses `new_unchecked` for subjects), so STR()
+    // matches their IRI text, but they cannot appear inside `<…>`
+    // (see `emittable_iri`).
+    fn parent_subject(id: &str) -> (String, Option<String>) {
+        if emittable_iri(id) {
+            (format!("<{id}>"), None)
+        } else {
+            (
+                "?_parentSubj".to_string(),
+                Some(format!(
+                    "    FILTER(STR(?_parentSubj) = \"{}\")",
+                    escape_sparql_string(id)
+                )),
+            )
+        }
+    }
+
     // Parent filter
     if let Some(ref parent) = query.parent {
         match parent {
             Scope::Raw { id, predicate } => {
                 if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
-                    conformance_patterns.push(format!("    <{safe_id}> <{safe_pred}> ?source ."));
+                    let (subj, filter) = parent_subject(safe_id);
+                    conformance_patterns.push(format!("    {subj} <{safe_pred}> ?source ."));
+                    conformance_patterns.extend(filter);
                 } else {
                     log::warn!(
                         "Skipping parent scope: invalid IRI in id='{}' or predicate='{}'",
@@ -331,14 +358,18 @@ pub(super) fn build_query_patterns(
                 };
                 if let Some(ref f) = field {
                     if let Ok(safe_f) = validate_iri(f) {
-                        conformance_patterns.push(format!("    <{safe_id}> <{safe_f}> ?source ."));
+                        let (subj, filter) = parent_subject(safe_id);
+                        conformance_patterns.push(format!("    {subj} <{safe_f}> ?source ."));
+                        conformance_patterns.extend(filter);
                     } else {
                         log::warn!("Skipping parent scope: invalid IRI in field='{}'", f);
                     }
                 } else {
                     let safe_model = escape_sparql_string(model);
                     let hash_model = format!("#{safe_model}");
-                    conformance_patterns.push(format!("    <{safe_id}> ?_parentPred ?source ."));
+                    let (subj, filter) = parent_subject(safe_id);
+                    conformance_patterns.push(format!("    {subj} ?_parentPred ?source ."));
+                    conformance_patterns.extend(filter);
                     conformance_patterns.push(format!(
                         "    FILTER(STRENDS(STR(?_parentPred), \"/{safe_model}\") || STRENDS(STR(?_parentPred), \"{hash_model}\"))",
                     ));
@@ -401,7 +432,12 @@ fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: boo
             has_conformance = true;
             if prop.is_flag {
                 if let Some(ref initial) = prop.initial_value {
-                    if validate_iri(initial).is_ok() {
+                    // `emittable_iri`, not `validate_iri`: an initial like
+                    // "true" or "literal://string:x" passes the injection
+                    // guard but is not a parseable IRI, and `<true>` makes
+                    // the whole query fail to parse. STR() matches the
+                    // `new_unchecked` store term either way.
+                    if emittable_iri(initial) {
                         conformance_patterns
                             .push(format!("    ?source <{}> <{initial}> .", prop.predicate));
                     } else {
@@ -436,7 +472,8 @@ fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: boo
                 let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
                 has_conformance = true;
                 if prop.is_flag {
-                    if validate_iri(initial).is_ok() {
+                    // Same `emittable_iri` gate as the required branch above.
+                    if emittable_iri(initial) {
                         conformance_patterns
                             .push(format!("    ?source <{}> <{initial}> .", prop.predicate));
                     } else {
@@ -657,7 +694,7 @@ fn compile_leaf_condition(
     if prop_name == "base" || prop_name == "id" {
         match condition {
             WhereCondition::String(val) => {
-                if validate_iri(val).is_ok() {
+                if emittable_iri(val) {
                     // `VALUES` rather than `FILTER(?source = <val>)`:
                     // it binds `?source` instead of merely testing it,
                     // which is what lets an `id` condition stand alone
@@ -675,7 +712,7 @@ fn compile_leaf_condition(
             WhereCondition::StringArray(vals) => {
                 let valid: Vec<&str> = vals
                     .iter()
-                    .filter(|v| validate_iri(v).is_ok())
+                    .filter(|v| emittable_iri(v))
                     .map(|v| v.as_str())
                     .collect();
                 if valid.len() == vals.len() {
@@ -726,7 +763,7 @@ fn compile_leaf_condition(
         let direction = prop.direction.as_deref().unwrap_or("forward");
         match condition {
             WhereCondition::String(val) => {
-                if validate_iri(val).is_ok() {
+                if emittable_iri(val) {
                     if direction == "reverse" {
                         out.push(format!("    <{val}> <{safe_pred}> ?source ."));
                     } else {
@@ -754,7 +791,7 @@ fn compile_leaf_condition(
                     "{}_{leaf_id}",
                     prop_name.replace(|c: char| !c.is_alphanumeric(), "_")
                 );
-                let all_valid = vals.iter().all(|v| validate_iri(v).is_ok());
+                let all_valid = vals.iter().all(|v| emittable_iri(v));
                 if all_valid {
                     let iris = vals
                         .iter()
@@ -1230,6 +1267,63 @@ mod tests {
         assert!(
             sparql.contains("DESC(?_rp_num)") && sparql.contains("DESC(?_rp_str)"),
             "ORDER BY should use DESC: {sparql}"
+        );
+    }
+
+    /// A flag whose `initial` passes the injection blacklist but is not a
+    /// parseable IRI ("true" has no scheme) must never be inlined as `<true>`
+    /// — that makes the whole query fail to parse. The conformance pattern
+    /// must take the STR() fallback, still constraining on the value.
+    #[test]
+    fn flag_initial_that_is_not_an_iri_takes_the_str_fallback() {
+        let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
+        let sparql = match plan {
+            InstanceQueryPlan::Single(q) => q,
+            InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
+        };
+        assert!(
+            !sparql.contains("<true>"),
+            "must not inline a non-IRI initial as an IRIREF: {sparql}"
+        );
+        assert!(
+            sparql.contains("FILTER(STR(?_cf_done) = \"true\")"),
+            "must still constrain the flag value via STR(): {sparql}"
+        );
+        // And an initial that IS a real IRI keeps the seekable form.
+        let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
+        let sparql = match plan {
+            InstanceQueryPlan::Single(q) => q,
+            InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
+        };
+        assert!(
+            sparql.contains("<todo://yes>"),
+            "a parseable initial stays inlined: {sparql}"
+        );
+    }
+
+    /// Same defect in the pagination timestamp probe: a non-IRI flag initial
+    /// must make the probe fall through to a variable-based pattern instead
+    /// of emitting `<true>` inside the reified triple.
+    #[test]
+    fn timestamp_probe_skips_flag_with_non_iri_initial() {
+        let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
+        let probe = build_timestamp_probe(&s);
+        assert!(
+            !probe.contains("<true>"),
+            "must not inline a non-IRI initial: {probe}"
+        );
+        assert!(
+            probe.contains("?_cf_done"),
+            "falls through to the required-property probe: {probe}"
+        );
+        // A parseable initial keeps the targeted reified form.
+        let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
+        let probe = build_timestamp_probe(&s);
+        assert!(
+            probe.contains("<todo://yes>"),
+            "a parseable initial stays targeted: {probe}"
         );
     }
 }

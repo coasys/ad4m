@@ -6,6 +6,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
+- **Breaking: a subject class property named `id`, `baseExpression`, `createdAt`, `updatedAt`, `author` or `timestamp` is now rejected at registration** [#991](https://github.com/coasys/ad4m/pull/991)
+  - These are reserved synthetic hydration keys; a property sharing one of these names could silently overwrite hydration metadata or be overwritten by it (issue #974) instead of causing an error. `ensureSDNASubjectClass` runs at app startup, so a class already in the wild with a colliding property name will stop registering on upgrade rather than continue mis-reading. Rename the property to fix it.
 - **Runtime bump — Deno 2.3.1 → 2.9.5, Holochain 0.7.0-dev.16 → 0.7.0 (stable)** [#907](https://github.com/coasys/ad4m/pull/907)
   - Deno / deno_core / rusty_v8 updated to Deno 2.9.5 (op2 v2.9 macro syntax, JsErrorClass manual impl, ModuleLoader 3-arg signature, JsRuntime::init_platform(None), v8::scope! pattern).
   - Rust toolchain 1.92 → 1.96.1.
