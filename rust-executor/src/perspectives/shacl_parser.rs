@@ -1498,8 +1498,7 @@ mod tests {
             let link = links
                 .iter()
                 .find(|l| {
-                    l.source.ends_with(source_suffix)
-                        && l.predicate.as_deref() == Some(predicate)
+                    l.source.ends_with(source_suffix) && l.predicate.as_deref() == Some(predicate)
                 })
                 .unwrap_or_else(|| panic!("no {predicate} link on ...{source_suffix}"));
             let json = link
@@ -1580,8 +1579,7 @@ mod tests {
         let setter_json = links
             .iter()
             .find(|l| {
-                l.source.ends_with("Cache.state")
-                    && l.predicate.as_deref() == Some("ad4m://setter")
+                l.source.ends_with("Cache.state") && l.predicate.as_deref() == Some("ad4m://setter")
             })
             .expect("setter link")
             .target
@@ -1611,9 +1609,8 @@ mod tests {
 
         let links = parse_shacl_to_links(shacl_json, "Cache").expect("parse SHACL");
         assert!(
-            !links
-                .iter()
-                .any(|l| l.target.contains("\"local\"") || l.predicate.as_deref() == Some("ad4m://local")),
+            !links.iter().any(|l| l.target.contains("\"local\"")
+                || l.predicate.as_deref() == Some("ad4m://local")),
             "no local flag anywhere in a class that never declared one"
         );
     }

@@ -1318,7 +1318,10 @@ impl Ad4mMcpHandler {
         )
         .await;
 
-        match perspective.add_link(link, status, None, &agent_context).await {
+        match perspective
+            .add_link(link, status, None, &agent_context)
+            .await
+        {
             Ok(_) => serde_json::to_string_pretty(&json!({
                 "success": true,
                 "expression_address": expression_address,

@@ -272,7 +272,10 @@ async fn describe_perspective_surfaces_the_local_flag() {
         "a shared property must not be annotated at all: {title:?}"
     );
 
-    let marks = find(cache["collections"].as_array().expect("collections"), "marks");
+    let marks = find(
+        cache["collections"].as_array().expect("collections"),
+        "marks",
+    );
     assert_eq!(marks["local"], json!(true));
 
     // A local property is still writable — only its reach differs.
@@ -351,7 +354,11 @@ async fn instance_writes_honour_the_local_flag() {
         "a shared property is unaffected",
     );
     let marks = statuses("cache://mark").await;
-    assert_eq!(marks.len(), 2, "one from create, one from add_to_collection");
+    assert_eq!(
+        marks.len(),
+        2,
+        "one from create, one from add_to_collection"
+    );
     assert!(
         marks.iter().all(|s| *s == LinkStatus::Local),
         "both collection write paths must honour local, got {marks:?}",
