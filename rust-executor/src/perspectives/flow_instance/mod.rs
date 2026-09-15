@@ -32,11 +32,14 @@
 //!   ▼ FlowInstance::read_set  ← ONLY store access in a state read
 //!      ├─ proposals (TransitionAtoms from above)
 //!      └─ resolve_role_grants per gated target state  (roles.rs)
-//!         ▲ ROLE ELIGIBILITY IS DECIDED HERE. The fold does no role work.
+//!         Reads each candidate's role rows and their history — grant time,
+//!         signed + authorised revocation tombstones — into RoleGrant windows.
+//!         Decides nothing about any particular vote.
 //!   │
 //!   ▼ fold_read_set
-//!      Calls eligible_votes per atom (roles.rs, pure) → VouchedAtom with
-//!      pre-filtered votes. No store. No role queries.
+//!      Calls eligible_votes per atom (roles.rs, pure): each vote is gated
+//!      AS OF ITS OWN TIMESTAMP against the windows (#1027) → VouchedAtom
+//!      with pre-filtered votes. No store. No role queries.
 //!   │
 //!   ▼ fold  (fold.rs — pure, no I/O)
 //!      Walks from genesis taking the earliest-settled declared edge per state.
@@ -133,14 +136,16 @@ pub struct ReadSet {
     /// The state the walk starts from — the flow definition's first state.
     pub genesis: String,
     pub proposals: Vec<ProposalLinks>,
-    /// Which voters this replica held eligible, and the role rows it says it
-    /// read. `eligible` is a verdict WE computed: the rows are cited by ID
-    /// and not carried here, so a verifier that folds this set has trusted
-    /// the minter about role membership rather than checked it. Present
-    /// because roles are re-derived live and a token's backing must at least
-    /// record what its verdict rested on. Making this half re-verifiable
-    /// needs the signed role rows themselves — the vote-time snapshot — which
-    /// is platform work this engine does not do yet.
+    /// Each voter's role rows and their history — when each row was granted
+    /// and which signed, authorised tombstones ended it — as this replica
+    /// read them (#1027). The *verdict* is not here: [`fold_read_set`] gates
+    /// every vote as of its own timestamp against these windows, so a
+    /// verifier re-runs that decision itself. What it still takes on trust
+    /// is the history: the rows and tombstones are cited by ID, author and
+    /// timestamp, not carried as signed links. Nothing cited is ever
+    /// deleted, so every citation stays resolvable against the graph;
+    /// carrying the signed links themselves is platform work this engine
+    /// does not do yet.
     pub role_grants: Vec<RoleGrant>,
 }
 
@@ -232,10 +237,11 @@ impl<'a> FlowInstance<'a> {
     }
 
     /// All I/O for a state read. Returns the proposal links of every
-    /// [`TransitionAtom`] on this instance, plus one [`RoleGrant`] verdict per
+    /// [`TransitionAtom`] on this instance, plus one [`RoleGrant`] — the
+    /// candidate's role rows with their grant and revocation history — per
     /// `(target_state, candidate_DID)` pair where the rule's `fromRole` gates
-    /// that state. That is two classes of store query and no others; the fold
-    /// that follows is pure over this value.
+    /// that state. That is three classes of store query and no others; the
+    /// fold that follows is pure over this value.
     ///
     /// Fails closed: `Err` propagates on any store error **and** on any role
     /// query that cannot discriminate between DIDs. The caller must abandon the

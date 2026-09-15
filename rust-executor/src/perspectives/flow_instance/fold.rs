@@ -19,7 +19,11 @@
 //!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. How
 //!   much that verdict is worth differs by half: the proposals and votes are
 //!   signed links the verifier re-checks itself, while the `fromRole`
-//!   eligibility is a verdict this replica computed — see
+//!   history — grant times and revocation tombstones, against which each
+//!   vote is gated as of its own timestamp — is what this replica read: the
+//!   read-set carries each row's [`RoleGrantWindow`](super::roles::RoleGrantWindow)
+//!   values but cites the underlying links by id, author and timestamp
+//!   rather than carrying them as signed links — see
 //!   [`ReadSet`](super::ReadSet).
 //! - **A function of the links present now.** Delete a settled vote and the
 //!   fold recomputes without it, so the flow stands where it stood before
@@ -115,9 +119,10 @@
 use super::atom::{TransitionAtom, Vote};
 use crate::perspectives::shacl_parser::{ConsensusRule, SHACLFlow};
 
-/// An atom whose votes have already been filtered by its rule's `fromRole`.
-/// Role resolution is the one step that needs the store, so the loader does
-/// it first and the fold stays pure.
+/// An atom whose votes have already been filtered by its rule's `fromRole`,
+/// each as of its own timestamp ([`super::roles::eligible_votes`]). Role
+/// resolution is the one step that needs the store, so the loader does it
+/// first and the fold stays pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VouchedAtom {
     pub atom: TransitionAtom,

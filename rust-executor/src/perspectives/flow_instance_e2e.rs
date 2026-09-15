@@ -6,11 +6,12 @@
 //! proposal, suppressed a mint or fabricated history with a single link that
 //! any neighbourhood member can write.
 //!
-//! Two of them pin *intended* behaviour that reads like a hole and is not
+//! One of them pins *intended* behaviour that reads like a hole and is not
 //! one: deleting a settled vote regresses the state (the graph is the truth
-//! and the state follows it), and revoking a role can un-settle an old edge
-//! (roles are re-derived live). Both are rulings, and both are visible here
-//! rather than silent.
+//! and the state follows it). The role-revocation tests pin the CORRECT
+//! behaviour introduced by tombstone revocation: a revocation is an explicit
+//! signed link, and eligibility is gated as-of each vote's own timestamp, so
+//! revocation only affects votes cast AFTER it — settled edges stay settled.
 
 use super::flow_classes::{advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE};
 use super::flow_context::load_shacl_flows;
@@ -18,7 +19,8 @@ use super::flow_evaluator::recompute_evidence_hash;
 use super::flow_evaluator_e2e::{literal, seed_flow, seed_satisfied_fixture, Fixture};
 use super::flow_instance::accept::accept_flow_proposal;
 use super::flow_instance::atom::{
-    ACCEPTED_BY_PREDICATE, FIRED_MARK, RESOLVED_AS_PREDICATE, TO_STATE_PREDICATE,
+    ACCEPTED_BY_PREDICATE, FIRED_MARK, RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE,
+    TO_STATE_PREDICATE,
 };
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
@@ -807,8 +809,10 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
         read_set
             .role_grants
             .iter()
-            .any(|g| g.eligible && g.did == acting_did(&f) && !g.rows.is_empty()),
-        "the role rows the verdict rested on belong in the proof: {read_set:?}"
+            .any(|g| g.did == acting_did(&f)
+                && !g.rows.is_empty()
+                && g.windows.iter().all(|w| !w.granted_at.is_empty())),
+        "the role rows the verdict rested on, and when they were granted, belong in the proof: {read_set:?}"
     );
 
     let json = serde_json::to_string(&read_set).expect("a read-set serialises");
@@ -861,13 +865,59 @@ async fn a_non_role_member_vote_does_not_count() {
     );
 }
 
-/// Test 20. The consequence of resolving roles against the CURRENT graph,
-/// pinned so it is visible rather than silent: revoking a voter's role after
-/// an edge settled un-settles it. Fixing this needs platform work (as-of
-/// queries and tombstoned role rows); until then a minted token's backing
-/// records which role rows the verdict rested on.
+/// Test 20. Tombstone revocation: a role revocation is an explicit signed link
+/// (`ad4m://flow/role_grant_revoked`), never a deletion. Because eligibility is
+/// gated as-of each vote's own timestamp, a tombstone written AFTER a vote
+/// cannot un-settle the edge that vote produced. The grant row stays in the
+/// graph, newcomers read the same history, and replicas always converge.
 #[tokio::test(flavor = "multi_thread")]
-async fn removing_a_voters_role_after_settle_unsettles_the_edge() {
+async fn revoking_a_role_after_settlement_does_not_unsettle_the_edge() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(
+        &mut f,
+        "delivery://Delivery.scoped",
+        r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#,
+    )
+    .await;
+    // Grant the role; the vote timestamp will be strictly later (wall-clock).
+    f.link(
+        TASK,
+        "ns://owner",
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
+    f.mint_one().await;
+    consensus_pass(&mut f).await;
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "edge settles while voter holds the role"
+    );
+
+    // Revoke via tombstone (timestamp > vote timestamp — sequential write).
+    f.link(
+        TASK,
+        ROLE_GRANT_REVOKED_PREDICATE,
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
+
+    // A newcomer deriving from scratch must reach the same state.
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "tombstone revocation does not un-settle history: the vote pre-dates the revocation"
+    );
+}
+
+/// Test 21. Newcomer convergence: a replica that first derives AFTER a
+/// tombstone is written reaches the same settled state as one that derived
+/// before. Both are represented by sequential `derived()` calls — the fold
+/// always re-derives from scratch so there is no separate newcomer code path.
+#[tokio::test(flavor = "multi_thread")]
+async fn newcomer_replica_converges_to_same_state_after_revocation() {
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(
         &mut f,
@@ -884,25 +934,266 @@ async fn removing_a_voters_role_after_settle_unsettles_the_edge() {
     .await;
     f.mint_one().await;
     consensus_pass(&mut f).await;
-    assert_eq!(f.derived().await.state, "scoped");
+    let state_before = f.derived().await.state.clone();
+    assert_eq!(state_before, "scoped");
 
-    let owner_links: Vec<LinkExpression> = links_of(&f, TASK)
-        .await
-        .into_iter()
-        .filter(|l| l.data.predicate.as_deref() == Some("ns://owner"))
-        .map(LinkExpression::from)
-        .collect();
-    assert!(!owner_links.is_empty());
-    f.perspective
-        .remove_links(owner_links, None)
-        .await
-        .expect("revoke the role");
+    // Tombstone the role after settlement.
+    f.link(
+        TASK,
+        ROLE_GRANT_REVOKED_PREDICATE,
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
 
+    // Re-derive from scratch: this is what a newcomer does.
+    assert_eq!(
+        f.derived().await.state,
+        state_before,
+        "newcomer convergence: revocation does not rewrite settled history"
+    );
+}
+
+/// Test 22. A vote cast AFTER a tombstone revocation does not count. The
+/// revocation only gates votes whose `at` timestamp follows the tombstone's.
+#[tokio::test(flavor = "multi_thread")]
+async fn late_syncing_revocation_stops_counting_votes_that_arrive_after_it() {
+    let mut f = seed_satisfied_fixture(None).await;
+    // n=2: need two distinct eligible voters to settle.
+    set_consensus_rule(
+        &mut f,
+        "delivery://Delivery.scoped",
+        r#"{"n":2,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#,
+    )
+    .await;
+    let bob = TestSigner::generate();
+
+    // Grant Alice's role and write her proposal (1 vote, need 2 to settle).
+    f.link(
+        TASK,
+        "ns://owner",
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
+    let seal = seal_for(&f, "scoped").await;
+    // write_proposal takes a short ID; the full URI is ad4m://flow/proposal/<id>.
+    let proposal_id = "revoke-timing";
+    let proposal_uri = format!("ad4m://flow/proposal/{proposal_id}");
+    f.write_proposal(
+        proposal_id,
+        "identified",
+        "scoped",
+        &[TASK.to_string()],
+        &seal,
+    )
+    .await;
     assert_eq!(
         f.derived().await.state,
         "identified",
-        "roles are re-derived live, so revoking one un-settles the edge it decided"
+        "1 < n=2, not settled"
     );
+
+    // Revoke Alice's role (tombstone, after her vote — strictly later wall-clock).
+    f.link(
+        TASK,
+        ROLE_GRANT_REVOKED_PREDICATE,
+        &literal(&acting_did(&f)),
+        LinkStatus::Local,
+    )
+    .await;
+
+    // Add Bob to the role (grant timestamp > revocation) and have Bob vote.
+    f.link(TASK, "ns://owner", &literal(&bob.did), LinkStatus::Local)
+        .await;
+    let bob_vote = bob.sign(
+        Link {
+            source: proposal_uri.clone(),
+            predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+            target: bob.did.clone(),
+        }
+        .normalize(),
+    );
+    f.perspective
+        .add_link_expression(LinkExpression::from(bob_vote), LinkStatus::Shared, None)
+        .await
+        .expect("sync Bob's vote");
+
+    // Alice's vote: T_alice < T_revoke → still counts (pre-revocation).
+    // Bob's vote: T_bob > T_bob_grant > T_revoke, Bob's grant never revoked → counts.
+    // Two eligible votes → n=2 settled.
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "Alice's pre-revocation vote + Bob's post-grant vote reach n=2"
+    );
+}
+
+/// Link timestamps are millisecond RFC3339 and the as-of gate compares them,
+/// so steps whose order matters must not land in the same millisecond.
+async fn tick() {
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+}
+
+const OWNER_RULE: &str = r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#;
+
+/// Gate every state of the review flow on "owns the task", so each edge of a
+/// multi-hop history is a role-gated vote.
+async fn seed_owner_gated_review_flow(rule: &str) -> Fixture {
+    let mut f = seed_review_flow().await;
+    for state in ["review", "changes_requested", "approved"] {
+        set_consensus_rule(&mut f, &format!("review://Review.{state}"), rule).await;
+    }
+    f
+}
+
+async fn grant_owner_role(f: &mut Fixture) {
+    let me = acting_did(f);
+    f.link(TASK, "ns://owner", &literal(&me), LinkStatus::Local)
+        .await;
+}
+
+/// This replica's agent tombstones its own grant on `row`.
+async fn revoke_own_role(f: &mut Fixture, row: &str) {
+    let me = acting_did(f);
+    f.link(
+        row,
+        ROLE_GRANT_REVOKED_PREDICATE,
+        &literal(&me),
+        LinkStatus::Shared,
+    )
+    .await;
+}
+
+/// A peer's tombstone revoking `revoked` on `row`, delivered as sync would
+/// deliver it: signed by the peer's real key.
+async fn sync_revocation_from(f: &mut Fixture, signer: &TestSigner, row: &str, revoked: &str) {
+    let tombstone = signer.sign(
+        Link {
+            source: row.to_string(),
+            predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
+            target: literal(revoked),
+        }
+        .normalize(),
+    );
+    f.perspective
+        .add_link_expression(LinkExpression::from(tombstone), LinkStatus::Shared, None)
+        .await
+        .expect("sync a peer's revocation");
+}
+
+/// A revocation gates only votes cast after it. The edge settled while the
+/// agent held the role stays settled — full DerivedState unchanged, and the
+/// pass reports nothing new — and a vote the same agent casts afterwards on a
+/// gated edge settles nothing. (Fails on the live-evaluation fold: there the
+/// post-revocation vote still counts.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revocation_gates_later_votes_and_leaves_settled_history_alone() {
+    let mut f = seed_owner_gated_review_flow(OWNER_RULE).await;
+    grant_owner_role(&mut f).await;
+    tick().await;
+    settle(&mut f, "p1", "review", "changes_requested").await;
+    let before = f.derived().await;
+    assert_eq!(before.state, "changes_requested");
+
+    tick().await;
+    revoke_own_role(&mut f, TASK).await;
+    assert_eq!(
+        f.derived().await,
+        before,
+        "a revocation must not un-settle history"
+    );
+    assert!(
+        consensus_pass(&mut f).await.is_empty(),
+        "nothing new settled"
+    );
+
+    tick().await;
+    propose(&mut f, "p2", "changes_requested", "review").await;
+    assert!(
+        consensus_pass(&mut f).await.is_empty(),
+        "a vote cast after the revocation settles nothing"
+    );
+    let after = f.derived().await;
+    assert_eq!(
+        after.state, "changes_requested",
+        "post-revocation vote ignored: {after:?}"
+    );
+    assert_eq!(walked(&after), walked(&before));
+}
+
+/// A replica deriving for the first time after the revocation — every
+/// derivation here is from scratch — reaches exactly the pre-revocation
+/// state, and so does an off-perspective verifier folding the serialised
+/// read-set, which now records the revocation it took into account.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newcomer_deriving_after_a_revocation_converges_on_the_settled_state() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE).await;
+    grant_owner_role(&mut f).await;
+    tick().await;
+    f.mint_one().await;
+    consensus_pass(&mut f).await;
+    let before = f.derived().await;
+    assert_eq!(before.state, "scoped");
+
+    tick().await;
+    revoke_own_role(&mut f, TASK).await;
+    assert_eq!(
+        f.derived().await,
+        before,
+        "derived from scratch after == before"
+    );
+    let read_set = f.read_set().await;
+    let json = serde_json::to_string(&read_set).expect("serialises");
+    let parsed: ReadSet = serde_json::from_str(&json).expect("deserialises");
+    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    assert_eq!(fold_read_set(&flows[&f.flow_uri], &parsed), before);
+    assert!(
+        read_set.role_grants.iter().any(|g| g.did == acting_did(&f)
+            && g.windows.iter().any(|w| !w.revocations.is_empty())),
+        "the read-set records the revocation the verdict took into account: {read_set:?}"
+    );
+}
+
+/// A revocation carries the grant's own authority rule. With the role pinned
+/// to rows this agent authored (`where.author`), a peer's tombstone on the
+/// row is not a revocation — the grant stays live for later votes — while
+/// this agent's own tombstone ends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revocation_from_outside_the_grants_authority_is_ignored() {
+    let mut f = seed_review_flow().await;
+    let me = acting_did(&f);
+    let admin_only = format!(
+        r#"{{"n":1,"fromRole":{{"className":"ns://Task","didProperty":"owner","where":{{"author":"{me}"}}}}}}"#
+    );
+    for state in ["review", "changes_requested", "approved"] {
+        set_consensus_rule(&mut f, &format!("review://Review.{state}"), &admin_only).await;
+    }
+    grant_owner_role(&mut f).await;
+    tick().await;
+    settle(&mut f, "p1", "review", "changes_requested").await;
+
+    tick().await;
+    let mallory = TestSigner::generate();
+    sync_revocation_from(&mut f, &mallory, TASK, &me).await;
+    tick().await;
+    settle(&mut f, "p2", "changes_requested", "review").await;
+    assert_eq!(
+        f.derived().await.state,
+        "review",
+        "an outsider's tombstone is not a revocation"
+    );
+
+    tick().await;
+    revoke_own_role(&mut f, TASK).await;
+    tick().await;
+    propose(&mut f, "p3", "review", "approved").await;
+    assert!(
+        consensus_pass(&mut f).await.is_empty(),
+        "the admin's own tombstone ends the grant"
+    );
+    assert_eq!(f.derived().await.state, "review");
 }
 
 // ---------------------------------------------------------------------------
