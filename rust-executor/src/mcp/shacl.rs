@@ -586,9 +586,16 @@ pub async fn resolve_property_predicate(
 /// `local` collection would be written Shared by exactly those tools while its
 /// scalar siblings stayed Local.
 ///
-/// An unknown class or property resolves to `Shared`: this is a storage
-/// decision on a write that is about to be validated anyway, and defaulting to
-/// the network-visible status never silently withholds data.
+/// An unknown class or property resolves to `Shared`. That default is *not*
+/// justified by "never withhold data" — for a privacy-adjacent flag the safe
+/// failure is the opposite one: withholding is recoverable, gossiping a value
+/// the class declared executor-private is not.
+///
+/// It is sound here only because the branch is unreachable in practice: every
+/// caller resolves the property's predicate from the same class SHACL first and
+/// aborts on failure, so reaching this function at all means the class and
+/// property exist. If that precondition ever stops holding, propagate the
+/// lookup failure instead of widening the default.
 pub async fn resolve_property_link_status(
     perspective: &PerspectiveInstance,
     class_name: &str,

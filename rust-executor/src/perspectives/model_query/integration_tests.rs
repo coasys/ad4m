@@ -37,6 +37,119 @@ fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> Decorated
     }
 }
 
+/// `make_link` with an explicit [`LinkStatus`], for the local-property read tests.
+fn make_link_with_status(
+    source: &str,
+    predicate: &str,
+    target: &str,
+    ts: &str,
+    status: crate::types::LinkStatus,
+) -> DecoratedLinkExpression {
+    let mut link = make_link(source, predicate, target, ts);
+    link.status = Some(status);
+    link
+}
+
+const LOCAL_CACHE_SHAPE_JSON: &str = r#"{
+    "className": "Cache",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "cache://Cache"
+        },
+        "state": {
+            "predicate": "cache://state",
+            "required": false,
+            "resolveLanguage": "literal",
+            "local": true
+        }
+    },
+    "relations": {}
+}"#;
+
+/// A `local: true` property must hydrate only from `LinkStatus::Local` links.
+///
+/// Nothing stops a peer gossiping a Shared link on a predicate the class declared
+/// local. Before the read-side filter the hydration path had no status handling at
+/// all, so that foreign link was read back as the property's value — the class
+/// declared the field executor-private and whoever gossiped last decided what it
+/// said.
+///
+/// The spoof case is asserted with the Shared link as the *only* link on the
+/// predicate, so the test is deterministic: without the filter the value hydrates,
+/// with it the property is absent. Asserting against a mixture would let
+/// result-ordering decide the outcome and pass by luck on unfiltered code.
+#[tokio::test]
+async fn local_property_hydrates_only_from_local_links() {
+    use crate::types::LinkStatus;
+
+    // Case 1 — spoof only: a Shared link is the sole value on the local predicate.
+    let store = SparqlStore::new(None).unwrap();
+    let spoofed = "literal:string:cache_spoofed";
+    store
+        .add_link(&make_link(spoofed, "ad4m://type", "cache://Cache", "1700000000000"))
+        .unwrap();
+    store
+        .add_link(&make_link_with_status(
+            spoofed,
+            "cache://state",
+            "literal:string:gossiped",
+            "1700000000001",
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 1, "instance should still be found");
+    let state = &result.instances[0]["state"];
+    assert!(
+        state.is_null(),
+        "a Shared link on a local predicate must not hydrate, got: {state}"
+    );
+
+    // Case 2 — the genuine article: a Local link on the same predicate does hydrate.
+    let store2 = SparqlStore::new(None).unwrap();
+    let genuine = "literal:string:cache_genuine";
+    store2
+        .add_link(&make_link(genuine, "ad4m://type", "cache://Cache", "1700000000000"))
+        .unwrap();
+    store2
+        .add_link(&make_link_with_status(
+            genuine,
+            "cache://state",
+            "literal:string:warm",
+            "1700000000001",
+            LinkStatus::Local,
+        ))
+        .unwrap();
+
+    let result2 = execute_model_query_from_json(
+        &store2,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result2.instances.len(), 1);
+    assert_eq!(
+        result2.instances[0]["state"],
+        json!("warm"),
+        "a Local link on a local predicate must hydrate normally"
+    );
+}
+
 #[tokio::test]
 async fn test_full_model_query_with_where_filter() {
     // Create an in-memory store
