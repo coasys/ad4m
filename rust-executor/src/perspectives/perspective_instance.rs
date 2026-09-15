@@ -158,6 +158,8 @@ mod inbound_touches_shacl_tests {
                 signature: String::new(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: Some(LinkStatus::Shared),
         }
@@ -2364,6 +2366,7 @@ impl PerspectiveInstance {
                     proof: ExpressionProof {
                         key: decorated.proof.key,
                         signature: decorated.proof.signature,
+                        ..Default::default()
                     },
                     status: Some(status.clone()),
                 };
@@ -8105,6 +8108,8 @@ mod tests {
                     signature: "s".into(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             };
@@ -8204,6 +8209,8 @@ mod tests {
                     signature: "s".into(),
                     valid: Some(true),
                     invalid: Some(false),
+
+                    ..Default::default()
                 },
                 status: None,
             };
