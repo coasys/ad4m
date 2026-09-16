@@ -518,7 +518,7 @@ mod tests {
 
         async fn role_grant_timestamps(
             &self,
-            _row_id: &str,
+            _instance_id: &str,
             _grant_predicate: Option<&str>,
             did: &str,
         ) -> anyhow::Result<RoleGrantTimestamps> {
@@ -649,7 +649,11 @@ mod tests {
         }
     }
 
-    fn window(instance_id: &str, granted_at: &str, revocations: &[(&str, &str)]) -> RoleGrantWindow {
+    fn window(
+        instance_id: &str,
+        granted_at: &str,
+        revocations: &[(&str, &str)],
+    ) -> RoleGrantWindow {
         RoleGrantWindow {
             instance_id: instance_id.into(),
             granted_at: granted_at.into(),
@@ -855,7 +859,7 @@ mod tests {
     #[test]
     fn an_unparseable_revocation_is_surfaced_never_ignored() {
         let w = RoleGrantWindow {
-            row_id: "r0".into(),
+            instance_id: "r0".into(),
             granted_at: T0.into(),
             revocations: vec![revocation(ADMIN, "not-a-timestamp"), revocation(ADMIN, T2)],
         };
@@ -863,7 +867,7 @@ mod tests {
         assert!(!w.open_at(NOW), "unparseable revocation closes the window");
 
         let only_garbage = RoleGrantWindow {
-            row_id: "r0".into(),
+            instance_id: "r0".into(),
             granted_at: T0.into(),
             revocations: vec![revocation(ADMIN, "not-a-timestamp")],
         };
