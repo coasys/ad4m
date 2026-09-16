@@ -16,9 +16,10 @@
 //! conductor that starts only once they finish.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use log::{error, info, warn};
-use tokio::sync::oneshot;
+use tokio::sync::watch;
 
 use crate::agent::AgentService;
 use crate::holochain_service::{
@@ -39,6 +40,13 @@ static STARTUP_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 /// calls would each build a runtime for the same language, and the later one would replace
 /// the earlier one without tearing it down.
 static CORE_LANGUAGE_LOAD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The core-load outcome of the startup in flight: `None` until the caller that started it
+/// has loaded the core languages, then whether that succeeded. Callers that arrive while it
+/// is in flight wait on this instead of loading again. Replaced in the same critical section
+/// that claims `STARTUP_IN_FLIGHT`, so they never read an earlier startup's outcome.
+type CoreLoadOutcome = watch::Receiver<Option<bool>>;
+static CURRENT_CORE_LOAD: Mutex<Option<CoreLoadOutcome>> = Mutex::new(None);
 
 /// A claim on a flag, released when dropped.
 struct InFlight(&'static AtomicBool);
@@ -67,50 +75,58 @@ impl Drop for InFlight {
 /// dropped before it finishes (the request was cancelled), the task skips them; they load on
 /// first use instead.
 pub struct ConductorStartup {
-    /// `None` when another startup was already in flight: this caller is a follower.
-    core_loaded: Option<oneshot::Sender<bool>>,
+    role: Role,
+}
+
+enum Role {
+    /// Started the startup in flight; runs the core load and reports its outcome.
+    Leader(watch::Sender<Option<bool>>),
+    /// Arrived while a startup was in flight; shares its outcome instead of loading again.
+    /// `load_core_system_languages` reloads the language language unconditionally, and the
+    /// in-flight task may by then be installing link languages through it. `None` only if no
+    /// startup ever published an outcome.
+    Follower(Option<CoreLoadOutcome>),
 }
 
 impl ConductorStartup {
     /// Load the core system languages, one caller at a time, then let the startup task load
-    /// the link and installed languages.
-    ///
-    /// A follower (a generate/unlock that arrived while another startup was in flight) skips
-    /// the load when the core languages are already registered. `load_core_system_languages`
-    /// reloads the language language unconditionally, and the in-flight task may by then be
-    /// loading link languages through it.
+    /// the link and installed languages. A caller that arrived while a startup was in flight
+    /// waits for that startup's core load and returns its outcome instead.
     pub async fn load_core_languages(
-        mut self,
+        self,
         language_language_only: bool,
     ) -> Result<(), LanguageError> {
-        let result = {
-            let _one_at_a_time = CORE_LANGUAGE_LOAD.lock().await;
-            if self.core_loaded.is_none() && core_languages_registered(language_language_only).await
-            {
-                info!("Core system languages already loaded by the startup in flight");
-                Ok(())
-            } else {
-                LanguageController::global_instance()
-                    .load_core_system_languages(language_language_only)
-                    .await
+        match self.role {
+            Role::Leader(outcome) => {
+                let result = {
+                    let _one_at_a_time = CORE_LANGUAGE_LOAD.lock().await;
+                    LanguageController::global_instance()
+                        .load_core_system_languages(language_language_only)
+                        .await
+                };
+                outcome.send_replace(Some(result.is_ok()));
+                result
             }
-        };
-        if let Some(tx) = self.core_loaded.take() {
-            let _ = tx.send(result.is_ok());
+            Role::Follower(outcome) => {
+                if matches!(wait_for_outcome(outcome).await, Some(true)) {
+                    info!("Core system languages loaded by the startup in flight");
+                    Ok(())
+                } else {
+                    Err(LanguageError::LoadError {
+                        address: "system languages".to_string(),
+                        message: "the concurrent generate/unlock failed to load them".to_string(),
+                    })
+                }
+            }
         }
-        result
     }
 }
 
-async fn core_languages_registered(language_language_only: bool) -> bool {
-    let controller = LanguageController::global_instance();
-    if controller.get_language_language().await.is_err() {
-        return false;
-    }
-    language_language_only
-        || (controller.get_agent_language().await.is_ok()
-            && controller.get_neighbourhood_language().await.is_ok()
-            && controller.get_perspective_language().await.is_ok())
+/// The outcome once reported; `None` if the reporting handle was dropped first.
+async fn wait_for_outcome(outcome: Option<CoreLoadOutcome>) -> Option<bool> {
+    let mut outcome = outcome?;
+    let reported = outcome.wait_for(|o| o.is_some()).await.ok()?;
+    *reported
 }
 
 /// Start the conductor (unless it is already running) in the background, and once the
@@ -118,14 +134,21 @@ async fn core_languages_registered(language_language_only: bool) -> bool {
 /// Call this before loading the core languages. A failed start is logged and announced as an
 /// `agent-status-changed` event carrying the error, since the reply may already have gone.
 pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
-    let Some(in_flight) = InFlight::claim(&STARTUP_IN_FLIGHT) else {
-        info!("Holochain startup already in progress; not starting another");
-        return ConductorStartup { core_loaded: None };
+    let (in_flight, core_loaded_tx, core_loaded_rx) = {
+        let mut current = CURRENT_CORE_LOAD.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(in_flight) = InFlight::claim(&STARTUP_IN_FLIGHT) else {
+            info!("Holochain startup already in progress; not starting another");
+            return ConductorStartup {
+                role: Role::Follower(current.clone()),
+            };
+        };
+        let (tx, rx) = watch::channel(None);
+        *current = Some(rx.clone());
+        (in_flight, tx, rx)
     };
     // Before spawning, so a request arriving before the task's first poll already waits
     // rather than seeing no service and no start.
     let starting = ConductorStarting::begin();
-    let (core_loaded_tx, core_loaded_rx) = oneshot::channel();
 
     tokio::spawn(async move {
         if maybe_get_holochain_service().await.is_none() {
@@ -150,8 +173,8 @@ pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
             drop(starting);
         }
 
-        // `false` is a failed core load; `Err` is the handle dropped before it finished.
-        if !matches!(core_loaded_rx.await, Ok(true)) {
+        // `Some(false)` is a failed core load; `None` is the handle dropped before it finished.
+        if wait_for_outcome(Some(core_loaded_rx)).await != Some(true) {
             warn!("Core system languages did not load; skipping link and installed languages");
             return;
         }
@@ -170,7 +193,7 @@ pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
     });
 
     ConductorStartup {
-        core_loaded: Some(core_loaded_tx),
+        role: Role::Leader(core_loaded_tx),
     }
 }
 
@@ -212,5 +235,37 @@ mod tests {
         });
         assert!(task.await.is_err());
         assert!(InFlight::claim(&FLAG).is_some());
+    }
+
+    fn follower() -> (watch::Sender<Option<bool>>, ConductorStartup) {
+        let (tx, rx) = watch::channel(None);
+        let startup = ConductorStartup {
+            role: Role::Follower(Some(rx)),
+        };
+        (tx, startup)
+    }
+
+    #[tokio::test]
+    async fn a_follower_succeeds_once_the_leader_loads_the_core() {
+        let (leader, startup) = follower();
+        let load = tokio::spawn(startup.load_core_languages(false));
+        leader.send_replace(Some(true));
+        assert!(load.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_follower_fails_when_the_leader_core_load_fails() {
+        let (leader, startup) = follower();
+        let load = tokio::spawn(startup.load_core_languages(false));
+        leader.send_replace(Some(false));
+        assert!(load.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_follower_fails_when_the_leader_is_dropped_before_reporting() {
+        let (leader, startup) = follower();
+        let load = tokio::spawn(startup.load_core_languages(false));
+        drop(leader);
+        assert!(load.await.unwrap().is_err());
     }
 }
