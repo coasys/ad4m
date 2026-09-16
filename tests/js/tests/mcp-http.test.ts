@@ -282,14 +282,31 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(toolNames).to.include('auth_status');
         });
 
+        // #851 sub-problem 3: on an executor WITH an admin credential, the mint
+        // code must not be handed to a caller that presents nothing. This test
+        // must run BEFORE any test sends the admin credential, because a valid
+        // Authorization header is adopted into the session.
+        it("withholds the mint code from an unauthenticated caller (#851-3)", async function() {
+            const gated = await callMcpTool(MCP_BASE_URL,'request_capability', {
+                app_name: "mcp-test-unauth",
+                app_desc: "MCP Integration Test (no credentials)"
+            }, mcpSessionId);
+            expect(gated.request_id, "request itself is still created (Launcher pairing flow)").to.be.a('string');
+            expect(gated.code, "mint code must not be returned inline to an unauthenticated caller").to.be.undefined;
+        });
+
         it("should authenticate with admin credential via request_capability", async function() {
+            // The admin credential rides the Authorization header — before the
+            // #851-3 gate this call worked with no credentials at all, which
+            // was exactly the vulnerability.
             const capResult = await callMcpTool(MCP_BASE_URL,'request_capability', {
                 app_name: "mcp-test",
                 app_desc: "MCP Integration Test"
-            }, mcpSessionId);
+            }, mcpSessionId, { Authorization: `Bearer ${adminCredential}` });
             expect(capResult.request_id).to.be.a('string');
             expect(capResult.code).to.be.a('string');
 
+            // The exchange itself needs no auth: the code is the secret.
             const jwtResult = await callMcpTool(MCP_BASE_URL,'generate_jwt', {
                 request_id: capResult.request_id,
                 code: capResult.code,
