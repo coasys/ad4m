@@ -83,6 +83,9 @@ type KeyRingStatus = "none" | "ready" | "pending" | "error";
 let keyRingStatus: KeyRingStatus = "none";
 /** True when this agent has been identified as the room admin. */
 let isRoomAdmin = false;
+/** Cooldown for commit-path key ring retries (ms since epoch). */
+let lastKeyRingRetry = 0;
+const KEY_RING_RETRY_COOLDOWN_MS = 10_000;
 
 function isPlaceholder(value: string): boolean {
     return !value || value === "<to-be-filled>";
@@ -505,10 +508,30 @@ const language = defineLanguage({
                 );
             }
             if (keyRingStatus === "error" || keyRingStatus === "pending") {
-                console.log(
-                    `[server-link-language] retrying E2E key ring acquisition before commit (status: ${keyRingStatus})...`,
-                );
-                await setupKeyRing();
+                const now = Date.now();
+                if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
+                    console.log(
+                        `[server-link-language] skipping key ring retry — cooldown (${KEY_RING_RETRY_COOLDOWN_MS}ms)`,
+                    );
+                } else {
+                    const prevStatus = keyRingStatus;
+                    console.log(
+                        `[server-link-language] retrying E2E key ring acquisition before commit (status: ${keyRingStatus})...`,
+                    );
+                    lastKeyRingRetry = now;
+                    await setupKeyRing();
+                    if (prevStatus === "pending" && keyRingStatus === "ready") {
+                        console.log(
+                            "[server-link-language] key ring acquired (was pending) — re-bootstrapping to recover skipped links",
+                        );
+                        await syncModule.bootstrap();
+                        const recovered = syncModule.render();
+                        if (recovered.links.length > 0) {
+                            getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
+                        }
+                        syncModule.clearPendingMissingVersions();
+                    }
+                }
             }
             if (keyRingStatus === "error") {
                 throw new Error(

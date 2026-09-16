@@ -642,6 +642,55 @@ describe("sync: bootstrap", () => {
         assert.equal(emittedDiffs.length, 0);
     });
 
+    it("tracks missing key versions so catchUp retries key ring refresh", async () => {
+        const transport = new MockTransport();
+        resetAdapters();
+        syncModule._resetBatchStateForTests();
+        initAdapters({ storage: new MockStorage(), transport, config });
+        store.initStore(simpleHash);
+        emittedDiffs = [];
+        syncStates = [];
+        keyRing = null;
+
+        let refreshCalled = false;
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => { refreshCalled = true; return false; },
+        });
+
+        const rk = generateRoomKey();
+        const plainLink = makeLink({ source: "plain" });
+        const encLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 3);
+
+        transport.route(
+            (url, method) => method === "GET" && url.endsWith("/render"),
+            () => ({
+                status: 200,
+                headers: {},
+                body: JSON.stringify({ links: [plainLink, encLink], revision: "rev-1", sequence: 1 }),
+            }),
+        );
+
+        await syncModule.bootstrap();
+
+        assert.equal(store.allLinks().links.length, 1, "only the plaintext link should be stored");
+        assert.equal(store.allLinks().links[0].data.source, "plain");
+
+        // catchUp with empty diffs — should still attempt refresh because
+        // bootstrap tracked version 3 via trackMissingKeyVersions.
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) }),
+        );
+
+        await syncModule.catchUp();
+        assert.equal(refreshCalled, true, "catchUp should retry key ring refresh for versions tracked by bootstrap");
+    });
+
     it("replaces stale local links with the server snapshot", async () => {
         const transport = new MockTransport();
         setup(transport);

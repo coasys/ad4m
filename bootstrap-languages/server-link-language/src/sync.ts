@@ -561,6 +561,7 @@ export async function bootstrap(): Promise<void> {
             `[server-link-language] bootstrap: skipped ${missingVersions.size} undecryptable ` +
             `key version(s): ${[...missingVersions].join(", ")} — will recover after key grant`,
         );
+        trackMissingKeyVersions(missingVersions);
     }
 
     // Replace the local link set atomically: remove any stale links left
