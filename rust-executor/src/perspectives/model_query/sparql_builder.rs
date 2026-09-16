@@ -233,6 +233,7 @@ pub(super) fn build_instance_sparql(
             predicate_filter,
         }
     } else {
+        let local_status = local_status_filter(shape);
         InstanceQueryPlan::Single(format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
@@ -242,9 +243,44 @@ pub(super) fn build_instance_sparql(
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-}}"#
+{local_status}}}"#
         ))
     }
+}
+
+/// SPARQL fragment restricting `local: true` properties to `LinkStatus::Local` links.
+///
+/// A peer can gossip a Shared link on a predicate the class declared local; without
+/// this filter, hydration surfaces that foreign link as the local value. A Shared
+/// link on a local predicate is foreign or pre-flag legacy data by definition, so it
+/// is dropped rather than read.
+///
+/// A link carrying no status annotation is likewise dropped: `?_status` stays unbound,
+/// the equality yields an error, and the row is excluded. Withholding is the safe
+/// failure for a privacy-adjacent flag — the opposite default would gossip a value the
+/// class declared executor-private.
+///
+/// Returns an empty string when the shape declares no local properties, leaving the
+/// query byte-identical to before.
+pub(super) fn local_status_filter(shape: &ModelShape) -> String {
+    let mut preds: Vec<String> = shape
+        .properties
+        .iter()
+        .filter(|p| p.local && !p.predicate.is_empty())
+        .filter_map(|p| validate_iri(&p.predicate).ok())
+        .map(|p| format!("<{p}>"))
+        .collect();
+    preds.sort();
+    preds.dedup();
+
+    if preds.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?_status . }}\n    FILTER(!(?predicate IN ({})) || ?_status = \"Local\")\n",
+        preds.join(", ")
+    )
 }
 
 /// Build a COUNT SPARQL query that returns the number of conforming instances.
