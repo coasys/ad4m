@@ -427,7 +427,7 @@ async fn a_peer_written_shared_mark_does_not_mute_our_fire_outcome() {
     );
 }
 
-/// The row every OTHER replica sees: the creator's cache is `Local`, so a
+/// The flow instance every OTHER replica sees: the creator's cache is `Local`, so a
 /// synced `FlowInstance` carries no `currentState` at all. It must still load
 /// as an instance — `currentState` is optional on the shape — with the empty
 /// state meaning "not yet derived here", and the pass then fills it.
@@ -449,7 +449,7 @@ async fn an_instance_without_a_cache_still_loads_and_the_pass_fills_it() {
     assert_eq!(
         records.len(),
         1,
-        "the row is an instance with or without its cache"
+        "the flow instance is recognised with or without its cache"
     );
     assert_eq!(
         records[0].current_state, "",
@@ -552,7 +552,7 @@ async fn a_synced_chat_message_does_not_trigger_a_pass() {
     );
 }
 
-/// The row as sync delivers it to every other replica: no `Local` cache.
+/// The flow instance as sync delivers it to every other replica: no `Local` cache.
 async fn drop_local_cache(f: &mut Fixture) {
     let cache: Vec<LinkExpression> = current_state_links(f)
         .await
@@ -592,7 +592,7 @@ async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
     let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
     let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
 
-    // Replica B: same definition, the instance row as sync delivers it (no
+    // Replica B: same definition, the flow instance as sync delivers it (no
     // cache), and A's history.
     let mut b = seed_review_flow().await;
     drop_local_cache(&mut b).await;
@@ -810,9 +810,9 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
             .role_grants
             .iter()
             .any(|g| g.did == acting_did(&f)
-                && !g.rows.is_empty()
+                && !g.instances.is_empty()
                 && g.windows.iter().all(|w| !w.granted_at.is_empty())),
-        "the role rows the verdict rested on, and when they were granted, belong in the proof: {read_set:?}"
+        "the role instances the verdict rested on, and when they were granted, belong in the proof: {read_set:?}"
     );
 
     let json = serde_json::to_string(&read_set).expect("a read-set serialises");
@@ -868,7 +868,7 @@ async fn a_non_role_member_vote_does_not_count() {
 /// Test 20. Tombstone revocation: a role revocation is an explicit signed link
 /// (`ad4m://flow/role_grant_revoked`), never a deletion. Because eligibility is
 /// gated as-of each vote's own timestamp, a tombstone written AFTER a vote
-/// cannot un-settle the edge that vote produced. The grant row stays in the
+/// cannot un-settle the edge that vote produced. The grant instance stays in the
 /// graph, newcomers read the same history, and replicas always converge.
 #[tokio::test(flavor = "multi_thread")]
 async fn revoking_a_role_after_settlement_does_not_unsettle_the_edge() {
@@ -1053,11 +1053,11 @@ async fn grant_owner_role(f: &mut Fixture) {
         .await;
 }
 
-/// This replica's agent tombstones its own grant on `row`.
-async fn revoke_own_role(f: &mut Fixture, row: &str) {
+/// This replica's agent tombstones its own grant on `role_instance`.
+async fn revoke_own_role(f: &mut Fixture, role_instance: &str) {
     let me = acting_did(f);
     f.link(
-        row,
+        role_instance,
         ROLE_GRANT_REVOKED_PREDICATE,
         &literal(&me),
         LinkStatus::Shared,
@@ -1065,12 +1065,17 @@ async fn revoke_own_role(f: &mut Fixture, row: &str) {
     .await;
 }
 
-/// A peer's tombstone revoking `revoked` on `row`, delivered as sync would
+/// A peer's tombstone revoking `revoked` on `role_instance`, delivered as sync would
 /// deliver it: signed by the peer's real key.
-async fn sync_revocation_from(f: &mut Fixture, signer: &TestSigner, row: &str, revoked: &str) {
+async fn sync_revocation_from(
+    f: &mut Fixture,
+    signer: &TestSigner,
+    role_instance: &str,
+    revoked: &str,
+) {
     let tombstone = signer.sign(
         Link {
-            source: row.to_string(),
+            source: role_instance.to_string(),
             predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
             target: literal(revoked),
         }
@@ -1157,8 +1162,8 @@ async fn a_newcomer_deriving_after_a_revocation_converges_on_the_settled_state()
 }
 
 /// A revocation carries the grant's own authority rule. With the role pinned
-/// to rows this agent authored (`where.author`), a peer's tombstone on the
-/// row is not a revocation — the grant stays live for later votes — while
+/// to instances this agent authored (`where.author`), a peer's tombstone on
+/// the instance is not a revocation — the grant stays live for later votes — while
 /// this agent's own tombstone ends it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_revocation_from_outside_the_grants_authority_is_ignored() {
