@@ -1253,7 +1253,7 @@ impl LanguageController {
 
         // Unpack hApp bundle
         info!("readAndTemplateHolochainDna: unpacking hApp bundle");
-        let holochain_service = crate::agent::conductor_startup::holochain_service_once_started()
+        let holochain_service = crate::holochain_service::holochain_service_once_started()
             .await
             .ok_or_else(|| LanguageError::RuntimeError {
                 address: source_language_hash.to_string(),
@@ -1602,7 +1602,7 @@ impl LanguageController {
 
         // Remove Holochain DNA for this language
         if let Some(holochain_service) =
-            crate::agent::conductor_startup::holochain_service_once_started().await
+            crate::holochain_service::holochain_service_once_started().await
         {
             match holochain_service.remove_app(address.to_string()).await {
                 Ok(()) => {

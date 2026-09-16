@@ -16,106 +16,117 @@
 //! conductor that starts only once they finish.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use log::{error, info};
 use tokio::sync::oneshot;
 
 use crate::agent::AgentService;
 use crate::holochain_service::{
-    maybe_get_holochain_service, HolochainService, HolochainServiceInterface, LocalConductorConfig,
+    maybe_get_holochain_service, ConductorStarting, HolochainService, LocalConductorConfig,
 };
+use crate::languages::error::LanguageError;
 use crate::languages::LanguageController;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC};
 
 /// Set while a startup task is running. A second generate/unlock arriving before the
 /// conductor is up would otherwise see no Holochain service and start a second conductor
-/// on the same data path, or load the same languages twice concurrently. Cleared when the
-/// task ends, so a later unlock (after a lock, or after a failed start) runs the startup
-/// again, as it did when this was inline.
+/// on the same data path. Held through `InFlight`, so it clears when the task ends however
+/// it ends, and a later unlock (after a lock, or after a failed start) runs the startup again.
 static STARTUP_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
-/// Set only while `HolochainService::init` is running — what
-/// `holochain_service_once_started` waits on.
-static CONDUCTOR_STARTING: AtomicBool = AtomicBool::new(false);
+/// Serializes `load_core_system_languages`. It loads each core language unconditionally and
+/// registers the runtime only once the constructor has run, so two concurrent generate/unlock
+/// calls would each build a runtime for the same language, and the later one would replace
+/// the earlier one without tearing it down.
+static CORE_LANGUAGE_LOAD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// The Holochain service, waiting for it while a startup task is bringing the conductor up.
-///
-/// For callers that took `maybe_get_holochain_service()` to mean "not running" because the
-/// conductor used to be up by the time unlock replied. They now wait out the start instead
-/// of failing in the seconds after unlock, and still get `None` at once when nothing is
-/// starting it (a locked agent, Holochain disabled, or a start that failed).
-pub async fn holochain_service_once_started() -> Option<HolochainServiceInterface> {
-    loop {
-        if let Some(service) = maybe_get_holochain_service().await {
-            return Some(service);
-        }
-        if !CONDUCTOR_STARTING.load(Ordering::SeqCst) {
-            return maybe_get_holochain_service().await;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+/// A claim on a flag, released when dropped.
+struct InFlight(&'static AtomicBool);
+
+impl InFlight {
+    /// `None` means the flag is already claimed.
+    fn claim(flag: &'static AtomicBool) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self(flag))
     }
 }
 
-/// Claims the in-flight flag. `false` means a startup task is already running.
-fn claim(flag: &AtomicBool) -> bool {
-    flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
-/// A started conductor startup, waiting to be told the core system languages are loaded.
+/// A started conductor startup, waiting for the caller to load the core system languages.
 ///
 /// The link and installed languages load only after that: loading installed languages skips
 /// the system ones by their registered addresses, which exist only once the core languages
 /// finish, so running both at once could load the agent language a second time and tear
-/// down the instance being loaded. Dropping this without calling
-/// `core_languages_loaded` (an error path) lets the task carry on.
+/// down the instance being loaded. Dropping this without loading (an error path) lets the
+/// task carry on.
 pub struct ConductorStartup {
     core_loaded: Option<oneshot::Sender<()>>,
 }
 
 impl ConductorStartup {
-    pub fn core_languages_loaded(mut self) {
+    /// Load the core system languages, one caller at a time, then let the startup task load
+    /// the link and installed languages.
+    pub async fn load_core_languages(
+        mut self,
+        language_language_only: bool,
+    ) -> Result<(), LanguageError> {
+        let result = {
+            let _one_at_a_time = CORE_LANGUAGE_LOAD.lock().await;
+            LanguageController::global_instance()
+                .load_core_system_languages(language_language_only)
+                .await
+        };
         if let Some(tx) = self.core_loaded.take() {
             let _ = tx.send(());
         }
+        result
     }
 }
 
 /// Start the conductor (unless it is already running) in the background, and once the
-/// caller reports the core system languages loaded, the link and installed languages.
-/// Call this before loading the core languages. Failures are logged and announced as an
+/// caller has loaded the core system languages, the link and installed languages.
+/// Call this before loading the core languages. A failed start is logged and announced as an
 /// `agent-status-changed` event carrying the error, since the reply may already have gone.
 pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
-    if !claim(&STARTUP_IN_FLIGHT) {
+    let Some(in_flight) = InFlight::claim(&STARTUP_IN_FLIGHT) else {
         info!("Holochain startup already in progress; not starting another");
         return ConductorStartup { core_loaded: None };
-    }
+    };
     // Before spawning, so a request arriving before the task's first poll already waits
     // rather than seeing no service and no start.
-    CONDUCTOR_STARTING.store(true, Ordering::SeqCst);
+    let starting = ConductorStarting::begin();
     let (core_loaded_tx, core_loaded_rx) = oneshot::channel();
 
     tokio::spawn(async move {
-        let mut errors: Vec<String> = Vec::new();
-
         if maybe_get_holochain_service().await.is_none() {
             info!("Holochain service not initialized. Initializing...");
             let config = crate::config::get_global_config();
             let hc_config = LocalConductorConfig::from_ad4m_config(&config, passphrase);
             let result = HolochainService::init(hc_config).await;
-            CONDUCTOR_STARTING.store(false, Ordering::SeqCst);
+            drop(starting);
             if let Err(e) = result {
                 error!("Error initializing Holochain: {:?}", e);
-                errors.push(format!("Holochain init failed: {}", e));
-            } else {
-                info!("Holochain init complete");
+                // Skip the link and installed languages: without a conductor each would wait
+                // 120s for it and panic, one after another, while this task kept the in-flight
+                // flag and so refused a retried unlock. They load on first use instead, and
+                // a successful retry loads the rest. Released before announcing, so a client
+                // that retries on the event isn't refused.
+                drop(in_flight);
+                announce_startup_failure(format!("Holochain init failed: {}", e)).await;
+                return;
             }
+            info!("Holochain init complete");
         } else {
-            CONDUCTOR_STARTING.store(false, Ordering::SeqCst);
+            drop(starting);
         }
 
-        // Err means the handle was dropped without reporting, which is also "go ahead".
+        // Err means the handle was dropped without loading, which is also "go ahead".
         let _ = core_loaded_rx.await;
 
         let language_language_only = crate::config::get_global_config()
@@ -127,25 +138,8 @@ pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
                 .await;
         }
 
-        STARTUP_IN_FLIGHT.store(false, Ordering::SeqCst);
-
-        if errors.is_empty() {
-            info!("Holochain and link languages ready");
-            return;
-        }
-
-        let mut status = AgentService::with_global_instance(|agent_service| agent_service.dump());
-        status.error = Some(errors.join("; "));
-        get_global_pubsub()
-            .await
-            .publish(
-                &AGENT_STATUS_CHANGED_TOPIC,
-                &serde_json::to_string(&status).unwrap_or_else(|e| {
-                    error!("Failed to serialize agent for pubsub: {e}");
-                    String::new()
-                }),
-            )
-            .await;
+        drop(in_flight);
+        info!("Holochain and link languages ready");
     });
 
     ConductorStartup {
@@ -153,16 +147,43 @@ pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
     }
 }
 
+async fn announce_startup_failure(message: String) {
+    let mut status = AgentService::with_global_instance(|agent_service| agent_service.dump());
+    status.error = Some(message);
+    get_global_pubsub()
+        .await
+        .publish(
+            &AGENT_STATUS_CHANGED_TOPIC,
+            &serde_json::to_string(&status).unwrap_or_else(|e| {
+                error!("Failed to serialize agent for pubsub: {e}");
+                String::new()
+            }),
+        )
+        .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_second_claim_is_refused_until_released() {
-        let flag = AtomicBool::new(false);
-        assert!(claim(&flag));
-        assert!(!claim(&flag));
-        flag.store(false, Ordering::SeqCst);
-        assert!(claim(&flag));
+    fn a_second_claim_is_refused_until_the_first_is_dropped() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let first = InFlight::claim(&FLAG).expect("first claim");
+        assert!(InFlight::claim(&FLAG).is_none());
+        drop(first);
+        assert!(InFlight::claim(&FLAG).is_some());
+    }
+
+    #[tokio::test]
+    async fn a_claim_is_released_when_its_task_panics() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let claim = InFlight::claim(&FLAG).expect("claim");
+        let task = tokio::spawn(async move {
+            let _claim = claim;
+            panic!("language load panicked");
+        });
+        assert!(task.await.is_err());
+        assert!(InFlight::claim(&FLAG).is_some());
     }
 }

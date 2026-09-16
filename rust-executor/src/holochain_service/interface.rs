@@ -5,7 +5,9 @@ use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, Signal, Signature, ZomeCallResponse,
 };
 use lazy_static::lazy_static;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{oneshot, Mutex, RwLock};
 
@@ -289,24 +291,83 @@ lazy_static! {
         Arc::new(RwLock::new(None));
 }
 
+/// Set while `HolochainService::init` is running. What `holochain_service_once_started`
+/// waits on. Set and cleared only through `ConductorStarting`.
+static CONDUCTOR_STARTING: AtomicBool = AtomicBool::new(false);
+
+/// How long any accessor waits for the conductor before giving up.
+const SERVICE_WAIT: Duration = Duration::from_secs(120);
+
+/// Marks a conductor start in progress for as long as it is held. Clearing on drop means an
+/// error, a panic or a cancelled task can't leave the flag set.
+pub struct ConductorStarting(());
+
+impl ConductorStarting {
+    pub fn begin() -> Self {
+        CONDUCTOR_STARTING.store(true, Ordering::SeqCst);
+        Self(())
+    }
+}
+
+impl Drop for ConductorStarting {
+    fn drop(&mut self) {
+        CONDUCTOR_STARTING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Polls `get` until it returns something, `keep_waiting` turns false, or `timeout` passes.
+/// Generic over `get` only so the tests needn't touch the global service.
+async fn wait_for<T, Fut>(
+    timeout: Duration,
+    keep_waiting: impl Fn() -> bool,
+    get: impl Fn() -> Fut,
+) -> Option<T>
+where
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(value) = get().await {
+            return Some(value);
+        }
+        if !keep_waiting() {
+            // Checked again: the start may have set the service just before it stopped waiting.
+            return get().await;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 pub async fn get_holochain_service() -> HolochainServiceInterface {
-    // Poll for the conductor to become available, with a timeout.
     // Language threads may call this before HolochainService::init() has
     // finished setting the global — instead of panicking immediately we
     // give the conductor up to 120 seconds to start.
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
-    loop {
-        {
-            let lock = HOLOCHAIN_SERVICE.read().await;
-            if let Some(svc) = lock.clone() {
-                return svc;
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("Holochain Conductor not started after 120s timeout");
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    wait_for(SERVICE_WAIT, || true, maybe_get_holochain_service)
+        .await
+        .unwrap_or_else(|| panic!("Holochain Conductor not started after 120s timeout"))
+}
+
+/// The Holochain service, waiting for it while a conductor start is in progress.
+///
+/// For callers that took `maybe_get_holochain_service()` to mean "not running" because the
+/// conductor used to be up by the time unlock replied (see `agent::conductor_startup`). They
+/// wait out a start instead of failing in the seconds after unlock. They still get `None` at
+/// once when nothing is starting it (a locked agent, or a start that failed), and after 120s
+/// if a start never finishes.
+pub async fn holochain_service_once_started() -> Option<HolochainServiceInterface> {
+    let service = wait_for(
+        SERVICE_WAIT,
+        || CONDUCTOR_STARTING.load(Ordering::SeqCst),
+        maybe_get_holochain_service,
+    )
+    .await;
+    if service.is_none() && CONDUCTOR_STARTING.load(Ordering::SeqCst) {
+        log::warn!("Holochain conductor still starting after 120s; giving up waiting");
     }
+    service
 }
 
 pub async fn maybe_get_holochain_service() -> Option<HolochainServiceInterface> {
@@ -317,4 +378,66 @@ pub async fn maybe_get_holochain_service() -> Option<HolochainServiceInterface> 
 pub async fn set_holochain_service(service: HolochainServiceInterface) {
     let mut lock = HOLOCHAIN_SERVICE.write().await;
     *lock = Some(service);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn wait_returns_none_at_once_when_nothing_is_starting() {
+        let started = Instant::now();
+        let found = wait_for(SERVICE_WAIT, || false, || async { None::<()> }).await;
+        assert!(found.is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn wait_returns_the_value_once_a_start_provides_it() {
+        let polls = AtomicUsize::new(0);
+        let found = wait_for(
+            SERVICE_WAIT,
+            || true,
+            || {
+                let n = polls.fetch_add(1, Ordering::SeqCst);
+                async move { (n >= 2).then_some(()) }
+            },
+        )
+        .await;
+        assert!(found.is_some());
+    }
+
+    #[tokio::test]
+    async fn wait_gives_up_when_a_start_never_finishes() {
+        let found = wait_for(Duration::from_millis(300), || true, || async { None::<()> }).await;
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_rechecks_after_the_start_stops() {
+        let polls = AtomicUsize::new(0);
+        let found = wait_for(
+            SERVICE_WAIT,
+            || false,
+            || {
+                let n = polls.fetch_add(1, Ordering::SeqCst);
+                async move { (n >= 1).then_some(()) }
+            },
+        )
+        .await;
+        assert!(found.is_some());
+    }
+
+    #[tokio::test]
+    async fn conductor_starting_clears_even_if_the_start_panics() {
+        let task = tokio::spawn(async {
+            let _starting = ConductorStarting::begin();
+            assert!(CONDUCTOR_STARTING.load(Ordering::SeqCst));
+            panic!("start failed");
+        });
+        assert!(task.await.is_err());
+        assert!(!CONDUCTOR_STARTING.load(Ordering::SeqCst));
+    }
 }

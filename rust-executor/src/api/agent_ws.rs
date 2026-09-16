@@ -301,17 +301,12 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let startup = spawn_conductor_startup(body.passphrase.clone());
     let config = crate::config::get_global_config();
     let language_language_only = config.language_language_only.unwrap_or(false);
-    let controller = LanguageController::global_instance();
-    if let Err(e) = controller
-        .load_core_system_languages(language_language_only)
-        .await
-    {
+    if let Err(e) = startup.load_core_languages(language_language_only).await {
         log::error!("Error loading system languages: {:?}", e);
         init_errors.push(format!("Failed to load system languages: {}", e));
     } else {
         log::info!("System languages loaded");
     }
-    startup.core_languages_loaded();
 
     if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
         log::warn!("Error publishing agent expression: {}", e);
@@ -399,17 +394,12 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         let startup = spawn_conductor_startup(body.passphrase.clone());
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
-        let controller = LanguageController::global_instance();
-        if let Err(e) = controller
-            .load_core_system_languages(language_language_only)
-            .await
-        {
+        if let Err(e) = startup.load_core_languages(language_language_only).await {
             log::error!("Error loading system languages: {:?}", e);
             init_errors.push(format!("Failed to load system languages: {}", e));
         } else {
             log::info!("System languages loaded");
         }
-        startup.core_languages_loaded();
 
         log::info!("AD4M init complete");
 
