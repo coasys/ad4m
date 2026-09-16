@@ -223,9 +223,17 @@ pub async fn run_flow_consensus_pass(
 /// carried by the `Local` `currentState` link, if one is present.
 ///
 /// `None` means the cache is absent: either no `currentState` link at all,
-/// or only `Shared` links a peer wrote before #987.  The hydrated record
-/// cannot serve this query because it does not carry link status, so a
-/// peer's legacy `Shared` value is indistinguishable from ours there.
+/// or only `Shared` links a peer wrote before #987.
+///
+/// This read is raw links because it predates #1028.  Since #1028 landed on
+/// `dev`, hydration enforces the class's `local: true` flag itself — it drops
+/// any `currentState` link not annotated `Local` — so the hydrated record can
+/// now answer this, and the two paths agree
+/// (`a_peer_written_shared_cache_is_overridden_not_deleted` pins that).  Two
+/// things still have no home on the hydrated path: the fall-back-to-derive on
+/// zero-or-multiple `Local` links, and the literal-parse fall-back below.
+/// Collapsing this to a field read is #1026's follow-up, with tests of its
+/// own — not a rename.
 ///
 /// `write_local_current_state` removes all `Local` links before adding one,
 /// so the normal write path never leaves more than one.  If somehow more
