@@ -178,6 +178,37 @@ pub async fn gather_transcript_sparql(
     Ok(out)
 }
 
+/// Build a DID → display-name map for every speaker DID in `turns`.
+///
+/// Resolution order:
+/// 1. Multi-user db — looks up `username` by `did` in the `users` table.
+/// 2. Fallback — the raw DID string (no entry added to the map; callers treat
+///    a missing key as "use the DID as-is").
+///
+/// The map is built once per interpretation pass and threaded into
+/// [`build_interpretation_input`] so the LLM sees a human-readable speaker
+/// name instead of a 48-character base58 DID. The raw DID is preserved in the
+/// `speakerDid` field so anything that needs cryptographic identity still has
+/// it.
+pub fn build_speaker_name_map(
+    turns: &[TranscriptTurn],
+) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for turn in turns {
+        let did = &turn.speaker;
+        if map.contains_key(did) {
+            continue;
+        }
+        let resolved = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_username_by_did(did).ok().flatten()
+        });
+        if let Some(name) = resolved {
+            map.insert(did.clone(), name);
+        }
+    }
+    map
+}
+
 /// read the instances already present in the perspective for each target class
 /// into the id-keyed [`ExistingInstances`] map. Each [`InstanceContext`] carries
 /// the instance's `id` (base URI) alongside its declared identity value and
