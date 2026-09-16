@@ -906,7 +906,7 @@ mod tests {
         let ctxs = build_flow_contexts(&records, &catalogue);
         assert_eq!(ctxs.len(), 1);
         assert!(
-            matches!(ctxs[0].contested, ContentionStatus::NotContested),
+            ctxs[0].contested.verified_uncontested(),
             "a fresh uncontested derivation must be NotContested, not Unknown"
         );
     }
@@ -935,6 +935,10 @@ mod tests {
         assert!(
             matches!(ctxs[0].contested, ContentionStatus::Unknown),
             "cache-sourced contention must stay Unknown at the consumer"
+        );
+        assert!(
+            !ctxs[0].contested.verified_uncontested(),
+            "Unknown must never answer 'verified clean'"
         );
     }
 

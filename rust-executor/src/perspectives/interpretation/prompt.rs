@@ -1008,7 +1008,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// A verified-contested flow renders a `contested` key (`stalled` +
     /// `between` target states) so the model never reads it as "awaiting
     /// votes". `Unknown` (cache-sourced, contention not computed) renders

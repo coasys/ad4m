@@ -78,6 +78,16 @@ impl ContentionStatus {
             Some(c) => ContentionStatus::Contested(c),
         }
     }
+
+    /// The safe way to ask "is this flow verified clean?" — `true` only for
+    /// [`ContentionStatus::NotContested`]. Spelled as a method because the
+    /// idiomatic-looking `!matches!(x, Contested(_))` silently reads
+    /// `Unknown` as clean — exactly the conflation this enum exists to
+    /// remove. Prefer this over ad-hoc `matches!` at any site that gates
+    /// behaviour on "no contention".
+    pub fn verified_uncontested(&self) -> bool {
+        matches!(self, ContentionStatus::NotContested)
+    }
 }
 
 /// A [`FlowInstanceRecord`] paired with how its contention verdict was
