@@ -117,6 +117,11 @@ to read, instance_create to write.";
 /// Tool names that can be called without authentication.
 /// These are the auth bootstrapping tools for multi-user mode, plus the
 /// documentation (which is what tells a cold agent how to authenticate).
+///
+/// Being listed here only means `call_tool` does not reject the call outright.
+/// `request_capability` additionally runs `check_auth` itself and withholds the
+/// auto-permit (and the mint code) from unauthenticated callers — see
+/// `handle_capability_request` in auth.rs (issue #851, sub-problem 3).
 pub(crate) const AUTH_TOOLS: &[&str] = &[
     "get_documentation",
     "login_email",
@@ -205,6 +210,18 @@ impl Ad4mMcpHandler {
     /// This method checks all sources and stores the token in the session if found
     /// via HTTP header, so downstream helpers (get_agent_context, get_capabilities) work.
     async fn check_auth(&self, _tool_name: &str, context: &RequestContext<RoleServer>) -> bool {
+        // The context contributes exactly one input to the verdict: the bearer
+        // header. Everything after extraction lives in `check_auth_with_header`,
+        // which tests can drive — a `RequestContext<RoleServer>` cannot be
+        // fabricated outside rmcp (its `Peer` constructor is `pub(crate)`).
+        self.check_auth_with_header(bearer_credential(context))
+            .await
+    }
+
+    /// Context-free body of [`Self::check_auth`]: decides the verdict from the
+    /// session token, the configured admin credential, and the (already
+    /// extracted) bearer header.
+    async fn check_auth_with_header(&self, header_token: Option<String>) -> bool {
         let session_token = self
             .context
             .auth_token
@@ -232,8 +249,8 @@ impl Ad4mMcpHandler {
 
         // 3. Try HTTP Authorization header (for clients like mcporter that send
         //    credentials per-request rather than using the MCP session)
-        let header_present = bearer_credential(context).is_some();
-        if self.adopt_header_credential(context).await {
+        let header_present = header_token.is_some();
+        if self.adopt_credential(header_token).await {
             return true;
         }
 
@@ -259,7 +276,13 @@ impl Ad4mMcpHandler {
     /// Only a credential that already passes validation is stored, so this widens where
     /// an accepted credential is remembered, never which credentials are accepted.
     async fn adopt_header_credential(&self, context: &RequestContext<RoleServer>) -> bool {
-        let Some(header_token) = bearer_credential(context) else {
+        self.adopt_credential(bearer_credential(context)).await
+    }
+
+    /// Context-free body of [`Self::adopt_header_credential`], split out for the
+    /// same reason as [`Self::check_auth_with_header`].
+    async fn adopt_credential(&self, header_token: Option<String>) -> bool {
+        let Some(header_token) = header_token else {
             return false;
         };
         let admin_cred = self.context.admin_credential.as_deref();
