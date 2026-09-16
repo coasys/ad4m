@@ -1,5 +1,5 @@
 use super::{
-    apply_with_overlay, build_interpretation_input, class_label,
+    apply_with_overlay, build_interpretation_input, build_speaker_name_map, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
     identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
@@ -666,7 +666,14 @@ pub async fn run_interpretation_with_strategy_and_model(
             flow_filter,
         )
         .await;
-        let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
+        let speaker_names = build_speaker_name_map(transcript);
+        let prompt = build_interpretation_input(
+            shapes,
+            transcript,
+            &existing_ctx,
+            &active_flows,
+            &speaker_names,
+        );
 
         let service = crate::ai_service::AIService::global_instance()
             .await
@@ -1059,7 +1066,14 @@ pub async fn run_interpretation_with_harness_and_model(
         flow_filter,
     )
     .await;
-    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
+    let speaker_names = build_speaker_name_map(transcript);
+    let prompt = build_interpretation_input(
+        shapes,
+        transcript,
+        &existing_ctx,
+        &active_flows,
+        &speaker_names,
+    );
 
     // Build per-class propose shapes from the perspective's SHACL classes,
     // filtered to the class-name set the caller passed as `shapes`. Any
