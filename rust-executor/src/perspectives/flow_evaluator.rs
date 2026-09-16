@@ -609,10 +609,12 @@ pub async fn run_engine_proposal_pass(
             return Vec::new();
         }
     };
-    // Mint from the DERIVED state, never from the `currentState` cache: a
-    // peer can write that link, and believing it would steer every proposal
-    // this pass mints onto an edge the flow never reached — or, on a
-    // terminal value, suppress them all.
+    // Mint path: always derive, never use the `currentState` cache.  This is
+    // deliberate even though the cache is `Local`-verified since #987: minting
+    // from a stale cache (debounce gap, role-change lag) would issue proposals
+    // on the wrong edge and each one costs paid LLM tokens.  The evaluator
+    // runs rarely and needs the freshest fold immediately before minting, so
+    // the derive cost here is acceptable and correct.
     let records =
         crate::perspectives::flow_instance::derive_states(perspective, &records, &flows_by_uri)
             .await;

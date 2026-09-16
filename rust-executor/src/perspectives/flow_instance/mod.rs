@@ -61,7 +61,10 @@
 //! [`pass`] writes the cache and the marks, [`accept`] casts this replica's
 //! own vote — re-verifying the proposal's evidence seal against our own graph
 //! before signing, and sweeping the instance afterwards so the new vote is
-//! folded. Nothing in them can move a state the fold did not derive.
+//! folded — and [`trigger`] runs that same sweep when a peer's flow links
+//! sync in, since the cache and the marks are this replica's own and nobody
+//! else can update them. Nothing in them can move a state the fold did not
+//! derive.
 //!
 //! # The read-set is the proof
 //!
@@ -79,6 +82,9 @@ pub mod atom;
 pub mod fold;
 pub mod pass;
 pub mod roles;
+pub mod trigger;
+
+pub(crate) use pass::local_cached_state;
 
 use crate::perspectives::flow_context::FlowInstanceRecord;
 use crate::perspectives::flow_spawn::initial_state_of;
@@ -159,8 +165,9 @@ impl ReadSet {
             .collect()
     }
 
-    /// Proposal URIs already carrying a `resolved_as → "fired"` mark.
-    /// Bookkeeping for [`pass`], never an input to the fold.
+    /// Proposal URIs already carrying **this replica's** `Local`
+    /// `resolved_as → "fired"` mark. Bookkeeping for [`pass`], never an
+    /// input to the fold; a peer's `Shared` mark is not counted.
     pub fn marked_proposals(&self) -> HashSet<String> {
         self.proposals
             .iter()

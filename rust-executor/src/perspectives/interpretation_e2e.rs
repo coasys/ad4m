@@ -2093,6 +2093,7 @@ async fn auto_processor_high_level_signal_driven_pass() {
 ///
 /// Real-LLM (gemma3:12b). Retry loop for model non-determinism.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "llm-e2e"]
 async fn auto_processor_two_users_one_executor_no_double_processing() {
     use crate::agent::{did_for_context, AgentContext, AgentService};
     use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
