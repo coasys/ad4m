@@ -118,9 +118,12 @@ export class FlowInstance {
    * `proposals` accessors work without further round-trips.
    *
    * The record's `currentState` is a per-replica cache the consensus engine
-   * writes (as a local link) and — deliberately — never reads back as
-   * authority: the engine derives state by folding the signed links present
-   * now. Treat it as a hint for display, not as the flow's state.
+   * writes as a local link. It is read back only for display — the cache-first
+   * path in `gather_active_flow_contexts` fills the state rendered into LLM
+   * context — and **never as authority**: anything that decides something
+   * (the fold, the mint pass) derives state from the signed links present now
+   * and does not consult the cache. Treat it as a display hint, not as the
+   * flow's state.
    *
    * @param perspective - The perspective the flow instance lives on
    * @param flowName - Name of a `SHACLFlow` already registered on the perspective
