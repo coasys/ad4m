@@ -472,7 +472,7 @@ impl RequiresQueryable for PerspectiveInstance {
         // client-stamped and clients disagree on RFC 3339 flavour (#1000).
         // A link whose timestamp does not parse cannot date the grant; if
         // none parses this stays `None`, so the caller falls back to the
-        // row's own timestamp or fails closed.
+        // instance's own timestamp or fails closed.
         use crate::perspectives::flow_instance::time::parse_link_timestamp;
         let granted_at = match grant_predicate {
             Some(pred) => self
