@@ -131,10 +131,14 @@ impl Ad4mMcpHandler {
     /// inline code: the code is the mint secret (`generate_jwt` exchanges it for a
     /// signed ALL_CAPABILITY JWT valid on every executor surface), and returning it
     /// to any caller that could reach the MCP port made `--admin-credential`
-    /// decorative (issue #851, sub-problem 3). On an executor without an admin
-    /// credential, `check_auth` deliberately reports every local caller as
-    /// authenticated (single-user localhost trust model), so this gate changes
-    /// nothing there.
+    /// decorative (issue #851, sub-problem 3).
+    ///
+    /// Scope: this gate protects executors that SET an admin credential.
+    /// Without one, `check_auth` reports every caller as authenticated — it
+    /// has no peer-address check, and the MCP server binds 0.0.0.0 by
+    /// default — so on a credential-less executor the mint stays reachable
+    /// from the LAN. Making no-credential mode genuinely loopback-only is
+    /// #1033.
     pub(crate) async fn handle_capability_request(
         &self,
         p: RequestCapabilityParams,
@@ -522,14 +526,17 @@ mod capability_mint_tests {
         );
     }
 
-    /// The single-user localhost trust model must survive the gate: on an
-    /// executor started WITHOUT --admin-credential, `check_auth` reports a bare
-    /// local caller (no session token, no Authorization header) as
-    /// authenticated, so the auto-permit and inline code behave exactly as
-    /// before this fix. Composes the same two halves the transport wrapper
-    /// does: verdict from `check_auth_with_header`, then the request body.
+    /// The no-credential convenience must survive the gate: on an executor
+    /// started WITHOUT --admin-credential, `check_auth` reports a bare
+    /// caller (no session token, no Authorization header) as authenticated,
+    /// so the auto-permit and inline code behave exactly as before this fix.
+    /// Note that this is NOT localhost-scoped: `check_auth` has no
+    /// peer-address check, so with the default 0.0.0.0 bind any LAN caller
+    /// gets the same treatment — see #1033. Composes the same two halves the
+    /// transport wrapper does: verdict from `check_auth_with_header`, then
+    /// the request body.
     #[tokio::test]
-    async fn without_admin_credential_a_local_caller_is_still_auto_permitted() {
+    async fn without_admin_credential_an_unauthenticated_caller_is_still_auto_permitted() {
         let handler = Ad4mMcpHandler::new(McpContext {
             admin_credential: None,
             auth_token: Arc::new(RwLock::new(None)),
@@ -539,7 +546,7 @@ mod capability_mint_tests {
         let verdict = handler.check_auth_with_header(None).await;
         assert!(
             verdict,
-            "a no-admin-credential executor should authenticate a bare local caller"
+            "a no-admin-credential executor should authenticate a bare caller"
         );
 
         let resp = handler
@@ -548,7 +555,7 @@ mod capability_mint_tests {
         let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
         assert!(
             v["code"].as_str().is_some(),
-            "single-user localhost flow should still return the code inline: {resp}"
+            "no-credential flow should still return the code inline: {resp}"
         );
     }
 }
