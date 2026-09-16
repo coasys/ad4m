@@ -61,9 +61,9 @@ pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
 pub const RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
 /// The only [`RESOLVED_AS_PREDICATE`] value this engine writes.
 pub const FIRED_MARK: &str = "fired";
-/// Tombstone: role-row → revoked DID. Written instead of deleting the grant
-/// row; the link's author-asserted timestamp is the revocation time. Source =
-/// role-row URI, target = the DID — literal-encoded or raw, the reader
+/// Tombstone: role instance → revoked DID. Written instead of deleting the
+/// grant; the link's author-asserted timestamp is the revocation time. Source =
+/// role-instance URI, target = the DID — literal-encoded or raw, the reader
 /// accepts both (`flow_evaluator::target_names_did`). Authority mirrors the
 /// grant's own rule (`roles::revocation_authorised`): whoever the role
 /// query's `author` condition accepts as granter may revoke, which makes
@@ -369,7 +369,7 @@ fn earliest_proposer_timestamp(
 /// **Half 2 — raw `get_links` per proposal (must stay raw):** model_query
 /// hydration collapses each instance to a single `author` field (the earliest
 /// author across all links, `model_query/hydration.rs:171-183,350`) and
-/// carries no per-link signature verdict — its row is
+/// carries no per-link signature verdict — its hydrated record is
 /// `(predicate, target, author, timestamp)`, and `proof.valid` is never in it.
 /// Both identity checks below run through [`signed_by`], which needs both
 /// dropped fields at once: `l.author == did` **and** `proof.valid ==

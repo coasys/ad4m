@@ -3013,6 +3013,17 @@ impl Ad4mDb {
         Ok(user)
     }
 
+    pub fn get_username_by_did(&self, did: &str) -> Ad4mDbResult<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT username FROM users WHERE did = ?1")?;
+        match stmt.query_row([did], |row| row.get::<_, String>(0)) {
+            Ok(username) => Ok(Some(username)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
         let timestamp = chrono::Utc::now().timestamp();
         self.conn.execute(
