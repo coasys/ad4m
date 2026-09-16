@@ -311,6 +311,11 @@ const language = defineLanguage({
             emitSyncState: (state) => getRuntime().emitSyncStateChange(state),
             getKeyRing: () => keyRing,
             refreshKeyRing: async () => {
+                const now = Date.now();
+                if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
+                    return false;
+                }
+                lastKeyRingRetry = now;
                 const prevSize = keyRing?.size ?? 0;
                 await setupKeyRing();
                 return (keyRing?.size ?? 0) > prevSize;
@@ -488,6 +493,7 @@ const language = defineLanguage({
         keyRing = null;
         keyRingStatus = "none";
         isRoomAdmin = false;
+        lastKeyRingRetry = 0;
         auth.resetAuth();
         resetAdapters();
         console.log("[server-link-language] teardown");
