@@ -427,7 +427,7 @@ pub trait RequiresQueryable: Send + Sync {
     /// never turns into "granted since forever".
     async fn role_grant_timestamps(
         &self,
-        _row_id: &str,
+        _instance_id: &str,
         _grant_predicate: Option<&str>,
         _did: &str,
     ) -> anyhow::Result<RoleGrantTimestamps> {

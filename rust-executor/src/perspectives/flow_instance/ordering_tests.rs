@@ -140,7 +140,7 @@ fn a_grant_window_gates_by_instant_not_by_string() {
     // later. As strings the vote sorts BEFORE the grant, so string
     // comparison reads the vote as pre-grant and drops it.
     let window = RoleGrantWindow {
-        row_id: "r1".into(),
+        instance_id: "r1".into(),
         granted_at: OFFSET_FORM.into(),
         revocations: vec![],
     };
@@ -156,7 +156,7 @@ fn an_unparseable_revocation_fails_closed() {
     // comparison reads `at < "garbage"` as true and leaves the window OPEN;
     // the safe reading of an undatable revocation is "revoked".
     let window = RoleGrantWindow {
-        row_id: "r1".into(),
+        instance_id: "r1".into(),
         granted_at: T1.into(),
         revocations: vec![RoleRevocation {
             by: ALICE.into(),
