@@ -19,7 +19,11 @@
 //!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. How
 //!   much that verdict is worth differs by half: the proposals and votes are
 //!   signed links the verifier re-checks itself, while the `fromRole`
-//!   eligibility is a verdict this replica computed — see
+//!   history — grant times and revocation tombstones, against which each
+//!   vote is gated as of its own timestamp — is what this replica read: the
+//!   read-set carries each role instance's [`RoleGrantWindow`](super::roles::RoleGrantWindow)
+//!   values but cites the underlying links by id, author and timestamp
+//!   rather than carrying them as signed links — see
 //!   [`ReadSet`](super::ReadSet).
 //! - **A function of the links present now.** Delete a settled vote and the
 //!   fold recomputes without it, so the flow stands where it stood before
@@ -31,11 +35,12 @@
 //! settled?" would strand such a flow at genesis forever, while asking "did
 //! the *edge* collect `n` distinct voters?" resolves it.
 //!
-//! What that is *not*, in this PR: the deliberate two-bot path. The mint pass
+//! What that is *not*, as of #987: the deliberate two-bot path. The mint pass
 //! dedupes on `(instance, to_state, evidence_hash)` with no proposer
 //! dimension, so a bot that already sees a peer's proposal for the edge
 //! declines to mint a twin and must vote instead — and voting is
-//! [`super::accept`], whose RPC callers land in #968.
+//! [`super::accept`], whose WS-RPC / MCP / TS callers this PR (#988, which
+//! replaced the closed #968) adds.
 //!
 //! ## Ordering and time
 //!
@@ -50,7 +55,8 @@
 //! timestamp to the DID that signed it.
 //!
 //! **Settlement time is the n-th distinct eligible voter's timestamp.** Votes
-//! are sorted `(at, did, uri)` ascending and counted until the n-th distinct
+//! are sorted `(parsed at, did, uri)` ascending — parsed instants, because the
+//! timestamp string is client-formatted ([`super::time`]) — and counted until the n-th distinct
 //! DID; that voter's `at` becomes `nth_at`. A single colluding voter can shift
 //! `nth_at` earlier by back-dating their own vote far enough to change their
 //! position in the sort — moving to an earlier slot makes a different (later)
@@ -113,11 +119,14 @@
 //! narrow the stall above by making a back-dated second proposal detectable.
 
 use super::atom::{TransitionAtom, Vote};
+use super::time::parse_link_timestamp;
 use crate::perspectives::shacl_parser::{ConsensusRule, SHACLFlow};
+use chrono::{DateTime, Utc};
 
-/// An atom whose votes have already been filtered by its rule's `fromRole`.
-/// Role resolution is the one step that needs the store, so the loader does
-/// it first and the fold stays pure.
+/// An atom whose votes have already been filtered by its rule's `fromRole`,
+/// each as of its own timestamp ([`super::roles::eligible_votes`]). Role
+/// resolution is the one step that needs the store, so the loader does it
+/// first and the fold stays pure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VouchedAtom {
     pub atom: TransitionAtom,
@@ -215,7 +224,7 @@ pub fn quorum(rule: &ConsensusRule, distinct_voters: usize) -> bool {
 /// and `atoms` is finite.
 pub fn fold(genesis: &str, flow: &SHACLFlow, atoms: &[VouchedAtom]) -> DerivedState {
     let mut state = genesis.to_string();
-    let mut settled_at = String::new(); // "" sorts before every timestamp
+    let mut settled_at = String::new(); // "" parses as no instant: no floor at genesis
     let mut settled: Vec<SettledEdge> = Vec::new();
     let mut contested = None;
     loop {
@@ -280,8 +289,16 @@ fn settle(
         .filter(|t| t.from_state == state)
         .filter_map(|t| settle_edge(state, &t.to_state, after, flow, atoms, consumed))
         .collect();
+    // Rank by parsed instant, never by timestamp string (#1000). Every
+    // `settled_at` here came out of `settle_edge`, which only emits parsed
+    // vote timestamps — the `MAX_UTC` fallback is defence in depth so a
+    // timestamp that somehow cannot be placed in time can never rank
+    // earliest. The original string stays in the key so two edges settling
+    // at the same instant under different formats still rank identically on
+    // every replica.
     candidates.sort_by_key(|e| {
         (
+            parse_link_timestamp(&e.settled_at).unwrap_or(DateTime::<Utc>::MAX_UTC),
             e.settled_at.clone(),
             e.to_state.clone(),
             e.atom_uris.first().cloned().unwrap_or_default(),
@@ -293,7 +310,7 @@ fn settle(
     let winner_target = candidates[0].to_state.clone();
     let forecloses = candidates[1..]
         .iter()
-        .any(|loser| !reachable(flow, &winner_target, &loser.to_state));
+        .any(|loser| !feasibly_reachable(flow, &winner_target, &loser.to_state, atoms));
     if forecloses {
         Settlement::Contested(Contention {
             from_state: state.to_string(),
@@ -311,6 +328,10 @@ fn settle(
 /// now but loses a race is only *denied* if the state it leads to drops out of
 /// the graph reachable from the winner. A state is reachable from itself, so
 /// two transitions sharing a target never contend.
+///
+/// Used for the unit test that checks pure graph shape. [`settle`] uses
+/// [`feasibly_reachable`] instead, which also requires atom evidence on every
+/// intermediate hop.
 fn reachable(flow: &SHACLFlow, from: &str, to: &str) -> bool {
     let mut seen = vec![from.to_string()];
     let mut frontier = vec![from.to_string()];
@@ -319,6 +340,58 @@ fn reachable(flow: &SHACLFlow, from: &str, to: &str) -> bool {
             return true;
         }
         for t in flow.transitions.iter().filter(|t| t.from_state == state) {
+            if !seen.iter().any(|s| s == &t.to_state) {
+                seen.push(t.to_state.clone());
+                frontier.push(t.to_state.clone());
+            }
+        }
+    }
+    false
+}
+
+/// Whether `to` is reachable from `from` through hops that each carry at
+/// least one **admitted vote** — a [`VouchedAtom`] in `atoms` whose
+/// `eligible_votes` is non-empty.
+///
+/// The threshold is deliberate, and role-aware. Declaring an edge is
+/// unilateral (any flow author); *proposing* on it is also unilateral (any
+/// participant, including one whose votes the role rule excludes — #1030
+/// decides whose votes count, and a mere-existence check would route around
+/// it). An admitted vote is the first non-unilateral evidence that the
+/// cycle is live, and it is the same admission `settle_edge` pools twenty
+/// lines down — the two readings of the atom slice must not disagree on
+/// whose voice counts. Quorum is NOT required: that would change what
+/// "feasible" means for a half-voted edge, a bigger semantic call than
+/// contention suppression needs.
+///
+/// Failing closed here means an unconfirmed-cycle path does not silently
+/// suppress contention detection in [`settle`].
+///
+/// A state is reachable from itself regardless of atoms (the two-transitions-
+/// to-the-same-target case never contends).
+fn feasibly_reachable(flow: &SHACLFlow, from: &str, to: &str, atoms: &[VouchedAtom]) -> bool {
+    if from == to {
+        return true;
+    }
+    let mut seen = vec![from.to_string()];
+    let mut frontier = vec![from.to_string()];
+    while let Some(state) = frontier.pop() {
+        for t in flow.transitions.iter().filter(|t| t.from_state == state) {
+            // Only traverse this hop if some atom on it carries an admitted
+            // vote. A phantom hop (no atoms), a vote-less proposal, or an
+            // atom voted only by excluded DIDs cannot be relied on to carry
+            // the loser to its target.
+            let hop_has_admitted_vote = atoms.iter().any(|a| {
+                a.atom.from_state == state
+                    && a.atom.to_state == t.to_state
+                    && !a.eligible_votes.is_empty()
+            });
+            if !hop_has_admitted_vote {
+                continue;
+            }
+            if t.to_state == to {
+                return true;
+            }
             if !seen.iter().any(|s| s == &t.to_state) {
                 seen.push(t.to_state.clone());
                 frontier.push(t.to_state.clone());
@@ -347,7 +420,13 @@ fn settle_edge(
     consumed: &[SettledEdge],
 ) -> Option<SettledEdge> {
     let rule = rule_for(flow, to);
-    let mut pooled: Vec<(&Vote, &str)> = atoms
+    // Pool with each vote's parsed instant and sort by it — string order is
+    // client-library order inside a sub-second collision (#1000). Atom
+    // construction already dropped unparseable timestamps, so the
+    // `filter_map` is defence in depth for fold inputs built by other
+    // callers; a vote that cannot be placed in time cannot count, and above
+    // all cannot be the n-th.
+    let mut pooled: Vec<(DateTime<Utc>, &Vote, &str)> = atoms
         .iter()
         .filter(|v| v.atom.from_state == from && v.atom.to_state == to)
         .filter(|v| !consumed.iter().any(|e| e.atom_uris.contains(&v.atom.uri)))
@@ -356,13 +435,26 @@ fn settle_edge(
                 .iter()
                 .map(|vote| (vote, v.atom.uri.as_str()))
         })
+        .filter_map(|(vote, uri)| {
+            let Some(instant) = parse_link_timestamp(&vote.at) else {
+                log::warn!(
+                    "flow: ignoring vote by `{}` on `{uri}` — timestamp `{}` is not RFC 3339",
+                    vote.did,
+                    vote.at
+                );
+                return None;
+            };
+            Some((instant, vote, uri))
+        })
         .collect();
-    pooled.sort_by(|(a, a_uri), (b, b_uri)| (&a.at, &a.did, a_uri).cmp(&(&b.at, &b.did, b_uri)));
+    pooled.sort_by(|(a_at, a, a_uri), (b_at, b, b_uri)| {
+        (a_at, &a.did, a_uri, &a.at).cmp(&(b_at, &b.did, b_uri, &b.at))
+    });
 
     let mut voters: Vec<String> = Vec::new();
     let mut atom_uris: Vec<String> = Vec::new();
-    let mut nth_at = None;
-    for (vote, uri) in pooled {
+    let mut nth = None;
+    for (instant, vote, uri) in pooled {
         if voters.contains(&vote.did) {
             continue;
         }
@@ -371,18 +463,25 @@ fn settle_edge(
             atom_uris.push(uri.to_string());
         }
         if quorum(&rule, voters.len()) {
-            nth_at = Some(vote.at.clone());
+            nth = Some((instant, vote.at.clone()));
             break;
         }
     }
-    let nth_at = nth_at?;
+    let (nth_instant, nth_at) = nth?;
 
     atom_uris.sort();
     voters.sort();
+    // The floor (`max(nth, after)`) compares instants too: `after` is either
+    // the previous edge's settled_at (a parsed vote timestamp) or the ""
+    // genesis sentinel, which parses as no instant and floors nothing.
+    let settled_at = match parse_link_timestamp(after) {
+        Some(after_instant) if after_instant > nth_instant => after.to_string(),
+        _ => nth_at,
+    };
     Some(SettledEdge {
         from_state: from.to_string(),
         to_state: to.to_string(),
-        settled_at: nth_at.max(after.to_string()),
+        settled_at,
         atom_uris,
         voters,
     })
@@ -764,6 +863,157 @@ mod tests {
         assert!(
             !reachable(&triage, "approved", "rejected"),
             "terminal siblings"
+        );
+    }
+
+    /// A flow with a back-edge `approved → triage` that is declared in the
+    /// schema but has zero atoms — a phantom escape route that makes
+    /// `reachable()` report `rejected` as recoverable from `approved`.
+    /// With `feasibly_reachable()` (no atoms on the back-edge) the branch is
+    /// correctly treated as foreclosed and contention is reported.
+    fn phantom_back_edge_flow() -> SHACLFlow {
+        serde_json::from_value(serde_json::json!({
+            "name": "Triage",
+            "namespace": "triage://",
+            "states": [
+                { "name": "triage",   "value": 0.0 },
+                { "name": "approved", "value": 1.0 },
+                { "name": "rejected", "value": 0.0 },
+            ],
+            "transitions": [
+                { "action_name": "Approve", "from_state": "triage",   "to_state": "approved", "actions": [] },
+                { "action_name": "Reject",  "from_state": "triage",   "to_state": "rejected", "actions": [] },
+                // Back-edge: a flow author declares this, making `rejected`
+                // graph-reachable from `approved`; but if nobody votes on it
+                // the cycle is phantom.
+                { "action_name": "Reset",   "from_state": "approved", "to_state": "triage",   "actions": [] },
+            ],
+        }))
+        .expect("fixture flow parses")
+    }
+
+    /// **Regression for #999.** A back-edge with zero atoms is graph-reachable
+    /// but not feasibly traversable. The engine must still report contention
+    /// rather than silently take the earliest edge.
+    ///
+    /// This test fails on the unfixed code (which uses the pure-graph
+    /// `reachable()`) and must pass after the fix.
+    #[test]
+    fn phantom_back_edge_with_no_atoms_does_not_suppress_contention() {
+        let flow = phantom_back_edge_flow();
+        let atoms = vec![
+            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
+            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
+            // No atom for `approved → triage`; the back-edge is declared but phantom.
+        ];
+
+        let derived = fold("triage", &flow, &atoms);
+
+        assert_eq!(derived.state, "triage", "walk must not leave triage");
+        assert!(derived.settled.is_empty(), "no edge may be taken");
+        let contention = derived
+            .contested
+            .expect("phantom back-edge must not suppress contention");
+        assert_eq!(contention.from_state, "triage");
+        let targets: Vec<&str> = contention
+            .candidates
+            .iter()
+            .map(|e| e.to_state.as_str())
+            .collect();
+        assert_eq!(
+            targets,
+            vec!["approved", "rejected"],
+            "both candidates are visible in the reported contention"
+        );
+    }
+
+    /// When the back-edge in `phantom_back_edge_flow` actually has atoms, the
+    /// cycle is confirmed live: `rejected` is feasibly reachable from
+    /// `approved`, so taking the earliest edge is correct and no contention is
+    /// reported.
+    #[test]
+    fn confirmed_back_edge_with_atoms_is_not_contention() {
+        let flow = phantom_back_edge_flow();
+        let atoms = vec![
+            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
+            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
+            vouched("a://reset", "approved", "triage", &[(ALICE, T3)]),
+        ];
+
+        let derived = fold("triage", &flow, &atoms);
+
+        assert!(
+            derived.contested.is_none(),
+            "back-edge has atoms: the cycle is live, so no contention"
+        );
+        // The fold walks: triage→approved (T1), then approved→triage (T3 via back-edge),
+        // then triage→rejected (T3, since approved's atom is now consumed). No contention
+        // at any step; the cycle is confirmed live by the back-edge atom.
+        assert_eq!(
+            derived.state, "rejected",
+            "cycle completes: approved consumed, rejected fires on revisit"
+        );
+    }
+
+    /// The separating case between "someone proposed" and "the cycle is
+    /// live": an atom EXISTS on the back-edge but carries zero admitted
+    /// votes (a vote-less proposal, or one voted only by DIDs the role rule
+    /// excludes — `eligible_votes` is the role-gated list). Proposing is
+    /// unilateral, so it must not turn a reported Contention back into a
+    /// silent adjudication. This test passes under the eligible-vote
+    /// threshold and fails under a mere atom-existence check.
+    #[test]
+    fn vote_less_back_edge_atom_does_not_suppress_contention() {
+        let flow = phantom_back_edge_flow();
+        let atoms = vec![
+            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
+            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
+            // Atom exists on the back-edge, but nobody's vote was admitted.
+            vouched("a://reset", "approved", "triage", &[]),
+        ];
+
+        let derived = fold("triage", &flow, &atoms);
+
+        assert_eq!(derived.state, "triage", "walk must not leave triage");
+        let contention = derived
+            .contested
+            .expect("a vote-less proposal on the back-edge must not suppress contention");
+        assert_eq!(contention.from_state, "triage");
+    }
+
+    /// `feasibly_reachable` returns true when every hop on the path has atoms,
+    /// false when a hop is phantom, and always true when `from == to`.
+    #[test]
+    fn feasibly_reachable_requires_atom_evidence_on_every_hop() {
+        let flow = phantom_back_edge_flow();
+
+        // Atoms only for triage → {approved,rejected}; back-edge is phantom.
+        let without_back = vec![
+            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
+            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
+        ];
+        // rejected is NOT feasibly reachable from approved (back-edge phantom).
+        assert!(
+            !feasibly_reachable(&flow, "approved", "rejected", &without_back),
+            "phantom hop blocks the path"
+        );
+        // A state is always reachable from itself.
+        assert!(
+            feasibly_reachable(&flow, "approved", "approved", &without_back),
+            "same-state is trivially reachable"
+        );
+
+        // Add an atom for the back-edge; now the path is confirmed.
+        let mut with_back = without_back.clone();
+        with_back.push(vouched("a://reset", "approved", "triage", &[(ALICE, T3)]));
+        assert!(
+            feasibly_reachable(&flow, "approved", "rejected", &with_back),
+            "confirmed back-edge makes rejected reachable"
+        );
+        // Still not reachable from a dead end.
+        assert!(
+            !feasibly_reachable(&flow, "rejected", "approved", &with_back),
+            "rejected has no outgoing transitions"
         );
     }
 }

@@ -31,6 +31,7 @@
 //!   invisible, so a peer cannot re-point someone else's proposal by
 //!   appending a later value — the trick model hydration would fall for.
 
+use super::time::parse_link_timestamp;
 use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
@@ -60,6 +61,16 @@ pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
 pub const RESOLVED_AS_PREDICATE: &str = "ad4m://flow/resolved_as";
 /// The only [`RESOLVED_AS_PREDICATE`] value this engine writes.
 pub const FIRED_MARK: &str = "fired";
+/// Tombstone: role instance → revoked DID. Written instead of deleting the
+/// grant; the link's author-asserted timestamp is the revocation time. Source =
+/// role-instance URI, target = the DID — literal-encoded or raw, the reader
+/// accepts both (`flow_evaluator::target_names_did`). Authority mirrors the
+/// grant's own rule (`roles::revocation_authorised`): whoever the role
+/// query's `author` condition accepts as granter may revoke, which makes
+/// admin-gated roles admin-revoked, `$did` roles self-revoked, and
+/// open-authorship roles revocable by anyone. Stays in the graph forever so
+/// newcomers can reconstruct the full role-membership history.
+pub const ROLE_GRANT_REVOKED_PREDICATE: &str = "ad4m://flow/role_grant_revoked";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -116,6 +127,10 @@ pub enum AtomRejection {
     /// The proposer sealed the proposal with an empty evidence hash, which
     /// no verifier can reproduce.
     EmptySeal,
+    /// None of the proposer's own signed links carries an RFC 3339-parseable
+    /// timestamp, so the proposal cannot be placed in time (#1000). Fail
+    /// closed: a proposal that cannot be dated must not sort anywhere.
+    NoParseableTimestamp,
 }
 
 impl std::fmt::Display for AtomRejection {
@@ -133,6 +148,10 @@ impl std::fmt::Display for AtomRejection {
                 "the proposer's `{FLOW_INSTANCE_PREDICATE}` link names a different flow instance"
             ),
             Self::EmptySeal => write!(f, "the evidence seal is empty"),
+            Self::NoParseableTimestamp => write!(
+                f,
+                "none of the proposer's own links carries an RFC 3339-parseable timestamp"
+            ),
         }
     }
 }
@@ -208,7 +227,15 @@ pub fn unique_field(
 
 /// Every vote on this proposal: the proposer's own, cast at `proposed_at`,
 /// plus each `acceptedBy → a` link signed by `a`. One vote per DID, the
-/// earliest kept, sorted by `(at, did)`.
+/// earliest kept, ordered by parsed instant (`did`, then the original
+/// string, break the remaining ties).
+///
+/// Ordering compares **parsed instants**, never timestamp strings: the
+/// timestamp is client-asserted and clients disagree on RFC 3339 flavour,
+/// so string order is client-library order inside a sub-second collision
+/// (#1000, and [`super::time`]). A vote whose timestamp does not parse is
+/// dropped loudly — it cannot be placed in time, and it must not become
+/// "earliest" by being garbage.
 ///
 /// A vote is an authorship claim, not a data claim — otherwise one agent
 /// could write `acceptedBy → did:key:X` links for DIDs it does not control
@@ -218,7 +245,7 @@ pub fn valid_votes(
     proposer: &str,
     proposed_at: &str,
 ) -> Vec<Vote> {
-    let mut votes: Vec<Vote> = std::iter::once(Vote {
+    let mut votes: Vec<(chrono::DateTime<chrono::Utc>, Vote)> = std::iter::once(Vote {
         did: proposer.to_string(),
         at: proposed_at.to_string(),
     })
@@ -230,13 +257,24 @@ pub fn valid_votes(
                 at: l.timestamp.clone(),
             }),
     )
+    .filter_map(|v| match parse_link_timestamp(&v.at) {
+        Some(instant) => Some((instant, v)),
+        None => {
+            log::warn!(
+                "flow: dropping vote by `{}` — timestamp `{}` is not RFC 3339, so it cannot be ordered",
+                v.did,
+                v.at
+            );
+            None
+        }
+    })
     .collect();
     // Keep one vote per DID, the earliest — grouping by DID first, because
     // `dedup_by` only ever drops neighbours.
-    votes.sort_by(|a, b| (&a.did, &a.at).cmp(&(&b.did, &b.at)));
-    votes.dedup_by(|later, kept| later.did == kept.did);
-    votes.sort_by(|a, b| (&a.at, &a.did).cmp(&(&b.at, &b.did)));
-    votes
+    votes.sort_by(|(a_at, a), (b_at, b)| (&a.did, a_at, &a.at).cmp(&(&b.did, b_at, &b.at)));
+    votes.dedup_by(|(_, later), (_, kept)| later.did == kept.did);
+    votes.sort_by(|(a_at, a), (b_at, b)| (a_at, &a.did, &a.at).cmp(&(b_at, &b.did, &b.at)));
+    votes.into_iter().map(|(_, v)| v).collect()
 }
 
 /// Whether **this replica** marked this proposal fired: a `Local`
@@ -271,7 +309,8 @@ impl TransitionAtom {
         if evidence_hash.is_empty() {
             return Err(AtomRejection::EmptySeal);
         }
-        let proposed_at = earliest_proposer_timestamp(links, &proposer);
+        let proposed_at = earliest_proposer_timestamp(links, &proposer)
+            .ok_or(AtomRejection::NoParseableTimestamp)?;
         Ok(TransitionAtom {
             uri: uri.to_string(),
             from_state: unique_field(links, FROM_STATE_PREDICATE, &proposer)?,
@@ -284,15 +323,22 @@ impl TransitionAtom {
     }
 }
 
-/// Earliest timestamp among the proposer's own signed links. Never empty in
-/// practice: the proposer link that named them is one of these.
-fn earliest_proposer_timestamp(links: &[DecoratedLinkExpression], proposer: &str) -> String {
+/// Earliest timestamp among the proposer's own signed links, by parsed
+/// instant — string `min()` would pick by client format inside a sub-second
+/// collision (#1000). Links whose timestamp does not parse are skipped;
+/// `None` means no proposer link could be placed in time at all, which
+/// [`TransitionAtom::from_links`] turns into
+/// [`AtomRejection::NoParseableTimestamp`].
+fn earliest_proposer_timestamp(
+    links: &[DecoratedLinkExpression],
+    proposer: &str,
+) -> Option<String> {
     links
         .iter()
         .filter(|l| signed_by(l, proposer))
-        .map(|l| l.timestamp.clone())
+        .filter_map(|l| parse_link_timestamp(&l.timestamp).map(|dt| (dt, l.timestamp.clone())))
         .min()
-        .unwrap_or_default()
+        .map(|(_, ts)| ts)
 }
 
 /// Enumerate one instance's proposals and read each one's links.
@@ -304,7 +350,7 @@ fn earliest_proposer_timestamp(links: &[DecoratedLinkExpression], proposer: &str
 /// individual field, and whether that link's signature verified* — per-link
 /// facts hydration collapses away, so field-reading has to stay on raw links.
 ///
-/// **Half 1 — class query (this PR's change):** a `model_query` over the
+/// **Half 1 — class query (changed in #990, `cda1d95ea`):** a `model_query` over the
 /// hard-wired `FlowTransitionProposal` subject class, filtered by
 /// `flowInstance == instance_uri`, yields the URIs of every proposal that
 /// belongs to this instance. Using the class query rather than a raw
@@ -323,7 +369,7 @@ fn earliest_proposer_timestamp(links: &[DecoratedLinkExpression], proposer: &str
 /// **Half 2 — raw `get_links` per proposal (must stay raw):** model_query
 /// hydration collapses each instance to a single `author` field (the earliest
 /// author across all links, `model_query/hydration.rs:171-183,350`) and
-/// carries no per-link signature verdict — its row is
+/// carries no per-link signature verdict — its hydrated record is
 /// `(predicate, target, author, timestamp)`, and `proof.valid` is never in it.
 /// Both identity checks below run through [`signed_by`], which needs both
 /// dropped fields at once: `l.author == did` **and** `proof.valid ==
@@ -649,6 +695,19 @@ mod tests {
         assert_eq!(
             atom_of(&two_proposers),
             Err(AtomRejection::AmbiguousProposer)
+        );
+    }
+
+    /// A proposal none of whose proposer links can be placed in time must
+    /// not enter the fold at all — an undatable atom would otherwise sort
+    /// arbitrarily against every dated one (#1000).
+    #[test]
+    fn a_proposal_with_no_parseable_timestamp_is_rejected_by_name() {
+        let links = honest_proposal(ALICE, "review", "approved", "h1", "not-a-timestamp");
+        assert_eq!(
+            atom_of(&links),
+            Err(AtomRejection::NoParseableTimestamp),
+            "an undatable proposal is refused, not sorted"
         );
     }
 
