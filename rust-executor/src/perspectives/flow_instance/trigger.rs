@@ -211,25 +211,17 @@ impl PerspectiveInstance {
         }
     }
 
-    /// The agents [`flow_pass_agents`] names, with the managed users read
-    /// from the user DB and narrowed to those that can access this
-    /// perspective — a user who cannot see it has no bookkeeping to keep
-    /// here, and skipping them is what bounds the cost on a node with many
-    /// tenants.
+    /// The agents [`flow_pass_agents`] names, with this perspective's owner
+    /// DIDs read from its handle and resolved against the node's agents.
     ///
-    /// `UserInfo` carries the DID, so this uses
-    /// [`can_access_perspective_with_did`](crate::helpers::can_access_perspective_with_did)
-    /// and never takes the wallet mutex.
+    /// Two reads, both cheap and neither touching the wallet mutex: the
+    /// handle's `owners`, and — only when an owner is not the main agent —
+    /// the user DB, whose `UserInfo` carries the DID this maps by.
     ///
-    /// That is deliberately the *same* predicate `perspectives_ws` uses to
-    /// decide whether a managed user may read this perspective at all, so
-    /// bookkeeping is kept for exactly the agents that can read it. One
-    /// consequence worth knowing, because it is quiet: that predicate is
-    /// `is_owned_by`, which is **false for an unowned perspective** — a
-    /// perspective with no owners gets the main-agent pass only. That is
-    /// consistent (the WS API denies managed users there too, so they have
-    /// no cache to keep), and the `debug!` below names the count so the
-    /// "nobody swept" case is visible rather than inferred.
+    /// The user DB is read only in multi-user mode, because that is the only
+    /// mode in which an owner can be anyone but the main agent. That is an
+    /// optimisation, not a second rule: the rule is `flow_pass_agents`'s, and
+    /// an owner whose DID resolves to nobody is skipped there either way.
     ///
     /// Signing keys are **not** pre-checked. A user whose key is not in the
     /// wallet makes that user's write fail with the pass's existing
@@ -241,57 +233,52 @@ impl PerspectiveInstance {
     /// round-trip per user per pass. Note also that nothing here calls
     /// `ensure_user_key`: a missing key must never be answered by minting a
     /// fresh DID underneath an existing user.
-    ///
-    /// The single-user short-circuit here is an optimisation (skip the DB
-    /// read); the rule itself lives in `flow_pass_agents`, which is where it
-    /// is tested.
     async fn flow_pass_contexts(&self) -> Vec<AgentContext> {
-        let multi_user = crate::user_management::is_multi_user_enabled();
-        if !multi_user {
-            return flow_pass_agents(false, Vec::new());
+        let owners = self.persisted.lock().await.get_owners();
+        if owners.is_empty() {
+            return flow_pass_agents(&[], None, &[]);
         }
-        let handle = self.persisted.lock().await.clone();
-        let emails: Vec<String> =
-            match crate::db::Ad4mDb::with_global_instance(|db| db.list_users()) {
-                Ok(users) => {
-                    let total = users.len();
-                    let emails: Vec<String> = users
-                        .into_iter()
-                        .filter(|u| {
-                            crate::helpers::can_access_perspective_with_did(
-                                &Some(u.did.clone()),
-                                &handle,
-                            )
-                        })
-                        .map(|u| u.username)
-                        .collect();
-                    log::debug!(
-                        "sync-triggered flow pass on {}: sweeping for the main agent and {} of {} \
-                     managed user(s) with access",
-                        self.uuid,
-                        emails.len(),
-                        total
-                    );
-                    emails
+
+        let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone());
+        let managed_users: Vec<(String, String)> =
+            if crate::user_management::is_multi_user_enabled() {
+                match crate::db::Ad4mDb::with_global_instance(|db| db.list_users()) {
+                    Ok(users) => users.into_iter().map(|u| (u.did, u.username)).collect(),
+                    Err(e) => {
+                        // The main agent still resolves from `owners` alone, so
+                        // the host's own view stays correct; the managed users
+                        // heal on the next touch.
+                        log::warn!(
+                            "sync-triggered flow pass on {}: could not list users ({e}); \
+                             resolving owners against the main agent only",
+                            self.uuid
+                        );
+                        Vec::new()
+                    }
                 }
-                Err(e) => {
-                    // Fail closed on the *extra* agents, not on the pass: the
-                    // main agent still sweeps, so the host's own view stays
-                    // correct and the managed users heal on the next touch.
-                    log::warn!(
-                        "sync-triggered flow pass on {}: could not list users ({e}); \
-                     running the main-agent pass only",
-                        self.uuid
-                    );
-                    Vec::new()
-                }
+            } else {
+                Vec::new()
             };
-        flow_pass_agents(true, emails)
+
+        let contexts = flow_pass_agents(&owners, main_did.as_deref(), &managed_users);
+        log::debug!(
+            "sync-triggered flow pass on {}: {} of {} owner(s) are agents on this node",
+            self.uuid,
+            contexts.len(),
+            owners.len()
+        );
+        contexts
     }
 }
 
 /// Every agent whose `Local` bookkeeping a flow pass on this perspective
-/// must advance: the main agent always, then each managed user.
+/// must advance: **this perspective's owners, and nobody else.**
+///
+/// `owners` is the handle's owner DID list, `main_agent_did` this node's own
+/// DID, and `managed_users` the `(did, email)` of the node's managed users.
+/// An owner DID is the main agent's, or a managed user's, or neither — and
+/// *neither* is skipped: it names an agent this node does not act for, whose
+/// bookkeeping is kept on its own node.
 ///
 /// **Why more than one.** The derived-state cache and the fired marks are
 /// `Local` links, and managed users get their own local link space (the
@@ -301,17 +288,31 @@ impl PerspectiveInstance {
 /// happened long ago as new — the `first_pass_here` catch-up in
 /// [`pass`](super::pass) suppresses the flood only once.
 ///
-/// **Why all managed users and not only the online ones.** Unlike the
+/// **Why the main agent is not unconditional.** A hosted node holds
+/// perspectives it is not an owner of: a neighbourhood one managed user
+/// joined is that user's, and the main agent cannot even read it
+/// (`check_main_agent_access` is `is_owned_by` once a perspective has
+/// owners, which is why `perspectives_ws` denies it). Sweeping as the main
+/// agent there would write `Local` links for an agent that has nothing to
+/// read them.
+///
+/// **Why an unowned perspective is still the main agent's.** `owners` is
+/// populated on neighbourhood publish and join only (`neighbourhoods.rs`),
+/// so a plain local perspective has none — and `check_main_agent_access`
+/// grants the main agent an unowned perspective for exactly that reason.
+/// Empty `owners` therefore means `[main_agent]`, which is also every
+/// single-user node's normal case.
+///
+/// **Why all owners and not only the online ones.** Unlike the
 /// auto-processor — where an offline user simply misses an LLM pass another
 /// loop will redo — a missed flow pass leaves a value the user *reads*
 /// stale, and nothing re-triggers it: passes run on a link touch, a local
 /// vote, or an interpretation run, so an absent user's cache would stay
 /// wrong until the next unrelated link arrives in that flow. The pass is a
 /// fold over the links present now, with no LLM call, so running it for a
-/// quiet user costs store reads and nothing else.
+/// quiet owner costs store reads and nothing else.
 ///
-/// Single-user mode returns exactly `[main_agent]`, so nothing changes
-/// there. Managed users are deduplicated and ordered, so a pass sweeps in
+/// Owners keep their listed order and are deduplicated, so a pass sweeps in
 /// the same order every time.
 ///
 /// Cost note: each context currently re-reads the shared links too
@@ -320,15 +321,39 @@ impl PerspectiveInstance {
 /// `run_flow_consensus_pass` into derive-once / record-per-agent is the
 /// optimisation to make when the per-user `Local` links land, and is left
 /// until then so this change stays reviewable against that PR.
-pub fn flow_pass_agents(multi_user: bool, managed_user_emails: Vec<String>) -> Vec<AgentContext> {
-    let mut contexts = vec![AgentContext::main_agent()];
-    if !multi_user {
-        return contexts;
+pub fn flow_pass_agents(
+    owners: &[String],
+    main_agent_did: Option<&str>,
+    managed_users: &[(String, String)],
+) -> Vec<AgentContext> {
+    if owners.is_empty() {
+        return vec![AgentContext::main_agent()];
     }
-    let mut emails: Vec<String> = managed_user_emails;
-    emails.sort();
-    emails.dedup();
-    contexts.extend(emails.into_iter().map(AgentContext::for_user_email));
+
+    let mut contexts: Vec<AgentContext> = Vec::new();
+    for owner in owners {
+        let context = if Some(owner.as_str()) == main_agent_did {
+            AgentContext::main_agent()
+        } else {
+            match managed_users
+                .iter()
+                .find(|(did, _)| did == owner)
+                .map(|(_, email)| email.clone())
+            {
+                Some(email) => AgentContext::for_user_email(email),
+                // An owner this node does not act for: a peer that joined the
+                // neighbourhood from its own executor, or a user that has since
+                // been removed. Its bookkeeping is not ours to advance.
+                None => continue,
+            }
+        };
+        if !contexts
+            .iter()
+            .any(|c| c.user_email == context.user_email && c.is_main_agent == context.is_main_agent)
+        {
+            contexts.push(context);
+        }
+    }
     contexts
 }
 
@@ -493,39 +518,91 @@ mod tests {
             .collect::<Vec<_>>()
     }
 
+    const MAIN: &str = "did:key:zMain";
+    const ALICE: &str = "did:key:zAlice";
+    const BOB: &str = "did:key:zBob";
+
+    fn users() -> Vec<(String, String)> {
+        vec![
+            (ALICE.into(), "a@example.com".into()),
+            (BOB.into(), "b@example.com".into()),
+        ]
+    }
+
     #[test]
-    fn single_user_mode_sweeps_as_the_main_agent_only() {
-        // Even with users in the DB — a node that had multi-user switched
-        // off still has the rows — single-user mode must not fan out.
-        let contexts = flow_pass_agents(false, vec!["a@example.com".into()]);
+    fn an_unowned_perspective_is_the_main_agents() {
+        // `owners` is populated on neighbourhood publish/join only, so a plain
+        // local perspective has none — and that is the single-user norm. Users
+        // in the DB must not fan a pass out over a perspective nobody claims.
+        let contexts = flow_pass_agents(&[], Some(MAIN), &users());
         assert_eq!(emails(&contexts), vec![None]);
         assert!(contexts[0].is_main_agent);
     }
 
     #[test]
-    fn multi_user_sweeps_for_the_main_agent_and_every_managed_user() {
-        let contexts = flow_pass_agents(true, vec!["b@example.com".into(), "a@example.com".into()]);
+    fn owners_are_swept_in_their_listed_order() {
+        let owners = vec![BOB.to_string(), MAIN.to_string(), ALICE.to_string()];
+        let contexts = flow_pass_agents(&owners, Some(MAIN), &users());
         assert_eq!(
             emails(&contexts),
-            vec![None, Some("a@example.com"), Some("b@example.com")],
-            "main agent first, then managed users in a stable order"
+            vec![Some("b@example.com"), None, Some("a@example.com")],
+            "one context per owner, in the handle's order"
         );
         assert!(
-            contexts[1..].iter().all(|c| !c.is_main_agent),
+            contexts[1].is_main_agent,
+            "the main agent's own DID resolves to the main-agent context"
+        );
+        assert!(
+            !contexts[0].is_main_agent && !contexts[2].is_main_agent,
             "a managed user's pass must sign as that user, not as the host"
         );
     }
 
     #[test]
-    fn multi_user_with_no_managed_users_still_sweeps_for_the_main_agent() {
-        // The DB read failing, or a node before its first user signs up:
-        // the host's own view must still be maintained.
-        assert_eq!(emails(&flow_pass_agents(true, Vec::new())), vec![None]);
+    fn a_perspective_the_main_agent_does_not_own_is_not_swept_for_it() {
+        // The hosted case: one managed user joined a neighbourhood. The main
+        // agent cannot read it (`perspectives_ws` denies it), so writing its
+        // `Local` bookkeeping there would be bookkeeping nobody reads.
+        let contexts = flow_pass_agents(&[ALICE.to_string()], Some(MAIN), &users());
+        assert_eq!(emails(&contexts), vec![Some("a@example.com")]);
     }
 
     #[test]
-    fn a_duplicated_user_is_swept_once() {
-        let contexts = flow_pass_agents(true, vec!["a@example.com".into(), "a@example.com".into()]);
-        assert_eq!(emails(&contexts), vec![None, Some("a@example.com")]);
+    fn an_owner_this_node_does_not_act_for_is_skipped() {
+        // A peer that joined from its own executor, or a removed user: its
+        // bookkeeping lives on its own node. Skipped, never silently swept as
+        // the main agent — that would sign one agent's cache with another's key.
+        let owners = vec!["did:key:zRemotePeer".to_string(), MAIN.to_string()];
+        assert_eq!(
+            emails(&flow_pass_agents(&owners, Some(MAIN), &users())),
+            vec![None]
+        );
+
+        // And with no resolvable owner at all, nothing here has bookkeeping to
+        // keep: no pass, rather than a main-agent fallback.
+        assert!(
+            flow_pass_agents(&["did:key:zRemotePeer".to_string()], Some(MAIN), &users()).is_empty()
+        );
+    }
+
+    #[test]
+    fn a_duplicated_owner_is_swept_once() {
+        let owners = vec![ALICE.to_string(), ALICE.to_string(), MAIN.to_string()];
+        assert_eq!(
+            emails(&flow_pass_agents(&owners, Some(MAIN), &users())),
+            vec![Some("a@example.com"), None]
+        );
+    }
+
+    #[test]
+    fn without_a_main_agent_did_only_managed_owners_resolve() {
+        // The user DB read failed, or the agent is not yet initialised: the
+        // owners that still resolve are swept, and no context is invented.
+        let owners = vec![MAIN.to_string(), ALICE.to_string()];
+        assert_eq!(
+            emails(&flow_pass_agents(&owners, None, &users())),
+            vec![Some("a@example.com")]
+        );
+        assert!(flow_pass_agents(&owners, Some(MAIN), &[]).len() == 1);
     }
 }
