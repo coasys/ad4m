@@ -17,7 +17,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use log::{error, info};
+use log::{error, info, warn};
 use tokio::sync::oneshot;
 
 use crate::agent::AgentService;
@@ -58,35 +58,59 @@ impl Drop for InFlight {
     }
 }
 
-/// A started conductor startup, waiting for the caller to load the core system languages.
+/// A conductor startup, waiting for the caller to load the core system languages.
 ///
-/// The link and installed languages load only after that: loading installed languages skips
-/// the system ones by their registered addresses, which exist only once the core languages
-/// finish, so running both at once could load the agent language a second time and tear
-/// down the instance being loaded. Dropping this without loading (an error path) lets the
-/// task carry on.
+/// The link and installed languages load only after that load has succeeded: loading
+/// installed languages skips the system ones by their registered addresses, which exist only
+/// once the core languages finish, so running both at once could load the agent language a
+/// second time and tear down the instance being loaded. If the core load fails, or this is
+/// dropped before it finishes (the request was cancelled), the task skips them; they load on
+/// first use instead.
 pub struct ConductorStartup {
-    core_loaded: Option<oneshot::Sender<()>>,
+    /// `None` when another startup was already in flight: this caller is a follower.
+    core_loaded: Option<oneshot::Sender<bool>>,
 }
 
 impl ConductorStartup {
     /// Load the core system languages, one caller at a time, then let the startup task load
     /// the link and installed languages.
+    ///
+    /// A follower (a generate/unlock that arrived while another startup was in flight) skips
+    /// the load when the core languages are already registered. `load_core_system_languages`
+    /// reloads the language language unconditionally, and the in-flight task may by then be
+    /// loading link languages through it.
     pub async fn load_core_languages(
         mut self,
         language_language_only: bool,
     ) -> Result<(), LanguageError> {
         let result = {
             let _one_at_a_time = CORE_LANGUAGE_LOAD.lock().await;
-            LanguageController::global_instance()
-                .load_core_system_languages(language_language_only)
-                .await
+            if self.core_loaded.is_none() && core_languages_registered(language_language_only).await
+            {
+                info!("Core system languages already loaded by the startup in flight");
+                Ok(())
+            } else {
+                LanguageController::global_instance()
+                    .load_core_system_languages(language_language_only)
+                    .await
+            }
         };
         if let Some(tx) = self.core_loaded.take() {
-            let _ = tx.send(());
+            let _ = tx.send(result.is_ok());
         }
         result
     }
+}
+
+async fn core_languages_registered(language_language_only: bool) -> bool {
+    let controller = LanguageController::global_instance();
+    if controller.get_language_language().await.is_err() {
+        return false;
+    }
+    language_language_only
+        || (controller.get_agent_language().await.is_ok()
+            && controller.get_neighbourhood_language().await.is_ok()
+            && controller.get_perspective_language().await.is_ok())
 }
 
 /// Start the conductor (unless it is already running) in the background, and once the
@@ -126,8 +150,11 @@ pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
             drop(starting);
         }
 
-        // Err means the handle was dropped without loading, which is also "go ahead".
-        let _ = core_loaded_rx.await;
+        // `false` is a failed core load; `Err` is the handle dropped before it finished.
+        if !matches!(core_loaded_rx.await, Ok(true)) {
+            warn!("Core system languages did not load; skipping link and installed languages");
+            return;
+        }
 
         let language_language_only = crate::config::get_global_config()
             .language_language_only
