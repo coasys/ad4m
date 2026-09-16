@@ -388,9 +388,9 @@ pub struct RoleRevocation {
     pub at: String,
 }
 
-/// What the store knows about one role row's history for one DID: when the
-/// row's `didProperty` link naming the DID was written, and every
-/// **signed** tombstone on the row naming the DID.
+/// What the store knows about one role instance's history for one DID: when the
+/// instance's `didProperty` link naming the DID was written, and every
+/// **signed** tombstone on the instance naming the DID.
 ///
 /// Signature is checked here, at the store boundary — the same rule
 /// `flow_instance::atom::signed_by` applies to votes: a link whose stored
@@ -398,12 +398,12 @@ pub struct RoleRevocation {
 /// whether the tombstone's author may revoke depends on the role query, so
 /// `resolve_role_grants` applies that filter. `granted_at` is `None` when
 /// the role query has no `didProperty` or no such link exists; the caller
-/// then falls back to the row's own timestamp and never to "always".
+/// then falls back to the instance's own timestamp and never to "always".
 #[derive(Debug, Clone, Default)]
 pub struct RoleGrantTimestamps {
-    /// Earliest timestamp of a `row --didProperty--> did` link, if any.
+    /// Earliest timestamp of an `instance --didProperty--> did` link, if any.
     pub granted_at: Option<String>,
-    /// Every signed tombstone on this row naming this DID, any author.
+    /// Every signed tombstone on this instance naming this DID, any author.
     pub revocations: Vec<RoleRevocation>,
 }
 
@@ -413,16 +413,16 @@ pub struct RoleGrantTimestamps {
 pub trait RequiresQueryable: Send + Sync {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String>;
 
-    /// The store's history of one matched role row for one DID — see
+    /// The store's history of one matched role instance for one DID — see
     /// [`RoleGrantTimestamps`].
     ///
-    /// `row_id` — the instance URI `model_query` returned.
+    /// `instance_id` — the instance URI `model_query` returned.
     /// `grant_predicate` — the role query's `didProperty`, if any; `None`
     ///   for `$did`-style queries, where no single property carries the DID.
     /// `did` — the candidate's plain DID.
     ///
     /// The default knows nothing (no grant link, no tombstones). A caller
-    /// that gets `granted_at: None` must date the grant from the row itself
+    /// that gets `granted_at: None` must date the grant from the instance itself
     /// — `resolve_role_grants` does — so a stub that stays on this default
     /// never turns into "granted since forever".
     async fn role_grant_timestamps(
@@ -441,7 +441,7 @@ pub trait RequiresQueryable: Send + Sync {
 /// TypeScript `Literal` and by pre-normalisation peers (#1014).
 ///
 /// The legacy spelling matters more here than anywhere else in this file:
-/// every other malformed input in this read path fails *closed* (undated row
+/// every other malformed input in this read path fails *closed* (undated instance
 /// → error, non-discriminating query → error), but an unrecognised
 /// *tombstone* spelling would fail open — the revocation simply is not seen.
 fn target_names_did(target: &str, did: &str, did_literal: &str) -> bool {
@@ -456,7 +456,7 @@ impl RequiresQueryable for PerspectiveInstance {
 
     async fn role_grant_timestamps(
         &self,
-        row_id: &str,
+        instance_id: &str,
         grant_predicate: Option<&str>,
         did: &str,
     ) -> anyhow::Result<RoleGrantTimestamps> {
@@ -477,7 +477,7 @@ impl RequiresQueryable for PerspectiveInstance {
         let granted_at = match grant_predicate {
             Some(pred) => self
                 .get_links(&LinkQuery {
-                    source: Some(row_id.to_string()),
+                    source: Some(instance_id.to_string()),
                     predicate: Some(pred.to_string()),
                     ..Default::default()
                 })
@@ -492,7 +492,7 @@ impl RequiresQueryable for PerspectiveInstance {
 
         let revocations: Vec<RoleRevocation> = self
             .get_links(&LinkQuery {
-                source: Some(row_id.to_string()),
+                source: Some(instance_id.to_string()),
                 predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
                 ..Default::default()
             })
@@ -869,7 +869,7 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
             );
         };
         // A proposal carrying `resolved_as` is the recorded history of a
-        // consensus event, not a live row, and must not suppress a re-mint.
+        // consensus event, not a live proposal, and must not suppress a re-mint.
         // Without this a cyclic flow wedges: same graph → same seal → the
         // already-settled proposal matches the whole dedup key, so the mint
         // is skipped and the edge can never fire on the next visit.
@@ -1042,7 +1042,7 @@ mod tests {
     }
 
     /// Test 18. The seal is order-independent (two evaluations of the same
-    /// guard agree however the store ordered the rows) and
+    /// guard agree however the store ordered the instances) and
     /// content-sensitive (an edit that keeps the same IDs changes it) — the
     /// second half is what lets a voter refuse to co-sign edited evidence.
     #[test]
