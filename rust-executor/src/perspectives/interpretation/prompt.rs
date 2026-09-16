@@ -954,6 +954,7 @@ mod tests {
                 n: 1,
                 from_role: None,
             }),
+            contested: None,
         }
     }
 
@@ -1077,6 +1078,7 @@ mod tests {
                 consensus_rule: None,
             }],
             consensus_rule: None,
+            contested: None,
         };
         let input = build_interpretation_input(
             &shapes,

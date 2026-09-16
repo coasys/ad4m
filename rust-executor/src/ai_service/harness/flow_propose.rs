@@ -328,6 +328,7 @@ mod tests {
                 },
             ],
             consensus_rule: None,
+            contested: None,
         }
     }
 
@@ -340,6 +341,7 @@ mod tests {
             flow_interpretation_hint: None,
             reachable_next_states: vec![],
             consensus_rule: None,
+            contested: None,
         }
     }
 

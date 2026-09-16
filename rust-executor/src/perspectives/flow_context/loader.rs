@@ -17,6 +17,7 @@
 use super::render::summarize_flow_instance;
 use super::types::{FlowContext, FlowInstanceRecord};
 use crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS;
+use crate::perspectives::flow_instance::DerivedFlow;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{parse_flow_from_links, SHACLFlow};
@@ -165,18 +166,19 @@ async fn query_flow_instances(
 /// have the flow's shape imported from the neighbourhood) shouldn't
 /// fail the whole extraction pass. Order is preserved from `records`.
 pub fn build_flow_contexts(
-    records: &[FlowInstanceRecord],
+    records: &[DerivedFlow],
     flows_by_uri: &HashMap<String, SHACLFlow>,
 ) -> Vec<FlowContext> {
     records
         .iter()
-        .filter_map(|r| {
-            let flow = flows_by_uri.get(&r.flow_uri)?;
+        .filter_map(|df| {
+            let flow = flows_by_uri.get(&df.record.flow_uri)?;
             Some(summarize_flow_instance(
                 flow,
-                r.instance_uri.clone(),
-                r.subject.clone(),
-                r.current_state.clone(),
+                df.record.instance_uri.clone(),
+                df.record.subject.clone(),
+                df.record.current_state.clone(),
+                df.contested.clone(),
             ))
         })
         .collect()
@@ -267,7 +269,11 @@ pub async fn gather_active_flow_contexts(
     // The sync-triggered pass (`trigger.rs`) re-derives on every incoming flow
     // link, so residual staleness is bounded by the debounce window plus the
     // role-change gap documented there.
-    let mut resolved: Vec<FlowInstanceRecord> = Vec::with_capacity(records.len());
+    // Cache-sourced records carry `contested: None` — the Local-verified cache
+    // stores only the derived state name, not the fold's contention verdict.
+    // The sync-triggered pass re-derives on every incoming flow link, so a
+    // contested flow that somehow reached the cache is re-folded immediately.
+    let mut resolved: Vec<DerivedFlow> = Vec::with_capacity(records.len());
     let mut uncached: Vec<FlowInstanceRecord> = Vec::new();
     for record in records {
         match crate::perspectives::flow_instance::local_cached_state(
@@ -276,9 +282,12 @@ pub async fn gather_active_flow_contexts(
         )
         .await
         {
-            Ok(Some(cached)) => resolved.push(FlowInstanceRecord {
-                current_state: cached,
-                ..record
+            Ok(Some(cached)) => resolved.push(DerivedFlow {
+                record: FlowInstanceRecord {
+                    current_state: cached,
+                    ..record
+                },
+                contested: None,
             }),
             Ok(None) => uncached.push(record),
             Err(e) => {
@@ -666,6 +675,14 @@ mod tests {
         }
     }
 
+    /// Wrap a `FlowInstanceRecord` as an uncontested `DerivedFlow`.
+    fn uncontested(r: FlowInstanceRecord) -> DerivedFlow {
+        DerivedFlow {
+            record: r,
+            contested: None,
+        }
+    }
+
     // Minimal fixture flow so build_flow_contexts has something to pair
     // records against without pulling the whole render-side fixture
     // set. Local to this module because it exercises the loader-side
@@ -726,12 +743,12 @@ mod tests {
         let flow_uri = flow.flow_uri();
         let mut catalogue = HashMap::new();
         catalogue.insert(flow_uri.clone(), flow);
-        let records = vec![record(
+        let records = vec![uncontested(record(
             &flow_uri,
             "ad4m://flow/instance/inst-1",
             "ad4m://task/foo",
             "in_progress",
-        )];
+        ))];
         let ctxs = build_flow_contexts(&records, &catalogue);
         assert_eq!(ctxs.len(), 1);
         assert_eq!(ctxs[0].flow_name, "Delivery");
@@ -752,18 +769,18 @@ mod tests {
         // extraction — silently skip and keep processing the rest.
         let delivery_uri = delivery_flow().flow_uri();
         let records = vec![
-            record(
+            uncontested(record(
                 "coasys://GhostFlow",
                 "ad4m://flow/instance/g",
                 "ad4m://x",
                 "s0",
-            ),
-            record(
+            )),
+            uncontested(record(
                 &delivery_uri,
                 "ad4m://flow/instance/d",
                 "ad4m://task/y",
                 "identified",
-            ),
+            )),
         ];
 
         // Empty catalogue → all skipped, empty result (not error).
@@ -787,24 +804,24 @@ mod tests {
         let mut catalogue = HashMap::new();
         catalogue.insert(delivery_uri.clone(), delivery_flow());
         let records = vec![
-            record(
+            uncontested(record(
                 &delivery_uri,
                 "ad4m://flow/instance/a",
                 "ad4m://x",
                 "identified",
-            ),
-            record(
+            )),
+            uncontested(record(
                 &delivery_uri,
                 "ad4m://flow/instance/b",
                 "ad4m://y",
                 "scoped",
-            ),
-            record(
+            )),
+            uncontested(record(
                 &delivery_uri,
                 "ad4m://flow/instance/c",
                 "ad4m://z",
                 "review",
-            ),
+            )),
         ];
         let ctxs = build_flow_contexts(&records, &catalogue);
         let uris: Vec<&str> = ctxs.iter().map(|c| c.instance_uri.as_str()).collect();
@@ -815,6 +832,77 @@ mod tests {
                 "ad4m://flow/instance/b",
                 "ad4m://flow/instance/c",
             ]
+        );
+    }
+
+    // ------------- contested surface (issue #998) -------------
+
+    /// Build a minimal `Contention` for test fixtures.
+    fn fixture_contention(
+        from_state: &str,
+    ) -> crate::perspectives::flow_instance::fold::Contention {
+        use crate::perspectives::flow_instance::fold::{Contention, SettledEdge};
+        let edge = |to: &str| SettledEdge {
+            from_state: from_state.to_string(),
+            to_state: to.to_string(),
+            settled_at: "2026-09-16T00:00:00Z".to_string(),
+            atom_uris: vec![],
+            voters: vec!["did:key:z1".to_string()],
+        };
+        Contention {
+            from_state: from_state.to_string(),
+            candidates: vec![edge("done"), edge("rejected")],
+        }
+    }
+
+    /// A `DerivedFlow` whose fold returned `contested` MUST carry that
+    /// contention into the resulting `FlowContext`.  This test fails
+    /// (type error) on the pre-fix code where `derive_states` returned
+    /// `Vec<FlowInstanceRecord>` with no `contested` field and
+    /// `FlowContext` had no `contested` field either.
+    #[test]
+    fn build_flow_contexts_contested_derivation_surfaces_to_llm_context() {
+        let flow = delivery_flow();
+        let flow_uri = flow.flow_uri();
+        let mut catalogue = HashMap::new();
+        catalogue.insert(flow_uri.clone(), flow);
+        let contention = fixture_contention("in_progress");
+        let records = vec![DerivedFlow {
+            record: record(
+                &flow_uri,
+                "ad4m://flow/instance/c1",
+                "ad4m://task/stuck",
+                "in_progress",
+            ),
+            contested: Some(contention),
+        }];
+        let ctxs = build_flow_contexts(&records, &catalogue);
+        assert_eq!(ctxs.len(), 1);
+        assert!(
+            ctxs[0].contested.is_some(),
+            "a contested derivation must surface to the LLM context (issue #998)"
+        );
+    }
+
+    /// An uncontested `DerivedFlow` must leave `FlowContext.contested` as `None`
+    /// — no false positives.
+    #[test]
+    fn build_flow_contexts_uncontested_derivation_has_no_contention() {
+        let flow = delivery_flow();
+        let flow_uri = flow.flow_uri();
+        let mut catalogue = HashMap::new();
+        catalogue.insert(flow_uri.clone(), flow);
+        let records = vec![uncontested(record(
+            &flow_uri,
+            "ad4m://flow/instance/ok",
+            "ad4m://task/fine",
+            "in_progress",
+        ))];
+        let ctxs = build_flow_contexts(&records, &catalogue);
+        assert_eq!(ctxs.len(), 1);
+        assert!(
+            ctxs[0].contested.is_none(),
+            "an uncontested derivation must not be marked as contested"
         );
     }
 

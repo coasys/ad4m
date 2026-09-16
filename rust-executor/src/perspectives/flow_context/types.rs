@@ -4,6 +4,7 @@
 //! [`super::render`] and [`super::loader`] layers and out to
 //! `build_interpretation_input`.
 
+use crate::perspectives::flow_instance::fold::Contention;
 use crate::perspectives::shacl_parser::ConsensusRule;
 
 /// One live `FlowInstance` summarized for the LLM prompt-builder.
@@ -36,6 +37,12 @@ pub struct FlowContext {
     /// so the LLM knows how many signers are needed if the state's own
     /// rule is not overridden.
     pub consensus_rule: Option<ConsensusRule>,
+    /// Set when the fold found two edges out of `current_state` both
+    /// carrying quorum — the flow is irreversibly stalled. LLM context
+    /// renderers MUST surface this rather than presenting the flow as
+    /// "awaiting votes"; the mint pass MUST NOT propose into such a flow.
+    /// `None` for all ordinary (waiting or settled) flows.
+    pub contested: Option<Contention>,
 }
 
 /// One reachable next-state, ready for prompt insertion.
