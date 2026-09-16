@@ -58,4 +58,6 @@ pub use render::{
     DID_TOKEN, FLOW_BASE_TOKEN, FLOW_INSTANCE_TOKEN, FLOW_URI_TOKEN,
 };
 #[allow(unused_imports)]
-pub use types::{FlowContext, FlowInstanceRecord, NextStateSummary};
+pub use types::{
+    ContentionStatus, FlowContext, FlowInstanceRecord, NextStateSummary, ResolvedFlow,
+};
