@@ -12,7 +12,7 @@
 //! (roles are re-derived live). Both are rulings, and both are visible here
 //! rather than silent.
 
-use super::flow_classes::advance_flow_instance_state;
+use super::flow_classes::{advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE};
 use super::flow_context::load_shacl_flows;
 use super::flow_evaluator::recompute_evidence_hash;
 use super::flow_evaluator_e2e::{literal, seed_flow, seed_satisfied_fixture, Fixture};
@@ -24,7 +24,7 @@ use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::{fold_read_set, ReadSet};
 use crate::agent::signatures::TestSigner;
-use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
 
 const TASK: &str = "ad4m://task/1";
 
@@ -36,9 +36,10 @@ fn acting_did(f: &Fixture) -> String {
     crate::agent::did_for_context(&f.ctx).expect("did_for_context")
 }
 
-/// What a peer's forged `currentState` write looks like on the graph. The
-/// setter drops the existing link, so afterwards the only `currentState` on
-/// the instance is the attacker's value.
+/// A wrong value in this replica's OWN cache — what a stale or corrupted
+/// local `currentState` looks like. (A peer's write is a different shape,
+/// since the cache is `Local` now: see
+/// `a_peer_written_shared_cache_is_overridden_not_deleted`.)
 async fn forge_cached_state(f: &mut Fixture, state: &str) {
     advance_flow_instance_state(&mut f.perspective, &f.instance_uri, state, None, &f.ctx)
         .await
@@ -75,8 +76,9 @@ async fn propose_unverifiable(f: &mut Fixture, id: &str, from: &str, to: &str) -
         .await
 }
 
-/// The `resolved_as → "fired"` mark. Any member can write it on any
-/// proposal; that is precisely why the fold never reads it.
+/// A `resolved_as → "fired"` mark this replica did not derive — written
+/// `Shared`, as any member can write one on any proposal; that is precisely
+/// why the fold never reads it, and why the pass counts only `Local` marks.
 async fn forge_fired_mark(f: &mut Fixture, proposal_uri: &str) {
     f.link(
         proposal_uri,
@@ -161,6 +163,32 @@ async fn sync_proposal_from(
             .expect("sync a foreign proposal link");
     }
     uri
+}
+
+/// A peer's `resolved_as → "fired"` mark, delivered as sync would deliver
+/// it: signed by their key, and therefore `Shared` on this replica.
+async fn sync_fired_mark_from(f: &mut Fixture, signer: &TestSigner, proposal_uri: &str) {
+    let mark = signer.sign(
+        Link {
+            source: proposal_uri.to_string(),
+            predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
+            target: literal(FIRED_MARK),
+        }
+        .normalize(),
+    );
+    f.perspective
+        .add_link_expression(LinkExpression::from(mark), LinkStatus::Shared, None)
+        .await
+        .expect("sync a peer's fired mark");
+}
+
+/// Every `currentState` link on the fixture's instance, whoever wrote it.
+async fn current_state_links(f: &Fixture) -> Vec<crate::types::DecoratedLinkExpression> {
+    links_of(f, &f.instance_uri)
+        .await
+        .into_iter()
+        .filter(|l| l.data.predicate.as_deref() == Some(FLOW_CURRENT_STATE_PREDICATE))
+        .collect()
 }
 
 async fn links_of(f: &Fixture, source: &str) -> Vec<crate::types::DecoratedLinkExpression> {
@@ -289,6 +317,333 @@ async fn the_pass_writes_the_cache_and_the_marks_and_then_has_nothing_to_do() {
         proposal_exists(&f, &minted).await,
         "the pass deletes nothing, ever"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The cache and the marks are this replica's own (#987)
+// ---------------------------------------------------------------------------
+
+/// Nothing the pass records ever leaves this replica: the mint's initial
+/// cache, the healed cache and the fired marks are all `Local` links, and the
+/// cache stays single-valued across writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_cache_and_the_marks_are_local_links() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let initial = current_state_links(&f).await;
+    assert_eq!(initial.len(), 1, "the mint wrote one cache link");
+    assert_eq!(initial[0].status, Some(LinkStatus::Local));
+
+    let minted = f.mint_one().await;
+    assert_eq!(consensus_pass(&mut f).await.len(), 1);
+
+    let healed = current_state_links(&f).await;
+    assert_eq!(
+        healed.len(),
+        1,
+        "the old cache link is replaced, not joined"
+    );
+    assert_eq!(healed[0].status, Some(LinkStatus::Local));
+    assert_eq!(f.cached_state().await, "scoped");
+
+    let marks: Vec<_> = links_of(&f, &minted)
+        .await
+        .into_iter()
+        .filter(|l| l.data.predicate.as_deref() == Some(RESOLVED_AS_PREDICATE))
+        .collect();
+    assert_eq!(marks.len(), 1, "one settling atom, one mark");
+    assert_eq!(marks[0].status, Some(LinkStatus::Local));
+}
+
+/// A `Shared` `currentState` from a peer (what the pre-#987 executor wrote)
+/// is neither believed nor deleted: this replica writes its own derivation
+/// beside it, which is what hydration then serves, and the peer's link stays
+/// — the pass deletes nothing shared.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_written_shared_cache_is_overridden_not_deleted() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let bob = TestSigner::generate();
+    let peer_cache = bob.sign(
+        Link {
+            source: f.instance_uri.clone(),
+            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+            target: literal("scoped"),
+        }
+        .normalize(),
+    );
+    f.perspective
+        .add_link_expression(LinkExpression::from(peer_cache), LinkStatus::Shared, None)
+        .await
+        .expect("sync a peer's currentState");
+    assert_eq!(
+        f.cached_state().await,
+        "scoped",
+        "the peer's later write is what hydration serves until we derive"
+    );
+
+    consensus_pass(&mut f).await;
+    assert_eq!(
+        f.cached_state().await,
+        "identified",
+        "our own derivation is written and wins"
+    );
+    let links = current_state_links(&f).await;
+    assert!(
+        links
+            .iter()
+            .any(|l| l.status == Some(LinkStatus::Shared) && l.author == bob.did),
+        "the peer's link is left in place: {links:?}"
+    );
+    assert_eq!(
+        links
+            .iter()
+            .filter(|l| l.status == Some(LinkStatus::Local))
+            .count(),
+        1,
+        "and exactly one Local cache link is ours"
+    );
+}
+
+/// A peer's mark cannot mute this replica's once-only `FireOutcome`: only a
+/// `Local` mark says "I already recorded this", so a `Shared` one — forged
+/// or honest — is not ours, and the event still fires here exactly once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_written_shared_mark_does_not_mute_our_fire_outcome() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let minted = f.mint_one().await;
+    let bob = TestSigner::generate();
+    sync_fired_mark_from(&mut f, &bob, &minted).await;
+
+    let outcomes = consensus_pass(&mut f).await;
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "the peer's mark is not this replica's: {outcomes:?}"
+    );
+    assert!(
+        consensus_pass(&mut f).await.is_empty(),
+        "our own mark, once written, is"
+    );
+}
+
+/// The row every OTHER replica sees: the creator's cache is `Local`, so a
+/// synced `FlowInstance` carries no `currentState` at all. It must still load
+/// as an instance — `currentState` is optional on the shape — with the empty
+/// state meaning "not yet derived here", and the pass then fills it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_instance_without_a_cache_still_loads_and_the_pass_fills_it() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let cache: Vec<LinkExpression> = current_state_links(&f)
+        .await
+        .into_iter()
+        .map(LinkExpression::from)
+        .collect();
+    assert!(!cache.is_empty());
+    f.perspective
+        .remove_links(cache, None)
+        .await
+        .expect("drop the creator's local cache");
+
+    let records = f.instances().await;
+    assert_eq!(
+        records.len(),
+        1,
+        "the row is an instance with or without its cache"
+    );
+    assert_eq!(
+        records[0].current_state, "",
+        "absent cache = not yet derived"
+    );
+
+    consensus_pass(&mut f).await;
+    assert_eq!(
+        f.cached_state().await,
+        "identified",
+        "the pass writes the fold's answer"
+    );
+    assert_eq!(
+        current_state_links(&f).await[0].status,
+        Some(LinkStatus::Local)
+    );
+}
+
+/// Deliver links the way the link language delivers them: through
+/// `diff_from_link_language`, which is where the sync trigger hangs.
+async fn sync_in(f: &Fixture, links: Vec<LinkExpression>) {
+    f.perspective
+        .diff_from_link_language(PerspectiveDiff::from_additions(links))
+        .await
+        .expect("diff_from_link_language");
+}
+
+/// Poll the cache until it reads `state` or the budget runs out; `true`
+/// when it got there. The sync-triggered pass is debounced and runs on a
+/// spawned task, so a test cannot await it directly.
+async fn cache_reaches(f: &Fixture, state: &str) -> bool {
+    for _ in 0..50 {
+        if f.cached_state().await == state {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// A peer's vote arriving through sync — not through this replica's own
+/// accept or mint — must bring this replica's cache and marks up to date
+/// by itself: they are `Local`, so nobody else can. No pass is called here;
+/// the one `diff_from_link_language` queues does the work.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_synced_vote_triggers_this_replicas_own_pass() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let minted = f.mint_one().await;
+    assert_eq!(f.cached_state().await, "identified", "1 < n = 2 at mint");
+
+    let bob = TestSigner::generate();
+    let vote = bob.sign(
+        Link {
+            source: minted.clone(),
+            predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+            target: bob.did.clone(),
+        }
+        .normalize(),
+    );
+    sync_in(&f, vec![LinkExpression::from(vote)]).await;
+
+    assert!(
+        cache_reaches(&f, "scoped").await,
+        "the synced vote must trigger the pass that heals the cache"
+    );
+    assert!(
+        f.read_set().await.marked_proposals().contains(&minted),
+        "and that pass marks the settling proposal"
+    );
+    assert_eq!(
+        current_state_links(&f).await.len(),
+        1,
+        "single Local cache link, as always"
+    );
+}
+
+/// A synced chat message queues nothing: the trigger is keyed on the flow
+/// vocabulary, so ordinary traffic never re-derives a flow. Pinned by the
+/// cache staying put where a pass would have healed it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_synced_chat_message_does_not_trigger_a_pass() {
+    let mut f = seed_satisfied_fixture(None).await;
+    forge_cached_state(&mut f, "scoped").await;
+    let bob = TestSigner::generate();
+    let chat = bob.sign(
+        Link {
+            source: "flux://message/1".to_string(),
+            predicate: Some("flux://body".to_string()),
+            target: literal("hello"),
+        }
+        .normalize(),
+    );
+    sync_in(&f, vec![LinkExpression::from(chat)]).await;
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    assert_eq!(
+        f.cached_state().await,
+        "scoped",
+        "no pass ran: the wrong cache was not healed"
+    );
+}
+
+/// The row as sync delivers it to every other replica: no `Local` cache.
+async fn drop_local_cache(f: &mut Fixture) {
+    let cache: Vec<LinkExpression> = current_state_links(f)
+        .await
+        .into_iter()
+        .map(LinkExpression::from)
+        .collect();
+    f.perspective
+        .remove_links(cache, None)
+        .await
+        .expect("drop the local cache");
+}
+
+/// Copy every link of `proposal_uris` from replica `from` into replica
+/// `to`, as sync would (Shared, signatures intact), without going through
+/// the sync trigger so the test controls when the pass runs.
+async fn replicate_proposals(from: &Fixture, to: &mut Fixture, proposal_uris: &[&str]) {
+    for uri in proposal_uris {
+        for link in links_of(from, uri).await {
+            to.perspective
+                .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None)
+                .await
+                .expect("replicate a proposal link");
+        }
+    }
+}
+
+/// Catch-up is silent. A replica joining a flow with history finds every
+/// settled edge unmarked — marks are per replica — and must not report
+/// them all as new. Its first pass over the instance marks them and writes
+/// the cache without emitting; the next edge to settle is reported. The
+/// creating replica is not a newcomer (it wrote its cache at the mint), so
+/// its first settle IS reported — pinned by
+/// `the_pass_writes_the_cache_and_the_marks_and_then_has_nothing_to_do`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
+    let mut a = seed_review_flow().await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+
+    // Replica B: same definition, the instance row as sync delivers it (no
+    // cache), and A's history.
+    let mut b = seed_review_flow().await;
+    drop_local_cache(&mut b).await;
+    replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
+
+    let first = consensus_pass(&mut b).await;
+    assert!(first.is_empty(), "catch-up is silent, got {first:?}");
+    assert_eq!(
+        b.cached_state().await,
+        "review",
+        "but the cache is written (review → changes_requested → review)"
+    );
+    let marked = b.read_set().await.marked_proposals();
+    assert!(
+        marked.contains(&h1) && marked.contains(&h2),
+        "and the settled history is marked: {marked:?}"
+    );
+    assert!(
+        consensus_pass(&mut b).await.is_empty(),
+        "nothing left to record after catch-up"
+    );
+
+    // An edge that settles after catch-up is an event for B.
+    let h3 = settle(&mut a, "h3", "review", "approved").await;
+    replicate_proposals(&a, &mut b, &[&h3]).await;
+    let later = consensus_pass(&mut b).await;
+    assert_eq!(
+        later.len(),
+        1,
+        "an edge settling after catch-up fires here once: {later:?}"
+    );
+    assert_eq!(
+        (later[0].from_state.as_str(), later[0].to_state.as_str()),
+        ("review", "approved")
+    );
+    assert_eq!(b.cached_state().await, "approved");
+    assert!(consensus_pass(&mut b).await.is_empty(), "and only once");
+}
+
+/// A newcomer with nothing to catch up on: the first pass writes the cache
+/// (silently, trivially) and the FIRST edge to settle afterwards is
+/// reported — catch-up must not eat the first real event.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_newcomer_with_no_history_reports_the_first_settle_after_its_first_pass() {
+    let mut f = seed_satisfied_fixture(None).await;
+    drop_local_cache(&mut f).await;
+    assert!(consensus_pass(&mut f).await.is_empty());
+    assert_eq!(f.cached_state().await, "identified");
+
+    f.mint_one().await;
+    let outcomes = consensus_pass(&mut f).await;
+    assert_eq!(outcomes.len(), 1, "got {outcomes:?}");
+    assert_eq!(f.cached_state().await, "scoped");
 }
 
 // ---------------------------------------------------------------------------

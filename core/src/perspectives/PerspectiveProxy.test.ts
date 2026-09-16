@@ -638,6 +638,37 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     ).rejects.toThrow('PerspectiveProxy.remove: no stored LinkExpression matches');
   });
 
+  // Lal's #1011 review: the bare-Link resolution used `bare.predicate ||
+  // undefined`, and the Link constructor coerces a missing predicate to "" —
+  // so the predicate filter was silently dropped and matches[0] removed an
+  // arbitrary source→target link under a different predicate.
+  it('matches only predicate-less stored links when the bare Link has no predicate', async () => {
+    const withPredicate = makeStoredExpression('s://a', 'p://b', 't://c');
+    const withoutPredicate = makeStoredExpression('s://a', '', 't://c');
+    // the store reports a missing predicate as null, not ''
+    (withoutPredicate.data as any).predicate = null;
+    const removeLink = jest.fn().mockResolvedValue(true);
+    // the wrong candidate first: matches[0] of the unfiltered result
+    const queryLinks = jest.fn().mockResolvedValue([withPredicate, withoutPredicate]);
+    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks, removeLink };
+    const proxy = createProxy(mockClient);
+
+    await proxy.remove(new Link({ source: 's://a', target: 't://c' }));
+
+    expect(removeLink).toHaveBeenCalledWith('test-uuid', withoutPredicate, undefined);
+  });
+
+  it('throws instead of removing a predicated link when the bare Link has no predicate', async () => {
+    const withPredicate = makeStoredExpression('s://a', 'p://b', 't://c');
+    const queryLinks = jest.fn().mockResolvedValue([withPredicate]);
+    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks };
+    const proxy = createProxy(mockClient);
+
+    await expect(
+      proxy.remove(new Link({ source: 's://a', target: 't://c' }))
+    ).rejects.toThrow('no stored LinkExpression matches');
+  });
+
   it('passes a full LinkExpressionInput through unchanged', async () => {
     const storedExpr = makeStoredExpression('s://x', 'p://y', 't://z');
     const removeLink = jest.fn().mockResolvedValue(true);

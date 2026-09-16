@@ -325,6 +325,7 @@ impl AgentService {
                     smtp_config: None,
                     enable_mcp: None,
                     mcp_port: None,
+                    dynamic_class_tools: None,
                     pid_file: None,
                     wallet_backend: None,
                     wallet_backend_url: None,

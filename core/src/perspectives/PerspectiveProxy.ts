@@ -1144,8 +1144,10 @@ export class PerspectiveProxy {
      * Accepts either a full `LinkExpressionInput` (as returned by `add`) or a bare
      * `Link` (source/predicate/target only).  When a bare Link is passed the method
      * resolves it to the first stored `LinkExpression` whose source, predicate, and
-     * target match, then removes that expression.  If no match is found an error is
-     * thrown naming the link so the caller knows what was expected.
+     * target match, then removes that expression.  A bare Link without a predicate
+     * (or with the constructor's `""` stand-in) matches only stored links that
+     * themselves have no predicate.  If no match is found an error is thrown
+     * naming the link so the caller knows what was expected.
      *
      * @param link - The link to remove (LinkExpressionInput or bare Link)
      * @param batchId - Optional batch ID to group this operation with others
@@ -1155,11 +1157,23 @@ export class PerspectiveProxy {
         if (!('data' in link) || (link as any).data === undefined) {
             // bare Link — resolve to stored expression
             const bare = link as Link;
-            const matches = await this.get(new LinkQuery({
+            // The Link constructor coerces an absent predicate to "" and the
+            // store reports predicate-less links as predicate null — so ""
+            // and undefined both mean "no predicate" here, and neither may
+            // widen the query: dropping the filter would resolve (and
+            // remove!) an arbitrary source→target link under a *different*
+            // predicate. LinkQuery cannot express "predicate is absent", so
+            // in that case we query on source/target only and require the
+            // absence ourselves.
+            const predicateGiven = bare.predicate !== undefined && bare.predicate !== '';
+            const candidates = await this.get(new LinkQuery({
                 source: bare.source || undefined,
-                predicate: bare.predicate || undefined,
+                predicate: predicateGiven ? bare.predicate : undefined,
                 target: bare.target || undefined,
             }));
+            const matches = predicateGiven
+                ? candidates
+                : candidates.filter(m => !m.data.predicate);
             if (matches.length === 0) {
                 throw new Error(
                     `PerspectiveProxy.remove: no stored LinkExpression matches Link { source: "${bare.source}", predicate: "${bare.predicate}", target: "${bare.target}" }`
