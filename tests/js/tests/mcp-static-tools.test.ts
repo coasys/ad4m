@@ -306,10 +306,12 @@ describe("MCP static instance tools (dynamicClassTools off)", function() {
             const init = await initializeMcp(mcpBaseUrl);
             mcpSessionId = init.sessionId;
 
+            // Admin credential in the Authorization header: since #851-3 the
+            // inline code is only auto-permitted for authenticated callers.
             const cap = await callMcpTool(mcpBaseUrl, 'request_capability', {
                 app_name: "static-tools-test",
                 app_desc: "MCP static instance tools test"
-            }, mcpSessionId);
+            }, mcpSessionId, { Authorization: `Bearer ${adminCredential}` });
             const jwt = await callMcpTool(mcpBaseUrl, 'generate_jwt', {
                 request_id: cap.request_id,
                 code: cap.code,
