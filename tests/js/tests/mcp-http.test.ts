@@ -283,14 +283,17 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         // #851 sub-problem 3: on an executor WITH an admin credential, the mint
-        // code must not be handed to a caller that presents nothing. This test
-        // must run BEFORE any test sends the admin credential, because a valid
-        // Authorization header is adopted into the session.
+        // code must not be handed to a caller that presents nothing. A fresh
+        // session (same pattern as the header-only client test below) makes
+        // the pin independent of its neighbours: it cannot inherit adopted
+        // credentials, and stays valid under reordering, .only, or parallel
+        // runs.
         it("withholds the mint code from an unauthenticated caller (#851-3)", async function() {
+            const fresh = await initializeMcp(MCP_BASE_URL);
             const gated = await callMcpTool(MCP_BASE_URL,'request_capability', {
                 app_name: "mcp-test-unauth",
                 app_desc: "MCP Integration Test (no credentials)"
-            }, mcpSessionId);
+            }, fresh.sessionId);
             expect(gated.request_id, "request itself is still created (Launcher pairing flow)").to.be.a('string');
             expect(gated.code, "mint code must not be returned inline to an unauthenticated caller").to.be.undefined;
         });

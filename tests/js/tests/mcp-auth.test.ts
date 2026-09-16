@@ -140,12 +140,15 @@ describe("MCP Authentication HTTP Tests", function() {
 
         // #851 sub-problem 3: the request is still created (Launcher pairing
         // flow) but the mint code is withheld from a caller with no
-        // credentials on this admin-credentialed executor.
+        // credentials on this admin-credentialed executor. Fresh session so
+        // the pin cannot inherit adopted credentials from any neighbouring
+        // test, whatever the ordering.
         it("should withhold the request_capability mint code without auth", async function() {
+            const fresh = await initializeMcp(MCP_BASE_URL);
             const gated = await callMcpTool(MCP_BASE_URL, 'request_capability', {
                 app_name: "auth-test-unauth",
                 app_desc: "MCP Auth Test (no credentials)"
-            }, mcpSessionId);
+            }, fresh.sessionId);
             expect(gated.request_id).to.be.a('string');
             expect(gated.code, "mint code must not be returned inline").to.be.undefined;
         });
