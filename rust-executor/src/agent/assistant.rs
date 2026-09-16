@@ -52,7 +52,9 @@ pub enum ClaimError {
 impl std::fmt::Display for ClaimError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClaimError::OwnerNotHuman => write!(f, "owner identity does not carry AgentType::Human"),
+            ClaimError::OwnerNotHuman => {
+                write!(f, "owner identity does not carry AgentType::Human")
+            }
             ClaimError::KeyAlreadyClaimed { by } => {
                 write!(f, "executor key already claimed by {}", by)
             }
@@ -255,11 +257,11 @@ pub fn owner_of(state: &KeyState) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::agent::kel::adapter::MemoryAdapter;
+    use crate::agent::kel::adapter::{KelAdapter, MonotonicityCache};
     use crate::agent::kel::recovery::did_key_of;
     use crate::agent::kel::{
         fold, incept_human, recovery, KeyEventBody, RecoveryAuthority, RevocationReason,
     };
-    use crate::agent::kel::adapter::{KelAdapter, MonotonicityCache};
     use crate::agent::resolver::{AgentLanguageResolver, ReverseIndex, Validity};
     use did_key::{generate, Ed25519KeyPair};
     use std::sync::Arc;
@@ -455,7 +457,10 @@ mod tests {
         // assistant's key_id in the signature.
         //
         // Instead, demonstrate via the state check: sign-only has no delegate.
-        assert!(!asst_state.key_history.iter().any(|kv| kv.entry.scope.delegate));
+        assert!(!asst_state
+            .key_history
+            .iter()
+            .any(|kv| kv.entry.scope.delegate));
     }
 
     #[test]
@@ -521,13 +526,15 @@ mod tests {
 
         // New key active.
         assert_eq!(state_resumed.keys_at(state_resumed.head_seq()).len(), 1);
-        assert_eq!(state_resumed.keys_at(state_resumed.head_seq())[0].id, new_key.id);
+        assert_eq!(
+            state_resumed.keys_at(state_resumed.head_seq())[0].id,
+            new_key.id
+        );
     }
 
     #[test]
     fn retire_permanent() {
-        let (_, owner_scid, owner_key_id, owner_kp, asst_events, _, _) =
-            setup_claimed_assistant();
+        let (_, owner_scid, owner_key_id, owner_kp, asst_events, _, _) = setup_claimed_assistant();
         let asst_state = fold(&asst_events).unwrap();
 
         // Retire the assistant.
@@ -564,8 +571,7 @@ mod tests {
 
     #[test]
     fn pre_pause_signatures_valid() {
-        let (_, owner_scid, owner_key_id, owner_kp, asst_events, _, _) =
-            setup_claimed_assistant();
+        let (_, owner_scid, owner_key_id, owner_kp, asst_events, _, _) = setup_claimed_assistant();
         let asst_state = fold(&asst_events).unwrap();
         let asst_key_id = asst_state.keys_at(0)[0].id.clone();
 
