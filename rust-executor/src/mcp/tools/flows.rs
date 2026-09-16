@@ -283,7 +283,13 @@ impl Ad4mMcpHandler {
             &flows,
         )
         .await;
-        Ok(Some(derived.into_iter().next().unwrap_or(record)))
+        Ok(Some(
+            derived
+                .into_iter()
+                .next()
+                .map(|df| df.record)
+                .unwrap_or(record),
+        ))
     }
 
     /// Get available actions for an expression in a flow
