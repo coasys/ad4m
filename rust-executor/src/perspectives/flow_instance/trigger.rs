@@ -14,14 +14,14 @@
 //! store only after the wait, so it sees every link that queued it.
 //!
 //! **What triggers.** Proposal links (the atom fields and `flow/instance`),
-//! votes (`acceptedBy`) and `FlowInstance` rows (`flow/flow_uri`,
+//! votes (`acceptedBy`) and `FlowInstance` instances (`flow/flow_uri`,
 //! `flow/base`) — additions and removals alike, since deleting a vote
 //! regresses the state and the cache must follow. A role revocation
 //! tombstone (`flow/role_grant_revoked`, #1027) triggers too, but names a
-//! role row rather than an instance, and any instance's gate may read that
-//! row — so it sweeps every instance. **What does not.** Chat, tasks,
+//! role instance rather than a flow instance, and any flow instance's gate may
+//! read it — so it sweeps every flow instance. **What does not.** Chat, tasks,
 //! anything outside the flow vocabulary; and a peer's legacy `Shared` cache
-//! or mark, which this replica neither reads nor mirrors. Role rows
+//! or mark, which this replica neither reads nor mirrors. Role instances
 //! themselves (`fromRole` grants) are not in the vocabulary — they are
 //! whatever class the flow author chose — so a new grant is folded on the
 //! next flow-relevant diff or local vote rather than the moment it lands.
@@ -49,14 +49,14 @@ pub const FLOW_PASS_DEBOUNCE: Duration = Duration::from_millis(300);
 /// case — a diff with nothing from the flow vocabulary in it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FlowTouch {
-    /// `FlowInstance` URIs the diff names directly: the row's own links, or
+    /// `FlowInstance` URIs the diff names directly: the flow instance's own links, or
     /// a proposal's `flow/instance` link.
     pub instances: HashSet<String>,
     /// Proposal URIs whose instance the diff does not name (a vote, a field
     /// link). Resolved against the store when the pass runs.
     pub proposals: HashSet<String>,
-    /// The diff carried a role revocation tombstone. It names a role row,
-    /// not an instance, and a row can gate any instance's votes — so the
+    /// The diff carried a role revocation tombstone. It names a role instance,
+    /// not a flow instance, and a role instance can gate any flow instance's votes — so the
     /// pass sweeps every instance in the perspective.
     pub every_instance: bool,
 }
@@ -265,7 +265,7 @@ mod tests {
         assert!(FlowTouch::of_diff(&diff).is_empty());
     }
 
-    /// Instance rows and a proposal's `flow/instance` link name the instance
+    /// Flow instances and a proposal's `flow/instance` link name the instance
     /// outright; votes and field links name only the proposal, which the
     /// pass resolves. Removals count the same as additions.
     #[test]
@@ -304,8 +304,8 @@ mod tests {
         );
     }
 
-    /// A role revocation names a row, not an instance, and any instance's
-    /// gate may read that row — so it touches every instance (#1027).
+    /// A role revocation names a role instance, not a flow instance, and any
+    /// flow instance's gate may read it — so it touches every flow instance (#1027).
     #[test]
     fn a_role_revocation_touches_every_instance() {
         let diff = DecoratedPerspectiveDiff::from_additions(vec![link(

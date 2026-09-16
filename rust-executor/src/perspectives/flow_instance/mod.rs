@@ -32,7 +32,7 @@
 //!   ▼ FlowInstance::read_set  ← ONLY store access in a state read
 //!      ├─ proposals (TransitionAtoms from above)
 //!      └─ resolve_role_grants per gated target state  (roles.rs)
-//!         Reads each candidate's role rows and their history — grant time,
+//!         Reads each candidate's role instances and their history — grant time,
 //!         signed + authorised revocation tombstones — into RoleGrant windows.
 //!         Decides nothing about any particular vote.
 //!   │
@@ -100,7 +100,7 @@ use roles::{eligible_votes, resolve_role_grants, RoleGrant};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-/// A running flow: its identity row plus the definition it runs. Built once
+/// A running flow: its identity instance plus the definition it runs. Built once
 /// per read; borrows the definition from the caller's catalogue.
 #[derive(Debug)]
 pub struct FlowInstance<'a> {
@@ -136,12 +136,12 @@ pub struct ReadSet {
     /// The state the walk starts from — the flow definition's first state.
     pub genesis: String,
     pub proposals: Vec<ProposalLinks>,
-    /// Each voter's role rows and their history — when each row was granted
+    /// Each voter's role instances and their history — when each was granted
     /// and which signed, authorised tombstones ended it — as this replica
     /// read them (#1027). The *verdict* is not here: [`fold_read_set`] gates
     /// every vote as of its own timestamp against these windows, so a
     /// verifier re-runs that decision itself. What it still takes on trust
-    /// is the history: the rows and tombstones are cited by ID, author and
+    /// is the history: the role instances and tombstones are cited by ID, author and
     /// timestamp, not carried as signed links. Nothing cited is ever
     /// deleted, so every citation stays resolvable against the graph;
     /// carrying the signed links themselves is platform work this engine
@@ -207,7 +207,7 @@ pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> DerivedState {
 }
 
 impl<'a> FlowInstance<'a> {
-    /// Pair an already-loaded row with its definition from the caller's
+    /// Pair an already-loaded flow instance with its definition from the caller's
     /// catalogue.
     pub fn from_record(record: &FlowInstanceRecord, flow: &'a SHACLFlow) -> Self {
         FlowInstance {
@@ -223,8 +223,8 @@ impl<'a> FlowInstance<'a> {
         initial_state_of(self.flow)
     }
 
-    /// The flat row the guard and role translators take (`$flow.base`,
-    /// `$flow.instance`). Neither reads a state, so the row carries genesis
+    /// The flat record the guard and role translators take (`$flow.base`,
+    /// `$flow.instance`). Neither reads a state, so the record carries genesis
     /// purely to stay a valid [`FlowInstanceRecord`].
     pub fn as_record(&self) -> FlowInstanceRecord {
         FlowInstanceRecord {
@@ -238,7 +238,7 @@ impl<'a> FlowInstance<'a> {
 
     /// All I/O for a state read. Returns the proposal links of every
     /// [`TransitionAtom`] on this instance, plus one [`RoleGrant`] — the
-    /// candidate's role rows with their grant and revocation history — per
+    /// candidate's role instances with their grant and revocation history — per
     /// `(target_state, candidate_DID)` pair where the rule's `fromRole` gates
     /// that state. That is three classes of store query and no others; the
     /// fold that follows is pure over this value.
