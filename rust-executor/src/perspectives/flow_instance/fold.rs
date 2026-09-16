@@ -348,14 +348,22 @@ fn reachable(flow: &SHACLFlow, from: &str, to: &str) -> bool {
     false
 }
 
-/// Whether `to` is reachable from `from` through hops that each have at least
-/// one [`VouchedAtom`] in `atoms`.
+/// Whether `to` is reachable from `from` through hops that each carry at
+/// least one **admitted vote** — a [`VouchedAtom`] in `atoms` whose
+/// `eligible_votes` is non-empty.
 ///
-/// A path that is graph-reachable but traverses a hop with zero atoms is
-/// treated as not feasible: a flow author can declare a back-edge from a
-/// terminal state to make every downstream state look recoverable, but if
-/// nobody has ever voted on that edge the engine cannot confirm the cycle is
-/// live. Failing closed here means an unconfirmed-cycle path does not silently
+/// The threshold is deliberate, and role-aware. Declaring an edge is
+/// unilateral (any flow author); *proposing* on it is also unilateral (any
+/// participant, including one whose votes the role rule excludes — #1030
+/// decides whose votes count, and a mere-existence check would route around
+/// it). An admitted vote is the first non-unilateral evidence that the
+/// cycle is live, and it is the same admission `settle_edge` pools twenty
+/// lines down — the two readings of the atom slice must not disagree on
+/// whose voice counts. Quorum is NOT required: that would change what
+/// "feasible" means for a half-voted edge, a bigger semantic call than
+/// contention suppression needs.
+///
+/// Failing closed here means an unconfirmed-cycle path does not silently
 /// suppress contention detection in [`settle`].
 ///
 /// A state is reachable from itself regardless of atoms (the two-transitions-
@@ -368,13 +376,16 @@ fn feasibly_reachable(flow: &SHACLFlow, from: &str, to: &str, atoms: &[VouchedAt
     let mut frontier = vec![from.to_string()];
     while let Some(state) = frontier.pop() {
         for t in flow.transitions.iter().filter(|t| t.from_state == state) {
-            // Only traverse this hop if the atom pool contains at least one
-            // vouched atom for it. A phantom hop with no atoms cannot be relied
-            // on to carry the loser to its target.
-            let hop_has_atoms = atoms
-                .iter()
-                .any(|a| a.atom.from_state == state && a.atom.to_state == t.to_state);
-            if !hop_has_atoms {
+            // Only traverse this hop if some atom on it carries an admitted
+            // vote. A phantom hop (no atoms), a vote-less proposal, or an
+            // atom voted only by excluded DIDs cannot be relied on to carry
+            // the loser to its target.
+            let hop_has_admitted_vote = atoms.iter().any(|a| {
+                a.atom.from_state == state
+                    && a.atom.to_state == t.to_state
+                    && !a.eligible_votes.is_empty()
+            });
+            if !hop_has_admitted_vote {
                 continue;
             }
             if t.to_state == to {
@@ -941,6 +952,32 @@ mod tests {
             derived.state, "rejected",
             "cycle completes: approved consumed, rejected fires on revisit"
         );
+    }
+
+    /// The separating case between "someone proposed" and "the cycle is
+    /// live": an atom EXISTS on the back-edge but carries zero admitted
+    /// votes (a vote-less proposal, or one voted only by DIDs the role rule
+    /// excludes — `eligible_votes` is the role-gated list). Proposing is
+    /// unilateral, so it must not turn a reported Contention back into a
+    /// silent adjudication. This test passes under the eligible-vote
+    /// threshold and fails under a mere atom-existence check.
+    #[test]
+    fn vote_less_back_edge_atom_does_not_suppress_contention() {
+        let flow = phantom_back_edge_flow();
+        let atoms = vec![
+            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
+            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
+            // Atom exists on the back-edge, but nobody's vote was admitted.
+            vouched("a://reset", "approved", "triage", &[]),
+        ];
+
+        let derived = fold("triage", &flow, &atoms);
+
+        assert_eq!(derived.state, "triage", "walk must not leave triage");
+        let contention = derived
+            .contested
+            .expect("a vote-less proposal on the back-edge must not suppress contention");
+        assert_eq!(contention.from_state, "triage");
     }
 
     /// `feasibly_reachable` returns true when every hop on the path has atoms,
