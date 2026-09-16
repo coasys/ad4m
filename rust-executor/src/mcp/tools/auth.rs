@@ -104,11 +104,42 @@ impl Ad4mMcpHandler {
 
     /// Request a capability token (local connect flow - step 1)
     #[tool(
-        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
+        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. On an executor started with --admin-credential, the request is only auto-permitted (code returned inline) for callers that are already authenticated; otherwise the executor admin must approve the request and provide the code out-of-band. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
     )]
-    pub async fn request_capability(&self, params: Parameters<RequestCapabilityParams>) -> String {
-        let p = &params.0;
+    pub async fn request_capability(
+        &self,
+        params: Parameters<RequestCapabilityParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> String {
+        // `request_capability` is in AUTH_TOOLS, so `call_tool` never rejects it —
+        // it must stay reachable to *create* a request. Whether the request is
+        // auto-permitted is decided here, by the same check every gated tool uses.
+        let caller_authenticated = self.check_auth("request_capability", &context).await;
+        self.handle_capability_request(params.0, caller_authenticated)
+            .await
+    }
 
+    /// Body of [`Self::request_capability`], split from the transport wrapper so
+    /// tests can drive both authentication verdicts: a `RequestContext<RoleServer>`
+    /// cannot be fabricated outside rmcp (its `Peer` constructor is `pub(crate)`,
+    /// see `harness_bridge.rs`), so the wrapper stays a shim around `check_auth`
+    /// and everything decidable lives here.
+    ///
+    /// The request itself is always created — that publishes the capability-request
+    /// exception the ADAM Launcher listens for, which is the legitimate pairing
+    /// flow. What an unauthenticated caller must NOT get is the auto-permit and the
+    /// inline code: the code is the mint secret (`generate_jwt` exchanges it for a
+    /// signed ALL_CAPABILITY JWT valid on every executor surface), and returning it
+    /// to any caller that could reach the MCP port made `--admin-credential`
+    /// decorative (issue #851, sub-problem 3). On an executor without an admin
+    /// credential, `check_auth` deliberately reports every local caller as
+    /// authenticated (single-user localhost trust model), so this gate changes
+    /// nothing there.
+    pub(crate) async fn handle_capability_request(
+        &self,
+        p: RequestCapabilityParams,
+        caller_authenticated: bool,
+    ) -> String {
         let auth_info = AuthInfo {
             app_name: p.app_name.clone(),
             app_desc: p.app_desc.clone(),
@@ -120,6 +151,18 @@ impl Ad4mMcpHandler {
         };
 
         let request_id = cap_request_capability(auth_info.clone()).await;
+
+        if !caller_authenticated {
+            return json!({
+                "request_id": request_id,
+                "message": "Capability request created but NOT auto-permitted: this session is \
+                    not authenticated. The executor admin must approve the request (ADAM \
+                    Launcher), then call generate_jwt with this request_id and the code shown \
+                    to the admin. To auto-permit instead, authenticate first — send the admin \
+                    credential or an existing JWT in the Authorization header."
+            })
+            .to_string();
+        }
 
         match permit_capability(AuthInfoExtended {
             request_id: request_id.clone(),
@@ -403,5 +446,109 @@ mod auth_status_tests {
         );
         assert_eq!(v["executor_locked"], true);
         assert!(v["message"].as_str().unwrap().contains("unlockAgent"));
+    }
+}
+
+#[cfg(test)]
+mod capability_mint_tests {
+    use super::*;
+    use crate::mcp::server::McpContext;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn handler_with_admin_credential() -> Ad4mMcpHandler {
+        Ad4mMcpHandler::new(McpContext {
+            admin_credential: Some("test-admin-credential".to_string()),
+            auth_token: Arc::new(RwLock::new(None)),
+            dynamic_class_tools: false,
+        })
+    }
+
+    fn mint_params() -> RequestCapabilityParams {
+        RequestCapabilityParams {
+            app_name: "some-network-caller".to_string(),
+            app_desc: "a caller that has not authenticated".to_string(),
+            app_domain: None,
+            app_url: None,
+        }
+    }
+
+    /// The vulnerability of issue #851 sub-problem 3: anyone who could reach the
+    /// MCP port received an auto-permitted ALL_CAPABILITY mint code inline,
+    /// bypassing the admin credential entirely. The code IS the mint secret —
+    /// with it, `generate_jwt` hands out an all-capability JWT.
+    ///
+    /// This test failed on dev (b9da4e65f) before the fix: the response carried
+    /// `"code"` and "auto-permitted".
+    #[tokio::test]
+    async fn an_unauthenticated_caller_gets_no_mint_code() {
+        let handler = handler_with_admin_credential();
+        let resp = handler
+            .handle_capability_request(mint_params(), false)
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        assert!(
+            v.get("code").is_none(),
+            "unauthenticated caller received a capability mint code: {resp}"
+        );
+        // The pairing flow must survive: the request is still created, so the
+        // Launcher can show it and the admin can approve it out-of-band.
+        assert!(v["request_id"].as_str().is_some(), "response was: {resp}");
+        assert!(
+            v["message"].as_str().unwrap_or_default().contains("admin"),
+            "message should point at admin approval: {resp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_authenticated_caller_still_gets_a_permitted_code() {
+        use crate::agent::capabilities::{gen_request_key, requests_map};
+
+        let handler = handler_with_admin_credential();
+        let resp = handler.handle_capability_request(mint_params(), true).await;
+        let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        let request_id = v["request_id"].as_str().expect("request_id present");
+        let code = v["code"]
+            .as_str()
+            .expect("authenticated caller should receive the code inline");
+        // Not just an inline code: the permit must actually be registered,
+        // i.e. generate_jwt with this pair would succeed.
+        let key = gen_request_key(request_id, code);
+        assert!(
+            requests_map::get_request(&key)
+                .expect("requests map readable")
+                .is_some(),
+            "permit was not registered for the returned request_id/code"
+        );
+    }
+
+    /// The single-user localhost trust model must survive the gate: on an
+    /// executor started WITHOUT --admin-credential, `check_auth` reports a bare
+    /// local caller (no session token, no Authorization header) as
+    /// authenticated, so the auto-permit and inline code behave exactly as
+    /// before this fix. Composes the same two halves the transport wrapper
+    /// does: verdict from `check_auth_with_header`, then the request body.
+    #[tokio::test]
+    async fn without_admin_credential_a_local_caller_is_still_auto_permitted() {
+        let handler = Ad4mMcpHandler::new(McpContext {
+            admin_credential: None,
+            auth_token: Arc::new(RwLock::new(None)),
+            dynamic_class_tools: false,
+        });
+
+        let verdict = handler.check_auth_with_header(None).await;
+        assert!(
+            verdict,
+            "a no-admin-credential executor should authenticate a bare local caller"
+        );
+
+        let resp = handler
+            .handle_capability_request(mint_params(), verdict)
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
+        assert!(
+            v["code"].as_str().is_some(),
+            "single-user localhost flow should still return the code inline: {resp}"
+        );
     }
 }
