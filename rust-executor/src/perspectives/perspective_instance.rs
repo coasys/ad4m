@@ -1653,6 +1653,42 @@ impl PerspectiveInstance {
         Ok(result)
     }
 
+    /// Look up a link by value, tolerating the legacy `literal://` spelling
+    /// in the caller's probe.
+    ///
+    /// [`sign_local_link`] stores canonical ids, but a caller that authored
+    /// with the legacy spelling will reasonably present that same spelling
+    /// when removing or updating the link — while rows that predate
+    /// normalisation, or arrived pre-signed over sync, still carry whatever
+    /// spelling they were signed with. So: probe verbatim first (an exact
+    /// row always wins), then retry with the same mapping the write side
+    /// applies. See #1014.
+    fn get_link_tolerant(
+        &self,
+        link: &LinkExpression,
+    ) -> Result<Option<DecoratedLinkExpression>, AnyError> {
+        if let Some(found) = self.sparql_store.get_link(
+            &link.data.source,
+            link.data.predicate.as_deref(),
+            &link.data.target,
+            &link.author,
+            &link.timestamp,
+        )? {
+            return Ok(Some(found));
+        }
+        let normalized = link.data.normalize().with_normalized_literal_ids();
+        if normalized == link.data {
+            return Ok(None);
+        }
+        Ok(self.sparql_store.get_link(
+            &normalized.source,
+            normalized.predicate.as_deref(),
+            &normalized.target,
+            &link.author,
+            &link.timestamp,
+        )?)
+    }
+
     pub async fn remove_link(
         &mut self,
         link_expression: LinkExpression,
@@ -1667,16 +1703,9 @@ impl PerspectiveInstance {
 
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SPARQL store
+            // Query SPARQL store (legacy-spelling tolerant)
             let decorated_link = self
-                .sparql_store
-                .get_link(
-                    &link_expression.data.source,
-                    link_expression.data.predicate.as_deref(),
-                    &link_expression.data.target,
-                    &link_expression.author,
-                    &link_expression.timestamp,
-                )?
+                .get_link_tolerant(&link_expression)?
                 .ok_or(anyhow!("Link not found"))?;
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
@@ -1687,18 +1716,15 @@ impl PerspectiveInstance {
         } else {
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
-                &link_expression.data.source,
-                link_expression.data.predicate.as_deref(),
-                &link_expression.data.target,
-                &link_expression.author,
-                &link_expression.timestamp,
-            )? {
+            // Query SPARQL store (legacy-spelling tolerant)
+            if let Some(decorated_link) = self.get_link_tolerant(&link_expression)? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
 
-                let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
+                // The removal diff must reference the row as stored — when
+                // the probe matched through normalisation, the caller's
+                // spelling is not what replicas know.
+                let diff = PerspectiveDiff::from_removals(vec![link_from_db.clone()]);
                 let decorated_link_result =
                     DecoratedLinkExpression::from((link_from_db, status.clone()));
                 let decorated_diff =
@@ -2031,16 +2057,10 @@ impl PerspectiveInstance {
         }
         let handle = self.persisted.lock().await.clone();
 
-        // Query SPARQL store
-        let decorated_link_option = self.sparql_store.get_link(
-            &old_link.data.source,
-            old_link.data.predicate.as_deref(),
-            &old_link.data.target,
-            &old_link.author,
-            &old_link.timestamp,
-        )?;
+        // Query SPARQL store (legacy-spelling tolerant)
+        let decorated_link_option = self.get_link_tolerant(&old_link)?;
 
-        let (_link, link_status) = match decorated_link_option {
+        let (old_link_from_db, link_status) = match decorated_link_option {
             Some(decorated) => {
                 let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
                 (LinkExpression::from(decorated), status)
@@ -2068,19 +2088,21 @@ impl PerspectiveInstance {
                 .ok_or(anyhow!("Batch not found"))?;
             let diff = &mut batch.diff;
 
-            diff.removals.push(old_link.clone());
+            diff.removals.push(old_link_from_db.clone());
             let mut new_link_expr = new_link_expression.clone();
             new_link_expr.status = Some(link_status.clone());
             diff.additions.push(new_link_expr.clone());
 
             Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
         } else {
-            let diff =
-                PerspectiveDiff::from(vec![new_link_expression.clone()], vec![old_link.clone()]);
+            let diff = PerspectiveDiff::from(
+                vec![new_link_expression.clone()],
+                vec![old_link_from_db.clone()],
+            );
             let decorated_new_link_expression =
                 DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
             let decorated_old_link =
-                DecoratedLinkExpression::from((old_link.clone(), link_status.clone()));
+                DecoratedLinkExpression::from((old_link_from_db.clone(), link_status.clone()));
             let decorated_diff = DecoratedPerspectiveDiff::from(
                 vec![decorated_new_link_expression.clone()],
                 vec![decorated_old_link.clone()],
@@ -2158,14 +2180,8 @@ impl PerspectiveInstance {
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
-            // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
-                &link.data.source,
-                link.data.predicate.as_deref(),
-                &link.data.target,
-                &link.author,
-                &link.timestamp,
-            )? {
+            // Query SPARQL store (legacy-spelling tolerant)
+            if let Some(decorated_link) = self.get_link_tolerant(&link)? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
                 existing_links.push((link_from_db, status));
@@ -7307,6 +7323,115 @@ mod tests {
 
         assert_eq!(stored.data.source, "literal://string:from-old-peer");
         assert_eq!(stored.data.target, "literal://string:payload");
+    }
+
+    /// The write side normalises, so the lookup-by-value side must tolerate
+    /// the legacy spelling too — otherwise a caller that consistently speaks
+    /// legacy breaks on `addLink` → `removeLink`, a round trip that worked
+    /// before the guard (#1014, round-2 review finding).
+    #[tokio::test]
+    async fn legacy_spelled_remove_link_finds_the_normalized_row() {
+        let mut perspective = setup().await;
+        let legacy = Link {
+            source: "literal://string:legacy-channel".to_string(),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: "literal://string:legacy%20body".to_string(),
+        };
+
+        let stored = perspective
+            .add_link(
+                legacy.clone(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        // Probe with the caller's original legacy spelling.
+        let mut probe: LinkExpression = stored.clone().into();
+        probe.data = legacy;
+
+        perspective.remove_link(probe, None).await.unwrap();
+        assert!(perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// The quiet variant: `remove_links` filters to links it can find, so a
+    /// legacy-spelled probe used to be silently skipped — success with a
+    /// short result array and the row still present.
+    #[tokio::test]
+    async fn legacy_spelled_links_are_not_silently_skipped_in_batch_removal() {
+        let mut perspective = setup().await;
+        let legacy = Link {
+            source: "literal://string:batch-src".to_string(),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: "literal://string:batch-tgt".to_string(),
+        };
+        let stored = perspective
+            .add_link(
+                legacy.clone(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        let mut probe: LinkExpression = stored.clone().into();
+        probe.data = legacy;
+
+        let removed = perspective.remove_links(vec![probe], None).await.unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(perspective
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    /// `update_link` must treat its two arguments alike: the new link goes
+    /// through `sign_local_link`, so the old-link probe has to tolerate the
+    /// legacy spelling the caller authored with.
+    #[tokio::test]
+    async fn legacy_spelled_update_link_finds_the_old_row() {
+        let mut perspective = setup().await;
+        let legacy = Link {
+            source: "literal://string:update-src".to_string(),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: "literal://string:old-value".to_string(),
+        };
+        let stored = perspective
+            .add_link(
+                legacy.clone(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        let mut probe: LinkExpression = stored.clone().into();
+        probe.data = legacy;
+
+        let new_link = Link {
+            source: "literal://string:update-src".to_string(),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: "literal://string:new-value".to_string(),
+        };
+
+        let updated = perspective
+            .update_link(probe, new_link, None, &AgentContext::main_agent())
+            .await
+            .unwrap();
+        assert_eq!(updated.data.target, "literal:string:new-value");
+
+        let links = perspective.get_links(&LinkQuery::default()).await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].data.target, "literal:string:new-value");
     }
 
     #[tokio::test]

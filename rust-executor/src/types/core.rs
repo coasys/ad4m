@@ -126,6 +126,10 @@ impl Link {
     /// expression arriving over sync, or `addLinkExpression` input — because
     /// rewriting signed data invalidates the proof and diverges replicas
     /// (#1014).
+    ///
+    /// The predicate is deliberately left untouched: predicates name
+    /// relations and are never literal *expressions*, so there is no legacy
+    /// `literal://` predicate spelling to map from.
     pub fn with_normalized_literal_ids(self) -> Link {
         fn normalize(value: String) -> String {
             match normalize_legacy_literal(&value) {
