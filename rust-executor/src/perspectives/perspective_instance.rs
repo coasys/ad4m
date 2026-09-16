@@ -537,6 +537,23 @@ impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
     }
 }
 
+/// Sign a link authored by this executor's user.
+///
+/// This is the single seam where locally-minted links — GraphQL/WS
+/// `addLink` / `addLinks` / `linkMutations` / `updateLink` and the batch
+/// commit path all funnel through it — get their legacy `literal://` ids
+/// normalised (the same [`Link::with_normalized_literal_ids`] mapping the MCP
+/// write surface applies) before the signature is computed.
+///
+/// Deliberately NOT applied to `add_link_expression` (its input is already
+/// signed by some agent — rewriting the data would break the proof) nor
+/// anywhere on the sync path (`persist_link_diff`): links from peers must be
+/// stored exactly as the peer signed them, however malformed, or the same
+/// logical link ends up with different ids on different replicas. See #1014.
+fn sign_local_link(link: Link, context: &AgentContext) -> Result<Expression<Link>, AnyError> {
+    create_signed_expression(link.normalize().with_normalized_literal_ids(), context)
+}
+
 impl PerspectiveInstance {
     pub fn new(handle: PerspectiveHandle, created_from_join: Option<bool>) -> Self {
         // Build per-perspective data path for persistent SPARQL store
@@ -1616,7 +1633,7 @@ impl PerspectiveInstance {
             crate::billing::check_compute_credits(email)?;
         }
         link.validate()?;
-        let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
+        let link_expr: LinkExpression = sign_local_link(link, context)?.into();
         let result = self
             .add_link_expression(link_expr, status, batch_id)
             .await?;
@@ -1862,7 +1879,7 @@ impl PerspectiveInstance {
         }
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
-            .map(|l| create_signed_expression(l.normalize(), context).map(LinkExpression::from))
+            .map(|l| sign_local_link(l, context).map(LinkExpression::from))
             .collect();
         let link_expressions = link_expressions?;
 
@@ -1942,7 +1959,7 @@ impl PerspectiveInstance {
         }
         let additions = addition_links
             .into_iter()
-            .map(|l| create_signed_expression(l.normalize(), context))
+            .map(|l| sign_local_link(l, context))
             .map(|r| r.map(LinkExpression::from))
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
         let removals = mutations
@@ -2042,8 +2059,7 @@ impl PerspectiveInstance {
             }
         };
 
-        let new_link_expression =
-            LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
+        let new_link_expression = LinkExpression::from(sign_local_link(new_link, context)?);
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -6420,7 +6436,7 @@ impl PerspectiveInstance {
         // Process additions
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
+            let signed_expr = sign_local_link(link.data, context)?;
             let decorated =
                 DecoratedLinkExpression::from((LinkExpression::from(signed_expr), status.clone()));
 
@@ -7209,6 +7225,88 @@ mod tests {
         // Ensure the link is no longer present
         let links_after_removal = perspective.get_links(&query).await.unwrap();
         assert!(!links_after_removal.contains(&expression));
+    }
+
+    /// #1014 write-path guard: a locally-authored link using the legacy
+    /// `literal://<kind>:<value>` spelling is stored under the canonical
+    /// single-colon form — the same normalisation the MCP surface applies —
+    /// so the GraphQL/WS path can no longer mint ids that poison SPARQL reads.
+    #[tokio::test]
+    async fn local_authoring_normalizes_legacy_literal_ids() {
+        let mut perspective = setup().await;
+        let link = Link {
+            source: "literal://string:legacy-channel".to_string(),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: "literal://string:legacy%20body".to_string(),
+        };
+
+        let expression = perspective
+            .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+            .await
+            .unwrap();
+
+        assert_eq!(expression.data.source, "literal:string:legacy-channel");
+        assert_eq!(expression.data.target, "literal:string:legacy%20body");
+
+        let links = perspective.get_links(&LinkQuery::default()).await.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].data.source, "literal:string:legacy-channel");
+        assert_eq!(links[0].data.target, "literal:string:legacy%20body");
+    }
+
+    /// Already-canonical ids pass through the authoring boundary
+    /// byte-identical — the guard rewrites nothing but the legacy spelling.
+    #[tokio::test]
+    async fn local_authoring_leaves_canonical_ids_untouched() {
+        let mut perspective = setup().await;
+        let link = Link {
+            source: "literal:string:already-canonical".to_string(),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: "ad4m://obj/abc123".to_string(),
+        };
+
+        let expression = perspective
+            .add_link(
+                link.clone(),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(expression.data.source, link.source);
+        assert_eq!(expression.data.target, link.target);
+        assert_eq!(expression.data.predicate, link.predicate);
+    }
+
+    /// Sync tolerance is untouched: a pre-signed expression carrying a legacy
+    /// id — the shape `persist_link_diff` receives from a peer, and
+    /// `addLinkExpression` receives from a client — is stored exactly as
+    /// signed. Normalising it would invalidate the proof and give the same
+    /// logical link different ids on different replicas (#1014).
+    #[tokio::test]
+    async fn presigned_expressions_keep_legacy_ids_unchanged() {
+        let mut perspective = setup().await;
+        let context = AgentContext::main_agent();
+        let malformed = Link {
+            source: "literal://string:from-old-peer".to_string(),
+            predicate: Some("ad4m://has_child".to_string()),
+            target: "literal://string:payload".to_string(),
+        };
+
+        // Sign the malformed data as-is, like an old executor would have.
+        let presigned: LinkExpression = create_signed_expression(malformed.normalize(), &context)
+            .unwrap()
+            .into();
+
+        let stored = perspective
+            .add_link_expression(presigned.clone(), LinkStatus::Local, None)
+            .await
+            .unwrap();
+
+        assert_eq!(stored.data.source, "literal://string:from-old-peer");
+        assert_eq!(stored.data.target, "literal://string:payload");
     }
 
     #[tokio::test]
