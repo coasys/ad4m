@@ -283,6 +283,11 @@ lazy_static! {
 /// publishes can overlap; holding this across the read and the write means the
 /// last one to finish always carries the latest stored profile, never an older
 /// snapshot that happened to be slower on the network.
+///
+/// Process-wide rather than per-DID on purpose: every agent publishes through
+/// the one agent-language runtime, which runs requests serially, so a stuck
+/// publish already blocks other users there. A per-DID lock would add
+/// bookkeeping without decoupling them.
 static AGENT_PUBLISH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl AgentService {
@@ -558,13 +563,15 @@ impl AgentService {
     /// Works for both the main agent and managed users.
     /// Strips link decorations before publishing.
     pub async fn publish_agent_to_language(context: &AgentContext) -> Result<(), AnyError> {
-        let _publish_guard = AGENT_PUBLISH_LOCK.lock().await;
         let controller = crate::languages::LanguageController::global_instance();
         let agent_lang = controller
             .get_agent_language()
             .await
             .map_err(|e| anyhow!("Agent language not available: {}", e))?;
 
+        // Must be taken before the read below, not after: reading the profile
+        // outside the lock would let a stale snapshot be published last.
+        let _publish_guard = AGENT_PUBLISH_LOCK.lock().await;
         let agent = Self::get_agent_for_context(context)?;
         let context_did = did_for_context(context)?;
         if agent.did != context_did {
