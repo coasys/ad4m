@@ -14,7 +14,8 @@ use std::collections::HashMap;
 ///                  "existing": [{ "id", "title", "class" }, …],
 ///                  "fields": [{ "name", "required", "hint" }],
 ///                  "relations": [{ "name", "targetClass", "hint" }] }],
-///    "transcript": [{ "speaker", "speakerDid"?, "text", "timestamp"? }] }`.
+///    "transcript": [{ "speaker", "speakerDid"? (same-name collisions only),
+///                     "text", "timestamp"? }] }`.
 ///
 /// `existing` maps a class's local name to the instances already in the graph
 /// (`id` = base URI, `title` = the class's declared identity value, `class` =
@@ -51,12 +52,18 @@ use std::collections::HashMap;
 /// safely pass `&[]`.
 ///
 /// `speaker_names` maps a raw DID string to the human-readable display name the
-/// LLM should see as `"speaker"`. When a DID is found in the map the prompt
-/// renders the name and adds `"speakerDid"` so callers that need the
-/// cryptographic identity still have it. An unknown DID renders verbatim
-/// (no `"speakerDid"` field). Build this map with [`build_speaker_name_map`]
-/// for production callers; pass `&HashMap::new()` in tests that supply
-/// human-readable names directly in [`TranscriptTurn::speaker`].
+/// LLM should see as `"speaker"`. An unknown DID renders verbatim.
+///
+/// `"speakerDid"` has exactly one job — disambiguation: it is emitted only
+/// when two *different* DIDs in this transcript resolve to the *same*
+/// display name, so the model can still tell the speakers apart. In every
+/// other case the field is omitted: the LLM is the sole consumer of this
+/// JSON, the preamble tells it to reason about identity via `speaker`, and a
+/// per-turn field the model is never told how to act on buys nothing on an
+/// empirically-tuned prompt (the #1013 standard). Build the map with
+/// [`build_speaker_name_map`] for production callers; pass `&HashMap::new()`
+/// in tests that supply human-readable names directly in
+/// [`TranscriptTurn::speaker`].
 pub fn build_interpretation_input(
     shapes: &[ModelShape],
     transcript: &[TranscriptTurn],
@@ -176,14 +183,33 @@ pub fn build_interpretation_input(
             })
         })
         .collect();
+    // A display name is ambiguous when two different DIDs in this transcript
+    // resolve to it — only then does `speakerDid` have a job (see the doc
+    // comment above).
+    let ambiguous_names: std::collections::HashSet<&str> = {
+        let mut by_name: HashMap<&str, &str> = HashMap::new();
+        let mut ambiguous = std::collections::HashSet::new();
+        for t in transcript {
+            if let Some(name) = speaker_names.get(&t.speaker) {
+                match by_name.get(name.as_str()) {
+                    Some(&prior_did) if prior_did != t.speaker.as_str() => {
+                        ambiguous.insert(name.as_str());
+                    }
+                    _ => {
+                        by_name.insert(name.as_str(), t.speaker.as_str());
+                    }
+                }
+            }
+        }
+        ambiguous
+    };
     let turns: Vec<serde_json::Value> = transcript
         .iter()
         .map(|t| {
             let resolved = speaker_names.get(&t.speaker);
             let speaker_label = resolved.map(|s| s.as_str()).unwrap_or(t.speaker.as_str());
             let mut obj = serde_json::json!({ "speaker": speaker_label, "text": t.text });
-            if resolved.is_some() {
-                // Keep the raw DID available for callers that need cryptographic identity.
+            if resolved.is_some_and(|name| ambiguous_names.contains(name.as_str())) {
                 obj["speakerDid"] = serde_json::json!(t.speaker);
             }
             if !t.timestamp.is_empty() {
@@ -322,9 +348,10 @@ You receive a JSON object with these fields:
     optional `properties` object shows its *current state* so you can judge
     whether new turns continue that instance or belong to a fresh one.
   - `transcript`: an array of turns `{speaker, text}` and, when known,
-    `timestamp` (the source link's RFC3339 time) and `speakerDid` (the
-    signing agent's raw DID, present when `speaker` was resolved to a
-    human-readable display name — use `speaker` for identity reasoning).
+    `timestamp` (the source link's RFC3339 time). Use `speaker` for identity
+    reasoning. When two different participants share the same display name,
+    each of their turns also carries `speakerDid` (the signing agent's raw
+    DID) — use it only to tell those same-named speakers apart.
   - `active_flows` (OPTIONAL — present only when flows are running on this
     scope): an array of live `FlowInstance` summaries. Each entry has an
     `instance` URI, the `subject` base expression it rides on, the `flow`
@@ -1236,8 +1263,9 @@ mod tests {
         );
     }
 
-    /// Resolved DID renders as the human name; raw DID is preserved in `speakerDid`.
-    /// This test fails on the unfixed code (before the speaker_names parameter).
+    /// Resolved DID renders as the human name; with no same-name collision the
+    /// `speakerDid` field is omitted — it has exactly one job (disambiguation)
+    /// and costs prompt tokens per turn otherwise.
     #[test]
     fn speaker_did_resolves_to_name_when_map_provided() {
         let did = "did:key:z6MkAlice1234567890";
@@ -1250,9 +1278,44 @@ mod tests {
             v["transcript"][0]["speaker"], "Alice",
             "resolved speaker must appear as the display name, not the raw DID"
         );
+        assert!(
+            v["transcript"][0].get("speakerDid").is_none(),
+            "speakerDid must be omitted when the display name is unambiguous"
+        );
+    }
+
+    /// Two different DIDs resolving to the same display name: every turn of
+    /// the colliding name carries `speakerDid`, so the model can still tell
+    /// the speakers apart — the one job the field has. A third,
+    /// uniquely-named speaker in the same transcript stays `speakerDid`-free.
+    #[test]
+    fn same_display_name_collision_adds_speaker_did_to_both() {
+        let did_a = "did:key:z6MkAlice1111";
+        let did_b = "did:key:z6MkAlice2222";
+        let did_c = "did:key:z6MkBob3333";
+        let mut names = HashMap::new();
+        names.insert(did_a.to_string(), "Alice".to_string());
+        names.insert(did_b.to_string(), "Alice".to_string());
+        names.insert(did_c.to_string(), "Bob".to_string());
+        let turns = vec![
+            TranscriptTurn::from_speaker_text(did_a, "first"),
+            TranscriptTurn::from_speaker_text(did_c, "second"),
+            TranscriptTurn::from_speaker_text(did_b, "third"),
+        ];
+        let input = build_interpretation_input(&[], &turns, &no_existing(), &[], &names);
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(v["transcript"][0]["speaker"], "Alice");
         assert_eq!(
-            v["transcript"][0]["speakerDid"], did,
-            "raw DID must be preserved in speakerDid field"
+            v["transcript"][0]["speakerDid"], did_a,
+            "colliding name: first speaker's turns must carry the DID"
+        );
+        assert_eq!(
+            v["transcript"][2]["speakerDid"], did_b,
+            "colliding name: second speaker's turns must carry the DID"
+        );
+        assert!(
+            v["transcript"][1].get("speakerDid").is_none(),
+            "uniquely-named speaker must stay speakerDid-free"
         );
     }
 
