@@ -206,7 +206,8 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    element identifies our Delivery instance by name.
     let existing = ExistingInstances::new();
     let transcript = vec![TranscriptTurn::from_speaker_text("A", "irrelevant")];
-    let prompt = build_interpretation_input(&[], &transcript, &existing, &contexts);
+    let prompt =
+        build_interpretation_input(&[], &transcript, &existing, &contexts, &Default::default());
     let parsed: serde_json::Value = serde_json::from_str(&prompt).expect("prompt is valid JSON");
     let flows_in_prompt = parsed
         .get("active_flows")

@@ -178,6 +178,44 @@ pub async fn gather_transcript_sparql(
     Ok(out)
 }
 
+/// Build a DID → display-name map for every speaker DID in `turns`.
+///
+/// Resolution order:
+/// 1. Multi-user db — looks up `username` by `did` in the `users` table.
+/// 2. Fallback — the raw DID string (no entry added to the map; callers treat
+///    a missing key as "use the DID as-is").
+///
+/// Exactly one lookup per **unique** DID, resolved or not: the common
+/// multi-agent transcript is the one where *no* speaker is in the users
+/// table (agent DIDs aren't registered users), so memoising only successes
+/// would pay a lock + query per *turn* in precisely the case #1006 is about.
+///
+/// A stored username that is empty (or whitespace) counts as unresolved —
+/// rendering an empty speaker label would be strictly worse for extraction
+/// than the raw DID it replaces.
+///
+/// The map is built once per interpretation pass and threaded into
+/// [`build_interpretation_input`], which renders the display name and keeps
+/// the raw DID alongside it only where disambiguation needs it (see there).
+pub fn build_speaker_name_map(
+    turns: &[TranscriptTurn],
+) -> std::collections::HashMap<String, String> {
+    let unique_dids: std::collections::HashSet<&str> =
+        turns.iter().map(|t| t.speaker.as_str()).collect();
+    let mut map = std::collections::HashMap::new();
+    for did in unique_dids {
+        let resolved = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_username_by_did(did).ok().flatten()
+        });
+        if let Some(name) = resolved {
+            if !name.trim().is_empty() {
+                map.insert(did.to_string(), name);
+            }
+        }
+    }
+    map
+}
+
 /// read the instances already present in the perspective for each target class
 /// into the id-keyed [`ExistingInstances`] map. Each [`InstanceContext`] carries
 /// the instance's `id` (base URI) alongside its declared identity value and
