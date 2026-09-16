@@ -51,9 +51,12 @@
 //!   an instance with no timestamp at all is an error.
 //! - `revoked_at` is the tombstone's link timestamp.
 //!
-//! Timestamps are compared as strings, the engine-wide convention (every
-//! link timestamp is millisecond RFC 3339 in UTC, see
-//! [`fold`](super::fold) § *Ordering and time*).
+//! Timestamps are compared as **parsed instants** ([`super::time`]), never
+//! as strings: they are client-asserted RFC 3339 and clients disagree on
+//! flavour (`+00:00` vs `Z`, fractional digits, non-UTC offsets), so string
+//! order diverges from instant order inside a second (#1000). Anything that
+//! cannot be placed in time fails closed — see [`RoleGrantWindow::open_at`]
+//! and [`fold`](super::fold) § *Ordering and time*.
 //!
 //! ## Authority
 //!
@@ -93,6 +96,7 @@
 //! minted token's backing names a fully resolvable history.
 
 use super::atom::{TransitionAtom, Vote};
+use super::time::parse_link_timestamp;
 use crate::perspectives::flow_context::FlowInstanceRecord;
 pub use crate::perspectives::flow_evaluator::RoleRevocation;
 use crate::perspectives::flow_evaluator::{
@@ -121,16 +125,61 @@ pub struct RoleGrantWindow {
 }
 
 impl RoleGrantWindow {
-    /// The moment the instance stopped counting, if it has.
+    /// The moment the instance stopped counting, if it has: the earliest
+    /// revocation **by parsed instant** — string `min()` would pick by
+    /// client format inside a sub-second collision (#1000).
+    ///
+    /// Fail-closed like [`Self::open_at`]: a revocation that cannot be
+    /// placed in time sorts *first*, never last. `open_at` treats such a
+    /// tombstone as closing the window outright, so any surface rendering
+    /// this answer must show that tombstone — a later, parseable one
+    /// presenting itself as the earliest (or, with no other revocations,
+    /// the instance reading as "not revoked") would be the "revocation ignored"
+    /// direction this module cannot afford.
     pub fn revoked_at(&self) -> Option<&str> {
-        self.revocations.iter().map(|r| r.at.as_str()).min()
+        self.revocations
+            .iter()
+            .min_by_key(|r| {
+                let parsed = parse_link_timestamp(&r.at);
+                (
+                    parsed.is_some(),
+                    parsed.unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC),
+                    r.at.as_str(),
+                )
+            })
+            .map(|r| r.at.as_str())
     }
 
     /// Whether the instance counted for a vote cast at `at`:
-    /// `granted_at <= at < revoked_at`. A revocation stamped with the vote's
-    /// own timestamp already gates it.
+    /// `granted_at <= at < revoked_at`, compared as parsed instants —
+    /// timestamps are client-asserted and clients disagree on RFC 3339
+    /// flavour, so string comparison would gate same-second votes by client
+    /// library (#1000).
+    ///
+    /// **Anything that cannot be placed in time fails closed.** An
+    /// unparseable `at` or `granted_at` means the window never opens for
+    /// that question; an unparseable revocation timestamp closes the window
+    /// outright — an authorised tombstone exists, so the safe reading is
+    /// "revoked", never "revocation ignored". A revocation stamped with the
+    /// vote's own timestamp already gates it.
     pub fn open_at(&self, at: &str) -> bool {
-        self.granted_at.as_str() <= at && self.revoked_at().is_none_or(|revoked| at < revoked)
+        let (Some(at), Some(granted)) = (
+            parse_link_timestamp(at),
+            parse_link_timestamp(&self.granted_at),
+        ) else {
+            return false;
+        };
+        if granted > at {
+            return false;
+        }
+        let mut revoked: Option<chrono::DateTime<chrono::Utc>> = None;
+        for r in &self.revocations {
+            match parse_link_timestamp(&r.at) {
+                None => return false,
+                Some(instant) => revoked = Some(revoked.map_or(instant, |m| m.min(instant))),
+            }
+        }
+        revoked.is_none_or(|revoked| at < revoked)
     }
 }
 
@@ -273,9 +322,13 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
             let history = perspective
                 .role_grant_timestamps(&item.id, grant_predicate, did)
                 .await?;
-            let Some(granted_at) = history.granted_at.or_else(|| instance_timestamp(item)) else {
+            let Some(granted_at) = history
+                .granted_at
+                .or_else(|| instance_timestamp(item))
+                .filter(|t| parse_link_timestamp(t).is_some())
+            else {
                 anyhow::bail!(
-                    "resolve_role_grants: role instance `{}` (`{}`) carries no timestamp, so the grant cannot be placed in time; refusing to gate (fail-closed)",
+                    "resolve_role_grants: role instance `{}` (`{}`) carries no RFC 3339-parseable timestamp, so the grant cannot be placed in time; refusing to gate (fail-closed)",
                     item.id,
                     role.class_name
                 );
@@ -287,7 +340,13 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
                 .into_iter()
                 .filter(|r| revocation_authorised(&input, &r.by))
                 .collect();
-            revocations.sort_by(|a, b| (&a.at, &a.by).cmp(&(&b.at, &b.by)));
+            revocations.sort_by(|a, b| {
+                (parse_link_timestamp(&a.at), &a.at, &a.by).cmp(&(
+                    parse_link_timestamp(&b.at),
+                    &b.at,
+                    &b.by,
+                ))
+            });
             revocations.dedup();
             windows.push(RoleGrantWindow {
                 instance_id: item.id.clone(),
@@ -295,8 +354,18 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
                 revocations,
             });
         }
-        windows
-            .sort_by(|a, b| (&a.granted_at, &a.instance_id).cmp(&(&b.granted_at, &b.instance_id)));
+        windows.sort_by(|a, b| {
+            (
+                parse_link_timestamp(&a.granted_at),
+                &a.granted_at,
+                &a.instance_id,
+            )
+                .cmp(&(
+                    parse_link_timestamp(&b.granted_at),
+                    &b.granted_at,
+                    &b.instance_id,
+                ))
+        });
 
         grants.push(RoleGrant {
             to_state: to_state.to_string(),
@@ -449,7 +518,7 @@ mod tests {
 
         async fn role_grant_timestamps(
             &self,
-            _row_id: &str,
+            _instance_id: &str,
             _grant_predicate: Option<&str>,
             did: &str,
         ) -> anyhow::Result<RoleGrantTimestamps> {
@@ -531,7 +600,7 @@ mod tests {
                      "where": { "status": { "matches": ".*" } } }), ""),
             ("a role instance that cannot be placed in time",
              RoleStub { undated_instances: true, ..members(&[ALICE]) },
-             json!({ "className": "ns://Reviewer", "didProperty": "agent" }), "no timestamp"),
+             json!({ "className": "ns://Reviewer", "didProperty": "agent" }), "cannot be placed in time"),
         ];
 
         for (name, stub, role_json, expect_contains) in cases {
@@ -781,5 +850,27 @@ mod tests {
             .all(|w| w.granted_at == T0 && w.revocations.is_empty()));
         assert!(bob.eligible_at(NOW, None));
         assert!(!alice.eligible_at(NOW, None));
+    }
+
+    /// `revoked_at` must share `open_at`'s fail direction: a revocation that
+    /// cannot be placed in time closes the window (`open_at`), so it is also
+    /// the one `revoked_at` surfaces — never out-ranked by a later,
+    /// parseable tombstone, and never dropped into "not revoked".
+    #[test]
+    fn an_unparseable_revocation_is_surfaced_never_ignored() {
+        let w = RoleGrantWindow {
+            instance_id: "r0".into(),
+            granted_at: T0.into(),
+            revocations: vec![revocation(ADMIN, "not-a-timestamp"), revocation(ADMIN, T2)],
+        };
+        assert_eq!(w.revoked_at(), Some("not-a-timestamp"));
+        assert!(!w.open_at(NOW), "unparseable revocation closes the window");
+
+        let only_garbage = RoleGrantWindow {
+            instance_id: "r0".into(),
+            granted_at: T0.into(),
+            revocations: vec![revocation(ADMIN, "not-a-timestamp")],
+        };
+        assert_eq!(only_garbage.revoked_at(), Some("not-a-timestamp"));
     }
 }

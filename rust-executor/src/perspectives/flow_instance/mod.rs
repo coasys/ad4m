@@ -83,8 +83,11 @@
 pub mod accept;
 pub mod atom;
 pub mod fold;
+#[cfg(test)]
+mod ordering_tests;
 pub mod pass;
 pub mod roles;
+pub mod time;
 pub mod trigger;
 
 pub(crate) use pass::local_cached_state;
@@ -95,7 +98,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::DecoratedLinkExpression;
 use atom::{marked_fired, TransitionAtom};
-use fold::{fold, rule_for, DerivedState, VouchedAtom};
+use fold::{fold, rule_for, Contention, DerivedState, VouchedAtom};
 use roles::{eligible_votes, resolve_role_grants, RoleGrant};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -303,6 +306,22 @@ impl<'a> FlowInstance<'a> {
     }
 }
 
+/// A `FlowInstanceRecord` together with the derivation's contention verdict.
+///
+/// Returned by [`derive_states`] so consumers can honour the invariant:
+/// *anything that pays out on a completed flow must refuse a derivation with
+/// `contested.is_some()`*. Contention is a per-fold ephemeral — it is NOT
+/// stored on `FlowInstanceRecord` to prevent stale persisted values.
+#[derive(Debug, Clone)]
+pub struct DerivedFlow {
+    pub record: FlowInstanceRecord,
+    /// `Some` when two edges out of the current state both carry quorum; the
+    /// flow is irreversibly stalled and consumers must not propose into it or
+    /// present it as "awaiting votes". `None` means an ordinary settled or
+    /// waiting state.
+    pub contested: Option<Contention>,
+}
+
 /// Derive the current state of every record in one pass, replacing each
 /// `currentState` cache with the fold's answer so downstream readers act on
 /// the live derived state.
@@ -315,7 +334,7 @@ pub async fn derive_states(
     perspective: &PerspectiveInstance,
     records: &[FlowInstanceRecord],
     flows_by_uri: &HashMap<String, SHACLFlow>,
-) -> Vec<FlowInstanceRecord> {
+) -> Vec<DerivedFlow> {
     let mut out = Vec::with_capacity(records.len());
     for record in records {
         let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
@@ -325,9 +344,12 @@ pub async fn derive_states(
             .derive_state(perspective)
             .await
         {
-            Ok(derived) => out.push(FlowInstanceRecord {
-                current_state: derived.state,
-                ..record.clone()
+            Ok(derived) => out.push(DerivedFlow {
+                record: FlowInstanceRecord {
+                    current_state: derived.state,
+                    ..record.clone()
+                },
+                contested: derived.contested,
             }),
             Err(e) => log::warn!(
                 "derive_states: skipping {} — its state could not be derived: {e:#}",

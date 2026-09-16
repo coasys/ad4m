@@ -427,7 +427,7 @@ pub trait RequiresQueryable: Send + Sync {
     /// never turns into "granted since forever".
     async fn role_grant_timestamps(
         &self,
-        _row_id: &str,
+        _instance_id: &str,
         _grant_predicate: Option<&str>,
         _did: &str,
     ) -> anyhow::Result<RoleGrantTimestamps> {
@@ -468,6 +468,12 @@ impl RequiresQueryable for PerspectiveInstance {
             })?;
         let names_did = |target: &str| target_names_did(target, did, &did_literal);
 
+        // Earliest by parsed instant, not by string — grant links are
+        // client-stamped and clients disagree on RFC 3339 flavour (#1000).
+        // A link whose timestamp does not parse cannot date the grant; if
+        // none parses this stays `None`, so the caller falls back to the
+        // instance's own timestamp or fails closed.
+        use crate::perspectives::flow_instance::time::parse_link_timestamp;
         let granted_at = match grant_predicate {
             Some(pred) => self
                 .get_links(&LinkQuery {
@@ -478,8 +484,9 @@ impl RequiresQueryable for PerspectiveInstance {
                 .await?
                 .into_iter()
                 .filter(|l| names_did(&l.data.target))
-                .map(|l| l.timestamp)
-                .min(),
+                .filter_map(|l| parse_link_timestamp(&l.timestamp).map(|dt| (dt, l.timestamp)))
+                .min()
+                .map(|(_, ts)| ts),
             None => None,
         };
 
@@ -736,9 +743,27 @@ pub async fn run_engine_proposal_pass(
     // on the wrong edge and each one costs paid LLM tokens.  The evaluator
     // runs rarely and needs the freshest fold immediately before minting, so
     // the derive cost here is acceptable and correct.
-    let records =
+    let derived =
         crate::perspectives::flow_instance::derive_states(perspective, &records, &flows_by_uri)
             .await;
+    // Honour the invariant from issue #998: a contested flow is irreversibly
+    // stalled — two edges already carry quorum, so more proposals cannot resolve
+    // it. Proposing into such a flow wastes LLM tokens and misleads governance.
+    let records: Vec<_> = derived
+        .into_iter()
+        .filter_map(|df| {
+            if let Some(ref c) = df.contested {
+                log::info!(
+                    "run_engine_proposal_pass: {} is contested in state {:?}; skipping mint (issue #998)",
+                    df.record.instance_uri,
+                    c.from_state,
+                );
+                None
+            } else {
+                Some(df.record)
+            }
+        })
+        .collect();
 
     let satisfied =
         evaluate_flow_transitions(perspective, &records, &flows_by_uri, &acting_did).await;
