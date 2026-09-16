@@ -2,7 +2,9 @@
 //!
 //! The cache and the marks are `Local` (see [`pass`](super::pass)), so
 //! nothing a peer writes can update them on this replica — only this
-//! replica's own pass can. Before this module that pass ran after this
+//! replica's own pass can. `Local` is also per agent on a multi-user node,
+//! so one sync burst sweeps once per agent that keeps bookkeeping here; see
+//! [`flow_pass_agents`]. Before this module that pass ran after this
 //! replica's own vote ([`accept`](super::accept)) or mint only; a replica
 //! that merely *watched* a flow settle would never have recorded it.
 //!
@@ -160,53 +162,184 @@ impl PerspectiveInstance {
         });
     }
 
-    /// Resolve the touched proposals to their instances and sweep. Runs as
-    /// the main agent: the pass writes `Local` links only, so the signing
-    /// identity is bookkeeping rather than authority — the same context the
-    /// auto-processor's main loop uses.
+    /// Resolve the touched proposals to their instances, then sweep **once
+    /// per agent that keeps bookkeeping here** — see
+    /// [`flow_pass_agents`].
+    ///
+    /// Resolution happens once and outside that loop: which instances a diff
+    /// touched is a question about `Shared` links, so it has the same answer
+    /// for every agent. Only the recording is per agent.
     async fn run_sync_triggered_flow_pass(&mut self, touch: FlowTouch) {
-        let context = AgentContext::main_agent();
-        if touch.every_instance {
+        let instance_filter: Option<Vec<String>> = if touch.every_instance {
             log::debug!(
                 "sync-triggered flow pass on {}: a role revocation synced in; sweeping every instance",
                 self.uuid
             );
-            let outcomes = run_flow_consensus_pass(self, None, &context, None, None).await;
-            log_synced_outcomes(&outcomes);
-            return;
-        }
-        let mut instances = touch.instances;
-        for proposal in &touch.proposals {
-            let query = LinkQuery {
-                source: Some(proposal.clone()),
-                predicate: Some(FLOW_INSTANCE_PREDICATE.to_string()),
-                ..Default::default()
-            };
-            match self.get_links(&query).await {
-                // A proposal whose `flow/instance` link has not arrived is
-                // not an atom yet; that link's own arrival triggers the pass
-                // that folds it.
-                Ok(links) => instances.extend(links.into_iter().map(|l| l.data.target)),
-                Err(e) => log::warn!(
-                    "sync-triggered flow pass: resolving {proposal} to its instance failed: {e:#}"
-                ),
+            None
+        } else {
+            let mut instances = touch.instances;
+            for proposal in &touch.proposals {
+                let query = LinkQuery {
+                    source: Some(proposal.clone()),
+                    predicate: Some(FLOW_INSTANCE_PREDICATE.to_string()),
+                    ..Default::default()
+                };
+                match self.get_links(&query).await {
+                    // A proposal whose `flow/instance` link has not arrived is
+                    // not an atom yet; that link's own arrival triggers the pass
+                    // that folds it.
+                    Ok(links) => instances.extend(links.into_iter().map(|l| l.data.target)),
+                    Err(e) => log::warn!(
+                        "sync-triggered flow pass: resolving {proposal} to its instance failed: {e:#}"
+                    ),
+                }
             }
+            if instances.is_empty() {
+                return;
+            }
+            let mut instances: Vec<String> = instances.into_iter().collect();
+            instances.sort();
+            log::debug!("sync-triggered flow pass on {}: {instances:?}", self.uuid);
+            Some(instances)
+        };
+
+        for context in self.flow_pass_contexts().await {
+            let outcomes =
+                run_flow_consensus_pass(self, None, &context, None, instance_filter.as_deref())
+                    .await;
+            log_synced_outcomes(&context, &outcomes);
         }
-        if instances.is_empty() {
-            return;
+    }
+
+    /// The agents [`flow_pass_agents`] names, with the managed users read
+    /// from the user DB and narrowed to those that can access this
+    /// perspective — a user who cannot see it has no bookkeeping to keep
+    /// here, and skipping them is what bounds the cost on a node with many
+    /// tenants.
+    ///
+    /// `UserInfo` carries the DID, so this uses
+    /// [`can_access_perspective_with_did`](crate::helpers::can_access_perspective_with_did)
+    /// and never takes the wallet mutex.
+    ///
+    /// That is deliberately the *same* predicate `perspectives_ws` uses to
+    /// decide whether a managed user may read this perspective at all, so
+    /// bookkeeping is kept for exactly the agents that can read it. One
+    /// consequence worth knowing, because it is quiet: that predicate is
+    /// `is_owned_by`, which is **false for an unowned perspective** — a
+    /// perspective with no owners gets the main-agent pass only. That is
+    /// consistent (the WS API denies managed users there too, so they have
+    /// no cache to keep), and the `debug!` below names the count so the
+    /// "nobody swept" case is visible rather than inferred.
+    ///
+    /// Signing keys are **not** pre-checked. A user whose key is not in the
+    /// wallet makes that user's write fail with the pass's existing
+    /// "recording … rolled back (re-runs next pass)" warning — loud, and
+    /// harmless because the derivation is a pure fold that repeats. The
+    /// alternative, `WalletBackend::key_exists`, falls back to a blocking
+    /// HTTP call on `SharedWallet` — the very backend a multi-user node
+    /// runs — so pre-checking would trade a rare loud failure for a wallet
+    /// round-trip per user per pass. Note also that nothing here calls
+    /// `ensure_user_key`: a missing key must never be answered by minting a
+    /// fresh DID underneath an existing user.
+    ///
+    /// The single-user short-circuit here is an optimisation (skip the DB
+    /// read); the rule itself lives in `flow_pass_agents`, which is where it
+    /// is tested.
+    async fn flow_pass_contexts(&self) -> Vec<AgentContext> {
+        let multi_user = crate::user_management::is_multi_user_enabled();
+        if !multi_user {
+            return flow_pass_agents(false, Vec::new());
         }
-        let mut instances: Vec<String> = instances.into_iter().collect();
-        instances.sort();
-        log::debug!("sync-triggered flow pass on {}: {instances:?}", self.uuid);
-        let outcomes = run_flow_consensus_pass(self, None, &context, None, Some(&instances)).await;
-        log_synced_outcomes(&outcomes);
+        let handle = self.persisted.lock().await.clone();
+        let emails: Vec<String> =
+            match crate::db::Ad4mDb::with_global_instance(|db| db.list_users()) {
+                Ok(users) => {
+                    let total = users.len();
+                    let emails: Vec<String> = users
+                        .into_iter()
+                        .filter(|u| {
+                            crate::helpers::can_access_perspective_with_did(
+                                &Some(u.did.clone()),
+                                &handle,
+                            )
+                        })
+                        .map(|u| u.username)
+                        .collect();
+                    log::debug!(
+                        "sync-triggered flow pass on {}: sweeping for the main agent and {} of {} \
+                     managed user(s) with access",
+                        self.uuid,
+                        emails.len(),
+                        total
+                    );
+                    emails
+                }
+                Err(e) => {
+                    // Fail closed on the *extra* agents, not on the pass: the
+                    // main agent still sweeps, so the host's own view stays
+                    // correct and the managed users heal on the next touch.
+                    log::warn!(
+                        "sync-triggered flow pass on {}: could not list users ({e}); \
+                     running the main-agent pass only",
+                        self.uuid
+                    );
+                    Vec::new()
+                }
+            };
+        flow_pass_agents(true, emails)
     }
 }
 
-fn log_synced_outcomes(outcomes: &[super::pass::FireOutcome]) {
+/// Every agent whose `Local` bookkeeping a flow pass on this perspective
+/// must advance: the main agent always, then each managed user.
+///
+/// **Why more than one.** The derived-state cache and the fired marks are
+/// `Local` links, and managed users get their own local link space (the
+/// per-user `Local` work in flight). A single main-agent pass would leave
+/// every managed user's bookkeeping un-advanced: they would read a stale
+/// `currentState`, and their first later pass would report a settle that
+/// happened long ago as new — the `first_pass_here` catch-up in
+/// [`pass`](super::pass) suppresses the flood only once.
+///
+/// **Why all managed users and not only the online ones.** Unlike the
+/// auto-processor — where an offline user simply misses an LLM pass another
+/// loop will redo — a missed flow pass leaves a value the user *reads*
+/// stale, and nothing re-triggers it: passes run on a link touch, a local
+/// vote, or an interpretation run, so an absent user's cache would stay
+/// wrong until the next unrelated link arrives in that flow. The pass is a
+/// fold over the links present now, with no LLM call, so running it for a
+/// quiet user costs store reads and nothing else.
+///
+/// Single-user mode returns exactly `[main_agent]`, so nothing changes
+/// there. Managed users are deduplicated and ordered, so a pass sweeps in
+/// the same order every time.
+///
+/// Cost note: each context currently re-reads the shared links too
+/// (`load_shacl_flows`, `load_flow_instances`, the read set). Only the
+/// cache and mark reads are genuinely per agent. Splitting
+/// `run_flow_consensus_pass` into derive-once / record-per-agent is the
+/// optimisation to make when the per-user `Local` links land, and is left
+/// until then so this change stays reviewable against that PR.
+pub fn flow_pass_agents(multi_user: bool, managed_user_emails: Vec<String>) -> Vec<AgentContext> {
+    let mut contexts = vec![AgentContext::main_agent()];
+    if !multi_user {
+        return contexts;
+    }
+    let mut emails: Vec<String> = managed_user_emails;
+    emails.sort();
+    emails.dedup();
+    contexts.extend(emails.into_iter().map(AgentContext::for_user_email));
+    contexts
+}
+
+fn log_synced_outcomes(context: &AgentContext, outcomes: &[super::pass::FireOutcome]) {
+    let agent = match &context.user_email {
+        Some(email) => email.as_str(),
+        None => "main agent",
+    };
     for outcome in outcomes {
         log::info!(
-            "🔥 flow settled (synced in): {} {} → {} (by {:?})",
+            "🔥 flow settled (synced in, for {agent}): {} {} → {} (by {:?})",
             outcome.instance_uri,
             outcome.from_state,
             outcome.to_state,
@@ -349,5 +482,50 @@ mod tests {
             "after take, the next touch spawns again — nothing lands in a gap"
         );
         assert!(queue.take().proposals.is_empty(), "take drains");
+    }
+
+    // ---- flow_pass_agents ---------------------------------------------
+
+    fn emails(contexts: &[AgentContext]) -> Vec<Option<&str>> {
+        contexts
+            .iter()
+            .map(|c| c.user_email.as_deref())
+            .collect::<Vec<_>>()
+    }
+
+    #[test]
+    fn single_user_mode_sweeps_as_the_main_agent_only() {
+        // Even with users in the DB — a node that had multi-user switched
+        // off still has the rows — single-user mode must not fan out.
+        let contexts = flow_pass_agents(false, vec!["a@example.com".into()]);
+        assert_eq!(emails(&contexts), vec![None]);
+        assert!(contexts[0].is_main_agent);
+    }
+
+    #[test]
+    fn multi_user_sweeps_for_the_main_agent_and_every_managed_user() {
+        let contexts = flow_pass_agents(true, vec!["b@example.com".into(), "a@example.com".into()]);
+        assert_eq!(
+            emails(&contexts),
+            vec![None, Some("a@example.com"), Some("b@example.com")],
+            "main agent first, then managed users in a stable order"
+        );
+        assert!(
+            contexts[1..].iter().all(|c| !c.is_main_agent),
+            "a managed user's pass must sign as that user, not as the host"
+        );
+    }
+
+    #[test]
+    fn multi_user_with_no_managed_users_still_sweeps_for_the_main_agent() {
+        // The DB read failing, or a node before its first user signs up:
+        // the host's own view must still be maintained.
+        assert_eq!(emails(&flow_pass_agents(true, Vec::new())), vec![None]);
+    }
+
+    #[test]
+    fn a_duplicated_user_is_swept_once() {
+        let contexts = flow_pass_agents(true, vec!["a@example.com".into(), "a@example.com".into()]);
+        assert_eq!(emails(&contexts), vec![None, Some("a@example.com")]);
     }
 }

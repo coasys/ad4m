@@ -117,6 +117,10 @@ pub struct FlowInstance<'a> {
     /// The base expression this run is bound to — the task, message or
     /// whatever else the flow is about (`ad4m://task/foo`), *not* this run.
     ///
+    /// In flow-definition terms this is the run's **input**: it is the
+    /// expression whose subject classes auto-spawn matched against the
+    /// definition's `inputTypes` (`flow_spawn::spawn_candidates`).
+    ///
     /// Called `subject` rather than `baseExpression` only because that name
     /// collided with an `Ad4mModel` synthetic field (`e6362e5ca`); the
     /// template language still spells it `$flow.base`

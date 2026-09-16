@@ -144,10 +144,14 @@ pub struct FlowInstanceRecord {
     /// Instance URI — `ad4m://flow/instance/{id}` (see
     /// [`super::super::flow_classes::flow_instance_uri`]).
     pub instance_uri: String,
-    /// Base expression this instance is bound to. Named `subject` on
-    /// the `FlowInstance` class to avoid the Ad4mModel synthetic-field
-    /// collision that broke `baseExpression` in the reserved-field
-    /// rename fix (commit `e6362e5ca`).
+    /// Base expression this instance is bound to — the run's **input**:
+    /// the expression whose subject classes were matched against the flow
+    /// definition's `inputTypes` by `flow_spawn::spawn_candidates`.
+    /// Not this instance's own URI; that is `instance_uri` above.
+    ///
+    /// Named `subject` on the `FlowInstance` class to avoid the Ad4mModel
+    /// synthetic-field collision that broke `baseExpression` in the
+    /// reserved-field rename fix (commit `e6362e5ca`).
     pub subject: String,
     /// The state name this replica's consensus pass last cached for the
     /// instance (a `Local` link, #987) — or **empty** when no pass has run
