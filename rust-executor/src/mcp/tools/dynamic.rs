@@ -1017,13 +1017,14 @@ impl Ad4mMcpHandler {
                 target,
             };
 
+            // Written directly, not through the property's setter action, so
+            // `ad4m://local` has to be resolved from the shape here.
+            let status =
+                crate::mcp::shacl::resolve_property_link_status(&perspective, class_name, key)
+                    .await;
+
             if let Err(e) = perspective
-                .add_link(
-                    link,
-                    LinkStatus::Shared,
-                    Some(batch_id.clone()),
-                    &agent_context,
-                )
+                .add_link(link, status, Some(batch_id.clone()), &agent_context)
                 .await
             {
                 return format!("Error adding '{}' link (batch abandoned): {}", key, e);
@@ -1181,13 +1182,15 @@ impl Ad4mMcpHandler {
             target,
         };
 
+        let status = crate::mcp::shacl::resolve_property_link_status(
+            &perspective,
+            class_name,
+            property_name,
+        )
+        .await;
+
         if let Err(e) = perspective
-            .add_link(
-                link,
-                LinkStatus::Shared,
-                Some(batch_id.clone()),
-                &agent_context,
-            )
+            .add_link(link, status, Some(batch_id.clone()), &agent_context)
             .await
         {
             return format!(
@@ -1308,8 +1311,15 @@ impl Ad4mMcpHandler {
             target,
         };
 
+        let status = crate::mcp::shacl::resolve_property_link_status(
+            &perspective,
+            class_name,
+            collection_name,
+        )
+        .await;
+
         match perspective
-            .add_link(link, LinkStatus::Shared, None, &agent_context)
+            .add_link(link, status, None, &agent_context)
             .await
         {
             Ok(_) => serde_json::to_string_pretty(&json!({
