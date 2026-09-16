@@ -896,6 +896,8 @@ impl SparqlStore {
                         signature: proof_sig,
                         valid: proof_valid,
                         invalid: proof_valid.map(|v| !v),
+
+                        ..Default::default()
                     },
                     status,
                 };
@@ -1037,6 +1039,8 @@ impl SparqlStore {
                 signature: proof_sig,
                 valid: proof_valid,
                 invalid: proof_valid.map(|v| !v),
+
+                ..Default::default()
             },
             status,
         })
@@ -1419,6 +1423,8 @@ impl SparqlStore {
                         signature: proof_sig,
                         valid: proof_valid,
                         invalid: proof_valid.map(|v| !v),
+
+                        ..Default::default()
                     },
                     status,
                 });
@@ -1501,6 +1507,8 @@ mod tests {
                 signature: "testsig".to_string(),
                 valid: Some(true),
                 invalid: Some(false),
+
+                ..Default::default()
             },
             status: Some(LinkStatus::Shared),
         }
