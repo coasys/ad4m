@@ -295,7 +295,8 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
                 revocations,
             });
         }
-        windows.sort_by(|a, b| (&a.granted_at, &a.instance_id).cmp(&(&b.granted_at, &b.instance_id)));
+        windows
+            .sort_by(|a, b| (&a.granted_at, &a.instance_id).cmp(&(&b.granted_at, &b.instance_id)));
 
         grants.push(RoleGrant {
             to_state: to_state.to_string(),
@@ -579,7 +580,11 @@ mod tests {
         }
     }
 
-    fn window(instance_id: &str, granted_at: &str, revocations: &[(&str, &str)]) -> RoleGrantWindow {
+    fn window(
+        instance_id: &str,
+        granted_at: &str,
+        revocations: &[(&str, &str)],
+    ) -> RoleGrantWindow {
         RoleGrantWindow {
             instance_id: instance_id.into(),
             granted_at: granted_at.into(),
