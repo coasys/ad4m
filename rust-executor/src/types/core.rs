@@ -1,5 +1,6 @@
 use deno_core::{anyhow::anyhow, error::AnyError};
 use serde::{Deserialize, Deserializer, Serialize};
+use std::borrow::Cow;
 use std::fmt::Display;
 use std::str::FromStr;
 use ts_rs::TS;
@@ -94,7 +95,51 @@ impl From<LinkInput> for Link {
     }
 }
 
+/// Rewrite the legacy double-slash `literal://<kind>:<value>` form (still
+/// minted by older Flux/TypeScript `Literal` code) to the single-colon
+/// `literal:<kind>:<value>` form everything else in this executor speaks.
+///
+/// `literal://string:x` is *not* a parseable IRI — `string:x` reads as
+/// `host:port` with a non-numeric port, so oxigraph's SPARQL parser rejects
+/// `<literal://string:x>` outright and every query that inlines the value
+/// fails. Normalising means a caller that passes the legacy spelling gets the
+/// same node as one that passes the current spelling, instead of a hard SPARQL
+/// error or an unmatchable `NamedNode::new_unchecked` term (see #1014).
+///
+/// Shared by the MCP write surface and the GraphQL/WS authoring boundary
+/// ([`Link::with_normalized_literal_ids`]) so the two cannot drift.
+pub fn normalize_legacy_literal(value: &str) -> Cow<'_, str> {
+    match value.strip_prefix("literal://") {
+        // Only the `literal://<kind>:…` shape; `literal://` alone is not one.
+        Some(rest) if rest.contains(':') => Cow::Owned(format!("literal:{rest}")),
+        _ => Cow::Borrowed(value),
+    }
+}
+
 impl Link {
+    /// Rewrite legacy `literal://…` ids in source and target to the canonical
+    /// single-colon form ([`normalize_legacy_literal`]) — the same
+    /// normalisation the MCP write surface applies before storing a link.
+    ///
+    /// Only for links authored locally, *before* they are signed. Never apply
+    /// it to a link that already carries a signature — a peer-signed
+    /// expression arriving over sync, or `addLinkExpression` input — because
+    /// rewriting signed data invalidates the proof and diverges replicas
+    /// (#1014).
+    pub fn with_normalized_literal_ids(self) -> Link {
+        fn normalize(value: String) -> String {
+            match normalize_legacy_literal(&value) {
+                Cow::Owned(normalized) => normalized,
+                Cow::Borrowed(_) => value,
+            }
+        }
+        Link {
+            predicate: self.predicate,
+            source: normalize(self.source),
+            target: normalize(self.target),
+        }
+    }
+
     pub fn normalize(&self) -> Link {
         let predicate = match self.predicate.as_deref() {
             Some("") => None,

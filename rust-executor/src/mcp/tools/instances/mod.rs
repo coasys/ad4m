@@ -77,7 +77,6 @@ use crate::perspectives::model_query::types::{ModelShape, ShapeProperty, ShapeRe
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
 use crate::types::LinkQuery;
 use serde_json::{json, Map, Value};
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -506,25 +505,10 @@ pub(super) fn decoded_literal(target: &str) -> String {
     decoded
 }
 
-/// Rewrite the legacy double-slash `literal://<kind>:<value>` form (still
-/// minted by Flux's TypeScript `Literal`) to the single-colon
-/// `literal:<kind>:<value>` form everything else in this executor speaks.
-///
-/// `literal://string:x` is *not* a parseable IRI — `string:x` reads as
-/// `host:port` with a non-numeric port, so oxigraph's SPARQL parser rejects
-/// `<literal://string:x>` outright and every query that inlines the value
-/// fails (see [`generate_instance_uri`] for the same reasoning applied to
-/// minted ids). Normalising here means an agent that passes the legacy
-/// spelling — which `add_link`'s examples used to advertise — gets the same
-/// node as one that passes the current spelling, instead of a hard SPARQL
-/// error or an unmatchable `NamedNode::new_unchecked` target.
-pub(super) fn normalize_legacy_literal(value: &str) -> Cow<'_, str> {
-    match value.strip_prefix("literal://") {
-        // Only the `literal://<kind>:…` shape; `literal://` alone is not one.
-        Some(rest) if rest.contains(':') => Cow::Owned(format!("literal:{rest}")),
-        _ => Cow::Borrowed(value),
-    }
-}
+// Moved to `types/core.rs` so the GraphQL/WS authoring boundary
+// (`Link::with_normalized_literal_ids`) shares the exact same normalisation
+// as this MCP surface (#1014). Re-exported here for the existing callers.
+pub(super) use crate::types::normalize_legacy_literal;
 
 /// The *other* spelling of a `literal:` URI, or `None` if there isn't one.
 ///
