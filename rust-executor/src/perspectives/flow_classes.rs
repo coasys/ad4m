@@ -22,10 +22,20 @@
 use crate::agent::AgentContext;
 use crate::perspectives::hardwired_class::ensure_subject_class;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
+use crate::types::{Link, LinkQuery, LinkStatus};
+use ad4m_client::literal::Literal;
 
 pub(crate) const FLOW_INSTANCE_CLASS: &str = "FlowInstance";
 pub(crate) const FLOW_INSTANCE_TARGET_CLASS: &str = "ad4m://FlowInstance";
 pub(crate) const FLOW_INSTANCE_SDNA: &str = include_str!("hardwired_sdna/flow_instance.json");
+/// `FlowInstance → flowUri` — the row's identity: which `SHACLFlow` it runs.
+pub(crate) const FLOW_URI_PREDICATE: &str = "ad4m://flow/flow_uri";
+/// `FlowInstance → subject` — the base expression the flow runs on.
+pub(crate) const FLOW_BASE_PREDICATE: &str = "ad4m://flow/base";
+/// `FlowInstance → currentState` — the engine's per-replica cache of the
+/// derived state. Written [`LinkStatus::Local`] only (see
+/// [`write_local_current_state`]); the fold never reads it.
+pub(crate) const FLOW_CURRENT_STATE_PREDICATE: &str = "ad4m://flow/current_state";
 
 pub(crate) const FLOW_TRANSITION_PROPOSAL_CLASS: &str = "FlowTransitionProposal";
 pub(crate) const FLOW_TRANSITION_PROPOSAL_TARGET_CLASS: &str = "ad4m://FlowTransitionProposal";
@@ -125,10 +135,17 @@ pub(crate) async fn mint_flow_instance(
     // on the TS reader side. The `flowUri` value is the flow's canonical
     // URI (e.g. `coasys://DeliveryFlow`), not the bare name — see
     // James PR #929 R5.
+    //
+    // `currentState` is deliberately NOT in this value set: it is the
+    // engine's per-replica cache and goes in as a `Local` link below, in the
+    // same batch, so the shared row never carries a state claim for peers to
+    // read (#987). The SDNA setter is `local: true` as well, for writers that
+    // go through `update_subject`; this path writes the link directly so the
+    // status does not depend on which shape revision this perspective
+    // registered.
     let values = serde_json::json!({
         "flowUri": flow_uri,
         "subject": base_expression,
-        "currentState": initial_state,
     });
     perspective
         .create_subject(
@@ -138,11 +155,14 @@ pub(crate) async fn mint_flow_instance(
             },
             uri.clone(),
             Some(values),
-            batch_id,
+            batch_id.clone(),
             context,
         )
         .await
         .map_err(|e| anyhow::anyhow!("mint_flow_instance: create_subject failed: {e:#}"))?;
+    write_local_current_state(perspective, &uri, initial_state, batch_id, context)
+        .await
+        .map_err(|e| anyhow::anyhow!("mint_flow_instance: {e:#}"))?;
     Ok(uri)
 }
 
@@ -217,13 +237,17 @@ pub(crate) async fn write_flow_transition_proposal(
 /// Write a `FlowInstance`'s `currentState` link — the engine's **cache** of
 /// what [`crate::perspectives::flow_instance::fold_read_set`] derived.
 ///
-/// Nothing reads it back as authority; it exists so the SHACL `min_count=1`
-/// constraint stays satisfied and so a reader without a perspective (a UI, a
-/// prompt block) can see the fold's answer without walking the atoms. A peer
-/// overwriting it moves nothing.
+/// Nothing reads it back as authority; it exists so a reader without a
+/// perspective (a UI, a prompt block, a model query filtering on state) can
+/// see the fold's answer without walking the atoms. It is written
+/// [`LinkStatus::Local`]: every replica materialises only its own
+/// derivation, so a peer can neither show this replica an unverified claim
+/// nor overwrite its cache with a stale one (#987). A replica that has not
+/// derived yet simply has no `currentState` link — readers treat absence as
+/// "not yet derived", never as an error.
 ///
-/// An empty `to_state` is rejected up front: it would violate that same
-/// `min_count=1` constraint on write.
+/// An empty `to_state` is rejected up front: an empty cache would be
+/// indistinguishable from "not yet derived".
 pub(crate) async fn advance_flow_instance_state(
     perspective: &mut PerspectiveInstance,
     flow_instance_uri: &str,
@@ -233,29 +257,61 @@ pub(crate) async fn advance_flow_instance_state(
 ) -> anyhow::Result<()> {
     if to_state.is_empty() {
         return Err(anyhow::anyhow!(
-            "advance_flow_instance_state: to_state must not be empty (would violate FlowInstance.currentState min_count=1)"
+            "advance_flow_instance_state: to_state must not be empty (an empty cache reads as `not yet derived`)"
         ));
     }
     ensure_flow_model_classes(perspective, context).await?;
+    write_local_current_state(perspective, flow_instance_uri, to_state, batch_id, context)
+        .await
+        .map_err(|e| anyhow::anyhow!("advance_flow_instance_state: {e:#}"))
+}
 
-    // Property key must exactly match the SDNA `name` field (`currentState`,
-    // not `current_state`).
-    let values = serde_json::json!({ "currentState": to_state });
+/// Replace this replica's own `currentState` link with `state`, as a
+/// `Local` link. Same single-target semantics as the SDNA setter, restricted
+/// to what is ours: only existing **`Local`** `currentState` links are
+/// removed. A `Shared` value some peer wrote (the pre-#987 executor did) is
+/// left where it is — this engine deletes nothing shared, and hydration
+/// prefers the later write, which is ours.
+pub(crate) async fn write_local_current_state(
+    perspective: &mut PerspectiveInstance,
+    flow_instance_uri: &str,
+    state: &str,
+    batch_id: Option<String>,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    let existing = perspective
+        .get_links(&LinkQuery {
+            source: Some(flow_instance_uri.to_string()),
+            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+            ..Default::default()
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("reading the currentState cache failed: {e:#}"))?;
+    for link in existing
+        .into_iter()
+        .filter(|l| l.status == Some(LinkStatus::Local))
+    {
+        perspective
+            .remove_link(link.into(), batch_id.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("dropping the old currentState cache failed: {e:#}"))?;
+    }
+    let target = Literal::from_string(state.to_string())
+        .to_url()
+        .map_err(|e| anyhow::anyhow!("encoding state `{state}` failed: {e:#}"))?;
     perspective
-        .update_subject(
-            SubjectClassOption {
-                class_name: Some(FLOW_INSTANCE_CLASS.to_string()),
-                query: None,
+        .add_link(
+            Link {
+                source: flow_instance_uri.to_string(),
+                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+                target,
             },
-            flow_instance_uri.to_string(),
-            values,
+            LinkStatus::Local,
             batch_id,
             context,
         )
         .await
-        .map_err(|e| {
-            anyhow::anyhow!("advance_flow_instance_state: update_subject failed: {e:#}")
-        })?;
+        .map_err(|e| anyhow::anyhow!("writing the currentState cache failed: {e:#}"))?;
     Ok(())
 }
 
@@ -288,6 +344,17 @@ mod tests {
                 "FlowInstance SDNA missing '{expected}' property (found {names:?})",
             );
         }
+        // The predicate constants the sync trigger and the direct cache
+        // write use must be the paths the shape declares.
+        let path_of = |name: &str| {
+            props
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .and_then(|p| p["path"].as_str())
+        };
+        assert_eq!(path_of("flowUri"), Some(FLOW_URI_PREDICATE));
+        assert_eq!(path_of("subject"), Some(FLOW_BASE_PREDICATE));
+        assert_eq!(path_of("currentState"), Some(FLOW_CURRENT_STATE_PREDICATE));
     }
 
     #[test]
@@ -342,9 +409,11 @@ mod tests {
     fn mint_flow_instance_values_align_with_sdna_property_names() {
         // Guards the 2026-08-20 bug shape: values-JSON keys are matched against
         // SDNA-declared property names inside `create_subject`; a silent mismatch
-        // no-ops the write while the mint returns Ok. This test asserts the four
-        // scalar properties `mint_flow_instance` writes are exactly the ones the
-        // FlowInstance SDNA declares (identity + non-optional scalars).
+        // no-ops the write while the mint returns Ok. This test asserts the
+        // scalar properties `mint_flow_instance` passes to `create_subject`
+        // are exactly ones the FlowInstance SDNA declares. `currentState` is
+        // not among them: it bypasses the setter and goes in as a direct
+        // `Local` link (see `write_local_current_state`).
         let v = parse(FLOW_INSTANCE_SDNA);
         let props: Vec<&str> = v["properties"]
             .as_array()
@@ -352,12 +421,53 @@ mod tests {
             .iter()
             .filter_map(|p| p["name"].as_str())
             .collect();
-        for key in ["flowUri", "subject", "currentState"] {
+        for key in ["flowUri", "subject"] {
             assert!(
                 props.contains(&key),
                 "mint_flow_instance writes `{key}` but SDNA does not declare it (found {props:?})",
             );
         }
+    }
+
+    /// The `currentState` cache is per-replica (#987): the SDNA declares the
+    /// property `local`, its setter writes `local`, and the predicate the
+    /// direct write path uses is the one the shape declares — so a
+    /// `Local` link written by `write_local_current_state` hydrates as the
+    /// `currentState` property, and an `update_subject` caller lands on the
+    /// same status.
+    #[test]
+    fn current_state_property_is_local_in_sdna() {
+        let v = parse(FLOW_INSTANCE_SDNA);
+        let prop = v["properties"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"].as_str() == Some("currentState"))
+            .expect("currentState property must exist");
+        assert_eq!(
+            prop["path"].as_str(),
+            Some(FLOW_CURRENT_STATE_PREDICATE),
+            "the direct write path and the SDNA must agree on the predicate",
+        );
+        assert_eq!(
+            prop["local"].as_bool(),
+            Some(true),
+            "property must be local"
+        );
+        // Optional: a row synced from a peer carries no cache until this
+        // replica's pass runs, and `model_query` only returns instances that
+        // satisfy every `min_count >= 1` property — so a required cache would
+        // hide every remote instance.
+        assert_eq!(
+            prop["min_count"].as_u64(),
+            Some(0),
+            "currentState must be optional (min_count 0)"
+        );
+        let setter = prop["setter"].as_array().expect("setter array");
+        assert!(
+            !setter.is_empty() && setter.iter().all(|a| a["local"].as_bool() == Some(true)),
+            "every setter action must be local, got {setter:?}",
+        );
     }
 
     #[test]

@@ -149,7 +149,8 @@ const MESSAGE_SHACL = JSON.stringify({
     destructor_actions: []
 });
 
-// WakerSubscriptionManager — imported from @coasys/ad4m core
+// WakerSubscriptionManager — the canonical implementation, exported from core.
+// plugins/ad4m/wakerSubscriptionManager.ts is a re-export of this same module.
 import { WakerSubscriptionManager } from "@coasys/ad4m";
 
 // ============================================================================
@@ -170,6 +171,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     let executorProcess: ChildProcess | null = null;
     let perspectiveUuid: string = "";
     let mcpSessionId: string = "";
+    // Captured from generate_jwt so a later test can authenticate by header alone.
+    let headerOnlyToken: string = "";
     let agentDid: string = "";
 
     // Addresses for the populated perspective
@@ -207,6 +210,10 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             undefined,          // relayUrl
             true,               // enableMcp = true
             MCP_PORT,           // mcpPort
+            true,               // dynamicClassTools = true — section 4 exercises the
+                                // per-class tools, which are hidden by default. The
+                                // default (static-only) surface is covered by
+                                // mcp-static-tools.test.ts.
         );
 
         // Wait for servers to settle
@@ -257,15 +264,17 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
             // Subject class tools (higher-level)
             expect(toolNames).to.include('add_model');
-            expect(toolNames).to.include('get_models');
-            expect(toolNames).to.include('create_subject');
-            expect(toolNames).to.include('query_subjects');
-            expect(toolNames).to.include('get_subject_data');
+            expect(toolNames).to.include('describe_perspective');
+            expect(toolNames).to.include('instance_create');
+            expect(toolNames).to.include('instance_query');
+            expect(toolNames).to.include('instance_get');
+            expect(toolNames).to.include('instance_update');
+            expect(toolNames).to.include('instance_add_to_collection');
+            expect(toolNames).to.include('instance_remove_from_collection');
+            expect(toolNames).to.include('instance_remove');
+            expect(toolNames).to.include('instance_transcript');
             expect(toolNames).to.include('execute_commands');
-            expect(toolNames).to.include('set_subject_property');
-            expect(toolNames).to.include('get_subject_collection');
-            expect(toolNames).to.include('add_to_collection');
-            expect(toolNames).to.include('remove_from_collection');
+            expect(toolNames).to.include('get_documentation');
 
             // Auth tools
             expect(toolNames).to.include('request_capability');
@@ -287,11 +296,33 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }, mcpSessionId);
             expect(jwtResult.success).to.be.true;
             expect(jwtResult.token).to.be.a('string');
+            headerOnlyToken = jwtResult.token;
         });
 
         it("should confirm auth status", async function() {
             const status = await callMcpTool(MCP_BASE_URL,'auth_status', {}, mcpSessionId);
             expect(status.authenticated).to.be.true;
+        });
+
+        // A client that authenticates only by Authorization header — mcporter, the
+        // OpenClaw plugin, any .mcp.json `headers` entry — never populates the MCP
+        // session token. auth_status used to read only the session, so it answered
+        // "not authenticated" to a caller whose every other tool call succeeded, and
+        // that reading sends an agent back through a login it does not need.
+        it("should report authenticated for a header-only client on a fresh session", async function() {
+            expect(headerOnlyToken, "previous test must have produced a token").to.be.a('string');
+            const fresh = await initializeMcp(MCP_BASE_URL);
+            expect(fresh.sessionId).to.not.equal(mcpSessionId);
+
+            const status = await callMcpTool(
+                MCP_BASE_URL,
+                'auth_status',
+                {},
+                fresh.sessionId,
+                { Authorization: `Bearer ${headerOnlyToken}` },
+            );
+            expect(status.authenticated).to.be.true;
+            expect(status.executor_locked).to.be.false;
         });
     });
 
@@ -329,48 +360,48 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
         it("should create channel #general with messages", async function() {
             channel1Addr = "flux://channel-general-" + Date.now();
-            var result = await callMcpTool(MCP_BASE_URL,'create_subject', {
+            var result = await callMcpTool(MCP_BASE_URL,'instance_create', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel1Addr,
-                initial_values: JSON.stringify({ name: "general" }),
+                base_uri: channel1Addr,
+                properties: { name: "general" },
             }, mcpSessionId);
             expect(result.created).to.be.true;
 
             // Add two messages to #general
             msg1Addr = "flux://msg-" + Date.now() + "-1";
-            result = await callMcpTool(MCP_BASE_URL,'create_subject', {
+            result = await callMcpTool(MCP_BASE_URL,'instance_create', {
                 perspective_id: perspectiveUuid,
                 class_name: "Message",
-                expression_address: msg1Addr,
-                initial_values: JSON.stringify({ body: "Welcome to the channel!" }),
+                base_uri: msg1Addr,
+                properties: { body: "Welcome to the channel!" },
             }, mcpSessionId);
             expect(result.created).to.be.true;
 
             // Add message to channel's messages collection (high-level, no manual links)
-            await callMcpTool(MCP_BASE_URL,'add_to_collection', {
+            await callMcpTool(MCP_BASE_URL,'instance_add_to_collection', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel1Addr,
-                collection_name: "messages",
-                item_address: msg1Addr,
+                base_uri: channel1Addr,
+                collection: "messages",
+                item_uri: msg1Addr,
             }, mcpSessionId);
 
             msg2Addr = "flux://msg-" + Date.now() + "-2";
-            result = await callMcpTool(MCP_BASE_URL,'create_subject', {
+            result = await callMcpTool(MCP_BASE_URL,'instance_create', {
                 perspective_id: perspectiveUuid,
                 class_name: "Message",
-                expression_address: msg2Addr,
-                initial_values: JSON.stringify({ body: "Let's discuss the roadmap" }),
+                base_uri: msg2Addr,
+                properties: { body: "Let's discuss the roadmap" },
             }, mcpSessionId);
             expect(result.created).to.be.true;
 
-            await callMcpTool(MCP_BASE_URL,'add_to_collection', {
+            await callMcpTool(MCP_BASE_URL,'instance_add_to_collection', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel1Addr,
-                collection_name: "messages",
-                item_address: msg2Addr,
+                base_uri: channel1Addr,
+                collection: "messages",
+                item_uri: msg2Addr,
             }, mcpSessionId);
 
             console.log("Created #general with 2 messages");
@@ -378,29 +409,29 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
         it("should create channel #random with a message", async function() {
             channel2Addr = "flux://channel-random-" + Date.now();
-            var result = await callMcpTool(MCP_BASE_URL,'create_subject', {
+            var result = await callMcpTool(MCP_BASE_URL,'instance_create', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel2Addr,
-                initial_values: JSON.stringify({ name: "random" }),
+                base_uri: channel2Addr,
+                properties: { name: "random" },
             }, mcpSessionId);
             expect(result.created).to.be.true;
 
             msg3Addr = "flux://msg-" + Date.now() + "-3";
-            result = await callMcpTool(MCP_BASE_URL,'create_subject', {
+            result = await callMcpTool(MCP_BASE_URL,'instance_create', {
                 perspective_id: perspectiveUuid,
                 class_name: "Message",
-                expression_address: msg3Addr,
-                initial_values: JSON.stringify({ body: "Random thought of the day" }),
+                base_uri: msg3Addr,
+                properties: { body: "Random thought of the day" },
             }, mcpSessionId);
             expect(result.created).to.be.true;
 
-            await callMcpTool(MCP_BASE_URL,'add_to_collection', {
+            await callMcpTool(MCP_BASE_URL,'instance_add_to_collection', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel2Addr,
-                collection_name: "messages",
-                item_address: msg3Addr,
+                base_uri: channel2Addr,
+                collection: "messages",
+                item_uri: msg3Addr,
             }, mcpSessionId);
 
             console.log("Created #random with 1 message");
@@ -423,17 +454,17 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should discover subject classes (understand the data model)", async function() {
-            const classes = await callMcpTool(MCP_BASE_URL,'get_models', {
+            const desc = await callMcpTool(MCP_BASE_URL,'describe_perspective', {
                 perspective_id: perspectiveUuid,
             }, mcpSessionId);
-            var classStr = typeof classes === 'string' ? classes : JSON.stringify(classes);
-            expect(classStr).to.include('Channel');
-            expect(classStr).to.include('Message');
-            console.log("Bot discovered subject classes:", classStr);
+            const classNames: string[] = (desc.classes || []).map(function(c: any) { return c.name; });
+            expect(classNames).to.include('Channel');
+            expect(classNames).to.include('Message');
+            console.log("Bot discovered subject classes:", classNames.join(", "));
         });
 
         it("should list all channels", async function() {
-            const channels = await callMcpTool(MCP_BASE_URL,'query_subjects', {
+            const channels = await callMcpTool(MCP_BASE_URL,'instance_query', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
             }, mcpSessionId);
@@ -444,35 +475,34 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should read #general channel data", async function() {
-            const data = await callMcpTool(MCP_BASE_URL,'get_subject_data', {
+            const data = await callMcpTool(MCP_BASE_URL,'instance_get', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel1Addr,
+                base_uri: channel1Addr,
             }, mcpSessionId);
             var dataStr = typeof data === 'string' ? data : JSON.stringify(data);
             expect(dataStr).to.include("general");
             console.log("Bot read #general:", dataStr);
         });
 
-        it("should get messages in #general via collection", async function() {
-            const collection = await callMcpTool(MCP_BASE_URL,'get_subject_collection', {
+        it("should get messages in #general via the resolved collection", async function() {
+            const channel = await callMcpTool(MCP_BASE_URL,'instance_get', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel1Addr,
-                collection_name: "messages",
+                base_uri: channel1Addr,
             }, mcpSessionId);
-            expect(collection.items).to.be.an('array');
-            expect(collection.count).to.equal(2);
-            expect(collection.items).to.include(msg1Addr);
-            expect(collection.items).to.include(msg2Addr);
-            console.log("Bot found", collection.count, "messages in #general");
+            expect(channel.messages).to.be.an('array');
+            expect(channel.messages.length).to.equal(2);
+            expect(channel.messages).to.include(msg1Addr);
+            expect(channel.messages).to.include(msg2Addr);
+            console.log("Bot found", channel.messages.length, "messages in #general");
         });
 
         it("should read message content", async function() {
-            const data = await callMcpTool(MCP_BASE_URL,'get_subject_data', {
+            const data = await callMcpTool(MCP_BASE_URL,'instance_get', {
                 perspective_id: perspectiveUuid,
                 class_name: "Message",
-                expression_address: msg1Addr,
+                base_uri: msg1Addr,
             }, mcpSessionId);
             var dataStr = typeof data === 'string' ? data : JSON.stringify(data);
             expect(dataStr).to.include("Welcome to the channel!");
@@ -482,60 +512,58 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         it("should add a new message to #general (high-level)", async function() {
             var botMsgAddr = "flux://msg-bot-" + Date.now();
 
-            // Create message subject
-            var result = await callMcpTool(MCP_BASE_URL,'create_subject', {
+            // Create message instance
+            var result = await callMcpTool(MCP_BASE_URL,'instance_create', {
                 perspective_id: perspectiveUuid,
                 class_name: "Message",
-                expression_address: botMsgAddr,
-                initial_values: JSON.stringify({ body: "Hello! I'm an OpenClaw bot. How can I help?" }),
+                base_uri: botMsgAddr,
+                properties: { body: "Hello! I'm an OpenClaw bot. How can I help?" },
             }, mcpSessionId);
             expect(result.created).to.be.true;
 
             // Add message to channel's collection (no manual links!)
-            result = await callMcpTool(MCP_BASE_URL,'add_to_collection', {
+            result = await callMcpTool(MCP_BASE_URL,'instance_add_to_collection', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel1Addr,
-                collection_name: "messages",
-                item_address: botMsgAddr,
+                base_uri: channel1Addr,
+                collection: "messages",
+                item_uri: botMsgAddr,
             }, mcpSessionId);
             expect(result.success).to.be.true;
 
-            // Verify via collection query
-            var collection = await callMcpTool(MCP_BASE_URL,'get_subject_collection', {
+            // Verify via the resolved collection
+            var channel = await callMcpTool(MCP_BASE_URL,'instance_get', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel1Addr,
-                collection_name: "messages",
+                base_uri: channel1Addr,
             }, mcpSessionId);
-            expect(collection.count).to.equal(3); // 2 original + 1 bot message
+            expect(channel.messages.length).to.equal(3); // 2 original + 1 bot message
 
             // Verify message content
-            var msgData = await callMcpTool(MCP_BASE_URL,'get_subject_data', {
+            var msgData = await callMcpTool(MCP_BASE_URL,'instance_get', {
                 perspective_id: perspectiveUuid,
                 class_name: "Message",
-                expression_address: botMsgAddr,
+                base_uri: botMsgAddr,
             }, mcpSessionId);
             var dataStr = typeof msgData === 'string' ? msgData : JSON.stringify(msgData);
             expect(dataStr).to.include("OpenClaw bot");
             console.log("Bot successfully posted message to #general");
         });
 
-        it("should update channel name via set_subject_property", async function() {
-            var result = await callMcpTool(MCP_BASE_URL,'set_subject_property', {
+        it("should update channel name via instance_update", async function() {
+            var result = await callMcpTool(MCP_BASE_URL,'instance_update', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel1Addr,
-                property_name: "name",
-                value: "general-renamed",
+                base_uri: channel1Addr,
+                properties: { name: "general-renamed" },
             }, mcpSessionId);
             expect(result.success).to.be.true;
 
             // Verify the change
-            var data = await callMcpTool(MCP_BASE_URL,'get_subject_data', {
+            var data = await callMcpTool(MCP_BASE_URL,'instance_get', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel1Addr,
+                base_uri: channel1Addr,
             }, mcpSessionId);
             var dataStr = typeof data === 'string' ? data : JSON.stringify(data);
             expect(dataStr).to.include("general-renamed");
@@ -543,16 +571,15 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         });
 
         it("should verify #random channel is separate", async function() {
-            var collection = await callMcpTool(MCP_BASE_URL,'get_subject_collection', {
+            var channel = await callMcpTool(MCP_BASE_URL,'instance_get', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: channel2Addr,
-                collection_name: "messages",
+                base_uri: channel2Addr,
             }, mcpSessionId);
-            expect(collection.items).to.be.an('array');
-            expect(collection.count).to.equal(1); // Only the original message
-            expect(collection.items[0]).to.equal(msg3Addr);
-            console.log("Bot verified #random has", collection.count, "message (separate from #general)");
+            expect(channel.messages).to.be.an('array');
+            expect(channel.messages.length).to.equal(1); // Only the original message
+            expect(channel.messages[0]).to.equal(msg3Addr);
+            console.log("Bot verified #random has", channel.messages.length, "message (separate from #general)");
         });
     });
 
@@ -588,6 +615,16 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Static tools should still be present
             expect(toolNames).to.include('list_perspectives');
             expect(toolNames).to.include('add_model');
+
+            // Hybrid mode: the generic instance_* surface coexists with the
+            // per-class tools when dynamicClassTools is on.
+            expect(toolNames).to.include('describe_perspective');
+            expect(toolNames).to.include('instance_create');
+            expect(toolNames).to.include('instance_query');
+            expect(toolNames).to.include('instance_get');
+            expect(toolNames).to.include('instance_update');
+            expect(toolNames).to.include('instance_add_to_collection');
+            expect(toolNames).to.include('instance_remove');
         });
 
         it("should have correct schema for channel_create", async function() {
@@ -669,11 +706,11 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Verify the child link was created correctly via get_children
             var children = await callMcpTool(MCP_BASE_URL,'get_children', {
                 perspective_id: perspectiveUuid,
-                parent_address: parentChannelAddr,
+                parent: parentChannelAddr,
             }, mcpSessionId);
             console.log("get_children after parent create:", JSON.stringify(children));
             expect(children.count).to.be.greaterThan(0);
-            var childAddrs = children.children.map((c: any) => c.address);
+            var childAddrs = children.children.map((c: any) => c.id);
             expect(childAddrs).to.include(createdMsgAddr);
         });
 
@@ -719,7 +756,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Verify retrievable via get_children with the same plain parent
             var children = await callMcpTool(MCP_BASE_URL,'get_children', {
                 perspective_id: perspectiveUuid,
-                parent_address: plainParent,
+                parent: plainParent,
             }, mcpSessionId);
             expect(children.count).to.equal(1);
         });
@@ -925,27 +962,31 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             console.log("Added 2 tasks as children of #general");
         });
 
-        it("should get all children of #general via get_subject_children", async function() {
-            var result = await callMcpTool(MCP_BASE_URL,'get_subject_children', {
+        it("should get all children of #general via get_children", async function() {
+            var result = await callMcpTool(MCP_BASE_URL,'get_children', {
                 perspective_id: perspectiveUuid,
-                expression_address: channel1Addr,
+                parent: channel1Addr,
             }, mcpSessionId);
-            console.log("get_subject_children result:", JSON.stringify(result));
+            console.log("get_children result:", JSON.stringify(result));
             expect(result.children).to.be.an('array');
             // Should have original messages + the 2 tasks we just added
             expect(result.children.length).to.be.at.least(4);
+            expect(result.total_count).to.equal(result.children.length);
         });
 
-        it("should get children filtered by Task class", async function() {
-            var result = await callMcpTool(MCP_BASE_URL,'get_subject_children', {
+        it("should get children filtered by Task class via instance_query(parent)", async function() {
+            var result = await callMcpTool(MCP_BASE_URL,'instance_query', {
                 perspective_id: perspectiveUuid,
-                expression_address: channel1Addr,
-                child_class_name: "Task",
+                class_name: "Task",
+                parent: channel1Addr,
             }, mcpSessionId);
-            console.log("get_subject_children (Task) result:", JSON.stringify(result));
-            expect(result.children).to.be.an('array');
+            console.log("instance_query (Task, parent) result:", JSON.stringify(result));
+            expect(result.instances).to.be.an('array');
             // Only the 2 tasks should match (they have rdf://type -> ad4m://Task)
-            expect(result.children.length).to.equal(2);
+            expect(result.count).to.equal(2);
+            var ids = result.instances.map((t: any) => t.id);
+            expect(ids).to.include(task1Addr);
+            expect(ids).to.include(task2Addr);
         });
 
         it("should update task status via task_set_status", async function() {
@@ -1113,13 +1154,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             expect(target).to.equal("literal:boolean:true");
         });
 
-        it("should resolve string values via set_subject_property with resolve_language", async function() {
-            var result = await callMcpTool(MCP_BASE_URL,'set_subject_property', {
+        it("should resolve string values via instance_update with resolve_language", async function() {
+            var result = await callMcpTool(MCP_BASE_URL,'instance_update', {
                 perspective_id: perspectiveUuid,
                 class_name: "Channel",
-                expression_address: resolveTestChannelAddr,
-                property_name: "description",
-                value: "A test description",
+                base_uri: resolveTestChannelAddr,
+                properties: { description: "A test description" },
             }, mcpSessionId);
             expect(result.success).to.be.true;
 
@@ -1181,8 +1221,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
             var result = await callMcpTool(MCP_BASE_URL,'add_child', {
                 perspective_id: perspectiveUuid,
-                parent_address: parentAddr,
-                child_address: child1Addr,
+                parent: parentAddr,
+                child: child1Addr,
             }, mcpSessionId);
             console.log("add_child result 1:", JSON.stringify(result));
             expect(result.success).to.be.true;
@@ -1190,8 +1230,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
             result = await callMcpTool(MCP_BASE_URL,'add_child', {
                 perspective_id: perspectiveUuid,
-                parent_address: parentAddr,
-                child_address: child2Addr,
+                parent: parentAddr,
+                child: child2Addr,
             }, mcpSessionId);
             expect(result.success).to.be.true;
             console.log("Added 2 children to parent");
@@ -1200,7 +1240,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         it("should get children of a parent", async function() {
             var result = await callMcpTool(MCP_BASE_URL,'get_children', {
                 perspective_id: perspectiveUuid,
-                parent_address: parentAddr,
+                parent: parentAddr,
             }, mcpSessionId);
             console.log("get_children result:", JSON.stringify(result));
             expect(result.count).to.equal(2);
@@ -1215,7 +1255,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         it("should return empty children for unknown parent", async function() {
             var result = await callMcpTool(MCP_BASE_URL,'get_children', {
                 perspective_id: perspectiveUuid,
-                parent_address: "nonexistent-parent-" + Date.now(),
+                parent: "nonexistent-parent-" + Date.now(),
             }, mcpSessionId);
             expect(result.count).to.equal(0);
             expect(result.children).to.be.an('array');
@@ -1229,15 +1269,15 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
             var result = await callMcpTool(MCP_BASE_URL,'add_child', {
                 perspective_id: perspectiveUuid,
-                parent_address: wrappedParent,
-                child_address: child3Addr,
+                parent: wrappedParent,
+                child: child3Addr,
             }, mcpSessionId);
             expect(result.success).to.be.true;
 
             // Should be retrievable with the same wrapped parent
             result = await callMcpTool(MCP_BASE_URL,'get_children', {
                 perspective_id: perspectiveUuid,
-                parent_address: wrappedParent,
+                parent: wrappedParent,
             }, mcpSessionId);
             expect(result.count).to.equal(1);
             console.log("Pre-wrapped URI handled correctly");
@@ -1247,7 +1287,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             // Use channel1Addr from earlier tests as parent
             var result = await callMcpTool(MCP_BASE_URL,'get_children', {
                 perspective_id: perspectiveUuid,
-                parent_address: channel1Addr,
+                parent: channel1Addr,
             }, mcpSessionId);
             console.log("get_children for channel1:", JSON.stringify(result));
             // Channel already has messages/tasks added as children via SHACL tools
@@ -1393,7 +1433,8 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
     // ========================================================================
 
     describe("8. Waker Subscription (SPARQL Live Query)", function() {
-        // Uses the extracted WakerSubscriptionManager — same code path as the plugin
+        // Uses WakerSubscriptionManager from @coasys/ad4m — the single
+        // implementation; the OpenClaw plugin re-exports this same class.
         let wakerClient: Ad4mClient;
         let wakerPerspectiveUuid: string;
         let wakerChannelAddr: string;
@@ -1691,7 +1732,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             var config = await callMcpTool(MCP_BASE_URL, 'generate_waker_query', {
                 perspective_id: wakerPerspectiveUuid,
                 class_name: "Message",
-                parent_address: wakerChannelAddr,
+                parent: wakerChannelAddr,
             }, mcpSessionId);
             console.log("Channel waker query:", JSON.stringify(config, null, 2));
 
@@ -1734,7 +1775,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
             }
         });
 
-        it("should gracefully handle subscription to non-existent perspective without throwing", async function() {
+        // A subscription the executor refuses used to resolve silently, which
+        // told the caller it was listening when it was not — an agent then sat
+        // waiting for wake events that could never arrive. It now reports the
+        // failure and keeps the subscription pending for retry. The sibling
+        // test below still guards the crash mode that silence was hiding.
+        it("should report a refused subscription instead of claiming success", async function() {
             this.timeout(15000);
 
             var wakeCount = 0;
@@ -1746,19 +1792,31 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
                 onWake: function() { wakeCount++; },
             });
 
-            // Subscribe to a perspective UUID that doesn't exist — should NOT throw
             var bogusId = "00000000-0000-0000-0000-000000000000";
-            await manager.subscribe({
-                id: "test-stale-" + Date.now(),
-                type: "mention" as const,
-                perspective: bogusId,
-                channel: "",
-                query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
-            });
+            var subscriptionId = "test-stale-" + Date.now();
+            var error: any = null;
+            try {
+                await manager.subscribe({
+                    id: subscriptionId,
+                    type: "mention" as const,
+                    perspective: bogusId,
+                    channel: "",
+                    query: "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <ad4m://has_child>) }",
+                });
+            } catch (e) {
+                error = e;
+            }
 
-            // Should not have woken or added to active subscriptions
+            expect(error, "subscribe must reject when the executor refuses it").to.not.be.null;
+            expect(String(error.message)).to.contain(bogusId);
+            expect(String(error.message)).to.contain("re-attempting");
+
+            // Refused, so: nothing woke, and it is queued for retry rather than
+            // silently dropped.
             await sleep(500);
             expect(wakeCount).to.equal(0, "onWake should not fire for non-existent perspective");
+            expect(manager.getPending().map(function(p: any) { return p.id; }))
+                .to.contain(subscriptionId, "a refused subscription must stay pending for retry");
             manager.disposeAll();
         });
 

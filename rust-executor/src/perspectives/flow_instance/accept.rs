@@ -130,7 +130,14 @@ pub async fn accept_flow_proposal(
             .await
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
-    Ok(run_flow_consensus_pass(perspective, None, context, None, Some(&instance_uri)).await)
+    Ok(run_flow_consensus_pass(
+        perspective,
+        None,
+        context,
+        None,
+        Some(std::slice::from_ref(&instance_uri)),
+    )
+    .await)
 }
 
 /// Reject a proposal: retract the links on it that this replica signed.

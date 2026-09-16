@@ -117,10 +117,10 @@ export class FlowInstance {
    * on-graph record, so `currentState` / `availableTransitions` /
    * `proposals` accessors work without further round-trips.
    *
-   * `currentState` here is the record's cached value, which the executor
-   * writes and — deliberately — never reads back: the engine derives state
-   * by folding the signed links present now. Treat it as a hint for display,
-   * not as the flow's state.
+   * The record's `currentState` is a per-replica cache the consensus engine
+   * writes (as a local link) and — deliberately — never reads back as
+   * authority: the engine derives state by folding the signed links present
+   * now. Treat it as a hint for display, not as the flow's state.
    *
    * @param perspective - The perspective the flow instance lives on
    * @param flowName - Name of a `SHACLFlow` already registered on the perspective

@@ -163,6 +163,10 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Expose dynamic per-class SHACL tools over MCP in addition to the
+        /// static instance_* tools. Default: false.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        dynamic_class_tools: Option<bool>,
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         #[arg(long)]
         pid_file: Option<String>,
@@ -245,6 +249,7 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        dynamic_class_tools,
         pid_file,
     } = args.domain
     {
@@ -268,6 +273,7 @@ async fn main() -> Result<()> {
                 enable_multi_user,
                 enable_mcp,
                 mcp_port,
+                dynamic_class_tools,
                 pid_file,
                 localhost: None,
                 auto_permit_cap_requests: None,
@@ -342,6 +348,7 @@ async fn main() -> Result<()> {
             enable_multi_user: _,
             enable_mcp: _,
             mcp_port: _,
+            dynamic_class_tools: _,
             pid_file: _,
         } => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),
