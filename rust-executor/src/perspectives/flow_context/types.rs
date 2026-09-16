@@ -37,12 +37,58 @@ pub struct FlowContext {
     /// so the LLM knows how many signers are needed if the state's own
     /// rule is not overridden.
     pub consensus_rule: Option<ConsensusRule>,
-    /// Set when the fold found two edges out of `current_state` both
-    /// carrying quorum — the flow is irreversibly stalled. LLM context
-    /// renderers MUST surface this rather than presenting the flow as
-    /// "awaiting votes"; the mint pass MUST NOT propose into such a flow.
-    /// `None` for all ordinary (waiting or settled) flows.
-    pub contested: Option<Contention>,
+    /// The fold's contention verdict for `current_state` — three-state on
+    /// purpose. `Option<Contention>` would conflate "a fresh fold verified
+    /// no contention" with "contention was never computed" (the cache path
+    /// stores only the state name), and that conflation lands in the
+    /// permissive direction: an uncontested-*looking* flow the model may
+    /// propose into. Same `Option`-conflation family as the role-grant
+    /// "unknown ⇒ always" and `revoked_at` "unparseable ⇒ not revoked"
+    /// findings (#998 review).
+    pub contested: ContentionStatus,
+}
+
+/// Contention verdict carried by a [`FlowContext`].
+#[derive(Debug, Clone)]
+pub enum ContentionStatus {
+    /// A fresh fold ran on this replica and found no contention.
+    NotContested,
+    /// The state came from the `Local`-verified cache, which stores only
+    /// the derived state name — contention was **not computed**. Staleness
+    /// is bounded by the sync-triggered re-derive (every incoming flow
+    /// link re-folds), but a cached flow can look uncontested indefinitely
+    /// if no new link arrives. Consumers must not treat this as a verified
+    /// all-clear; anything payout-adjacent must re-derive instead (the
+    /// mint pass already does — it calls `derive_states` directly and
+    /// never sees this variant).
+    Unknown,
+    /// The fold found two edges out of `current_state` both carrying
+    /// quorum — the flow is irreversibly stalled. Renderers MUST surface
+    /// this rather than presenting the flow as "awaiting votes"; nothing
+    /// may propose into such a flow.
+    Contested(Contention),
+}
+
+impl ContentionStatus {
+    /// A fresh derivation's verdict: `derive_states` computes contention
+    /// definitively, so its `None` genuinely means "not contested".
+    pub fn from_fresh_derivation(contested: Option<Contention>) -> Self {
+        match contested {
+            None => ContentionStatus::NotContested,
+            Some(c) => ContentionStatus::Contested(c),
+        }
+    }
+}
+
+/// A [`FlowInstanceRecord`] paired with how its contention verdict was
+/// obtained — the loader's unit between state resolution (cache or fold)
+/// and [`FlowContext`] construction. The cache path yields
+/// [`ContentionStatus::Unknown`]; a fresh derivation yields a definitive
+/// verdict.
+#[derive(Debug, Clone)]
+pub struct ResolvedFlow {
+    pub record: FlowInstanceRecord,
+    pub contention: ContentionStatus,
 }
 
 /// One reachable next-state, ready for prompt insertion.

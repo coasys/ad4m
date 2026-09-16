@@ -300,7 +300,7 @@ impl<P: ToolProvider + ?Sized> FlowTransitionProposeProvider<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::flow_context::NextStateSummary;
+    use crate::perspectives::flow_context::{ContentionStatus, NextStateSummary};
 
     fn ctx_delivery_scoped() -> FlowContext {
         FlowContext {
@@ -328,7 +328,7 @@ mod tests {
                 },
             ],
             consensus_rule: None,
-            contested: None,
+            contested: ContentionStatus::NotContested,
         }
     }
 
@@ -341,7 +341,7 @@ mod tests {
             flow_interpretation_hint: None,
             reachable_next_states: vec![],
             consensus_rule: None,
-            contested: None,
+            contested: ContentionStatus::NotContested,
         }
     }
 

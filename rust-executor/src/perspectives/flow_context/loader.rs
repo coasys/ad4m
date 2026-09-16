@@ -15,9 +15,8 @@
 //! couldn't enumerate flows.
 
 use super::render::summarize_flow_instance;
-use super::types::{FlowContext, FlowInstanceRecord};
+use super::types::{ContentionStatus, FlowContext, FlowInstanceRecord, ResolvedFlow};
 use crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS;
-use crate::perspectives::flow_instance::DerivedFlow;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{parse_flow_from_links, SHACLFlow};
@@ -166,19 +165,19 @@ async fn query_flow_instances(
 /// have the flow's shape imported from the neighbourhood) shouldn't
 /// fail the whole extraction pass. Order is preserved from `records`.
 pub fn build_flow_contexts(
-    records: &[DerivedFlow],
+    records: &[ResolvedFlow],
     flows_by_uri: &HashMap<String, SHACLFlow>,
 ) -> Vec<FlowContext> {
     records
         .iter()
-        .filter_map(|df| {
-            let flow = flows_by_uri.get(&df.record.flow_uri)?;
+        .filter_map(|rf| {
+            let flow = flows_by_uri.get(&rf.record.flow_uri)?;
             Some(summarize_flow_instance(
                 flow,
-                df.record.instance_uri.clone(),
-                df.record.subject.clone(),
-                df.record.current_state.clone(),
-                df.contested.clone(),
+                rf.record.instance_uri.clone(),
+                rf.record.subject.clone(),
+                rf.record.current_state.clone(),
+                rf.contention.clone(),
             ))
         })
         .collect()
@@ -266,14 +265,15 @@ pub async fn gather_active_flow_contexts(
     // exactly what this replica last derived.  Instances whose cache is absent
     // (never derived yet) fall through to `derive_states`.
     //
-    // The sync-triggered pass (`trigger.rs`) re-derives on every incoming flow
-    // link, so residual staleness is bounded by the debounce window plus the
-    // role-change gap documented there.
-    // Cache-sourced records carry `contested: None` — the Local-verified cache
-    // stores only the derived state name, not the fold's contention verdict.
-    // The sync-triggered pass re-derives on every incoming flow link, so a
-    // contested flow that somehow reached the cache is re-folded immediately.
-    let mut resolved: Vec<DerivedFlow> = Vec::with_capacity(records.len());
+    // The cache stores only the state name — the fold's contention verdict
+    // was NOT computed on this path, so cache-sourced flows carry
+    // `ContentionStatus::Unknown`, never `NotContested`: "not computed" and
+    // "verified clean" must stay distinguishable at the consumer (the
+    // permissive conflation was the #998-review finding). Staleness of the
+    // *state* is bounded by the sync-triggered re-derive (`trigger.rs`, every
+    // incoming flow link), but contention does not expire on its own — a
+    // cached flow keeps `Unknown` until something re-folds it.
+    let mut resolved: Vec<ResolvedFlow> = Vec::with_capacity(records.len());
     let mut uncached: Vec<FlowInstanceRecord> = Vec::new();
     for record in records {
         match crate::perspectives::flow_instance::local_cached_state(
@@ -282,12 +282,12 @@ pub async fn gather_active_flow_contexts(
         )
         .await
         {
-            Ok(Some(cached)) => resolved.push(DerivedFlow {
+            Ok(Some(cached)) => resolved.push(ResolvedFlow {
                 record: FlowInstanceRecord {
                     current_state: cached,
                     ..record
                 },
-                contested: None,
+                contention: ContentionStatus::Unknown,
             }),
             Ok(None) => uncached.push(record),
             Err(e) => {
@@ -306,7 +306,10 @@ pub async fn gather_active_flow_contexts(
             &flows_by_uri,
         )
         .await;
-        resolved.extend(derived);
+        resolved.extend(derived.into_iter().map(|df| ResolvedFlow {
+            record: df.record,
+            contention: ContentionStatus::from_fresh_derivation(df.contested),
+        }));
     }
     build_flow_contexts(&resolved, &flows_by_uri)
 }
@@ -675,11 +678,11 @@ mod tests {
         }
     }
 
-    /// Wrap a `FlowInstanceRecord` as an uncontested `DerivedFlow`.
-    fn uncontested(r: FlowInstanceRecord) -> DerivedFlow {
-        DerivedFlow {
+    /// Wrap a `FlowInstanceRecord` as a fresh-fold, uncontested `ResolvedFlow`.
+    fn uncontested(r: FlowInstanceRecord) -> ResolvedFlow {
+        ResolvedFlow {
             record: r,
-            contested: None,
+            contention: ContentionStatus::NotContested,
         }
     }
 
@@ -855,9 +858,9 @@ mod tests {
         }
     }
 
-    /// A `DerivedFlow` whose fold returned `contested` MUST carry that
-    /// contention into the resulting `FlowContext`.  This test fails
-    /// (type error) on the pre-fix code where `derive_states` returned
+    /// A fold that returned `contested` MUST carry that contention into the
+    /// resulting `FlowContext`.  This test fails (type error) on the
+    /// pre-fix code where `derive_states` returned
     /// `Vec<FlowInstanceRecord>` with no `contested` field and
     /// `FlowContext` had no `contested` field either.
     #[test]
@@ -867,25 +870,27 @@ mod tests {
         let mut catalogue = HashMap::new();
         catalogue.insert(flow_uri.clone(), flow);
         let contention = fixture_contention("in_progress");
-        let records = vec![DerivedFlow {
+        let records = vec![ResolvedFlow {
             record: record(
                 &flow_uri,
                 "ad4m://flow/instance/c1",
                 "ad4m://task/stuck",
                 "in_progress",
             ),
-            contested: Some(contention),
+            contention: ContentionStatus::from_fresh_derivation(Some(contention)),
         }];
         let ctxs = build_flow_contexts(&records, &catalogue);
         assert_eq!(ctxs.len(), 1);
         assert!(
-            ctxs[0].contested.is_some(),
+            matches!(ctxs[0].contested, ContentionStatus::Contested(_)),
             "a contested derivation must surface to the LLM context (issue #998)"
         );
     }
 
-    /// An uncontested `DerivedFlow` must leave `FlowContext.contested` as `None`
-    /// — no false positives.
+    /// A fresh, uncontested fold must yield `NotContested` — no false
+    /// positives — and stay distinguishable from the cache path's `Unknown`
+    /// (the three-state point: "not computed" must never masquerade as
+    /// "verified clean").
     #[test]
     fn build_flow_contexts_uncontested_derivation_has_no_contention() {
         let flow = delivery_flow();
@@ -901,8 +906,35 @@ mod tests {
         let ctxs = build_flow_contexts(&records, &catalogue);
         assert_eq!(ctxs.len(), 1);
         assert!(
-            ctxs[0].contested.is_none(),
-            "an uncontested derivation must not be marked as contested"
+            matches!(ctxs[0].contested, ContentionStatus::NotContested),
+            "a fresh uncontested derivation must be NotContested, not Unknown"
+        );
+    }
+
+    /// The cache path never computes contention, so what it feeds forward
+    /// must be `Unknown` — indistinguishability from `NotContested` was the
+    /// #998-review finding (uncached contention rendering as "uncontested",
+    /// the permissive direction).
+    #[test]
+    fn build_flow_contexts_cache_sourced_flow_is_unknown_not_clean() {
+        let flow = delivery_flow();
+        let flow_uri = flow.flow_uri();
+        let mut catalogue = HashMap::new();
+        catalogue.insert(flow_uri.clone(), flow);
+        let records = vec![ResolvedFlow {
+            record: record(
+                &flow_uri,
+                "ad4m://flow/instance/cached",
+                "ad4m://task/cached",
+                "in_progress",
+            ),
+            contention: ContentionStatus::Unknown,
+        }];
+        let ctxs = build_flow_contexts(&records, &catalogue);
+        assert_eq!(ctxs.len(), 1);
+        assert!(
+            matches!(ctxs[0].contested, ContentionStatus::Unknown),
+            "cache-sourced contention must stay Unknown at the consumer"
         );
     }
 
