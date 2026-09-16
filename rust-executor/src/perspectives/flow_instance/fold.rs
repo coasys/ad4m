@@ -54,7 +54,8 @@
 //! timestamp to the DID that signed it.
 //!
 //! **Settlement time is the n-th distinct eligible voter's timestamp.** Votes
-//! are sorted `(at, did, uri)` ascending and counted until the n-th distinct
+//! are sorted `(parsed at, did, uri)` ascending — parsed instants, because the
+//! timestamp string is client-formatted ([`super::time`]) — and counted until the n-th distinct
 //! DID; that voter's `at` becomes `nth_at`. A single colluding voter can shift
 //! `nth_at` earlier by back-dating their own vote far enough to change their
 //! position in the sort — moving to an earlier slot makes a different (later)
@@ -117,7 +118,9 @@
 //! narrow the stall above by making a back-dated second proposal detectable.
 
 use super::atom::{TransitionAtom, Vote};
+use super::time::parse_link_timestamp;
 use crate::perspectives::shacl_parser::{ConsensusRule, SHACLFlow};
+use chrono::{DateTime, Utc};
 
 /// An atom whose votes have already been filtered by its rule's `fromRole`,
 /// each as of its own timestamp ([`super::roles::eligible_votes`]). Role
@@ -220,7 +223,7 @@ pub fn quorum(rule: &ConsensusRule, distinct_voters: usize) -> bool {
 /// and `atoms` is finite.
 pub fn fold(genesis: &str, flow: &SHACLFlow, atoms: &[VouchedAtom]) -> DerivedState {
     let mut state = genesis.to_string();
-    let mut settled_at = String::new(); // "" sorts before every timestamp
+    let mut settled_at = String::new(); // "" parses as no instant: no floor at genesis
     let mut settled: Vec<SettledEdge> = Vec::new();
     let mut contested = None;
     loop {
@@ -285,8 +288,16 @@ fn settle(
         .filter(|t| t.from_state == state)
         .filter_map(|t| settle_edge(state, &t.to_state, after, flow, atoms, consumed))
         .collect();
+    // Rank by parsed instant, never by timestamp string (#1000). Every
+    // `settled_at` here came out of `settle_edge`, which only emits parsed
+    // vote timestamps — the `MAX_UTC` fallback is defence in depth so a
+    // timestamp that somehow cannot be placed in time can never rank
+    // earliest. The original string stays in the key so two edges settling
+    // at the same instant under different formats still rank identically on
+    // every replica.
     candidates.sort_by_key(|e| {
         (
+            parse_link_timestamp(&e.settled_at).unwrap_or(DateTime::<Utc>::MAX_UTC),
             e.settled_at.clone(),
             e.to_state.clone(),
             e.atom_uris.first().cloned().unwrap_or_default(),
@@ -352,7 +363,13 @@ fn settle_edge(
     consumed: &[SettledEdge],
 ) -> Option<SettledEdge> {
     let rule = rule_for(flow, to);
-    let mut pooled: Vec<(&Vote, &str)> = atoms
+    // Pool with each vote's parsed instant and sort by it — string order is
+    // client-library order inside a sub-second collision (#1000). Atom
+    // construction already dropped unparseable timestamps, so the
+    // `filter_map` is defence in depth for fold inputs built by other
+    // callers; a vote that cannot be placed in time cannot count, and above
+    // all cannot be the n-th.
+    let mut pooled: Vec<(DateTime<Utc>, &Vote, &str)> = atoms
         .iter()
         .filter(|v| v.atom.from_state == from && v.atom.to_state == to)
         .filter(|v| !consumed.iter().any(|e| e.atom_uris.contains(&v.atom.uri)))
@@ -361,13 +378,26 @@ fn settle_edge(
                 .iter()
                 .map(|vote| (vote, v.atom.uri.as_str()))
         })
+        .filter_map(|(vote, uri)| {
+            let Some(instant) = parse_link_timestamp(&vote.at) else {
+                log::warn!(
+                    "flow: ignoring vote by `{}` on `{uri}` — timestamp `{}` is not RFC 3339",
+                    vote.did,
+                    vote.at
+                );
+                return None;
+            };
+            Some((instant, vote, uri))
+        })
         .collect();
-    pooled.sort_by(|(a, a_uri), (b, b_uri)| (&a.at, &a.did, a_uri).cmp(&(&b.at, &b.did, b_uri)));
+    pooled.sort_by(|(a_at, a, a_uri), (b_at, b, b_uri)| {
+        (a_at, &a.did, a_uri, &a.at).cmp(&(b_at, &b.did, b_uri, &b.at))
+    });
 
     let mut voters: Vec<String> = Vec::new();
     let mut atom_uris: Vec<String> = Vec::new();
-    let mut nth_at = None;
-    for (vote, uri) in pooled {
+    let mut nth = None;
+    for (instant, vote, uri) in pooled {
         if voters.contains(&vote.did) {
             continue;
         }
@@ -376,18 +406,25 @@ fn settle_edge(
             atom_uris.push(uri.to_string());
         }
         if quorum(&rule, voters.len()) {
-            nth_at = Some(vote.at.clone());
+            nth = Some((instant, vote.at.clone()));
             break;
         }
     }
-    let nth_at = nth_at?;
+    let (nth_instant, nth_at) = nth?;
 
     atom_uris.sort();
     voters.sort();
+    // The floor (`max(nth, after)`) compares instants too: `after` is either
+    // the previous edge's settled_at (a parsed vote timestamp) or the ""
+    // genesis sentinel, which parses as no instant and floors nothing.
+    let settled_at = match parse_link_timestamp(after) {
+        Some(after_instant) if after_instant > nth_instant => after.to_string(),
+        _ => nth_at,
+    };
     Some(SettledEdge {
         from_state: from.to_string(),
         to_state: to.to_string(),
-        settled_at: nth_at.max(after.to_string()),
+        settled_at,
         atom_uris,
         voters,
     })

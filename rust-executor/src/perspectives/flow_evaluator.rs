@@ -468,6 +468,12 @@ impl RequiresQueryable for PerspectiveInstance {
             })?;
         let names_did = |target: &str| target_names_did(target, did, &did_literal);
 
+        // Earliest by parsed instant, not by string — grant links are
+        // client-stamped and clients disagree on RFC 3339 flavour (#1000).
+        // A link whose timestamp does not parse cannot date the grant; if
+        // none parses this stays `None`, so the caller falls back to the
+        // row's own timestamp or fails closed.
+        use crate::perspectives::flow_instance::time::parse_link_timestamp;
         let granted_at = match grant_predicate {
             Some(pred) => self
                 .get_links(&LinkQuery {
@@ -478,8 +484,9 @@ impl RequiresQueryable for PerspectiveInstance {
                 .await?
                 .into_iter()
                 .filter(|l| names_did(&l.data.target))
-                .map(|l| l.timestamp)
-                .min(),
+                .filter_map(|l| parse_link_timestamp(&l.timestamp).map(|dt| (dt, l.timestamp)))
+                .min()
+                .map(|(_, ts)| ts),
             None => None,
         };
 
