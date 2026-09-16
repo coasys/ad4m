@@ -2,6 +2,8 @@ export * from "./Ad4mClient"
 export * from "./Address";
 export * from "./agent/Agent";
 export * from "./agent/AgentStatus";
+export * from "./agent/Identity";
+export * from "./agent/IdentityClient";
 export * from "./cache/PersistentCache";
 export * from "./Exception";
 export * from "./expression/Expression";
