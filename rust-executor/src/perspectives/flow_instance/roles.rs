@@ -584,7 +584,7 @@ mod tests {
                      "where": { "status": { "matches": ".*" } } }), ""),
             ("a role row that cannot be placed in time",
              RoleStub { undated_rows: true, ..members(&[ALICE]) },
-             json!({ "className": "ns://Reviewer", "didProperty": "agent" }), "no timestamp"),
+             json!({ "className": "ns://Reviewer", "didProperty": "agent" }), "cannot be placed in time"),
         ];
 
         for (name, stub, role_json, expect_contains) in cases {
