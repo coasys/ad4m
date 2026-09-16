@@ -232,7 +232,7 @@ impl OpenAiCompatBridge {
 /// The harness gives every call an id and appends a result for every call,
 /// budget-exhausted ones included, so on its own conversations none of the
 /// last three cases fires.
-fn structured_turns(messages: &[Value]) -> Result<Vec<ChatTurn>> {
+pub(super) fn structured_turns(messages: &[Value]) -> Result<Vec<ChatTurn>> {
     let mut turns: Vec<ChatTurn> = Vec::with_capacity(messages.len());
     let mut open: Option<OpenCalls> = None;
 
