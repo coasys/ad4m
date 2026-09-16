@@ -6,16 +6,24 @@
 //! mis-counting a vote, and a role query that cannot tell one DID from
 //! another is an error rather than "everybody passes".
 //!
-//! **Roles are re-derived live, against the current graph.** There is no
-//! honest way to snapshot them on today's platform — a snapshot written at
-//! vote time is a link any member could forge, which is exactly the
-//! authority this engine removes, and `model_query` has no as-of filter. The
-//! consequence, pinned by a test: revoking someone's role later can un-settle
-//! an edge their vote once settled. What makes that survivable is that the
-//! verdicts land in the [`ReadSet`](super::ReadSet) as [`RoleGrant`]s, each
-//! naming the rows it relied on — so a token minted from a flow records
-//! which role rows its verdict rested on, rather than merely asserting the
-//! voter was eligible.
+//! **Roles are re-derived live, against the current graph.** A vote-time
+//! snapshot of the role rows is not something the snapshotter could
+//! fabricate: the rows are signed by whoever wrote them, and a
+//! [`RoleGrant`]'s `rows` point at exactly those rows — so a verifier
+//! re-checking the signatures learns who granted the role, not who claims
+//! it. Admin-only authority is expressible today, too: the role's
+//! social-DNA query can pin the rows' author (`where: { author: "did:…" }`),
+//! and then only rows carrying the admin's signature count. The honest
+//! residual gap is **omission**, not forgery. A snapshotter can leave out an
+//! admin-signed revocation, and on today's platform a verifier cannot tell
+//! "did not exist yet" from "left out": `model_query` has no as-of filter,
+//! and revoking by deleting a row leaves no signed trace to miss. That is
+//! why v1 takes the live graph as its authority. The consequence, pinned by
+//! a test: revoking someone's role later can un-settle an edge their vote
+//! once settled. What makes that survivable is that the verdicts land in the
+//! [`ReadSet`](super::ReadSet) as [`RoleGrant`]s, each naming the rows it
+//! relied on — so a token minted from a flow records which role rows its
+//! verdict rested on, rather than merely asserting the voter was eligible.
 
 use super::atom::{TransitionAtom, Vote};
 use crate::perspectives::flow_context::FlowInstanceRecord;
