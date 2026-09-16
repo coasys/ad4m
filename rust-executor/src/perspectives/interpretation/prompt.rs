@@ -2,7 +2,7 @@ use super::{
     class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
 };
 use crate::db::Ad4mDb;
-use crate::perspectives::flow_context::{render_consensus_rule, FlowContext};
+use crate::perspectives::flow_context::{render_consensus_rule, ContentionStatus, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
 use std::collections::HashMap;
@@ -305,6 +305,24 @@ fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
             serde_json::json!(render_consensus_rule(rule)),
         );
     }
+    // A verified-contested flow must never read as "awaiting votes" — the
+    // preamble tells the model not to propose transitions on it. `Unknown`
+    // (cache-sourced, contention not computed) deliberately renders nothing:
+    // flagging every cached flow would be noise, and the accepted staleness
+    // is documented on `ContentionStatus::Unknown`.
+    if let ContentionStatus::Contested(ref c) = fc.contested {
+        obj.insert(
+            "contested".into(),
+            serde_json::json!({
+                "stalled": true,
+                "between": c
+                    .candidates
+                    .iter()
+                    .map(|e| e.to_state.as_str())
+                    .collect::<Vec<_>>(),
+            }),
+        );
+    }
     let next: Vec<serde_json::Value> = fc
         .reachable_next_states
         .iter()
@@ -388,7 +406,10 @@ You receive a JSON object with these fields:
     transcript matches a `nextStates` entry's `hint`, prefer extracting
     instances that will satisfy its `requires` guard so the flow can
     advance. When `active_flows` is absent, extract freely on the class
-    hints alone.
+    hints alone. An entry may carry `contested` (`{stalled, between}`):
+    that flow is irreversibly stalled between the listed target states —
+    do NOT extract instances aimed at advancing it; the deadlock needs
+    human resolution first.
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...relations}`,
 where fields carry strings drawn from what participants actually said or
@@ -999,7 +1020,7 @@ mod tests {
     // Passes with no active flows must be byte-identical to the pre-slice-10.2
     // prompt (guarded below).
 
-    use crate::perspectives::flow_context::{FlowContext, NextStateSummary};
+    use crate::perspectives::flow_context::{ContentionStatus, FlowContext, NextStateSummary};
     use crate::perspectives::shacl_parser::ConsensusRule;
 
     fn sample_delivery_context() -> FlowContext {
@@ -1026,6 +1047,7 @@ mod tests {
                 n: 1,
                 from_role: None,
             }),
+            contested: ContentionStatus::NotContested,
         }
     }
 
@@ -1056,6 +1078,50 @@ mod tests {
         assert!(
             keys.len() == 2 && keys.contains(&"classes") && keys.contains(&"transcript"),
             "pre-slice-10.2 keys must be preserved when active_flows is empty; got {keys:?}"
+        );
+    }
+
+    /// A verified-contested flow renders a `contested` key (`stalled` +
+    /// `between` target states) so the model never reads it as "awaiting
+    /// votes". `Unknown` (cache-sourced, contention not computed) renders
+    /// nothing — flagging every cached flow would be noise; the staleness
+    /// contract lives on `ContentionStatus::Unknown`.
+    #[test]
+    fn active_flows_contested_renders_stall_and_unknown_stays_silent() {
+        use crate::perspectives::flow_instance::fold::{Contention, SettledEdge};
+        let edge = |to: &str| SettledEdge {
+            from_state: "doing".to_string(),
+            to_state: to.to_string(),
+            settled_at: "2026-01-01T00:00:00.000Z".to_string(),
+            atom_uris: vec![],
+            voters: vec![],
+        };
+        let mut contested_ctx = sample_delivery_context();
+        contested_ctx.contested = ContentionStatus::Contested(Contention {
+            from_state: "doing".to_string(),
+            candidates: vec![edge("done"), edge("cancelled")],
+        });
+        let mut unknown_ctx = sample_delivery_context();
+        unknown_ctx.contested = ContentionStatus::Unknown;
+        let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
+        let input = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text("Ana", "hello")],
+            &no_existing(),
+            &[contested_ctx, unknown_ctx],
+            &HashMap::new(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let arr = v["active_flows"].as_array().unwrap();
+        assert_eq!(arr[0]["contested"]["stalled"], true);
+        assert_eq!(
+            arr[0]["contested"]["between"],
+            serde_json::json!(["done", "cancelled"]),
+            "contested must name the deadlocked target states"
+        );
+        assert!(
+            arr[1].get("contested").is_none(),
+            "Unknown (cache-sourced) must not render a contested flag"
         );
     }
 
@@ -1151,6 +1217,7 @@ mod tests {
                 consensus_rule: None,
             }],
             consensus_rule: None,
+            contested: ContentionStatus::NotContested,
         };
         let input = build_interpretation_input(
             &shapes,
