@@ -1086,6 +1086,7 @@ mod tests {
             &[TranscriptTurn::from_speaker_text("Ana", "hello")],
             &no_existing(),
             &[contested_ctx, unknown_ctx],
+            &HashMap::new(),
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         let arr = v["active_flows"].as_array().unwrap();
