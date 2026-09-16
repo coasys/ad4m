@@ -36,6 +36,7 @@ use crate::perspectives::flow_classes::write_flow_transition_proposal;
 use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, reachable_next_states, FlowInstanceRecord, FlowTokens,
 };
+use crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
 use crate::perspectives::flow_semantic_check::{
     build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
 };
@@ -45,8 +46,10 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
+use crate::types::LinkQuery;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -372,17 +375,142 @@ fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value
     Ok(json!({ "id": id, "predicate": predicate }))
 }
 
+/// One signed revocation tombstone: who wrote it and when.
+///
+/// Rides in the read-set (see `flow_instance::roles::RoleGrantWindow`), so a
+/// verdict names the tombstones it honoured, not merely that "a revocation
+/// existed".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleRevocation {
+    /// The tombstone's author — the DID that signed it.
+    pub by: String,
+    /// The tombstone's link timestamp: the moment the grant stopped counting.
+    pub at: String,
+}
+
+/// What the store knows about one role instance's history for one DID: when the
+/// instance's `didProperty` link naming the DID was written, and every
+/// **signed** tombstone on the instance naming the DID.
+///
+/// Signature is checked here, at the store boundary — the same rule
+/// `flow_instance::atom::signed_by` applies to votes: a link whose stored
+/// verdict is not `valid` is invisible. **Authority is not checked here**:
+/// whether the tombstone's author may revoke depends on the role query, so
+/// `resolve_role_grants` applies that filter. `granted_at` is `None` when
+/// the role query has no `didProperty` or no such link exists; the caller
+/// then falls back to the instance's own timestamp and never to "always".
+#[derive(Debug, Clone, Default)]
+pub struct RoleGrantTimestamps {
+    /// Earliest timestamp of an `instance --didProperty--> did` link, if any.
+    pub granted_at: Option<String>,
+    /// Every signed tombstone on this instance naming this DID, any author.
+    pub revocations: Vec<RoleRevocation>,
+}
+
 /// The one perspective call the evaluator needs, behind a trait so the
 /// composition below can be unit-tested against a stub.
 #[async_trait]
 pub trait RequiresQueryable: Send + Sync {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String>;
+
+    /// The store's history of one matched role instance for one DID — see
+    /// [`RoleGrantTimestamps`].
+    ///
+    /// `instance_id` — the instance URI `model_query` returned.
+    /// `grant_predicate` — the role query's `didProperty`, if any; `None`
+    ///   for `$did`-style queries, where no single property carries the DID.
+    /// `did` — the candidate's plain DID.
+    ///
+    /// The default knows nothing (no grant link, no tombstones). A caller
+    /// that gets `granted_at: None` must date the grant from the instance itself
+    /// — `resolve_role_grants` does — so a stub that stays on this default
+    /// never turns into "granted since forever".
+    async fn role_grant_timestamps(
+        &self,
+        _instance_id: &str,
+        _grant_predicate: Option<&str>,
+        _did: &str,
+    ) -> anyhow::Result<RoleGrantTimestamps> {
+        Ok(RoleGrantTimestamps::default())
+    }
+}
+
+/// Does a link target name this DID? Accepts the raw DID (the flow's own
+/// `proposer` links), the `literal:string:`-encoded form the SDNA setters
+/// write, and the legacy `literal://string:` spelling still minted by Flux's
+/// TypeScript `Literal` and by pre-normalisation peers (#1014).
+///
+/// The legacy spelling matters more here than anywhere else in this file:
+/// every other malformed input in this read path fails *closed* (undated instance
+/// → error, non-discriminating query → error), but an unrecognised
+/// *tombstone* spelling would fail open — the revocation simply is not seen.
+fn target_names_did(target: &str, did: &str, did_literal: &str) -> bool {
+    target == did || crate::utils::normalize_legacy_literal(target).as_ref() == did_literal
 }
 
 #[async_trait]
 impl RequiresQueryable for PerspectiveInstance {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
         PerspectiveInstance::model_query(self, class_name, query_json).await
+    }
+
+    async fn role_grant_timestamps(
+        &self,
+        instance_id: &str,
+        grant_predicate: Option<&str>,
+        did: &str,
+    ) -> anyhow::Result<RoleGrantTimestamps> {
+        use ad4m_client::literal::Literal;
+        let did_literal = Literal::from_string(did.to_string())
+            .to_url()
+            .map_err(|e| {
+                anyhow::anyhow!("role_grant_timestamps: literal encode DID `{did}`: {e}")
+            })?;
+        let names_did = |target: &str| target_names_did(target, did, &did_literal);
+
+        // Earliest by parsed instant, not by string — grant links are
+        // client-stamped and clients disagree on RFC 3339 flavour (#1000).
+        // A link whose timestamp does not parse cannot date the grant; if
+        // none parses this stays `None`, so the caller falls back to the
+        // instance's own timestamp or fails closed.
+        use crate::perspectives::flow_instance::time::parse_link_timestamp;
+        let granted_at = match grant_predicate {
+            Some(pred) => self
+                .get_links(&LinkQuery {
+                    source: Some(instance_id.to_string()),
+                    predicate: Some(pred.to_string()),
+                    ..Default::default()
+                })
+                .await?
+                .into_iter()
+                .filter(|l| names_did(&l.data.target))
+                .filter_map(|l| parse_link_timestamp(&l.timestamp).map(|dt| (dt, l.timestamp)))
+                .min()
+                .map(|(_, ts)| ts),
+            None => None,
+        };
+
+        let revocations: Vec<RoleRevocation> = self
+            .get_links(&LinkQuery {
+                source: Some(instance_id.to_string()),
+                predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            // The vote rule (`atom::signed_by`): a link whose signature does
+            // not verify is not a link anyone wrote.
+            .filter(|l| l.proof.valid == Some(true) && names_did(&l.data.target))
+            .map(|l| RoleRevocation {
+                by: l.author,
+                at: l.timestamp,
+            })
+            .collect();
+
+        Ok(RoleGrantTimestamps {
+            granted_at,
+            revocations,
+        })
     }
 }
 
@@ -615,9 +743,27 @@ pub async fn run_engine_proposal_pass(
     // on the wrong edge and each one costs paid LLM tokens.  The evaluator
     // runs rarely and needs the freshest fold immediately before minting, so
     // the derive cost here is acceptable and correct.
-    let records =
+    let derived =
         crate::perspectives::flow_instance::derive_states(perspective, &records, &flows_by_uri)
             .await;
+    // Honour the invariant from issue #998: a contested flow is irreversibly
+    // stalled — two edges already carry quorum, so more proposals cannot resolve
+    // it. Proposing into such a flow wastes LLM tokens and misleads governance.
+    let records: Vec<_> = derived
+        .into_iter()
+        .filter_map(|df| {
+            if let Some(ref c) = df.contested {
+                log::info!(
+                    "run_engine_proposal_pass: {} is contested in state {:?}; skipping mint (issue #998)",
+                    df.record.instance_uri,
+                    c.from_state,
+                );
+                None
+            } else {
+                Some(df.record)
+            }
+        })
+        .collect();
 
     let satisfied =
         evaluate_flow_transitions(perspective, &records, &flows_by_uri, &acting_did).await;
@@ -741,7 +887,7 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
             );
         };
         // A proposal carrying `resolved_as` is the recorded history of a
-        // consensus event, not a live row, and must not suppress a re-mint.
+        // consensus event, not a live proposal, and must not suppress a re-mint.
         // Without this a cyclic flow wedges: same graph → same seal → the
         // already-settled proposal matches the whole dedup key, so the mint
         // is skipped and the edge can never fire on the next visit.
@@ -847,6 +993,37 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    #[test]
+    fn target_names_did_accepts_raw_and_both_literal_spellings() {
+        let did = "did:key:zAlice";
+        let lit = "literal:string:did%3Akey%3AzAlice";
+        assert!(target_names_did(did, did, lit));
+        assert!(target_names_did(lit, did, lit));
+        // The legacy double-slash spelling names the same DID — a tombstone
+        // written in it must be seen, or revocation fails open.
+        assert!(target_names_did(
+            "literal://string:did%3Akey%3AzAlice",
+            did,
+            lit
+        ));
+        assert!(!target_names_did(
+            "literal:string:did%3Akey%3AzBob",
+            did,
+            lit
+        ));
+        assert!(!target_names_did("literal://", did, lit));
+    }
+
+    #[test]
+    fn to_url_emits_the_single_colon_spelling_target_names_did_expects() {
+        use ad4m_client::literal::Literal;
+        let url = Literal::from_string("did:key:zAlice".to_string())
+            .to_url()
+            .expect("literal encode");
+        assert!(url.starts_with("literal:") && !url.starts_with("literal://"));
+        assert!(target_names_did(&url, "did:key:zAlice", &url));
+    }
+
     fn mq(class: &str) -> ModelQuery {
         ModelQuery {
             class_name: class.to_string(),
@@ -883,7 +1060,7 @@ mod tests {
     }
 
     /// Test 18. The seal is order-independent (two evaluations of the same
-    /// guard agree however the store ordered the rows) and
+    /// guard agree however the store ordered the instances) and
     /// content-sensitive (an edit that keeps the same IDs changes it) — the
     /// second half is what lets a voter refuse to co-sign edited evidence.
     #[test]

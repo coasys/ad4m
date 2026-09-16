@@ -32,11 +32,14 @@
 //!   ▼ FlowInstance::read_set  ← ONLY store access in a state read
 //!      ├─ proposals (TransitionAtoms from above)
 //!      └─ resolve_role_grants per gated target state  (roles.rs)
-//!         ▲ ROLE ELIGIBILITY IS DECIDED HERE. The fold does no role work.
+//!         Reads each candidate's role instances and their history — grant time,
+//!         signed + authorised revocation tombstones — into RoleGrant windows.
+//!         Decides nothing about any particular vote.
 //!   │
 //!   ▼ fold_read_set
-//!      Calls eligible_votes per atom (roles.rs, pure) → VouchedAtom with
-//!      pre-filtered votes. No store. No role queries.
+//!      Calls eligible_votes per atom (roles.rs, pure): each vote is gated
+//!      AS OF ITS OWN TIMESTAMP against the windows (#1027) → VouchedAtom
+//!      with pre-filtered votes. No store. No role queries.
 //!   │
 //!   ▼ fold  (fold.rs — pure, no I/O)
 //!      Walks from genesis taking the earliest-settled declared edge per state.
@@ -80,8 +83,11 @@
 pub mod accept;
 pub mod atom;
 pub mod fold;
+#[cfg(test)]
+mod ordering_tests;
 pub mod pass;
 pub mod roles;
+pub mod time;
 pub mod trigger;
 
 pub(crate) use pass::local_cached_state;
@@ -92,12 +98,12 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::DecoratedLinkExpression;
 use atom::{marked_fired, TransitionAtom};
-use fold::{fold, rule_for, DerivedState, VouchedAtom};
+use fold::{fold, rule_for, Contention, DerivedState, VouchedAtom};
 use roles::{eligible_votes, resolve_role_grants, RoleGrant};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-/// A running flow: its identity row plus the definition it runs. Built once
+/// A running flow: its identity instance plus the definition it runs. Built once
 /// per read; borrows the definition from the caller's catalogue.
 #[derive(Debug)]
 pub struct FlowInstance<'a> {
@@ -133,14 +139,16 @@ pub struct ReadSet {
     /// The state the walk starts from — the flow definition's first state.
     pub genesis: String,
     pub proposals: Vec<ProposalLinks>,
-    /// Which voters this replica held eligible, and the role rows it says it
-    /// read. `eligible` is a verdict WE computed: the rows are cited by ID
-    /// and not carried here, so a verifier that folds this set has trusted
-    /// the minter about role membership rather than checked it. Present
-    /// because roles are re-derived live and a token's backing must at least
-    /// record what its verdict rested on. Making this half re-verifiable
-    /// needs the signed role rows themselves — the vote-time snapshot — which
-    /// is platform work this engine does not do yet.
+    /// Each voter's role instances and their history — when each was granted
+    /// and which signed, authorised tombstones ended it — as this replica
+    /// read them (#1027). The *verdict* is not here: [`fold_read_set`] gates
+    /// every vote as of its own timestamp against these windows, so a
+    /// verifier re-runs that decision itself. What it still takes on trust
+    /// is the history: the role instances and tombstones are cited by ID, author and
+    /// timestamp, not carried as signed links. Nothing cited is ever
+    /// deleted, so every citation stays resolvable against the graph;
+    /// carrying the signed links themselves is platform work this engine
+    /// does not do yet.
     pub role_grants: Vec<RoleGrant>,
 }
 
@@ -202,7 +210,7 @@ pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> DerivedState {
 }
 
 impl<'a> FlowInstance<'a> {
-    /// Pair an already-loaded row with its definition from the caller's
+    /// Pair an already-loaded flow instance with its definition from the caller's
     /// catalogue.
     pub fn from_record(record: &FlowInstanceRecord, flow: &'a SHACLFlow) -> Self {
         FlowInstance {
@@ -218,8 +226,8 @@ impl<'a> FlowInstance<'a> {
         initial_state_of(self.flow)
     }
 
-    /// The flat row the guard and role translators take (`$flow.base`,
-    /// `$flow.instance`). Neither reads a state, so the row carries genesis
+    /// The flat record the guard and role translators take (`$flow.base`,
+    /// `$flow.instance`). Neither reads a state, so the record carries genesis
     /// purely to stay a valid [`FlowInstanceRecord`].
     pub fn as_record(&self) -> FlowInstanceRecord {
         FlowInstanceRecord {
@@ -232,10 +240,11 @@ impl<'a> FlowInstance<'a> {
     }
 
     /// All I/O for a state read. Returns the proposal links of every
-    /// [`TransitionAtom`] on this instance, plus one [`RoleGrant`] verdict per
+    /// [`TransitionAtom`] on this instance, plus one [`RoleGrant`] — the
+    /// candidate's role instances with their grant and revocation history — per
     /// `(target_state, candidate_DID)` pair where the rule's `fromRole` gates
-    /// that state. That is two classes of store query and no others; the fold
-    /// that follows is pure over this value.
+    /// that state. That is three classes of store query and no others; the
+    /// fold that follows is pure over this value.
     ///
     /// Fails closed: `Err` propagates on any store error **and** on any role
     /// query that cannot discriminate between DIDs. The caller must abandon the
@@ -297,6 +306,22 @@ impl<'a> FlowInstance<'a> {
     }
 }
 
+/// A `FlowInstanceRecord` together with the derivation's contention verdict.
+///
+/// Returned by [`derive_states`] so consumers can honour the invariant:
+/// *anything that pays out on a completed flow must refuse a derivation with
+/// `contested.is_some()`*. Contention is a per-fold ephemeral — it is NOT
+/// stored on `FlowInstanceRecord` to prevent stale persisted values.
+#[derive(Debug, Clone)]
+pub struct DerivedFlow {
+    pub record: FlowInstanceRecord,
+    /// `Some` when two edges out of the current state both carry quorum; the
+    /// flow is irreversibly stalled and consumers must not propose into it or
+    /// present it as "awaiting votes". `None` means an ordinary settled or
+    /// waiting state.
+    pub contested: Option<Contention>,
+}
+
 /// Derive the current state of every record in one pass, replacing each
 /// `currentState` cache with the fold's answer so downstream readers act on
 /// the live derived state.
@@ -309,7 +334,7 @@ pub async fn derive_states(
     perspective: &PerspectiveInstance,
     records: &[FlowInstanceRecord],
     flows_by_uri: &HashMap<String, SHACLFlow>,
-) -> Vec<FlowInstanceRecord> {
+) -> Vec<DerivedFlow> {
     let mut out = Vec::with_capacity(records.len());
     for record in records {
         let Some(flow) = flows_by_uri.get(&record.flow_uri) else {
@@ -319,9 +344,12 @@ pub async fn derive_states(
             .derive_state(perspective)
             .await
         {
-            Ok(derived) => out.push(FlowInstanceRecord {
-                current_state: derived.state,
-                ..record.clone()
+            Ok(derived) => out.push(DerivedFlow {
+                record: FlowInstanceRecord {
+                    current_state: derived.state,
+                    ..record.clone()
+                },
+                contested: derived.contested,
             }),
             Err(e) => log::warn!(
                 "derive_states: skipping {} — its state could not be derived: {e:#}",

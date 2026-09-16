@@ -10,7 +10,7 @@
 //! from graph I/O makes it cheap to add fixture-driven tests as new
 //! `PropertyCondition` variants land.
 
-use super::types::{FlowContext, NextStateSummary};
+use super::types::{ContentionStatus, FlowContext, NextStateSummary};
 use crate::perspectives::shacl_parser::{
     ConsensusRule, FlowState, ModelQuery, PropertyCondition, SHACLFlow,
 };
@@ -169,6 +169,7 @@ pub fn summarize_flow_instance(
     instance_uri: impl Into<String>,
     subject: impl Into<String>,
     current_state: impl Into<String>,
+    contested: ContentionStatus,
 ) -> FlowContext {
     let current_state = current_state.into();
     let instance_uri = instance_uri.into();
@@ -185,6 +186,7 @@ pub fn summarize_flow_instance(
         flow_interpretation_hint: flow.interpretation_hint.clone(),
         reachable_next_states,
         consensus_rule: flow.consensus_rule.clone(),
+        contested,
     }
 }
 
@@ -965,6 +967,7 @@ mod tests {
             "ad4m://flow/instance/inst-1",
             "ad4m://task/foo",
             "in_progress",
+            ContentionStatus::NotContested,
         );
         assert_eq!(ctx.flow_name, "Delivery");
         assert_eq!(ctx.instance_uri, "ad4m://flow/instance/inst-1");
@@ -1012,6 +1015,7 @@ mod tests {
             "ad4m://flow/instance/inst-42",
             "ad4m://task/foo",
             "identified",
+            ContentionStatus::NotContested,
         );
         let scoped = ctx
             .reachable_next_states
