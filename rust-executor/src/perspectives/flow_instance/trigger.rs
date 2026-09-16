@@ -231,6 +231,17 @@ impl PerspectiveInstance {
     /// no cache to keep), and the `debug!` below names the count so the
     /// "nobody swept" case is visible rather than inferred.
     ///
+    /// Signing keys are **not** pre-checked. A user whose key is not in the
+    /// wallet makes that user's write fail with the pass's existing
+    /// "recording … rolled back (re-runs next pass)" warning — loud, and
+    /// harmless because the derivation is a pure fold that repeats. The
+    /// alternative, `WalletBackend::key_exists`, falls back to a blocking
+    /// HTTP call on `SharedWallet` — the very backend a multi-user node
+    /// runs — so pre-checking would trade a rare loud failure for a wallet
+    /// round-trip per user per pass. Note also that nothing here calls
+    /// `ensure_user_key`: a missing key must never be answered by minting a
+    /// fresh DID underneath an existing user.
+    ///
     /// The single-user short-circuit here is an optimisation (skip the DB
     /// read); the rule itself lives in `flow_pass_agents`, which is where it
     /// is tested.
