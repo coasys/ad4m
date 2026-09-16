@@ -37,8 +37,8 @@ use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
 /// evidence seal does not recompute on this replica. Returns whatever
 /// settled as a result, which may be nothing: a vote that does not yet reach
 /// quorum is a landed vote, not a failure.
-// The WS-RPC / MCP / TS surfaces that call this land in the accept-reject PR
-// (#968); in this PR the e2e tests are its only caller.
+// The WS-RPC / MCP / TS surfaces that call this land in #988 (which replaced
+// the closed #968); on #987 the e2e tests are its only caller.
 #[allow(dead_code)]
 pub async fn accept_flow_proposal(
     perspective: &mut PerspectiveInstance,

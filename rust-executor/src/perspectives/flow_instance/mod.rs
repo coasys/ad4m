@@ -105,9 +105,22 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// A running flow: its identity instance plus the definition it runs. Built once
 /// per read; borrows the definition from the caller's catalogue.
+///
+/// The two URIs point at different things and are easy to swap by eye:
+/// `uri` is the flow run, `subject` is the thing it runs *about*.
 #[derive(Debug)]
 pub struct FlowInstance<'a> {
+    /// This run's own identity — `ad4m://flow/instance/{id}`, the
+    /// `FlowInstanceRecord::instance_uri`. Every proposal in the read-set
+    /// points here through `flowInstance`.
     pub uri: String,
+    /// The base expression this run is bound to — the task, message or
+    /// whatever else the flow is about (`ad4m://task/foo`), *not* this run.
+    ///
+    /// Called `subject` rather than `baseExpression` only because that name
+    /// collided with an `Ad4mModel` synthetic field (`e6362e5ca`); the
+    /// template language still spells it `$flow.base`
+    /// (`flow_context::render::FLOW_BASE_TOKEN`).
     pub subject: String,
     pub flow: &'a SHACLFlow,
 }

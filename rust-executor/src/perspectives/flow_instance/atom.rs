@@ -350,7 +350,7 @@ fn earliest_proposer_timestamp(
 /// individual field, and whether that link's signature verified* — per-link
 /// facts hydration collapses away, so field-reading has to stay on raw links.
 ///
-/// **Half 1 — class query (this PR's change):** a `model_query` over the
+/// **Half 1 — class query (changed in #990, `cda1d95ea`):** a `model_query` over the
 /// hard-wired `FlowTransitionProposal` subject class, filtered by
 /// `flowInstance == instance_uri`, yields the URIs of every proposal that
 /// belongs to this instance. Using the class query rather than a raw

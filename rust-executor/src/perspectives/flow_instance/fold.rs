@@ -35,11 +35,12 @@
 //! settled?" would strand such a flow at genesis forever, while asking "did
 //! the *edge* collect `n` distinct voters?" resolves it.
 //!
-//! What that is *not*, in this PR: the deliberate two-bot path. The mint pass
+//! What that is *not*, as of #987: the deliberate two-bot path. The mint pass
 //! dedupes on `(instance, to_state, evidence_hash)` with no proposer
 //! dimension, so a bot that already sees a peer's proposal for the edge
 //! declines to mint a twin and must vote instead — and voting is
-//! [`super::accept`], whose RPC callers land in #968.
+//! [`super::accept`], whose RPC callers land in #988 (which replaced the
+//! closed #968).
 //!
 //! ## Ordering and time
 //!
