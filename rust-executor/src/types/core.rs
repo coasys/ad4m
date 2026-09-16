@@ -500,6 +500,7 @@ pub struct TriggeredNotification {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ModelApiType {
     OpenAi,
+    Anthropic,
 }
 
 impl FromStr for ModelApiType {
@@ -512,6 +513,9 @@ impl FromStr for ModelApiType {
             "openAi" => Ok(ModelApiType::OpenAi),
             "OpenAi" => Ok(ModelApiType::OpenAi),
             "OPEN_AI" => Ok(ModelApiType::OpenAi),
+            "anthropic" => Ok(ModelApiType::Anthropic),
+            "Anthropic" => Ok(ModelApiType::Anthropic),
+            "ANTHROPIC" => Ok(ModelApiType::Anthropic),
             _ => Err(format!("Unknown ModelApiType: {}", s)),
         }
     }
@@ -522,6 +526,7 @@ impl ToString for ModelApiType {
     fn to_string(&self) -> String {
         match self {
             ModelApiType::OpenAi => "OPEN_AI".to_string(),
+            ModelApiType::Anthropic => "ANTHROPIC".to_string(),
         }
     }
 }
