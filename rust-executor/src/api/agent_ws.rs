@@ -270,6 +270,20 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(serde_json::to_value(agent)?)
 }
 
+/// Publishes the main agent to the agent language without holding up the caller.
+///
+/// The publish is best-effort (a failure is only logged) and reaches a remote
+/// server, so awaiting it made generate/unlock take as long as that server took
+/// to answer or time out. `publish_agent_to_language` serializes publishes, so a
+/// profile update made right after this still wins.
+fn spawn_main_agent_publish() {
+    tokio::spawn(async {
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!("Error publishing agent expression: {}", e);
+        }
+    });
+}
+
 /// agent.generate — generate agent identity
 async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
@@ -308,9 +322,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         log::info!("System languages loaded");
     }
 
-    if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-        log::warn!("Error publishing agent expression: {}", e);
-    }
+    spawn_main_agent_publish();
 
     if !init_errors.is_empty() {
         agent.error = Some(init_errors.join("; "));
@@ -403,9 +415,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
         log::info!("AD4M init complete");
 
-        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-            log::warn!("Error publishing agent expression: {}", e);
-        }
+        spawn_main_agent_publish();
     }
 
     let mut agent = {
