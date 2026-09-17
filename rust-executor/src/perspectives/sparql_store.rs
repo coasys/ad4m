@@ -167,6 +167,55 @@ fn status_str(status: &Option<LinkStatus>) -> &'static str {
     }
 }
 
+/// Encode a proof verdict for storage.
+///
+/// `proof.valid` is tri-state — `Some(true)` = "evaluated and verified",
+/// `Some(false)` = "evaluated and wrong", `None` = "never evaluated" — and the
+/// store carries that third state as the *absence* of the `proofValid`
+/// annotation. `None` here therefore means "write no annotation at all", not
+/// "write false".
+///
+/// Paired with [`decode_proof_valid`]; keep the two in step. This encoding used
+/// to be spelled out at the write site and decoded independently at three read
+/// sites, which is how `None` came to be flattened to `"false"` in the first
+/// place (#1046).
+fn encode_proof_valid(valid: Option<bool>) -> Option<String> {
+    valid.map(|v| v.to_string())
+}
+
+/// Decode a stored `proofValid` annotation back into a verdict.
+///
+/// The empty string means the annotation is absent: both SPARQL read paths bind
+/// `?proofValid` through `OPTIONAL`, and the solution accessors yield `""` for
+/// an unbound variable.
+///
+/// # Rows written before #1046
+///
+/// Both earlier writers — the named-graph one and the reifier one that replaced
+/// it — emitted `proofValid` unconditionally as `proof.valid.unwrap_or(false)`.
+/// So on any existing disk a *never evaluated* link is stored as `"false"`,
+/// byte-identical to a real negative verdict, and decodes here as `Some(false)`
+/// — "evaluated and failed".
+///
+/// That is deliberate and is not repaired. It is a choice made with a mechanism
+/// available: [`SparqlStore::migration_version`] /
+/// [`SparqlStore::set_migration_version`] exist and the store is at
+/// version 2, so a v3 sweep was on the table. It would have been a guess. The
+/// information was destroyed at write time and only re-verification can recover
+/// it, so rewriting those rows to `None` would invent a "never evaluated" claim
+/// for links that may genuinely have failed verification.
+///
+/// `Some(false)` is the fail-closed reading at every consumer that branches on
+/// the field (`signed_by`, the `flow_evaluator` revocation filter,
+/// `get_sdna_facts`), so the unrecoverable guess errs restrictive.
+fn decode_proof_valid(s: &str) -> Option<bool> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s == "true")
+    }
+}
+
 /// Back-compat SPARQL function for legacy notification triggers and SDNA
 /// queries that still call `<ad4m://fn/parse_literal>(?target)`.
 ///
@@ -486,19 +535,13 @@ impl SparqlStore {
             (ONT_STATUS, status_str(&link.status)),
         ];
 
-        // `proof.valid` is tri-state: `Some(true)` and `Some(false)` are
-        // verdicts ("verified" / "evaluated and wrong"), while `None` means the
-        // signature was never evaluated at all. Persisting `None` as `"false"`
-        // made those two indistinguishable on read. An unevaluated verdict is
-        // therefore stored as an *absent* annotation. Every reader already maps
-        // an absent `proofValid` back to `None` (`for_each_matched_link`,
-        // `link_from_solution`, `migrate_named_graphs_to_reifiers`), so absence
-        // is the faithful encoding rather than a new convention — and both
-        // SPARQL reads bind it through `OPTIONAL`.
-        let valid_str;
-        if let Some(valid) = proof.valid {
-            valid_str = valid.to_string();
-            annotations.push((ONT_PROOF_VALID, &valid_str));
+        // `proof.valid` is tri-state and `None` ("never evaluated") is stored as
+        // an absent annotation rather than as `"false"`. See
+        // `encode_proof_valid` / `decode_proof_valid` for the encoding and for
+        // what it means for rows written before #1046.
+        let valid_str = encode_proof_valid(proof.valid);
+        if let Some(valid_str) = valid_str.as_deref() {
+            annotations.push((ONT_PROOF_VALID, valid_str));
         }
 
         for (pred_uri, value) in &annotations {
@@ -881,11 +924,7 @@ impl SparqlStore {
                     }
                 }
 
-                let proof_valid = if proof_valid_str.is_empty() {
-                    None
-                } else {
-                    Some(proof_valid_str == "true")
-                };
+                let proof_valid = decode_proof_valid(&proof_valid_str);
                 let status = match status_val.as_str() {
                     "Local" => Some(LinkStatus::Local),
                     "Shared" => Some(LinkStatus::Shared),
@@ -1024,11 +1063,7 @@ impl SparqlStore {
         let proof_key = get_str("proofKey");
         let proof_sig = get_str("proofSig");
         let proof_valid_str = get_str("proofValid");
-        let proof_valid = if proof_valid_str.is_empty() {
-            None
-        } else {
-            Some(proof_valid_str == "true")
-        };
+        let proof_valid = decode_proof_valid(&proof_valid_str);
         let status_val = get_str("status");
         let status = match status_val.as_str() {
             "Local" => Some(LinkStatus::Local),
@@ -1407,11 +1442,7 @@ impl SparqlStore {
                 let proof_key = get_str("proofKey");
                 let proof_sig = get_str("proofSig");
                 let proof_valid_str = get_str("proofValid");
-                let proof_valid = if proof_valid_str.is_empty() {
-                    None
-                } else {
-                    Some(proof_valid_str == "true")
-                };
+                let proof_valid = decode_proof_valid(&proof_valid_str);
                 let status_val = get_str("status");
                 let status = match status_val.as_str() {
                     "Local" => Some(LinkStatus::Local),
@@ -2873,6 +2904,28 @@ mod tests {
     // negative verdict on read. One test per read path, because each path
     // decodes the annotation independently, plus a `Some(false)` control that
     // proves the fix did not simply stop recording negative verdicts.
+    //
+    // `Some(true)` is not re-asserted here — it is already pinned by
+    // `assert_eq!(results[0].proof.valid, Some(true))` in
+    // `test_query_links_returns_metadata` above — so together with these tests
+    // all three states are pinned end to end.
+
+    /// The encode/decode pair is the single definition of the storage
+    /// convention; this pins all three states through it directly, without a
+    /// store, so a change to one half that breaks the other fails here first.
+    #[test]
+    fn proof_valid_encode_decode_round_trips_all_three_states() {
+        for verdict in [Some(true), Some(false), None] {
+            let encoded = encode_proof_valid(verdict);
+            let decoded = decode_proof_valid(encoded.as_deref().unwrap_or(""));
+            assert_eq!(decoded, verdict, "encode/decode must be lossless");
+        }
+        assert_eq!(
+            encode_proof_valid(None),
+            None,
+            "an unevaluated verdict must produce no annotation, not \"false\""
+        );
+    }
 
     /// Read path 1: `link_from_solution`, reached via `get_all_links`.
     #[test]
@@ -2916,18 +2969,13 @@ mod tests {
         assert_eq!(links[0].proof.invalid, None);
     }
 
-    /// Read path 3: `migrate_named_graphs_to_reifiers`. Named-graph-era data
-    /// with no `proofValid` annotation decodes to `None`; the migration then
-    /// re-persists it through `insert_link_triples`, so this covers the read
-    /// path *and* the write site it feeds.
-    #[test]
-    fn proof_valid_none_survives_named_graph_migration() {
-        let svc = new_service();
-
-        // Seed one link in the pre-reifier named-graph layout: the triple in a
-        // named graph, its metadata on the graph IRI in the default graph, and
-        // deliberately no `proofValid` annotation.
-        let graph = NamedNode::new("ad4m://graph/legacy1").unwrap();
+    /// Seed one link in the pre-reifier named-graph layout: the triple in a
+    /// named graph, its metadata on the graph IRI in the default graph.
+    ///
+    /// `proof_valid` is the raw annotation value, or `None` to omit the
+    /// annotation entirely.
+    fn seed_named_graph_link(svc: &SparqlStore, graph_iri: &str, proof_valid: Option<&str>) {
+        let graph = NamedNode::new(graph_iri).unwrap();
         let source = NamedNode::new("ad4m://src").unwrap();
         let predicate = NamedNode::new("ad4m://pred").unwrap();
         let target = NamedNode::new("ad4m://tgt").unwrap();
@@ -2939,13 +2987,19 @@ mod tests {
                 GraphNameRef::NamedNode(graph.as_ref()),
             ))
             .unwrap();
-        for (pred_uri, value) in [
+
+        let mut annotations = vec![
             (ONT_AUTHOR, "did:key:z6Mktest"),
             (ONT_TIMESTAMP, "2024-01-15T10:00:00.000Z"),
             (ONT_PROOF_KEY, "testkey"),
             (ONT_PROOF_SIG, "testsig"),
             (ONT_STATUS, "Shared"),
-        ] {
+        ];
+        if let Some(value) = proof_valid {
+            annotations.push((ONT_PROOF_VALID, value));
+        }
+
+        for (pred_uri, value) in annotations {
             let lit = Literal::new_simple_literal(value);
             svc.store
                 .insert(QuadRef::new(
@@ -2956,6 +3010,24 @@ mod tests {
                 ))
                 .unwrap();
         }
+    }
+
+    /// Read path 3: `migrate_named_graphs_to_reifiers`, on the corpus real
+    /// legacy data actually has.
+    ///
+    /// The shipped named-graph writer emitted `proofValid` unconditionally as
+    /// `proof.valid.unwrap_or(false)` (see `8782ea35`), so *every* row on a
+    /// user's disk carries the annotation and an unevaluated verdict is stored
+    /// as `"false"`, byte-identical to a real negative one. This pins the
+    /// deliberate consequence: such a row migrates to `Some(false)`,
+    /// "evaluated and failed", and is **not** rescued into `None`. Rescuing it
+    /// would invent an unevaluated claim for links that may genuinely have
+    /// failed verification; `Some(false)` is the fail-closed reading at every
+    /// consumer. See `decode_proof_valid` for the full reasoning.
+    #[test]
+    fn legacy_proof_valid_false_migrates_as_false_not_none() {
+        let svc = new_service();
+        seed_named_graph_link(&svc, "ad4m://graph/legacy1", Some("false"));
 
         let migrated = svc.migrate_named_graphs_to_reifiers().unwrap();
         assert_eq!(migrated, 1, "the seeded legacy link should migrate");
@@ -2963,9 +3035,40 @@ mod tests {
         let links = svc.get_all_links().unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(
+            links[0].proof.valid,
+            Some(false),
+            "a legacy `proofValid \"false\"` row must keep reading as a negative \
+             verdict across migration — turning it into None would silently \
+             upgrade failed verifications to \"never evaluated\" — got {:?}",
+            links[0].proof.valid
+        );
+        assert_eq!(links[0].proof.invalid, Some(true));
+    }
+
+    /// Read path 3 again, for the absent-annotation shape.
+    ///
+    /// This shape never existed in the named-graph era — that writer always
+    /// emitted the annotation, which is what
+    /// `legacy_proof_valid_false_migrates_as_false_not_none` covers. It is the
+    /// shape the *current* writer produces, so what this pins is that
+    /// `migrate_named_graphs_to_reifiers` decodes an absent annotation to
+    /// `None` and re-persists it through `insert_link_triples` without
+    /// reintroducing the flattening — the read path *and* the write site it
+    /// feeds. Do not read it as evidence that legacy data is covered.
+    #[test]
+    fn proof_valid_absent_annotation_survives_named_graph_migration() {
+        let svc = new_service();
+        seed_named_graph_link(&svc, "ad4m://graph/legacy1", None);
+
+        let migrated = svc.migrate_named_graphs_to_reifiers().unwrap();
+        assert_eq!(migrated, 1, "the seeded link should migrate");
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
             links[0].proof.valid, None,
-            "a legacy link with no proofValid annotation must stay unevaluated \
-             across migration — got {:?}",
+            "a link with no proofValid annotation must stay unevaluated across \
+             migration — got {:?}",
             links[0].proof.valid
         );
         assert_eq!(links[0].proof.invalid, None);
