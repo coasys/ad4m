@@ -187,13 +187,18 @@ fn resolve_host(requested: Option<&str>, has_credential: bool) -> String {
 ///   config, so this cannot drift from the decisions
 ///   [`start_tls_listener`] makes.
 ///
-/// One thing `tls_listening` does **not** prove: that the HTTPS socket bound.
-/// `axum_server::bind_rustls` binds inside the spawned task (the same shape
-/// the RPC port uses), so a port conflict surfaces as an error log after this
-/// returns, and plain is on loopback by then. That is the fail-*closed*
-/// direction — MCP is unreachable rather than reachable in cleartext — and it
-/// is logged, not silent. Reversing it would mean binding eagerly here and on
-/// the RPC port both; worth doing, not worth diverging on.
+/// `tls_listening` does prove the HTTPS socket bound: [`start_tls_listener`]
+/// creates the listener synchronously before returning, so a port conflict
+/// reaches this function as `false` and the plain bind is left alone. That is
+/// the one place this diverges from the RPC port, which narrows on
+/// `config.tls.is_some()` — on configuration, which cannot fail. Narrowing on
+/// an outcome is the stronger rule, and it is worth the divergence precisely
+/// because the port here is *derived* (`--mcp-port + 1`) rather than typed by
+/// an operator: nobody chose it, so nobody checked what else is on it.
+///
+/// What no boolean here can prove is that the HTTPS listener ever carried an
+/// MCP message — that needs an end-to-end test with a certificate fixture,
+/// which #986 names and this PR does not add.
 fn resolve_plain_host(
     requested: Option<&str>,
     has_credential: bool,
@@ -356,17 +361,12 @@ async fn start_tls_listener(
         }
     };
 
-    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-        &tls.cert_file_path,
-        &tls.key_file_path,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("MCP TLS config error: {}", e))?;
-
     let addr = SocketAddr::from(([0, 0, 0, 0], tls_port));
 
-    // Bind before reporting success: a conflict here has to degrade to "no
-    // HTTPS", not to "no remote MCP at all". See the doc comment above.
+    // Bind before cert I/O and before reporting success: check port
+    // availability first so that a conflict returns Ok(false) rather than
+    // propagating an Err after the cert has already loaded. See the doc comment
+    // above for why the bind must happen synchronously here.
     let std_listener = match std::net::TcpListener::bind(addr) {
         Ok(listener) => listener,
         Err(e) => {
@@ -381,6 +381,13 @@ async fn start_tls_listener(
     // axum-server drives this socket from tokio; a blocking accept would stall
     // the runtime thread it lands on.
     std_listener.set_nonblocking(true)?;
+
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+        &tls.cert_file_path,
+        &tls.key_file_path,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("MCP TLS config error: {}", e))?;
 
     let router = mcp_router(context, initial_token);
     info!("Starting AD4M MCP server (HTTPS) on https://{}", addr);
@@ -501,6 +508,43 @@ mod tests {
         assert_eq!(
             resolve_plain_host(Some("10.0.0.5"), false, true),
             "10.0.0.5"
+        );
+    }
+
+    /// The bind happens synchronously before `start_tls_listener` returns, so a
+    /// port conflict degrades to `Ok(false)` — not to `Ok(true)` (which the
+    /// pre-fix code returned immediately after `tokio::spawn`, before touching
+    /// the socket) and not to `Err` (which cert-I/O-before-bind would produce
+    /// because the nonexistent path would fail first).
+    #[tokio::test]
+    async fn start_tls_listener_returns_false_when_port_is_already_held() {
+        // Hold a port so the TLS bind fails.
+        let holder = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let held_port = holder.local_addr().unwrap().port();
+        // plain_port + 1 == held_port so resolve_tls_port yields TlsPort::Use,
+        // reaching the actual bind.  rpc_tls_port differs so we don't hit the
+        // ClashesWithRpcTls early-return instead.
+        let plain_port = held_port.wrapping_sub(1);
+        let rpc_tls_port = held_port.wrapping_add(1);
+
+        let context = McpContext {
+            admin_credential: Some("cred".to_string()),
+            auth_token: Arc::new(RwLock::new(None)),
+            dynamic_class_tools: false,
+        };
+        let tls = TlsConfig {
+            cert_file_path: "/nonexistent/cert.pem".to_string(),
+            key_file_path: "/nonexistent/key.pem".to_string(),
+            tls_port: rpc_tls_port,
+        };
+
+        let result = start_tls_listener(&context, None, plain_port, true, tls).await;
+        assert_eq!(
+            result.unwrap(),
+            false,
+            "a held port must degrade to Ok(false); Ok(true) means the bind \
+             is still inside the spawned task (pre-fix), Err means cert I/O \
+             happened before the bind (wrong ordering)"
         );
     }
 }
