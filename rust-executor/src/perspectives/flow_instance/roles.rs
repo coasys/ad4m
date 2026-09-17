@@ -43,13 +43,26 @@
 //! ## Where the timestamps come from
 //!
 //! - `granted_at` is the earliest `instance --didProperty--> did` link, when
-//!   the
-//!   query names a `didProperty` and that link exists — there the grant is
+//!   the query names a `didProperty` and that link exists — there the grant is
 //!   dated from the assignment itself; otherwise the instance's own timestamp
 //!   (its earliest link, as `model_query` reports it). Only that fallback is
 //!   coarse: in it, membership acquired on a pre-existing instance dates from the
 //!   instance, not the acquisition. Neither branch is ever "unknown, so always":
 //!   an instance with no timestamp at all is an error.
+//!
+//!   **This paragraph described the intent from #1027 until #1065; it did not
+//!   describe the code.** The `didProperty` branch had never once executed:
+//!   the role's `didProperty` is a property *name* and the lookup passed it to
+//!   `get_links` as an RDF *predicate*, so it matched nothing and every
+//!   `didProperty` role fell through to the fallback — which is normally
+//!   EARLIER than the assignment link, making the branch advertised as the
+//!   precise one the widest one available. Every such grant was therefore
+//!   retroactive to the instance's creation, and votes cast between then and
+//!   the DID actually being assigned counted toward quorum. `didProperty` is
+//!   resolved through the class shape at the store boundary since #1065
+//!   (`flow_evaluator::PerspectiveInstance::did_property_predicate`); the
+//!   sentence above is true from that commit forward and from no earlier one.
+//!   Receipts minted before it date their grants from the instance.
 //! - `revoked_at` is the tombstone's link timestamp.
 //!
 //! Timestamps are compared as **parsed instants** ([`super::time`]), never
@@ -320,21 +333,35 @@ impl RoleGrantEvidence {
     /// collection side and the pre-#1027 behaviour; see the module header and
     /// <https://github.com/coasys/ad4m/issues/1063>.
     ///
-    /// The tombstone filter reads each link's carried `proof.valid`, which is
-    /// the rule the whole fold layer uses (`atom::signed_by` reads it for
-    /// votes). It is a **verdict about a link, and a reader must not take the
-    /// minter's word for it**: before folding a read-set that arrived from
-    /// elsewhere, re-decorate every carried link — proposals and role evidence
-    /// alike — with [`DecoratedLinkExpression::verify_signature`], which
-    /// recomputes `proof.valid` from the signature itself. Doing it there
-    /// rather than here keeps one trust rule in the fold and puts the
-    /// cryptography at the one boundary where the material is untrusted.
+    /// A tombstone counts only when its signature verifies, and `resolve`
+    /// **recomputes that verdict itself** instead of reading the carried
+    /// `proof.valid`: every revocation link is re-decorated with
+    /// [`DecoratedLinkExpression::verify_signature`] before
+    /// [`revocation_link_counts_for_did`] sees it. `proof.valid` is a claim
+    /// made by whoever serialised the read-set, so on a receipt that arrived
+    /// from elsewhere it is worth exactly as much as the sender — and a forged
+    /// `"valid": true` on a tombstone ends a grant early, changing who counted
+    /// toward quorum. Doing it here rather than asking the caller to
+    /// re-decorate first makes it **unskippable**: there is no path from
+    /// carried evidence to a [`RoleGrantWindow`] that does not go through this
+    /// function, so a future ingest seam cannot forget the step.
+    ///
+    /// This keeps `resolve` pure — `verify_signature` is SHA256 plus an
+    /// Ed25519 check against the author's own `did:key`: no store, no clock,
+    /// no network — at a cost bounded by the number of tombstones carried.
+    ///
+    /// Grant links get no such treatment because they are not
+    /// signature-filtered on either side; see above and #1063.
     pub fn resolve(&self, translated_role_query: &Value) -> anyhow::Result<RoleGrant> {
         let did_literal = did_literal_url(&self.did)?;
         let grant_counts =
             |l: &&DecoratedLinkExpression| grant_link_names_did(l, &self.did, &did_literal);
-        let revocation_counts = |l: &&DecoratedLinkExpression| {
-            revocation_link_counts_for_did(l, &self.did, &did_literal)
+        // Never the carried verdict: recompute it from the signature. See
+        // § Signatures above.
+        let reverified = |l: &DecoratedLinkExpression| {
+            let mut l = l.clone();
+            l.verify_signature();
+            l
         };
 
         let mut windows = Vec::with_capacity(self.instances.len());
@@ -366,7 +393,8 @@ impl RoleGrantEvidence {
             let mut revocations: Vec<RoleRevocation> = instance
                 .revocation_links
                 .iter()
-                .filter(revocation_counts)
+                .map(reverified)
+                .filter(|l| revocation_link_counts_for_did(l, &self.did, &did_literal))
                 .filter(|l| revocation_authorised(translated_role_query, &l.author))
                 .map(|l| RoleRevocation {
                     by: l.author.clone(),
@@ -574,18 +602,62 @@ pub fn eligible_votes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::signatures::TestSigner;
     use crate::perspectives::flow_evaluator::RoleGrantLinks;
-    use crate::types::{DecoratedExpressionProof, Link};
     use async_trait::async_trait;
     use serde_json::json;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{LazyLock, Mutex};
 
-    const ALICE: &str = "did:key:alice";
-    const BOB: &str = "did:key:bob";
-    const ADMIN: &str = "did:key:admin";
-    const LEAD: &str = "did:key:lead";
-    const MALLORY: &str = "did:key:mallory";
+    /// Test personas hold **real** Ed25519 keypairs, not `did:key:alice`
+    /// placeholders, because [`RoleGrantEvidence::resolve`] recomputes every
+    /// tombstone's signature rather than reading its carried `proof.valid`.
+    /// A fixture that merely *claims* `valid: true` is precisely the minter's
+    /// word the reader no longer takes, so a fixture that wants a tombstone to
+    /// count has to sign it for real.
+    ///
+    /// Leaked on first use so the DIDs are `&'static str` and read like the
+    /// constants they replaced. One keypair per persona per process.
+    fn persona(name: &str) -> &'static TestSigner {
+        static SIGNERS: LazyLock<Mutex<HashMap<String, &'static TestSigner>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+        *SIGNERS
+            .lock()
+            .expect("persona registry")
+            .entry(name.to_string())
+            .or_insert_with(|| Box::leak(Box::new(TestSigner::generate())))
+    }
+
+    /// The signer behind a DID one of the fixtures produced, for re-signing.
+    fn persona_for_did(did: &str) -> Option<&'static TestSigner> {
+        SIGNER_NAMES
+            .iter()
+            .map(|n| persona(n))
+            .find(|s| s.did == did)
+    }
+
+    const SIGNER_NAMES: [&str; 5] = ["alice", "bob", "admin", "lead", "mallory"];
+
+    #[allow(non_snake_case)]
+    fn ALICE() -> &'static str {
+        &persona("alice").did
+    }
+    #[allow(non_snake_case)]
+    fn BOB() -> &'static str {
+        &persona("bob").did
+    }
+    #[allow(non_snake_case)]
+    fn ADMIN() -> &'static str {
+        &persona("admin").did
+    }
+    #[allow(non_snake_case)]
+    fn LEAD() -> &'static str {
+        &persona("lead").did
+    }
+    #[allow(non_snake_case)]
+    fn MALLORY() -> &'static str {
+        &persona("mallory").did
+    }
     const T0: &str = "2026-01-01T00:00:00.000Z";
     const T1: &str = "2026-01-02T00:00:00.000Z";
     const T2: &str = "2026-01-03T00:00:00.000Z";
@@ -619,9 +691,16 @@ mod tests {
         }
     }
 
-    /// One link as `get_links` returns it. Author, target, signature verdict
+    /// One link as `get_links` returns it. Author, target, signature validity
     /// and timestamp are all inputs the filters read, so every fixture states
-    /// them explicitly — `valid: false` is the forged/unsigned case.
+    /// them explicitly.
+    ///
+    /// `valid` is honoured **cryptographically**, not by setting `proof.valid`:
+    /// a valid link is signed by `author`'s own key over its own data and
+    /// timestamp, and a forged one carries a signature from a key that is not
+    /// `author`'s. `proof.valid` is still pre-set to match, because that is
+    /// what a store hands back — but `resolve` recomputes it, so a fixture
+    /// whose claim and signature disagree gets ruled on by the signature.
     fn role_link(
         predicate: &str,
         target: &str,
@@ -629,27 +708,36 @@ mod tests {
         valid: bool,
         timestamp: &str,
     ) -> DecoratedLinkExpression {
-        DecoratedLinkExpression {
-            author: author.to_string(),
-            timestamp: timestamp.to_string(),
-            data: Link {
+        use crate::types::{Link as CoreLink, LinkExpression, LinkStatus};
+        let at = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .unwrap_or_else(|e| panic!("fixture timestamp `{timestamp}`: {e}"))
+            .with_timezone(&chrono::Utc);
+        let signer = persona_for_did(author)
+            .unwrap_or_else(|| panic!("fixture author `{author}` is not a known persona"));
+        // A forged link states `author` but is signed by somebody else's key —
+        // exactly what a link whose signature does not check out looks like.
+        let signing_key = if valid { signer } else { persona("forger") };
+        let mut expr = signing_key.sign_at(
+            CoreLink {
                 source: "r0".to_string(),
                 predicate: Some(predicate.to_string()),
                 target: target.to_string(),
-            },
-            proof: DecoratedExpressionProof {
-                key: format!("{author}#key"),
-                signature: "sig".to_string(),
-                valid: Some(valid),
-                invalid: Some(!valid),
-            },
-            status: None,
-        }
+            }
+            .normalize(),
+            at,
+        );
+        expr.author = author.to_string();
+        expr.proof.key = format!("{author}#key");
+        let mut link =
+            DecoratedLinkExpression::from((LinkExpression::from(expr), LinkStatus::Shared));
+        link.proof.valid = Some(valid);
+        link.proof.invalid = Some(!valid);
+        link
     }
 
     /// A signed `instance --agent--> did` grant link at `at`.
     fn grant_link(did: &str, at: &str) -> DecoratedLinkExpression {
-        role_link("agent", did, ADMIN, true, at)
+        role_link("agent", did, ADMIN(), true, at)
     }
 
     /// A signed tombstone by `by` at `at`.
@@ -747,7 +835,7 @@ mod tests {
                     if self.undated_instances {
                         json!({ "id": format!("r{i}") })
                     } else {
-                        json!({ "id": format!("r{i}"), "timestamp": T0, "author": ADMIN })
+                        json!({ "id": format!("r{i}"), "timestamp": T0, "author": ADMIN() })
                     }
                 })
                 .collect();
@@ -778,23 +866,23 @@ mod tests {
     #[tokio::test]
     #[rustfmt::skip]
     async fn both_role_query_shapes_resolve_per_candidate() {
-        let cases: Vec<(&str, Value, &[&str], &[&str], &[&str], Option<usize>)> = vec![
+        let cases: Vec<(&str, Value, Vec<&str>, Vec<&str>, Vec<&str>, Option<usize>)> = vec![
             ("shape 1: didProperty filters candidates",
              json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
-             &[ALICE], &[ALICE, BOB], &[ALICE], Some(2)),
+             vec![ALICE()], vec![ALICE(), BOB()], vec![ALICE()], Some(2)),
             ("shape 2: $did token substitutes per candidate",
              json!({ "className": "ns://Member", "where": { "member": "$did" } }),
-             &[BOB], &[ALICE, BOB], &[BOB], None),
+             vec![BOB()], vec![ALICE(), BOB()], vec![BOB()], None),
             ("one role instance does not satisfy count.min = 2",
              json!({ "className": "ns://Reviewer", "didProperty": "agent", "count": { "min": 2 } }),
-             &[ALICE], &[ALICE], &[], None),
+             vec![ALICE()], vec![ALICE()], vec![], None),
         ];
 
         for (name, role_json, member_dids, candidates, expected, expect_calls) in cases {
-            let stub = members(member_dids);
+            let stub = members(&member_dids);
             let role = role(role_json);
             let evidence =
-                resolve_role_grants(&stub, "approved", &role, &record(), &dids(candidates))
+                resolve_role_grants(&stub, "approved", &role, &record(), &dids(&candidates))
                     .await
                     .unwrap();
             let grants = views(&evidence, &role);
@@ -841,7 +929,7 @@ mod tests {
         ];
 
         for (name, stub, role_json, expect_contains) in cases {
-            let err = resolve_role_grants(&stub, "approved", &role(role_json), &record(), &dids(&[ALICE]))
+            let err = resolve_role_grants(&stub, "approved", &role(role_json), &record(), &dids(&[ALICE()]))
                 .await
                 .expect_err(name);
             assert!(err.to_string().contains(expect_contains), "{name}: got {err:#}");
@@ -851,12 +939,12 @@ mod tests {
         // the same way for a reader off-perspective: an instance with no signed
         // grant link and no instance timestamp cannot be placed in time, and
         // an unplaceable grant gates nothing rather than gating everything.
-        let stub = RoleStub { undated_instances: true, ..members(&[ALICE]) };
+        let stub = RoleStub { undated_instances: true, ..members(&[ALICE()]) };
         let undated = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
-        let evidence = resolve_role_grants(&stub, "approved", &undated, &record(), &dids(&[ALICE]))
+        let evidence = resolve_role_grants(&stub, "approved", &undated, &record(), &dids(&[ALICE()]))
             .await
             .expect("collecting the links themselves cannot fail on timing");
-        let err = evidence[0].resolve(&translated(&undated, ALICE)).expect_err("undated instance");
+        let err = evidence[0].resolve(&translated(&undated, ALICE())).expect_err("undated instance");
         assert!(err.to_string().contains("cannot be placed in time"), "got {err:#}");
 
         // And the undeterminable rule never even runs a query.
@@ -864,7 +952,7 @@ mod tests {
         let _ = resolve_role_grants(
             &stub, "approved",
             &role(json!({ "className": "ns://Quorum", "where": { "open": true } })),
-            &record(), &dids(&[ALICE]),
+            &record(), &dids(&[ALICE()]),
         ).await;
         assert!(stub.calls.lock().unwrap().is_empty(), "no query may run for an undeterminable rule");
     }
@@ -926,7 +1014,7 @@ mod tests {
 
     #[test]
     fn a_rule_without_a_role_admits_every_vote_and_one_with_a_role_admits_only_grantees() {
-        let atom = atom_with_votes(&[(ALICE, T1), (BOB, T2)]);
+        let atom = atom_with_votes(&[(ALICE(), T1), (BOB(), T2)]);
         let open = ConsensusRule {
             n: 1,
             from_role: None,
@@ -939,16 +1027,16 @@ mod tests {
             "no grant, no vote — an unresolved gate admits nobody"
         );
         let grants = vec![
-            grant("approved", BOB, vec![window("r0", T0, &[])]),
-            grant("approved", ALICE, vec![]),
-            grant("shipped", ALICE, vec![window("r1", T0, &[])]),
+            grant("approved", BOB(), vec![window("r0", T0, &[])]),
+            grant("approved", ALICE(), vec![]),
+            grant("shipped", ALICE(), vec![window("r1", T0, &[])]),
         ];
         assert_eq!(
             eligible_votes(&atom, &gated, &grants)
                 .into_iter()
                 .map(|v| v.did)
                 .collect::<Vec<_>>(),
-            vec![BOB],
+            vec![BOB()],
             "a grant with no instances admits nobody, and a grant for another target state is not a grant for this one"
         );
     }
@@ -969,9 +1057,9 @@ mod tests {
             ("revocation back-dated before the grant",      T2, T1, Some(T0), false),
         ];
         for (name, vote_at, granted_at, revoked_at, counts) in cases {
-            let revocations: Vec<(&str, &str)> = revoked_at.map(|at| (ADMIN, at)).into_iter().collect();
-            let grants = vec![grant("approved", ALICE, vec![window("r0", granted_at, &revocations)])];
-            let atom = atom_with_votes(&[(ALICE, vote_at)]);
+            let revocations: Vec<(&str, &str)> = revoked_at.map(|at| (ADMIN(), at)).into_iter().collect();
+            let grants = vec![grant("approved", ALICE(), vec![window("r0", granted_at, &revocations)])];
+            let atom = atom_with_votes(&[(ALICE(), vote_at)]);
             assert_eq!(eligible_votes(&atom, &gated_rule(None), &grants).len(), usize::from(counts), "{name}");
         }
     }
@@ -981,12 +1069,12 @@ mod tests {
     /// not — which is what keeps an edge they settled settled.
     #[test]
     fn a_revocation_gates_only_votes_cast_after_it() {
-        let atom = atom_with_votes(&[(ALICE, T2), (ALICE, T4)]);
-        let before = vec![grant("approved", ALICE, vec![window("r0", T1, &[])])];
+        let atom = atom_with_votes(&[(ALICE(), T2), (ALICE(), T4)]);
+        let before = vec![grant("approved", ALICE(), vec![window("r0", T1, &[])])];
         let after = vec![grant(
             "approved",
-            ALICE,
-            vec![window("r0", T1, &[(ADMIN, T3)])],
+            ALICE(),
+            vec![window("r0", T1, &[(ADMIN(), T3)])],
         )];
         assert_eq!(eligible_votes(&atom, &gated_rule(None), &before).len(), 2);
         let eligible = eligible_votes(&atom, &gated_rule(None), &after);
@@ -1003,15 +1091,15 @@ mod tests {
     fn the_rules_count_is_evaluated_as_of_the_vote() {
         let grants = vec![grant(
             "approved",
-            ALICE,
-            vec![window("r0", T0, &[]), window("r1", T1, &[(ADMIN, T3)])],
+            ALICE(),
+            vec![window("r0", T0, &[]), window("r1", T1, &[(ADMIN(), T3)])],
         )];
         let rule = gated_rule(Some(json!({ "min": 2 })));
         assert_eq!(
-            eligible_votes(&atom_with_votes(&[(ALICE, T2)]), &rule, &grants).len(),
+            eligible_votes(&atom_with_votes(&[(ALICE(), T2)]), &rule, &grants).len(),
             1
         );
-        assert!(eligible_votes(&atom_with_votes(&[(ALICE, T4)]), &rule, &grants).is_empty());
+        assert!(eligible_votes(&atom_with_votes(&[(ALICE(), T4)]), &rule, &grants).is_empty());
     }
 
     /// A tombstone counts only from an author the grant's own rule accepts:
@@ -1022,31 +1110,32 @@ mod tests {
     #[tokio::test]
     #[rustfmt::skip]
     async fn a_tombstone_counts_only_from_an_author_the_grants_rule_accepts() {
-        let cases: Vec<(&str, Value, &[&str], &[&str])> = vec![
+        let cases: Vec<(&str, Value, Vec<&str>, Vec<&str>)> = vec![
             ("no author condition: anyone may grant, so anyone may revoke",
              json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
-             &[ADMIN, MALLORY, ALICE], &[]),
+             vec![ADMIN(), MALLORY(), ALICE()], vec![]),
             ("admin-only grants are admin-only revocations",
-             json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN } }),
-             &[ADMIN], &[MALLORY, ALICE]),
+             json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() } }),
+             vec![ADMIN()], vec![MALLORY(), ALICE()]),
             ("a set of authorised granters",
-             json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": { "in": [ADMIN, LEAD] } } }),
-             &[ADMIN, LEAD], &[MALLORY, ALICE]),
+             json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": { "in": [ADMIN(), LEAD()] } } }),
+             vec![ADMIN(), LEAD()], vec![MALLORY(), ALICE()]),
             ("`or` branches: a revoker any branch would accept as granter",
              json!({ "className": "ns://Reviewer", "didProperty": "agent",
-                     "or": [ { "className": "ns://Reviewer", "where": { "author": ADMIN } },
-                             { "className": "ns://Reviewer", "where": { "author": LEAD } } ] }),
-             &[ADMIN, LEAD], &[MALLORY, ALICE]),
+                     "or": [ { "className": "ns://Reviewer", "where": { "author": ADMIN() } },
+                             { "className": "ns://Reviewer", "where": { "author": LEAD() } } ] }),
+             vec![ADMIN(), LEAD()], vec![MALLORY(), ALICE()]),
             ("`author: $did`: a self-granted role is self-revoked",
              json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": "$did" } }),
-             &[ALICE], &[ADMIN, MALLORY]),
+             vec![ALICE()], vec![ADMIN(), MALLORY()]),
         ];
         for (name, role_json, accepted, rejected) in cases {
-            let mut stub = members(&[ALICE]);
-            let revokers: Vec<(&str, &str)> = accepted.iter().chain(rejected).map(|by| (*by, T2)).collect();
-            stub.histories.insert(ALICE.into(), history(ALICE, Some(T1), &revokers));
+            let mut stub = members(&[ALICE()]);
+            let revokers: Vec<(&str, &str)> =
+                accepted.iter().chain(rejected.iter()).map(|by| (*by, T2)).collect();
+            stub.histories.insert(ALICE().into(), history(ALICE(), Some(T1), &revokers));
             let role = role(role_json);
-            let evidence = resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE]))
+            let evidence = resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE()]))
                 .await
                 .unwrap();
             assert_eq!(
@@ -1070,19 +1159,24 @@ mod tests {
     async fn windows_are_derived_from_the_carried_links() {
         let mut stub = RoleStub {
             rows_per_match: 2,
-            ..members(&[ALICE, BOB])
+            ..members(&[ALICE(), BOB()])
         };
         stub.histories.insert(
-            ALICE.into(),
-            history(ALICE, Some(T1), &[(MALLORY, T3), (ADMIN, T2)]),
+            ALICE().into(),
+            history(ALICE(), Some(T1), &[(MALLORY(), T3), (ADMIN(), T2)]),
         );
         // Bob's instances have no `didProperty` link the store could date: they
         // date from the instances themselves (T0), and nothing revoked them.
         let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
-        let evidence =
-            resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE, BOB]))
-                .await
-                .unwrap();
+        let evidence = resolve_role_grants(
+            &stub,
+            "approved",
+            &role,
+            &record(),
+            &dids(&[ALICE(), BOB()]),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             evidence[1].instances[0].asserted_instance_timestamp.as_deref(),
             Some(T0),
@@ -1090,13 +1184,13 @@ mod tests {
         );
         let grants = views(&evidence, &role);
         let alice = &grants[0];
-        assert_eq!(alice.did, ALICE);
+        assert_eq!(alice.did, ALICE());
         assert_eq!(alice.instances, vec!["r0", "r1"]);
         for w in &alice.windows {
             assert_eq!(w.granted_at, T1);
             assert_eq!(
                 w.revocations,
-                vec![revocation(ADMIN, T2), revocation(MALLORY, T3)],
+                vec![revocation(ADMIN(), T2), revocation(MALLORY(), T3)],
                 "no author condition, so both tombstones count, earliest first"
             );
             assert_eq!(w.revoked_at(), Some(T2));
@@ -1110,40 +1204,71 @@ mod tests {
         assert!(!alice.eligible_at(NOW, None));
     }
 
-    /// An unsigned tombstone is not a revocation — the vote-layer rule
-    /// (`atom::signed_by`: a link whose verdict is not `valid` is not a link
-    /// anyone wrote), applied to tombstones by
+    /// A tombstone whose signature does not check out is not a revocation —
+    /// the vote-layer rule (`atom::signed_by`: a link whose verdict is not
+    /// `valid` is not a link anyone wrote), applied to tombstones by
     /// [`revocation_link_counts_for_did`]. Pinned here because the reshape
     /// moved the filter from the store boundary into the pure reader, and this
     /// is the assertion that says it survived the move.
     ///
+    /// The second half is the stronger claim, and the reason `resolve`
+    /// re-derives `proof.valid` instead of reading it: the carried verdict is
+    /// the *minter's* word about a link, and a read-set that arrived from
+    /// elsewhere can say anything it likes. A tombstone with a bad signature
+    /// and `"valid": true` written on it must not end a grant — otherwise a
+    /// sender could shrink anyone's eligibility window and change who counted
+    /// toward quorum, using nothing but a boolean.
+    ///
     /// Grant links deliberately have no such check yet; see #1063.
     #[test]
-    fn an_unsigned_tombstone_does_not_revoke() {
+    fn a_tombstone_whose_signature_fails_does_not_revoke_whatever_it_claims() {
         let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
-        let query = translated(&role, ALICE);
-        let mut unsigned = tombstone(ALICE, ADMIN, T2);
-        unsigned.proof.valid = Some(false);
-        unsigned.proof.invalid = Some(true);
+        let query = translated(&role, ALICE());
 
-        let grant = RoleGrantEvidence {
-            to_state: "approved".into(),
-            role_class: "ns://Reviewer".into(),
-            did: ALICE.into(),
-            instances: vec![RoleInstanceHistory {
-                instance_id: "r0".into(),
-                grant_links: vec![grant_link(ALICE, T1)],
-                revocation_links: vec![unsigned],
-                asserted_instance_timestamp: None,
-            }],
-        }
-        .resolve(&query)
-        .expect("resolves");
+        let open_with = |revocation: DecoratedLinkExpression| {
+            RoleGrantEvidence {
+                to_state: "approved".into(),
+                role_class: "ns://Reviewer".into(),
+                did: ALICE().into(),
+                instances: vec![RoleInstanceHistory {
+                    instance_id: "r0".into(),
+                    grant_links: vec![grant_link(ALICE(), T1)],
+                    revocation_links: vec![revocation],
+                    asserted_instance_timestamp: None,
+                }],
+            }
+            .resolve(&query)
+            .expect("resolves")
+        };
+
+        // Signature genuinely does not verify, and the link says so.
+        let honest_verdict = role_link(
+            crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE,
+            ALICE(),
+            ADMIN(),
+            false,
+            T2,
+        );
+        let grant = open_with(honest_verdict.clone());
         assert!(
             grant.windows[0].revocations.is_empty(),
             "an unsigned tombstone is not a link anyone wrote"
         );
         assert!(grant.eligible_at(NOW, None), "so the grant is still open");
+
+        // Same bad signature, but the read-set claims it verified.
+        let mut lying_verdict = honest_verdict;
+        lying_verdict.proof.valid = Some(true);
+        lying_verdict.proof.invalid = Some(false);
+        let grant = open_with(lying_verdict);
+        assert!(
+            grant.windows[0].revocations.is_empty(),
+            "`proof.valid` is the sender's claim; resolve re-derives it from the signature"
+        );
+        assert!(
+            grant.eligible_at(NOW, None),
+            "a forged verdict must not shrink the window"
+        );
     }
 
     /// A tombstone naming *someone else* is not this DID's revocation, and a
@@ -1155,15 +1280,15 @@ mod tests {
         let grant = RoleGrantEvidence {
             to_state: "approved".into(),
             role_class: "ns://Reviewer".into(),
-            did: ALICE.into(),
+            did: ALICE().into(),
             instances: vec![RoleInstanceHistory {
                 instance_id: "r0".into(),
-                grant_links: vec![grant_link(BOB, T0), grant_link(ALICE, T3)],
-                revocation_links: vec![tombstone(BOB, ADMIN, T4)],
+                grant_links: vec![grant_link(BOB(), T0), grant_link(ALICE(), T3)],
+                revocation_links: vec![tombstone(BOB(), ADMIN(), T4)],
                 asserted_instance_timestamp: None,
             }],
         }
-        .resolve(&translated(&role, ALICE))
+        .resolve(&translated(&role, ALICE()))
         .expect("resolves");
         assert_eq!(
             grant.windows[0].granted_at, T3,
@@ -1184,7 +1309,10 @@ mod tests {
         let w = RoleGrantWindow {
             instance_id: "r0".into(),
             granted_at: T0.into(),
-            revocations: vec![revocation(ADMIN, "not-a-timestamp"), revocation(ADMIN, T2)],
+            revocations: vec![
+                revocation(ADMIN(), "not-a-timestamp"),
+                revocation(ADMIN(), T2),
+            ],
         };
         assert_eq!(w.revoked_at(), Some("not-a-timestamp"));
         assert!(!w.open_at(NOW), "unparseable revocation closes the window");
@@ -1192,7 +1320,7 @@ mod tests {
         let only_garbage = RoleGrantWindow {
             instance_id: "r0".into(),
             granted_at: T0.into(),
-            revocations: vec![revocation(ADMIN, "not-a-timestamp")],
+            revocations: vec![revocation(ADMIN(), "not-a-timestamp")],
         };
         assert_eq!(only_garbage.revoked_at(), Some("not-a-timestamp"));
     }

@@ -176,14 +176,23 @@ pub struct ProposalLinks {
 ///
 /// # Reading one that arrived from elsewhere
 ///
-/// The fold trusts each link's carried `proof.valid`, uniformly, for both
-/// halves — it is the same rule `atom::signed_by` applies to votes. That
-/// verdict is the *minter's* claim. A reader must therefore re-decorate every
-/// carried link with
-/// [`DecoratedLinkExpression::verify_signature`](crate::types::DecoratedLinkExpression::verify_signature),
-/// which recomputes `proof.valid` from the signature itself, before calling
-/// [`fold_read_set`]. One trust rule in the fold; the cryptography at the one
-/// boundary where the material is untrusted.
+/// `proof.valid` on a carried link is the *minter's* claim about that link, so
+/// nothing a reader decides may rest on it unchecked. The two halves of the
+/// read-set are at different stages of honouring that:
+///
+/// - **Role evidence re-verifies by construction.**
+///   [`roles::RoleGrantEvidence::resolve`] re-decorates every revocation link
+///   with
+///   [`DecoratedLinkExpression::verify_signature`](crate::types::DecoratedLinkExpression::verify_signature)
+///   before filtering, and it is the only path from carried evidence to a
+///   window — so there is no version of this call that skips the check.
+/// - **Proposals and votes still read the carried verdict**, via
+///   `atom::signed_by`. A reader folding a read-set that arrived from
+///   elsewhere must therefore re-decorate those links itself before calling
+///   [`fold_read_set`]. That is a documented obligation, not an enforced one:
+///   a caller who forgets it folds a forged `"valid": true` into quorum. See
+///   <https://github.com/coasys/ad4m/issues/1068>, which closes it at the
+///   ingest seam where the untrusted material actually enters.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadSet {
     pub instance_uri: String,
