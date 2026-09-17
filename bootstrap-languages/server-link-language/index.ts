@@ -57,9 +57,6 @@ import {
 const SERVER_URL = "<to-be-filled>";
 
 //!@ad4m-template-variable
-const ROOM_ID = "<to-be-filled>";
-
-//!@ad4m-template-variable
 const UID = "<to-be-filled>";
 
 // ---------------------------------------------------------------------------
@@ -309,11 +306,11 @@ const language = defineLanguage({
         myDid = getAgent().did();
         store.initStore(hash);
 
-        configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(ROOM_ID) && !isPlaceholder(UID);
+        configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(UID);
         if (!configured) {
             console.log(
                 `[server-link-language] init: did=${myDid}, template variables not filled in — ` +
-                "running inert until published with SERVER_URL/ROOM_ID/UID.",
+                "running inert until published with SERVER_URL/UID.",
             );
             return;
         }
@@ -483,7 +480,7 @@ const language = defineLanguage({
             console.error("[server-link-language] initial websocket connect failed:", err);
         });
 
-        console.log(`[server-link-language] init complete: did=${myDid}, room=${ROOM_ID}, uid=${UID}`);
+        console.log(`[server-link-language] init complete: did=${myDid}, uid=${UID}`);
     },
 
     async teardown() {
@@ -525,7 +522,7 @@ const language = defineLanguage({
         async commit(diff: PerspectiveDiff) {
             if (!configured) {
                 throw new Error(
-                    "server-link-language: not configured (SERVER_URL/ROOM_ID/UID template variables unfilled)",
+                    "server-link-language: not configured (SERVER_URL/UID template variables unfilled)",
                 );
             }
             if (keyRingStatus === "error" || keyRingStatus === "pending") {
@@ -706,4 +703,4 @@ export default language;
 // Template params metadata (for language.publish / LanguageMeta)
 // ---------------------------------------------------------------------------
 
-export const possibleTemplateParams: string[] = ["ROOM_ID", "SERVER_URL", "UID"];
+export const possibleTemplateParams: string[] = ["SERVER_URL", "UID"];
