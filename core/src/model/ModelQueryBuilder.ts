@@ -407,13 +407,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       (rawResult: any) => {
         try {
           const results = parseResults(rawResult);
-          console.debug(`[ModelQueryBuilder.subscribe] Update received for ${subscriptionId}: ${results.length} instances`);
           const fp = buildFingerprint(results);
           if (fp === lastResultFingerprint) {
-            console.debug(`[ModelQueryBuilder.subscribe] Fingerprint unchanged, skipping callback`);
             return;
           }
-          console.debug(`[ModelQueryBuilder.subscribe] Fingerprint changed, calling callback with ${results.length} results`);
           lastResultFingerprint = fp;
           callback(results);
         } catch (e) {
