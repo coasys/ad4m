@@ -18,7 +18,9 @@ item 10 collapses them.
 - `HolochainService::init` is invoked from `agent/conductor_startup.rs`, in a task that
   agent generate/unlock spawn before replying, not from `lib.rs`. The reply may go out
   before the conductor is up, so nothing that runs during or straight after unlock may
-  assume it is.
+  assume it is. The `start_holochain_conductor` op in `holochain_service_extension.rs`
+  also calls `init`, bypassing both the in-flight claim and `ConductorStarting`; it has
+  no in-repo JS caller, so don't add one.
 - Signals are consumed by `lib.rs::holochain_signal_receiver` and routed to the language
   runtime registered for that cell.
 - Three accessors, all in `interface.rs`: `maybe_get_holochain_service()` returns at once;

@@ -36,7 +36,7 @@ pub(crate) mod interface;
 pub(crate) use interface::{
     get_holochain_service, holochain_service_once_started, maybe_get_holochain_service,
     ConductorStarting, HolochainServiceInterface, HolochainServiceRequest,
-    HolochainServiceResponse,
+    HolochainServiceResponse, SERVICE_WAIT,
 };
 
 use self::interface::set_holochain_service;

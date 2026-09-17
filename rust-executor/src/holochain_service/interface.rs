@@ -295,8 +295,9 @@ lazy_static! {
 /// waits on. Set and cleared only through `ConductorStarting`.
 static CONDUCTOR_STARTING: AtomicBool = AtomicBool::new(false);
 
-/// How long any accessor waits for the conductor before giving up.
-const SERVICE_WAIT: Duration = Duration::from_secs(120);
+/// How long any accessor waits for the conductor before giving up. Also bounds a
+/// generate/unlock waiting on another's startup (`agent::conductor_startup`).
+pub(crate) const SERVICE_WAIT: Duration = Duration::from_secs(120);
 
 /// Marks a conductor start in progress for as long as it is held. Clearing on drop means an
 /// error, a panic or a cancelled task can't leave the flag set.

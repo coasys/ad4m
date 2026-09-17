@@ -17,6 +17,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use log::{error, info, warn};
 use tokio::sync::watch;
@@ -24,6 +25,7 @@ use tokio::sync::watch;
 use crate::agent::AgentService;
 use crate::holochain_service::{
     maybe_get_holochain_service, ConductorStarting, HolochainService, LocalConductorConfig,
+    SERVICE_WAIT,
 };
 use crate::languages::error::LanguageError;
 use crate::languages::LanguageController;
@@ -83,9 +85,32 @@ enum Role {
     Leader(watch::Sender<Option<bool>>),
     /// Arrived while a startup was in flight; shares its outcome instead of loading again.
     /// `load_core_system_languages` reloads the language language unconditionally, and the
-    /// in-flight task may by then be installing link languages through it. `None` only if no
-    /// startup ever published an outcome.
+    /// in-flight task may by then be installing link languages through it. `Option` only
+    /// because the static's type allows it: `claim_startup` sets the receiver in the same
+    /// critical section that claims the flag, so whenever a claim fails there is one.
     Follower(Option<CoreLoadOutcome>),
+}
+
+/// The result of claiming the startup: either this caller starts it, or it joins the one in
+/// flight.
+enum Claim {
+    Leader(watch::Sender<Option<bool>>, InFlight),
+    Follower(Option<CoreLoadOutcome>),
+}
+
+/// Claim `STARTUP_IN_FLIGHT`, or join the startup that holds it. The claim and the
+/// replacement of `CURRENT_CORE_LOAD` happen under one lock; that is what makes a follower
+/// attach to the startup in flight rather than read a finished one's outcome.
+fn claim_startup() -> Claim {
+    let mut current = CURRENT_CORE_LOAD.lock().unwrap_or_else(|e| e.into_inner());
+    match InFlight::claim(&STARTUP_IN_FLIGHT) {
+        Some(in_flight) => {
+            let (tx, rx) = watch::channel(None);
+            *current = Some(rx);
+            Claim::Leader(tx, in_flight)
+        }
+        None => Claim::Follower(current.clone()),
+    }
 }
 
 impl ConductorStartup {
@@ -107,19 +132,38 @@ impl ConductorStartup {
                 outcome.send_replace(Some(result.is_ok()));
                 result
             }
-            Role::Follower(outcome) => {
-                if matches!(wait_for_outcome(outcome).await, Some(true)) {
-                    info!("Core system languages loaded by the startup in flight");
-                    Ok(())
-                } else {
-                    Err(LanguageError::LoadError {
-                        address: "system languages".to_string(),
-                        message: "the concurrent generate/unlock failed to load them".to_string(),
-                    })
-                }
-            }
+            Role::Follower(outcome) => follow(outcome, SERVICE_WAIT).await,
         }
     }
+}
+
+/// A follower's core load: the in-flight startup's outcome, waited for up to `timeout`.
+/// Bounded like the Holochain service accessors, because a leader stuck in its core load
+/// (e.g. a system language waiting on a conductor that never starts) keeps
+/// `STARTUP_IN_FLIGHT` claimed, making every later generate/unlock a follower; unbounded,
+/// each of those requests would hang with nothing logged.
+async fn follow(outcome: Option<CoreLoadOutcome>, timeout: Duration) -> Result<(), LanguageError> {
+    let message = match tokio::time::timeout(timeout, wait_for_outcome(outcome)).await {
+        Ok(Some(true)) => {
+            info!("Core system languages loaded by the startup in flight");
+            return Ok(());
+        }
+        Ok(_) => "the concurrent generate/unlock failed to load them".to_string(),
+        Err(_) => {
+            warn!(
+                "Startup in flight has not loaded the core system languages after {}s; giving up waiting",
+                timeout.as_secs()
+            );
+            format!(
+                "the concurrent generate/unlock did not load them within {}s",
+                timeout.as_secs()
+            )
+        }
+    };
+    Err(LanguageError::LoadError {
+        address: "system languages".to_string(),
+        message,
+    })
 }
 
 /// The outcome once reported; `None` if the reporting handle was dropped first.
@@ -133,19 +177,22 @@ async fn wait_for_outcome(outcome: Option<CoreLoadOutcome>) -> Option<bool> {
 /// caller has loaded the core system languages, the link and installed languages.
 /// Call this before loading the core languages. A failed start is logged and announced as an
 /// `agent-status-changed` event carrying the error, since the reply may already have gone.
+///
+/// `passphrase` is used only if this call actually starts the conductor. It is ignored when
+/// another generate/unlock's startup is in flight, and when a conductor is already running:
+/// the lair keystore's passphrase is fixed when it is created, and a second `init` would
+/// fail or put a second conductor on the same data path.
 pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
-    let (in_flight, core_loaded_tx, core_loaded_rx) = {
-        let mut current = CURRENT_CORE_LOAD.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(in_flight) = InFlight::claim(&STARTUP_IN_FLIGHT) else {
+    let (core_loaded_tx, in_flight) = match claim_startup() {
+        Claim::Leader(tx, in_flight) => (tx, in_flight),
+        Claim::Follower(outcome) => {
             info!("Holochain startup already in progress; not starting another");
             return ConductorStartup {
-                role: Role::Follower(current.clone()),
+                role: Role::Follower(outcome),
             };
-        };
-        let (tx, rx) = watch::channel(None);
-        *current = Some(rx.clone());
-        (in_flight, tx, rx)
+        }
     };
+    let core_loaded_rx = core_loaded_tx.subscribe();
     // Before spawning, so a request arriving before the task's first poll already waits
     // rather than seeing no service and no start.
     let starting = ConductorStarting::begin();
@@ -164,6 +211,13 @@ pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
                 // flag and so refused a retried unlock. They load on first use instead, and
                 // a successful retry loads the rest. Released before announcing, so a client
                 // that retries on the event isn't refused.
+                //
+                // Releasing early lets a retry become a second leader while this startup's
+                // core load may still be running. That is safe only because this path returns
+                // without loading languages: the two core loads are serialized by
+                // `CORE_LANGUAGE_LOAD`, but nothing else keeps an installed-language load here
+                // from overlapping the other leader's core load (see `ConductorStartup`). Keep
+                // this path free of language loads, including "try the languages anyway".
                 drop(in_flight);
                 announce_startup_failure(format!("Holochain init failed: {}", e)).await;
                 return;
@@ -235,6 +289,42 @@ mod tests {
         });
         assert!(task.await.is_err());
         assert!(InFlight::claim(&FLAG).is_some());
+    }
+
+    // The one test touching the module's statics; unit tests run with --test-threads=1.
+    #[tokio::test]
+    async fn followers_attach_to_the_startup_in_flight_not_a_finished_one() {
+        let Claim::Leader(first, first_in_flight) = claim_startup() else {
+            panic!("the first claim should lead");
+        };
+        let Claim::Follower(Some(mut joined)) = claim_startup() else {
+            panic!("a claim while the first is held should follow it");
+        };
+        first.send_replace(Some(false));
+        assert_eq!(*joined.borrow_and_update(), Some(false));
+
+        drop(first_in_flight);
+        let Claim::Leader(second, second_in_flight) = claim_startup() else {
+            panic!("a claim after the first is released should lead again");
+        };
+        let Claim::Follower(Some(later)) = claim_startup() else {
+            panic!("a claim while the second is held should follow it");
+        };
+        assert_eq!(
+            *later.borrow(),
+            None,
+            "must not see the first startup's outcome"
+        );
+        second.send_replace(Some(true));
+        assert_eq!(*later.borrow(), Some(true));
+        drop(second_in_flight);
+    }
+
+    #[tokio::test]
+    async fn a_follower_gives_up_when_the_leader_never_reports() {
+        let (_leader, rx) = watch::channel(None);
+        let result = follow(Some(rx), Duration::from_millis(300)).await;
+        assert!(result.is_err());
     }
 
     fn follower() -> (watch::Sender<Option<bool>>, ConductorStartup) {
