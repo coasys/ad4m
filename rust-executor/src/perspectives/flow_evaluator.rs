@@ -634,19 +634,47 @@ impl RequiresQueryable for PerspectiveInstance {
         // is not worth carrying; when none parses this stays empty and the
         // reader falls back to the instance's own timestamp or fails closed.
         use crate::perspectives::flow_instance::time::parse_link_timestamp;
-        let mut grant_links: Vec<DecoratedLinkExpression> = match grant_predicate {
-            Some(pred) => self
-                .get_links(&LinkQuery {
+        let raw_grant_links: Vec<DecoratedLinkExpression> = match grant_predicate {
+            Some(pred) => {
+                self.get_links(&LinkQuery {
                     source: Some(instance_id.to_string()),
                     predicate: Some(pred.to_string()),
                     ..Default::default()
                 })
                 .await?
-                .into_iter()
-                .filter(|l| grant_counts(l) && parse_link_timestamp(&l.timestamp).is_some())
-                .collect(),
+            }
             None => Vec::new(),
         };
+        let mut grant_links: Vec<DecoratedLinkExpression> = raw_grant_links
+            .iter()
+            .filter(|l| grant_counts(l) && parse_link_timestamp(&l.timestamp).is_some())
+            .cloned()
+            .collect();
+        // A `didProperty` role whose assignment links cannot be found is not a
+        // neutral outcome: `granted_at` falls back to
+        // `asserted_instance_timestamp`, which is the instance's *earliest*
+        // link and therefore normally EARLIER than the assignment — the
+        // widest possible window, not the narrow one the rule asked for. That
+        // is exactly the shape of the #1027 hole this commit's parent fixed,
+        // and what made it survive a fully green suite was that nothing
+        // distinguished "this query names no didProperty" from "this
+        // didProperty resolves to nothing". Warn so the next spelling drift
+        // announces itself instead of silently widening eligibility.
+        if let Some(pred) = grant_predicate {
+            if grant_links.is_empty() {
+                log::warn!(
+                    "role_grant_links: role class `{role_class}` instance `{instance_id}`: \
+                     didProperty `{}` resolved to predicate `{pred}` but no assignment link for \
+                     `{did}` survived (store returned {} link(s) on that predicate). \
+                     `granted_at` will fall back to the instance's own timestamp, which is \
+                     normally EARLIER than the assignment — a WIDER eligibility window than the \
+                     rule intends. Check that the didProperty spelling matches the class shape \
+                     and that the assignment link carries a parseable RFC 3339 timestamp.",
+                    did_property.unwrap_or(pred),
+                    raw_grant_links.len(),
+                );
+            }
+        }
         grant_links.sort_by(|a, b| {
             (parse_link_timestamp(&a.timestamp), &a.timestamp)
                 .cmp(&(parse_link_timestamp(&b.timestamp), &b.timestamp))
