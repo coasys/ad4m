@@ -17,7 +17,7 @@
  * than the `wrap` escape hatch, which exists for tests that already own
  * a matched (record, shape) pair.
  *
- * # What's here vs. what's coming in §7 / slice 10.6
+ * # What's here, and what is still absent
  *
  * Read surface (implemented today, PR #929):
  * - `uri`, `subject`, `flowName`, `currentStateName`, `startedAtMillis`
@@ -28,15 +28,22 @@
  * - `proposals()` — queries `FlowTransitionProposal` records that
  *   target this instance's URI.
  *
- * Mutations + subscriptions (`proposeTransition`, `accept`, `reject`,
- * `fireAction`, `onStateChange`, `onProposalAdded`, `onProposalResolved`)
- * land with the consensus-engine slice (§4.3 / slice 10.6). Rather than
- * ship them as `throw new Error("not yet")` stubs — which is a type-level
- * lie the caller only discovers at runtime — they are simply absent from
- * this class until the engine is wired.
+ * - `acceptProposal()` / `rejectProposal()` — the consensus write API:
+ *   accept counts your DID toward the flow's consensusRule and fires the
+ *   transition at quorum; reject withdraws only the links you signed and
+ *   resolves to how many went. Reject is not a cancel — another agent's
+ *   proposal is theirs, and because state is recomputed from the links
+ *   present now, withdrawing a vote that had settled an edge moves the
+ *   flow back to where it stood before it.
+ *
+ * Still absent (rather than shipped as `throw new Error("not yet")`
+ * stubs): `proposeTransition`, `fireAction`, and the subscriptions
+ * (`onStateChange`, `onProposalAdded`, `onProposalResolved`) — they land
+ * with the manual-proposal and subscription-topic slices.
  */
 
 import { PerspectiveProxy } from "./PerspectiveProxy";
+import { FlowFireOutcome } from "./PerspectiveClient";
 import { Ad4mModel } from "../model/Ad4mModel";
 import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
@@ -108,9 +115,15 @@ export class FlowInstance {
    *
    * The returned wrapper carries the parsed `SHACLFlow` alongside the
    * on-graph record, so `currentState` / `availableTransitions` /
-   * `proposals` accessors work without further round-trips. The record's
-   * `currentState` is a per-replica cache the executor's consensus engine
-   * writes (as a local link) and never reads back as authority.
+   * `proposals` accessors work without further round-trips.
+   *
+   * The record's `currentState` is a per-replica cache the consensus engine
+   * writes as a local link. It is read back only for display — the cache-first
+   * path in `gather_active_flow_contexts` fills the state rendered into LLM
+   * context — and **never as authority**: anything that decides something
+   * (the fold, the mint pass) derives state from the signed links present now
+   * and does not consult the cache. Treat it as a display hint, not as the
+   * flow's state.
    *
    * @param perspective - The perspective the flow instance lives on
    * @param flowName - Name of a `SHACLFlow` already registered on the perspective
@@ -283,7 +296,7 @@ export class FlowInstance {
    * `FlowTransitionProposal.flowInstance` references).
    */
   get uri(): string {
-    return (this.record as any).baseExpression as string;
+    return this.record.id;
   }
 
   /**
@@ -358,12 +371,25 @@ export class FlowInstance {
    * for the where-filter — one SPARQL round-trip, no client-side
    * filtering.
    *
-   * Note: the consensus engine (slice 10.6) will start writing these; today
-   * they only exist when a client wrote one directly (or a test seeded one).
+   * These are written by the executor's consensus pass when it mints a
+   * transition, and by clients proposing directly. Superseded proposals are
+   * not swept here — a stale one is simply never counted by the fold, and
+   * accepting it fails with a stale-state error.
    */
   async proposals(): Promise<FlowTransitionProposal[]> {
     return FlowTransitionProposal.findAll(this.perspective, {
       where: { flowInstance: this.uri },
     });
+  }
+
+  async acceptProposal(proposal: FlowTransitionProposal | string): Promise<FlowFireOutcome[]> {
+    const uri = typeof proposal === "string" ? proposal : proposal.id;
+    return this.perspective.acceptFlowProposal(uri);
+  }
+
+  /** Withdraw our own links from a proposal; resolves to how many went. */
+  async rejectProposal(proposal: FlowTransitionProposal | string): Promise<number> {
+    const uri = typeof proposal === "string" ? proposal : proposal.id;
+    return this.perspective.rejectFlowProposal(uri);
   }
 }

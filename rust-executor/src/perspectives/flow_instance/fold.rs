@@ -39,8 +39,8 @@
 //! dedupes on `(instance, to_state, evidence_hash)` with no proposer
 //! dimension, so a bot that already sees a peer's proposal for the edge
 //! declines to mint a twin and must vote instead — and voting is
-//! [`super::accept`], whose RPC callers land in #988 (which replaced the
-//! closed #968).
+//! [`super::accept`], whose WS-RPC / MCP / TS callers this PR (#988, which
+//! replaced the closed #968) adds.
 //!
 //! ## Ordering and time
 //!
