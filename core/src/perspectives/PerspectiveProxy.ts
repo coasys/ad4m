@@ -868,6 +868,10 @@ export class PerspectiveProxy {
         return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
     }
 
+    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string): Promise<FlowFireOutcome[]> {
+        return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale)
+    }
+
     async acceptFlowProposal(proposalUri: string): Promise<FlowFireOutcome[]> {
         return await this.#client.acceptFlowProposal(this.#handle.uuid, proposalUri)
     }

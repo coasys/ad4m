@@ -382,6 +382,24 @@ export class FlowInstance {
     });
   }
 
+  /**
+   * Mint a manual flow-transition proposal for this instance.
+   *
+   * The executor evaluates the guard on its own replica, seals the evidence,
+   * writes the proposal, and — when the flow's `consensusRule.n` is 1 —
+   * fires immediately, returning the settled outcomes.
+   *
+   * An empty array means the proposal is queued; other voters must
+   * `acceptProposal` to reach quorum.
+   *
+   * Throws when `toState` is not reachable from the derived state, or when
+   * the target state carries a `requires` guard that is not currently
+   * satisfied on this replica.
+   */
+  async proposeTransition(toState: string, rationale?: string): Promise<FlowFireOutcome[]> {
+    return this.perspective.proposeFlowTransition(this.uri, toState, rationale);
+  }
+
   async acceptProposal(proposal: FlowTransitionProposal | string): Promise<FlowFireOutcome[]> {
     const uri = typeof proposal === "string" ? proposal : proposal.id;
     return this.perspective.acceptFlowProposal(uri);

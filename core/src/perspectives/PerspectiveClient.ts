@@ -405,6 +405,17 @@ export class PerspectiveClient {
         )
     }
 
+    async proposeFlowTransition(
+        uuid: string,
+        instanceUri: string,
+        toState: string,
+        rationale?: string,
+    ): Promise<FlowFireOutcome[]> {
+        return this.#apiClient.call<FlowFireOutcome[]>(
+            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale },
+        )
+    }
+
     async acceptFlowProposal(uuid: string, proposalUri: string): Promise<FlowFireOutcome[]> {
         return this.#apiClient.call<FlowFireOutcome[]>(
             'perspective.acceptFlowProposal', { uuid, proposalUri },
