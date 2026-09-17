@@ -326,7 +326,21 @@ async fn start_tls_listener(
         axum_server::bind_rustls(addr, rustls_config)
             .serve(router.into_make_service())
             .await
-            .unwrap_or_else(|e| log::error!("MCP TLS server error: {}", e));
+            // Name the outage, not just the listener that caused it. We already
+            // returned `true`, so `resolve_plain_host` has narrowed the cleartext
+            // listener to loopback on the strength of this task binding. An
+            // operator reading "TLS server error" reasonably concludes HTTPS is
+            // missing and the rest still works; what actually happened is that
+            // MCP has no remote surface at all.
+            .unwrap_or_else(|e| {
+                log::error!(
+                    "MCP HTTPS listener on port {tls_port} stopped: {e}. Remote MCP is now \
+                     unavailable: the cleartext listener was narrowed to 127.0.0.1:{plain_port} \
+                     because this listener was expected to serve remote clients (unless \
+                     --mcp-host was set explicitly, which overrides that). Free port \
+                     {tls_port} and restart the executor to restore remote access."
+                )
+            });
     });
     Ok(true)
 }
