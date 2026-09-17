@@ -83,11 +83,14 @@ type KeyRingStatus = "none" | "ready" | "pending" | "error";
 let keyRingStatus: KeyRingStatus = "none";
 /** True when this agent has been identified as the room admin. */
 let isRoomAdmin = false;
-/** Cooldown for background (dep) key ring retries (ms since epoch). */
+/** Cooldown for key ring retries — shared across WS and HTTP paths (ms since epoch). */
 let lastKeyRingRetry = 0;
 const KEY_RING_RETRY_COOLDOWN_MS = 10_000;
 /** In-flight setupKeyRing promise for single-flight deduplication. */
 let keyRingInflight: Promise<void> | null = null;
+/** Monotonic lifecycle counter — incremented on teardown to invalidate
+ *  in-flight async operations from a previous lifecycle. */
+let lifecycleGen = 0;
 
 function isPlaceholder(value: string): boolean {
     return !value || value === "<to-be-filled>";
@@ -95,7 +98,10 @@ function isPlaceholder(value: string): boolean {
 
 function setupKeyRingCoalesced(): Promise<void> {
     if (!keyRingInflight) {
-        keyRingInflight = setupKeyRing().finally(() => { keyRingInflight = null; });
+        const p = setupKeyRing().finally(() => {
+            if (keyRingInflight === p) keyRingInflight = null;
+        });
+        keyRingInflight = p;
     }
     return keyRingInflight;
 }
@@ -105,20 +111,18 @@ function setupKeyRingCoalesced(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function setupKeyRing(): Promise<void> {
+    const gen = lifecycleGen;
     const config = getConfig();
     try {
         const token = await auth.getValidToken();
         const keysRes = await api.fetchRoomKeys(config, token);
+        if (gen !== lifecycleGen) return;
         if (!keysRes) {
-            // 404 — room has no E2E at all.
             keyRingStatus = "none";
             keyRing = null;
             return;
         }
         if (keysRes.keys.length === 0 && keysRes.e2e_enabled) {
-            // Room HAS E2E but this agent has no keys yet — a freshly
-            // added member awaiting grant from the admin. Refuse to
-            // commit plaintext into an encrypted room.
             keyRingStatus = "pending";
             keyRing = null;
             console.log(
@@ -138,6 +142,7 @@ async function setupKeyRing(): Promise<void> {
         const versions = [...keyRing.keys()].sort((a, b) => a - b);
         console.log(`[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`);
     } catch (err) {
+        if (gen !== lifecycleGen) return;
         keyRingStatus = "error";
         keyRing = null;
         console.error(
@@ -154,21 +159,21 @@ async function setupKeyRing(): Promise<void> {
  * get picked up. Returns true when new key versions were obtained.
  */
 async function refreshKeyRingIfNeeded(): Promise<boolean> {
+    const now = Date.now();
+    if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
+        return false;
+    }
+    lastKeyRingRetry = now;
     const prevSize = keyRing?.size ?? 0;
     await setupKeyRingCoalesced();
     const newSize = keyRing?.size ?? 0;
     if (newSize > prevSize) {
         console.log("[server-link-language] key ring refreshed — re-bootstrapping");
         await syncModule.bootstrap();
-        // bootstrap() replaces the store but does not emit (by design —
-        // cold-start callers query the store directly).  Recovery callers
-        // must emit so the executor's perspective layer surfaces the
-        // recovered links.
         const recovered = syncModule.render();
         if (recovered.links.length > 0) {
             getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
         }
-        syncModule.clearPendingMissingVersions();
         return true;
     }
     return false;
@@ -479,10 +484,7 @@ const language = defineLanguage({
     },
 
     async teardown() {
-        // Drain any pending batched commits BEFORE we tear down auth/adapters.
-        // The main commit path now awaits the POST directly, but the batch
-        // infrastructure still exists (used by unit tests, retry timers) and
-        // may hold stale segments from a failed flush cycle.
+        lifecycleGen++;
         try {
             await syncModule.drainCommitBatch();
         } catch (err) {
@@ -538,7 +540,6 @@ const language = defineLanguage({
                     if (recovered.links.length > 0) {
                         getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
                     }
-                    syncModule.clearPendingMissingVersions();
                 }
             }
             if (keyRingStatus === "error") {

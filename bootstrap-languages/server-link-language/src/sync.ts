@@ -545,15 +545,12 @@ export async function bootstrap(): Promise<void> {
     const { config, getToken } = deps();
     const token = await getToken();
 
-    // The render response now includes revision + sequence, so we avoid the
-    // extra fetchRevision round-trip that the old code made.
     const rendered = await api.fetchRender(config, token);
 
-    // Route through fromWireDiff so encrypted links that can't be
-    // decrypted yet (freshly joined member awaiting key grant) get
-    // skipped instead of crashing the entire bootstrap. The
-    // catchUp() → refreshKeyRing → re-bootstrap path recovers them
-    // once the admin grants keys.
+    // Clear stale pending versions before re-processing the full snapshot.
+    // fromWireDiff will re-track any versions that remain missing.
+    _pendingMissingVersions.clear();
+
     const renderDiff: WirePerspectiveDiff = { additions: rendered.links, removals: [] };
     const { diff, missingVersions } = fromWireDiff(renderDiff);
 
@@ -635,7 +632,6 @@ export async function catchUp(): Promise<PerspectiveDiff> {
                 );
             } else if (gotNew) {
                 console.log("[server-link-language] key ring refreshed with new versions — re-bootstrapping");
-                _pendingMissingVersions.clear();
                 await bootstrap();
                 const recovered = store.allLinks();
                 if (recovered.links.length > 0) {

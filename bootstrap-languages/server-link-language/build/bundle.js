@@ -3662,9 +3662,6 @@ function trackMissingKeyVersions(versions) {
   for (const v of versions)
     _pendingMissingVersions.add(v);
 }
-function clearPendingMissingVersions() {
-  _pendingMissingVersions.clear();
-}
 function deps() {
   if (!_deps) {
     throw new Error("sync module not initialized. Call initSync() during language init().");
@@ -3912,6 +3909,7 @@ async function bootstrap() {
   const { config, getToken } = deps();
   const token = await getToken();
   const rendered = await fetchRender(config, token);
+  _pendingMissingVersions.clear();
   const renderDiff = { additions: rendered.links, removals: [] };
   const { diff, missingVersions } = fromWireDiff(renderDiff);
   if (missingVersions.size > 0) {
@@ -3964,7 +3962,6 @@ async function catchUp() {
         );
       } else if (gotNew) {
         console.log("[server-link-language] key ring refreshed with new versions \u2014 re-bootstrapping");
-        _pendingMissingVersions.clear();
         await bootstrap();
         const recovered = allLinks();
         if (recovered.links.length > 0) {
@@ -4346,22 +4343,28 @@ var isRoomAdmin = false;
 var lastKeyRingRetry = 0;
 var KEY_RING_RETRY_COOLDOWN_MS = 1e4;
 var keyRingInflight = null;
+var lifecycleGen = 0;
 function isPlaceholder(value) {
   return !value || value === "<to-be-filled>";
 }
 function setupKeyRingCoalesced() {
   if (!keyRingInflight) {
-    keyRingInflight = setupKeyRing().finally(() => {
-      keyRingInflight = null;
+    const p = setupKeyRing().finally(() => {
+      if (keyRingInflight === p)
+        keyRingInflight = null;
     });
+    keyRingInflight = p;
   }
   return keyRingInflight;
 }
 async function setupKeyRing() {
+  const gen = lifecycleGen;
   const config = getConfig();
   try {
     const token = await getValidToken();
     const keysRes = await fetchRoomKeys(config, token);
+    if (gen !== lifecycleGen)
+      return;
     if (!keysRes) {
       keyRingStatus = "none";
       keyRing = null;
@@ -4386,6 +4389,8 @@ async function setupKeyRing() {
     const versions = [...keyRing.keys()].sort((a, b) => a - b);
     console.log(`[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`);
   } catch (err) {
+    if (gen !== lifecycleGen)
+      return;
     keyRingStatus = "error";
     keyRing = null;
     console.error(
@@ -4395,6 +4400,11 @@ async function setupKeyRing() {
   }
 }
 async function refreshKeyRingIfNeeded() {
+  const now = Date.now();
+  if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
+    return false;
+  }
+  lastKeyRingRetry = now;
   const prevSize = keyRing?.size ?? 0;
   await setupKeyRingCoalesced();
   const newSize = keyRing?.size ?? 0;
@@ -4405,7 +4415,6 @@ async function refreshKeyRingIfNeeded() {
     if (recovered.links.length > 0) {
       getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
     }
-    clearPendingMissingVersions();
     return true;
   }
   return false;
@@ -4633,6 +4642,7 @@ var language = defineLanguage({
     console.log(`[server-link-language] init complete: did=${myDid}, room=${ROOM_ID}`);
   },
   async teardown() {
+    lifecycleGen++;
     try {
       await drainCommitBatch();
     } catch (err) {
@@ -4685,7 +4695,6 @@ var language = defineLanguage({
           if (recovered.links.length > 0) {
             getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
           }
-          clearPendingMissingVersions();
         }
       }
       if (keyRingStatus === "error") {
