@@ -23,6 +23,14 @@ use tokio::sync::RwLock;
 pub struct McpContext {
     pub admin_credential: Option<String>,
     pub auth_token: Arc<RwLock<Option<String>>>,
+    /// Whether the dynamic per-class SHACL tools are exposed over this MCP
+    /// transport (listed by `tools/list`, callable by `tools/call`). Off by
+    /// default so external clients see a stable, DNA-independent tool set;
+    /// the generic `instance_*` tools cover the same operations. Only the
+    /// MCP transport reads this — the in-process harness bridge
+    /// (`list_tool_schemas` / `call_tool_by_name`) always includes the
+    /// dynamic tools.
+    pub dynamic_class_tools: bool,
 }
 
 /// Configuration for the MCP HTTP server
@@ -36,6 +44,9 @@ pub struct McpServerConfig {
     /// SECURITY: `0.0.0.0` also exposes MCP to the LAN on a bare-metal node — a
     /// deployment that wants to restrict it sets `MCP_HOST=127.0.0.1`.
     pub host: String,
+    /// Expose dynamic per-class SHACL tools over MCP (see
+    /// [`McpContext::dynamic_class_tools`]). Default `false`.
+    pub dynamic_class_tools: bool,
 }
 
 impl Default for McpServerConfig {
@@ -43,6 +54,7 @@ impl Default for McpServerConfig {
         Self {
             port: 3001,
             host: std::env::var("MCP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
+            dynamic_class_tools: false,
         }
     }
 }
@@ -61,9 +73,16 @@ pub async fn start_mcp_server(
 
     let initial_token = auth_token;
 
+    if config.dynamic_class_tools {
+        info!("MCP: dynamic per-class SHACL tools are exposed (dynamicClassTools=true)");
+    } else {
+        info!("MCP: static tool surface only (dynamicClassTools=false); per-class tools hidden");
+    }
+
     let context = McpContext {
         admin_credential,
         auth_token: Arc::new(RwLock::new(initial_token.clone())),
+        dynamic_class_tools: config.dynamic_class_tools,
     };
 
     // Create the session manager for HTTP transport

@@ -1,8 +1,13 @@
 import type { OnlineAgent } from "./types.js";
 
 interface AgentEntry {
-  wsId: string;
+  wsIds: Set<string>;
   status?: unknown;
+}
+
+interface PendingOffline {
+  timer: NodeJS.Timeout;
+  onExpired: () => void;
 }
 
 /**
@@ -17,7 +22,7 @@ interface AgentEntry {
  */
 export class TelepresenceManager {
   private graceMs: number;
-  private offlineTimers = new Map<string, NodeJS.Timeout>();
+  private offlineTimers = new Map<string, PendingOffline>();
   /** roomId → did → agent entry */
   private agents = new Map<string, Map<string, AgentEntry>>();
 
@@ -38,14 +43,26 @@ export class TelepresenceManager {
       this.agents.set(roomId, room);
     }
     const existing = room.get(did);
-    room.set(did, { wsId, status: existing?.status });
+    if (existing) {
+      existing.wsIds.add(wsId);
+    } else {
+      room.set(did, { wsIds: new Set([wsId]), status: undefined });
+    }
+  }
+
+  /** Removes a single connection from an agent's tracked set. */
+  markConnectionClosed(roomId: string, did: string, wsId: string): void {
+    const entry = this.agents.get(roomId)?.get(did);
+    if (entry) {
+      entry.wsIds.delete(wsId);
+    }
   }
 
   cancelPendingOffline(roomId: string, did: string): void {
     const k = this.key(roomId, did);
-    const timer = this.offlineTimers.get(k);
-    if (timer) {
-      clearTimeout(timer);
+    const pending = this.offlineTimers.get(k);
+    if (pending) {
+      clearTimeout(pending.timer);
       this.offlineTimers.delete(k);
     }
   }
@@ -62,10 +79,14 @@ export class TelepresenceManager {
     const timer = setTimeout(() => {
       this.offlineTimers.delete(k);
       this.agents.get(roomId)?.delete(did);
-      onExpired();
+      try {
+        onExpired();
+      } catch {
+        // Best-effort — onExpired fires outside any caller's error boundary.
+      }
     }, this.graceMs);
     timer.unref();
-    this.offlineTimers.set(k, timer);
+    this.offlineTimers.set(k, { timer, onExpired });
   }
 
   setStatus(roomId: string, did: string, status: unknown): void {
@@ -88,7 +109,16 @@ export class TelepresenceManager {
   }
 
   close(): void {
-    for (const timer of this.offlineTimers.values()) clearTimeout(timer);
+    // Fire pending onExpired callbacks so callers (ws.ts) can broadcast
+    // `peer-left` for agents still in their grace period at shutdown.
+    for (const pending of this.offlineTimers.values()) {
+      clearTimeout(pending.timer);
+      try {
+        pending.onExpired();
+      } catch {
+        // Best-effort during shutdown.
+      }
+    }
     this.offlineTimers.clear();
     this.agents.clear();
   }

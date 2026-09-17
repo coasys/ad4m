@@ -42,21 +42,30 @@
  * ## Link confidentiality
  *
  * Once a room key is available, `encryptLinkForWire` / `decryptLinkFromWire`
- * protect the semantic payload (`{source, predicate, target}`) of every
- * LinkExpression crossing the wire. `author`, `timestamp`, and `proof` stay
- * in the clear — they're needed for signature verification and routing,
- * and the AD4M runtime's own signature was computed over the *plaintext*
- * data before it ever reached this language. The local store always holds
- * decrypted links (see src/sync.ts); only the wire representation is
- * ciphertext.
+ * protect the ENTIRE LinkExpression (author, timestamp, proof, and data)
+ * crossing the wire. No metadata leaks — the server only sees ciphertext
+ * plus a client-computed `link_hash` for OR-Set dedup. The local store
+ * always holds decrypted links (see src/sync.ts); only the wire
+ * representation is ciphertext.
+ *
+ * `decryptLinkFromWire` handles both the current full-encryption format and
+ * the legacy data-only format (for backward compatibility with links
+ * encrypted before the full-encryption change).
  */
 
-import { x25519 } from "@noble/curves/ed25519";
+import { x25519, ed25519 } from "@noble/curves/ed25519";
 import { gcm } from "@noble/ciphers/aes";
 import { sha256 } from "@noble/hashes/sha2";
 import { hkdf } from "@noble/hashes/hkdf";
 
-import type { Link, LinkExpression, SealedRoomKeyEnvelope, WireLinkExpression } from "./types.js";
+import type {
+    KeysResponseEntry,
+    Link,
+    LinkExpression,
+    SealedRoomKeyEnvelope,
+    WireLinkExpression,
+} from "./types.js";
+import { isEncryptedLinkData } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Domain separation constants
@@ -81,6 +90,8 @@ export function bytesToHex(bytes: Uint8Array): string {
     return out;
 }
 
+const HEX_PAIR = /^[0-9a-fA-F]{2}$/;
+
 export function hexToBytes(hex: string): Uint8Array {
     const clean = hex.trim();
     if (clean.length % 2 !== 0) {
@@ -89,11 +100,10 @@ export function hexToBytes(hex: string): Uint8Array {
     const out = new Uint8Array(clean.length / 2);
     for (let i = 0; i < out.length; i++) {
         const byte = clean.substring(i * 2, i * 2 + 2);
-        const parsed = parseInt(byte, 16);
-        if (Number.isNaN(parsed)) {
+        if (!HEX_PAIR.test(byte)) {
             throw new Error(`hexToBytes: invalid hex byte "${byte}" at offset ${i * 2}`);
         }
-        out[i] = parsed;
+        out[i] = parseInt(byte, 16);
     }
     return out;
 }
@@ -124,6 +134,91 @@ export function randomBytes(length: number): Uint8Array {
     const out = new Uint8Array(length);
     globalThis.crypto.getRandomValues(out);
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// Base58btc decoder (minimal — avoids @scure/base dependency)
+// ---------------------------------------------------------------------------
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BASE58_MAP = new Map<string, number>();
+for (let i = 0; i < BASE58_ALPHABET.length; i++) BASE58_MAP.set(BASE58_ALPHABET[i], i);
+
+function base58Decode(input: string): Uint8Array {
+    if (input.length === 0) return new Uint8Array(0);
+    const bytes: number[] = [0];
+    for (const ch of input) {
+        const val = BASE58_MAP.get(ch);
+        if (val === undefined) throw new Error(`base58: invalid character '${ch}'`);
+        let carry = val;
+        for (let j = 0; j < bytes.length; j++) {
+            carry += bytes[j] * 58;
+            bytes[j] = carry & 0xff;
+            carry >>= 8;
+        }
+        while (carry > 0) {
+            bytes.push(carry & 0xff);
+            carry >>= 8;
+        }
+    }
+    // Preserve leading zeros (base58 '1' == 0x00)
+    let leadingZeros = 0;
+    for (const ch of input) { if (ch === "1") leadingZeros++; else break; }
+    const result = new Uint8Array(leadingZeros + bytes.length);
+    bytes.reverse();
+    result.set(bytes, leadingZeros);
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// DID:key → Ed25519 public key extraction
+// ---------------------------------------------------------------------------
+
+const ED25519_MULTICODEC = new Uint8Array([0xed, 0x01]);
+
+/**
+ * Extracts the raw 32-byte Ed25519 public key from a `did:key:z...` string.
+ * Only supports ed25519 keys (multicodec prefix 0xed01). Strips any
+ * `#fragment` key-id suffix.
+ */
+function didToEd25519PublicKey(did: string): Uint8Array {
+    const base = did.includes("#") ? did.slice(0, did.indexOf("#")) : did;
+    const prefix = "did:key:";
+    if (!base.startsWith(prefix)) throw new Error(`not a did:key DID: ${did}`);
+    const multibase = base.slice(prefix.length);
+    if (!multibase.startsWith("z")) throw new Error(`unsupported multibase: ${did}`);
+    const decoded = base58Decode(multibase.slice(1));
+    if (decoded.length !== 34 || decoded[0] !== ED25519_MULTICODEC[0] || decoded[1] !== ED25519_MULTICODEC[1]) {
+        throw new Error(`unsupported did:key type: ${did}`);
+    }
+    return decoded.slice(2);
+}
+
+// ---------------------------------------------------------------------------
+// X25519 ownership verification
+// ---------------------------------------------------------------------------
+
+/**
+ * Verifies that an X25519 public key genuinely belongs to the given DID.
+ * The signature must have been produced by:
+ *   `agentSignStringHex(x25519PublicKeyHex)` — which internally signs
+ *   `SHA-256(x25519PublicKeyHex)` (the AD4M executor's hashing convention).
+ *
+ * Returns true if valid, false otherwise. Never throws on invalid input.
+ *
+ * Use this before sealing room keys for a member — prevents a malicious
+ * server from substituting X25519 keys in the ACL response.
+ */
+export function verifyX25519Ownership(did: string, x25519PublicKeyHex: string, signatureHex: string): boolean {
+    try {
+        const ed25519PubKey = didToEd25519PublicKey(did);
+        // Match the AD4M executor's agentSignStringHex convention: signs SHA-256(message)
+        const messageHash = sha256(utf8ToBytes(x25519PublicKeyHex));
+        const signatureBytes = hexToBytes(signatureHex);
+        return ed25519.verify(signatureBytes, messageHash, ed25519PubKey);
+    } catch {
+        return false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,29 +299,31 @@ export function openRoomKeyEnvelope(envelope: SealedRoomKeyEnvelope, recipientPr
     return gcm(sealKey, nonce).decrypt(ciphertext);
 }
 
-/**
- * Wire framing for the `encryptedKey` string field returned by
- * `GET /rooms/:roomId/keys`: base64 of the JSON-serialized envelope. This
- * framing choice is this client's own convention (the endpoint's exact
- * byte format isn't pinned down elsewhere) — kept in one place so it's
- * easy to reconcile against the real server later.
- */
-export function encodeSealedEnvelope(envelope: SealedRoomKeyEnvelope): string {
-    return btoa(JSON.stringify(envelope));
+// ---------------------------------------------------------------------------
+// Key ring
+// ---------------------------------------------------------------------------
+
+/** Ordered map of key version → decrypted room key. */
+export type KeyRing = Map<number, Uint8Array>;
+
+export function buildKeyRing(
+    entries: KeysResponseEntry[],
+    recipientPrivateKey: Uint8Array,
+): KeyRing {
+    const ring: KeyRing = new Map();
+    for (const entry of entries) {
+        const plainKey = openRoomKeyEnvelope(entry.encryptedKey, recipientPrivateKey);
+        ring.set(entry.version, plainKey);
+    }
+    return ring;
 }
 
-export function decodeSealedEnvelope(encoded: string): SealedRoomKeyEnvelope {
-    const parsed = JSON.parse(atob(encoded)) as Partial<SealedRoomKeyEnvelope>;
-    if (!parsed.ephemeralPublicKey || !parsed.nonce || !parsed.ciphertext) {
-        throw new Error(
-            "decodeSealedEnvelope: malformed envelope (missing ephemeralPublicKey/nonce/ciphertext)",
-        );
+export function latestKeyVersion(ring: KeyRing): number {
+    let max = 0;
+    for (const v of ring.keys()) {
+        if (v > max) max = v;
     }
-    return {
-        ephemeralPublicKey: parsed.ephemeralPublicKey,
-        nonce: parsed.nonce,
-        ciphertext: parsed.ciphertext,
-    };
+    return max;
 }
 
 // ---------------------------------------------------------------------------
@@ -245,46 +342,86 @@ export function statusField(status: string | undefined): { status?: string } {
 }
 
 /**
- * Encrypts a LinkExpression's `{source, predicate, target}` payload for
- * the wire. `author` / `timestamp` / `proof` are left untouched — they are
- * plaintext metadata needed for routing and signature verification, and
- * were already signed by the runtime before this language ever saw the
- * diff. Uses a fresh random nonce per call (required for AES-GCM safety —
- * the room key is long-lived and shared across every link in the room).
+ * Encrypts the entire LinkExpression (author, timestamp, proof, data) for
+ * the wire. No metadata remains in cleartext — the server receives only
+ * `{data: {ciphertext, nonce}, link_hash}`. The `link_hash` is a SHA-256
+ * of the canonical plaintext fields, computed client-side so the server
+ * can still content-address links for OR-Set dedup/removal matching
+ * without seeing the plaintext.
  */
-export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array): WireLinkExpression {
-    const plaintext = utf8ToBytes(JSON.stringify(link.data));
+export function encryptLinkForWire(link: LinkExpression, roomKey: Uint8Array, keyVersion?: number): WireLinkExpression {
+    const canonical = JSON.stringify({
+        source: link.data.source,
+        predicate: link.data.predicate ?? null,
+        target: link.data.target,
+        author: link.author,
+        timestamp: link.timestamp,
+    });
+    const linkHashHex = bytesToHex(sha256(utf8ToBytes(canonical)));
+
+    const fullPayload: Record<string, unknown> = {
+        author: link.author,
+        timestamp: link.timestamp,
+        proof: link.proof,
+        data: link.data,
+    };
+    if (link.status !== undefined) fullPayload.status = link.status;
+    const plaintext = utf8ToBytes(JSON.stringify(fullPayload));
     const nonce = randomBytes(AES_NONCE_BYTES);
     const ciphertext = gcm(roomKey, nonce).encrypt(plaintext);
 
     return {
-        author: link.author,
-        timestamp: link.timestamp,
-        proof: link.proof,
-        ...statusField(link.status),
-        encrypted: bytesToHex(concatBytes(nonce, ciphertext)),
+        data: { ciphertext: bytesToHex(ciphertext), nonce: bytesToHex(nonce) },
+        link_hash: linkHashHex,
+        ...(keyVersion !== undefined ? { key_version: keyVersion } : {}),
     };
 }
 
 /**
- * Reverses encryptLinkForWire. Throws if `roomKey` is wrong or the
- * ciphertext was tampered with (AES-GCM auth tag failure).
+ * Reverses encryptLinkForWire. Handles both formats:
+ * - Full encryption (current): ciphertext contains `{author, timestamp, proof, data}`
+ * - Legacy data-only: ciphertext contains `{source, predicate, target}`
+ * Throws if `roomKey` is wrong or the ciphertext was tampered with
+ * (AES-GCM auth tag failure).
  */
-export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKey: Uint8Array): LinkExpression {
-    if (!wireLink.encrypted) {
-        throw new Error("decryptLinkFromWire: wire link has no `encrypted` field");
+export function decryptLinkFromWire(wireLink: WireLinkExpression, roomKeyOrRing: Uint8Array | KeyRing): LinkExpression {
+    if (!isEncryptedLinkData(wireLink.data)) {
+        throw new Error("decryptLinkFromWire: wire link has no encrypted data (expected {ciphertext, nonce} in data)");
     }
-    const combined = hexToBytes(wireLink.encrypted);
-    const nonce = combined.slice(0, AES_NONCE_BYTES);
-    const ciphertext = combined.slice(AES_NONCE_BYTES);
+    let roomKey: Uint8Array;
+    if (roomKeyOrRing instanceof Map) {
+        const version = wireLink.key_version ?? 1;
+        const key = roomKeyOrRing.get(version);
+        if (!key) {
+            throw new Error(
+                `decryptLinkFromWire: no key for version ${version} in ring ` +
+                `(have versions: ${[...roomKeyOrRing.keys()].join(", ")})`,
+            );
+        }
+        roomKey = key;
+    } else {
+        roomKey = roomKeyOrRing;
+    }
+    const nonce = hexToBytes(wireLink.data.nonce);
+    const ciphertext = hexToBytes(wireLink.data.ciphertext);
     const plaintext = gcm(roomKey, nonce).decrypt(ciphertext);
-    const data = JSON.parse(bytesToUtf8(plaintext)) as Link;
+    const parsed = JSON.parse(bytesToUtf8(plaintext));
+
+    if (parsed.author && parsed.data && typeof parsed.data === "object") {
+        return {
+            author: parsed.author,
+            timestamp: parsed.timestamp,
+            proof: parsed.proof,
+            ...statusField(parsed.status),
+            data: parsed.data as Link,
+        };
+    }
 
     return {
-        author: wireLink.author,
-        timestamp: wireLink.timestamp,
-        proof: wireLink.proof,
+        author: wireLink.author ?? "",
+        timestamp: wireLink.timestamp ?? "",
+        proof: wireLink.proof ?? { signature: "", key: "" },
         ...statusField(wireLink.status),
-        data,
+        data: parsed as Link,
     };
 }

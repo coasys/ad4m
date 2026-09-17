@@ -17,14 +17,10 @@ Scaffolded from `ad4m-link-language-template` (pure/impure adapter
 separation, esbuild + Deno bundling, Node/tsx unit tests). See `README.md`
 for the full architecture writeup.
 
-**Imported into the `ad4m` monorepo** (`bootstrap-languages/server-link-language/`)
-from the standalone `server-link-language` repo. The standalone repo remains
-the canonical dev copy for now; changes made here should be ported back.
-`package.json`'s `@coasys/ad4m-ldk` dependency is `workspace:*` (was
-`link:../ad4m/ad4m-ldk/js` in the standalone repo), and the `ad4m-ldk`
-resolution in `esbuild.ts`/`tsconfig.json` was repointed from the standalone
-repo's sibling-checkout layout (`../ad4m/ad4m-ldk/...`) to the monorepo's
-own layout (`../../ad4m-ldk/...`, same convention every other
+Lives in the `ad4m` monorepo at `bootstrap-languages/server-link-language/`.
+`package.json`'s `@coasys/ad4m-ldk` dependency uses `workspace:*`, and the
+`ad4m-ldk` resolution in `esbuild.ts`/`tsconfig.json` points to the
+monorepo's own layout (`../../ad4m-ldk/...`, same convention every other
 `bootstrap-languages/*` package uses) — see "Build / test / typecheck"
 below.
 
@@ -64,14 +60,19 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
 
 ## Non-obvious conventions
 
-- **Adapter/singleton pattern everywhwere.** Every module that needs I/O
+- **Adapter/singleton pattern everywhere.** Every module that needs I/O
   (`api.ts`, `sync.ts`, `store.ts`, `ws-client.ts`) pulls its dependency
   from a swappable module-level singleton in `src/adapters.ts`
   (`initTransport`/`getTransport`, etc.), never imports `ad4m:host`
   directly. This is what makes every module under `tests/` runnable in
-  plain Node with mocks. `src/adapters-deno.ts` is the only file allowed to
-  import `@coasys/ad4m-ldk`, and only `index.ts` is allowed to import
-  `adapters-deno.ts`.
+  plain Node with mocks. **Import rules:** `src/adapters-deno.ts` is the only
+  file allowed to import runtime-specific APIs (`ad4m:host`, Deno globals).
+  Only `index.ts` is allowed to import `adapters-deno.ts`. `index.ts` also
+  imports `defineLanguage` and `hash` directly from `@coasys/ad4m-ldk` —
+  these are module-surface exports (not I/O adapters), so the direct import
+  does not break the swappable-adapter guarantee. Pure library
+  imports (`@noble/curves`, `@noble/ciphers`, `@noble/hashes`) are fine
+  anywhere — they contain no runtime coupling.
 - **`applyInboundWireDiff` (src/sync.ts) is the only place that calls
   `emitDiff`.** The AD4M executor discards `perspectiveSyncSync()`'s return
   value — `emitPerspectiveDiff` is the only thing that makes an inbound
@@ -101,46 +102,52 @@ tests/*.test.ts                    — node:test + tsx, one file per pure module
   running) and calls `resetAdapters()` / `auth.resetAuth()` for hygiene,
   but a fresh instance would start clean regardless.
 
+## Gotchas
+
+- **`httpFetch` return shape varies by executor version.**
+  Executor builds before `2b65ebbf0` return a plain string on success
+  and throw `"http_fetch METHOD URL -> STATUS: body"` for non-ok HTTP.
+  Current dev (`2b65ebbf0`+) returns `{ status, body }` for all
+  responses. `DenoTransport.fetch()` handles both shapes — do not
+  remove the `typeof res === "string"` guard until the old executor
+  version falls out of deployment.
+
 ## Known limitations / follow-ups
 
-- **No persistent commit outbox.** `commit()` applies to the local store
-  unconditionally, then pushes to the server with a single inline retry
-  (`commitWithRetry` in `index.ts`). If both attempts fail, the link stays
-  local-only and is **not** automatically retried later — the gap is only
-  closed if the user makes another edit or another instance later
-  overwrites/syncs the same state. A durable pending-commits queue
-  (persisted in the KV store, retried by `sync()` on its normal cadence)
-  would close this; scoped out of v1 because it needs its own conflict/
-  ordering story.
-- **No E2E key rotation handling.** The room key is fetched once during
-  `init()`'s `setupRoomKey()` and held for the perspective's lifetime. The
-  `version` field in `KeysResponse` is captured but unused — a real
-  rotation flow would need to detect a version bump (e.g. periodic
-  `/keys` re-fetch, or a dedicated WS push message not in the current
-  server API) and re-key in place.
-- **E2E encryption has 5 confirmed incompatibilities with the server.**
-  Plaintext mode works end-to-end (verified by smoke test). E2E needs
-  reconciliation before production use:
-  1. Encrypted link format: server expects `data: { ciphertext, nonce }`,
-     client sends `encrypted: hex(nonce || ciphertext)`.
-  2. KDF: server uses `SHA-256(shared)`, client uses
-     `HKDF-SHA256(shared, salt, info, 32)`.
-  3. Key envelope: server returns parsed JSON object, client expects
-     base64-encoded string.
-  4. X25519 derivation: server derives from DID public key
-     (`edwardsToMontgomeryPub`), client derives from
-     `sha256(sign("adam-server-link-language:x25519-seed:v1"))` —
-     different keypairs entirely.
-  5. Key response format: server sends `encryptedKey: object`,
-     client expects `encryptedKey: string`.
-  Fixes localize to `src/api.ts` (response shaping) and
-  `src/encryption.ts` (envelope framing) — core sync logic stays
-  unchanged.
-- **`peers.remote()` and E2E setup are not covered by the automated test
-  suite directly** (only indirectly, through `api.ts`/`encryption.ts` unit
-  tests) — there's no `index.ts`-level integration test because `index.ts`
-  requires the Deno `ad4m:host` bootstrap to exercise for real. Verify
-  those paths against a running `link-server` once one exists.
+- **Durable outbox is limited to in-memory retry.** `enqueueCommitBatched`
+  (src/sync.ts) coalesces contiguous commits into segments and retries
+  each segment up to 3 times with exponential backoff. If all attempts
+  fail, the failed segments re-enqueue for the next flush cycle and the
+  language emits `LinkLanguageInstalledButNotSynced`. This keeps links
+  local-only until the server recovers, but a process restart loses the
+  queue — a durable pending-commits queue (persisted in the KV store,
+  retried by `sync()`) would close this gap.
+- **E2E encryption activates automatically — no plaintext mode.** The admin's
+  language instance generates the initial room key during `init()` when no E2E
+  exists yet. Subsequent rotations require explicit admin action.
+  `performRotation()` generates a fresh room key client-side, seals it to every
+  ACL member's X25519 public key, and POSTs only sealed envelopes — the server
+  never sees plaintext. It does NOT fire on presence events (`onPeerJoined` is
+  reconnect/wake, not ACL change — rotating there would mint a new version on
+  every reconnect). `onPeerJoined` only calls `performAdminKeyGrants()` to
+  grant historical keys to members who lack them (idempotent). The key ring
+  loads once during `init()`'s `setupKeyRing()` and the `version` field in
+  `KeysResponse` remains unused for mid-session detection — a periodic `/keys`
+  re-fetch or a dedicated WS push message would close that gap.
+- **E2E encryption wire format is unified.** Both client and server use
+  the same `EncryptedLinkData` shape (`{ciphertext, nonce}`) in the link's
+  `data` field for encrypted rooms — no separate `encrypted` field. The
+  server treats link data as opaque (no E2E validation at commit time)
+  and stores only sealed `encryptedKey` envelopes (ECIES: ephemeral X25519
+  ECDH + HKDF-SHA256 + AES-256-GCM). Key generation and sealing happen
+  exclusively client-side. The server accepts client-registered X25519
+  public keys during auth.
+- **E2E integration coverage via test matrix.** The integration suite
+  (`tests/js/tests/integration.test.ts`) runs the full neighbourhood test
+  battery for both `[holochain]` and `[server-link]` link-language
+  configurations. Since E2E activates automatically for every room, the
+  `[server-link]` leg exercises the full init → key generation → encrypt →
+  sync → decrypt → grant pipeline through two real AD4M executors.
 
 ## Testing approach
 

@@ -269,6 +269,20 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(serde_json::to_value(agent)?)
 }
 
+/// Publishes the main agent to the agent language without holding up the caller.
+///
+/// The publish is best-effort (a failure is only logged) and reaches a remote
+/// server, so awaiting it made generate/unlock take as long as that server took
+/// to answer or time out. `publish_agent_to_language` serializes publishes, so a
+/// profile update made right after this still wins.
+fn spawn_main_agent_publish() {
+    tokio::spawn(async {
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!("Error publishing agent expression: {}", e);
+        }
+    });
+}
+
 /// agent.generate — generate agent identity
 async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
@@ -321,9 +335,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         log::info!("System languages loaded");
     }
 
-    if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-        log::warn!("Error publishing agent expression: {}", e);
-    }
+    spawn_main_agent_publish();
 
     if !init_errors.is_empty() {
         agent.error = Some(init_errors.join("; "));
@@ -436,9 +448,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
         log::info!("AD4M init complete");
 
-        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-            log::warn!("Error publishing agent expression: {}", e);
-        }
+        spawn_main_agent_publish();
     }
 
     let mut agent = {
@@ -513,17 +523,39 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone()).await;
 
     if ctx.auto_permit_cap_requests {
-        println!("======================================");
-        println!("Got capability request: \n{:?}", auth_info);
+        log::debug!(
+            "🔐 auto-permitting capability request (request_id={}, app_name={:?})",
+            request_id,
+            auth_info.app_name
+        );
         let random_number_challenge =
             crate::agent::capabilities::permit_capability(AuthInfoExtended {
                 request_id: request_id.clone(),
                 auth: auth_info,
             })
             .map_err(|e| WsRpcError::internal(e))?;
-        println!("--------------------------------------");
-        println!("Random number challenge: {}", random_number_challenge);
-        println!("======================================");
+
+        // Dev-mode auto-permit needs `rand` to call agent.generateJwt.
+        // Print it to stdout ONLY when AD4M_LOG_SECRETS=1 (dev opt-in),
+        // matching the gate used by email_service/mcp-auth. Wire response
+        // stays Value::String(request_id) so existing clients and the
+        // integration tests are unaffected. Non-opt-in operators still see
+        // a diagnostic log line telling them how to obtain the value.
+        if std::env::var("AD4M_LOG_SECRETS")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            println!(
+                "AD4M_LOG_SECRETS=1: auto-permitted request_id={} rand={}",
+                request_id, random_number_challenge
+            );
+        } else {
+            log::debug!(
+                "🔐 capability request auto-permitted (request_id={}, rand=<redacted; set AD4M_LOG_SECRETS=1 to print>)",
+                request_id
+            );
+        }
+        // Fall through to Value::String(request_id) below.
     }
 
     Ok(Value::String(request_id))

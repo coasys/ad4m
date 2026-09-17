@@ -26,6 +26,22 @@ export class AIClient {
         return this.#apiClient.call<Model[]>('ai.models');
     }
 
+    /**
+     * Ask a remote endpoint which models it serves, before adding one.
+     *
+     * Takes the credentials of a model that does not exist yet — a settings
+     * form is being filled in and wants the list to pick from. Rejects when
+     * the endpoint is unreachable or the key is refused, which makes this the
+     * credential check too: without it a bad key surfaces later as a failed
+     * completion carrying an error from a different layer.
+     *
+     * `apiType` defaults to the OpenAI shape, which is what every endpoint
+     * that is not Anthropic speaks.
+     */
+    async discoverModels(baseUrl: string, apiKey?: string, apiType?: string): Promise<string[]> {
+        return this.#apiClient.call<string[]>('ai.discoverModels', { baseUrl, apiKey, apiType });
+    }
+
     async addModel(model: ModelInput): Promise<string> {
         return this.#apiClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) });
     }
@@ -83,9 +99,12 @@ export class AIClient {
         const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text });
 
         const compressed = base64js.toByteArray(aiEmbed);
-        // Decode to a string via TextDecoder rather than pako's `{ to: 'string' }`
-        // option: newer @types/pako dropped that overload, which broke the build.
-        const decompressed = JSON.parse(new TextDecoder().decode(pako.inflate(compressed)));
+        // NB: pako v1 accepts `{ to: 'string' }`, pako v2 wants `{ toText: true }`,
+        // pako v3 also drops that overload from its bundled types. Call the
+        // version-agnostic form (returns Uint8Array) and decode explicitly so
+        // this works regardless of which pako major the lockfile pins.
+        const inflated = pako.inflate(compressed);
+        const decompressed = JSON.parse(new TextDecoder('utf-8').decode(inflated));
 
         return decompressed;
     }

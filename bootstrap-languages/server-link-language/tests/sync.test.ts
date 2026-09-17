@@ -12,8 +12,9 @@ import type { RoomConfig, StorageAdapter, Transport, TransportResponse } from ".
 import { initAdapters, resetAdapters } from "../src/adapters.js";
 import * as store from "../src/store.js";
 import * as syncModule from "../src/sync.js";
-import { encryptLinkForWire, generateRoomKey } from "../src/encryption.js";
+import { encryptLinkForWire, generateRoomKey, type KeyRing } from "../src/encryption.js";
 import type { LinkExpression, PerspectiveDiff } from "../src/types.js";
+import { isEncryptedLinkData } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
 // Mock adapters
@@ -74,7 +75,7 @@ function makeLink(overrides?: Partial<LinkExpression["data"]>): LinkExpression {
 
 let emittedDiffs: PerspectiveDiff[];
 let syncStates: string[];
-let roomKey: Uint8Array | null;
+let keyRing: KeyRing | null;
 
 function setup(transport: MockTransport): void {
     resetAdapters();
@@ -86,14 +87,14 @@ function setup(transport: MockTransport): void {
 
     emittedDiffs = [];
     syncStates = [];
-    roomKey = null;
+    keyRing = null;
 
     syncModule.initSync({
         config,
         getToken: async () => "test-token",
         emitDiff: (diff) => emittedDiffs.push(diff),
         emitSyncState: (state) => syncStates.push(state),
-        getRoomKey: () => roomKey,
+        getKeyRing: () => keyRing,
     });
 }
 
@@ -114,7 +115,8 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.equal(store.getRevision(), "rev-5");
         assert.equal(emittedDiffs.length, 1);
         assert.deepEqual(emittedDiffs[0], { additions: [link], removals: [] });
-        assert.deepEqual(result, { additions: [link], removals: [] });
+        assert.deepEqual(result.diff, { additions: [link], removals: [] });
+        assert.equal(result.missingVersions.size, 0);
     });
 
     it("applies removals and still emits", () => {
@@ -130,18 +132,152 @@ describe("sync: applyInboundWireDiff (the emitPerspectiveDiff trap)", () => {
         assert.deepEqual(emittedDiffs[0].removals, [link]);
     });
 
-    it("decrypts wire links before applying/emitting when a room key is set", () => {
+    it("decrypts wire links before applying/emitting when a key ring is set", () => {
         const transport = new MockTransport();
         setup(transport);
-        roomKey = generateRoomKey();
+        const rk = generateRoomKey();
+        keyRing = new Map([[1, rk]]);
         const link = makeLink({ source: "secret-source" });
-        const wireLink = encryptLinkForWire(link, roomKey);
+        const wireLink = encryptLinkForWire(link, rk, 1);
 
         syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 1, "rev-1");
 
         assert.equal(emittedDiffs.length, 1);
         assert.deepEqual(emittedDiffs[0].additions[0], link);
         assert.deepEqual(store.allLinks().links[0], link);
+    });
+
+    it("skips encrypted diff without key ring — reports missing versions, advances cursor", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        // keyRing stays null — simulates a freshly joined member awaiting key grant
+        const rk = generateRoomKey();
+        const link = makeLink({ source: "encrypted-no-ring" });
+        const wireLink = encryptLinkForWire(link, rk, 1);
+
+        const result = syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
+
+        assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
+        assert.equal(store.getSequence(), 5, "sequence must advance — cursor must not get stuck");
+        assert.equal(result.missingVersions.size, 1, "must report the missing version");
+        assert.ok(result.missingVersions.has(1), "must report version 1");
+    });
+
+    it("skips encrypted diff with missing key version — applies rest, reports missing versions", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const rk1 = generateRoomKey();
+        const rk2 = generateRoomKey();
+        keyRing = new Map([[1, rk1]]);
+        const link = makeLink({ source: "wrong-version" });
+        const wireLink = encryptLinkForWire(link, rk2, 2); // encrypted with version 2, ring only has 1
+
+        const result = syncModule.applyInboundWireDiff({ additions: [wireLink], removals: [] }, 5, "rev-5");
+
+        assert.equal(store.allLinks().links.length, 0, "undecryptable link must not appear in store");
+        assert.equal(store.getSequence(), 5, "sequence must advance — cursor must not get stuck");
+        assert.equal(emittedDiffs.length, 1, "still emits (empty) diff");
+        assert.deepEqual(result.missingVersions, new Set([2]));
+    });
+
+    it("applies plaintext links and skips undecryptable ones in a mixed batch", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const rk = generateRoomKey();
+        keyRing = new Map([[1, rk]]);
+        const plaintextLink = makeLink({ source: "visible" });
+        const encryptedLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 2); // version 2, ring only has 1
+
+        const result = syncModule.applyInboundWireDiff(
+            { additions: [plaintextLink, encryptedLink], removals: [] }, 5, "rev-5",
+        );
+
+        assert.equal(store.allLinks().links.length, 1, "plaintext link must be applied");
+        assert.deepEqual(store.allLinks().links[0].data.source, "visible");
+        assert.equal(emittedDiffs.length, 1, "diff emitted with the plaintext link");
+        assert.deepEqual(result.missingVersions, new Set([2]));
+        assert.equal(store.getSequence(), 5, "sequence advances past the batch");
+    });
+
+    it("encrypted removal across key versions removes the correct link", () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const rk1 = generateRoomKey();
+        const rk2 = generateRoomKey();
+        keyRing = new Map([[1, rk1], [2, rk2]]);
+        const link = makeLink({ source: "will-be-removed" });
+
+        // Add with version 1
+        const wireAdd = encryptLinkForWire(link, rk1, 1);
+        syncModule.applyInboundWireDiff({ additions: [wireAdd], removals: [] }, 1, "rev-1");
+        assert.equal(store.allLinks().links.length, 1);
+
+        // Remove with version 2 (after key rotation)
+        const wireRemove = encryptLinkForWire(link, rk2, 2);
+        syncModule.applyInboundWireDiff({ additions: [], removals: [wireRemove] }, 2, "rev-2");
+        assert.equal(store.allLinks().links.length, 0, "removal must match by plaintext identity, not by key version");
+    });
+});
+
+// ---------------------------------------------------------------------------
+// toWireLink / toWireDiff — outbound encryption contracts
+// ---------------------------------------------------------------------------
+
+describe("sync: toWireLink contracts", () => {
+    it("produces plaintext wire link when key ring is null", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        // keyRing stays null
+        let capturedBody = "";
+        transport.route(
+            (url, method) => method === "POST" && url.includes("/commit"),
+            (_url, _method, body) => {
+                capturedBody = body;
+                return { status: 200, headers: {}, body: JSON.stringify({ sequence: 1, revision: "rev-1" }) };
+            },
+        );
+
+        const link = makeLink();
+        await syncModule.commit({ additions: [link], removals: [] });
+        const sent = JSON.parse(capturedBody);
+        assert.equal(sent.additions[0].author, "did:key:zAuthor", "plaintext link must retain author");
+        assert.equal(sent.additions[0].data.source, "a", "plaintext link must retain data fields");
+        assert.equal(isEncryptedLinkData(sent.additions[0].data), false, "data must not be encrypted");
+    });
+
+    it("encrypts wire link when key ring has keys", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        const rk = generateRoomKey();
+        keyRing = new Map([[1, rk]]);
+        let capturedBody = "";
+        transport.route(
+            (url, method) => method === "POST" && url.includes("/commit"),
+            (_url, _method, body) => {
+                capturedBody = body;
+                return { status: 200, headers: {}, body: JSON.stringify({ sequence: 1, revision: "rev-1" }) };
+            },
+        );
+
+        const link = makeLink();
+        await syncModule.commit({ additions: [link], removals: [] });
+        const sent = JSON.parse(capturedBody);
+        assert.ok(isEncryptedLinkData(sent.additions[0].data), "data must be encrypted");
+        assert.equal(sent.additions[0].author, undefined, "author must be absent on encrypted wire link");
+        assert.equal(sent.additions[0].key_version, 1, "key_version must be set");
+        assert.equal(typeof sent.additions[0].link_hash, "string", "link_hash must be present");
+    });
+
+    it("throws when key ring exists but has no keys (empty Map)", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+        keyRing = new Map(); // non-null but empty
+
+        const link = makeLink();
+        await assert.rejects(
+            () => syncModule.commit({ additions: [link], removals: [] }),
+            /key ring has no keys/,
+        );
     });
 });
 
@@ -235,6 +371,185 @@ describe("sync: catchUp / performSync", () => {
         assert.equal(store.getSequence(), 1);
     });
 
+    it("retries refreshKeyRing on subsequent sync when first attempt found no new keys", async () => {
+        // Simulates the CI race condition: Bob's first catchUp encounters an
+        // encrypted diff but refreshKeyRing finds no key yet (admin hasn't
+        // granted). The cursor advances past the diff. On the SECOND catchUp,
+        // the server returns empty diffs — but the persistent missing-versions
+        // set triggers another refreshKeyRing attempt, which now succeeds.
+        const transport = new MockTransport();
+        setup(transport);
+        const rk = generateRoomKey();
+        const link = makeLink({ source: "encrypted-retry" });
+        const wireLink = encryptLinkForWire(link, rk, 1);
+
+        let refreshCallCount = 0;
+
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => {
+                refreshCallCount++;
+                if (refreshCallCount >= 2) {
+                    // Second attempt: admin has granted the key
+                    keyRing = new Map([[1, rk]]);
+                    return true;
+                }
+                // First attempt: no key yet
+                return false;
+            },
+        });
+
+        let syncCallCount = 0;
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => {
+                syncCallCount++;
+                if (syncCallCount === 1) {
+                    // First sync: returns encrypted diff
+                    return {
+                        status: 200, headers: {},
+                        body: JSON.stringify({
+                            diffs: [{ additions: [wireLink], removals: [] }],
+                            revision: "rev-1", sequence: 1,
+                        }),
+                    };
+                }
+                // Second sync: empty — cursor already advanced past the diff
+                return {
+                    status: 200, headers: {},
+                    body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }),
+                };
+            },
+        );
+        // bootstrap(/render) route for re-bootstrap after key ring refresh
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => ({
+                status: 200, headers: {},
+                body: JSON.stringify({ links: [wireLink], revision: "rev-1" }),
+            }),
+        );
+
+        // First catchUp: encrypted diff skipped, refreshKeyRing returns false
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 1, "first catchUp must call refreshKeyRing");
+        assert.equal(emittedDiffs.length, 1, "first catchUp emits (with skipped links)");
+        const firstEmit = emittedDiffs[0];
+        assert.equal(firstEmit.additions.length, 0, "encrypted link must be skipped");
+
+        // Second catchUp: empty diffs, but persistent missing versions
+        // triggers retry — this time refreshKeyRing succeeds → re-bootstrap
+        emittedDiffs = [];
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 2, "second catchUp must retry refreshKeyRing");
+        // Re-bootstrap should have emitted the decrypted link
+        assert.ok(emittedDiffs.length > 0, "re-bootstrap must emit the recovered link");
+        const recoveredLinks = emittedDiffs.flatMap((d) => d.additions);
+        assert.ok(
+            recoveredLinks.some((l) => l.data.source === "encrypted-retry"),
+            "recovered link must have the original plaintext data",
+        );
+    });
+
+    it("trackMissingKeyVersions bridges WS-path misses into the HTTP-sync retry set", async () => {
+        // Simulates the real-world flow: Bob receives an encrypted diff via
+        // WebSocket (applyInboundWireDiff called OUTSIDE catchUp), can't
+        // decrypt it, and calls trackMissingKeyVersions. The next catchUp
+        // sees _pendingMissingVersions > 0 even though the HTTP response
+        // has 0 diffs (cursor already advanced by applyInboundWireDiff).
+        const transport = new MockTransport();
+        setup(transport);
+        const rk = generateRoomKey();
+        const link = makeLink({ source: "ws-recovery" });
+        const wireLink = encryptLinkForWire(link, rk, 1);
+
+        let refreshCallCount = 0;
+
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => {
+                refreshCallCount++;
+                // First call (from catchUp): grant the key
+                keyRing = new Map([[1, rk]]);
+                return true;
+            },
+        });
+
+        // Step 1: Simulate WS onDiff — applyInboundWireDiff outside catchUp.
+        // This advances the sequence cursor but can't decrypt.
+        const wsResult = syncModule.applyInboundWireDiff(
+            { additions: [wireLink], removals: [] }, 1, "rev-1",
+        );
+        assert.equal(wsResult.missingVersions.size, 1, "WS diff must report missing version");
+        assert.equal(emittedDiffs.length, 1, "WS diff must emit (with skipped links)");
+        assert.equal(emittedDiffs[0].additions.length, 0, "encrypted link must be skipped");
+
+        // Step 2: Bridge the missing versions — this is what index.ts does
+        syncModule.trackMissingKeyVersions(wsResult.missingVersions);
+
+        // Step 3: HTTP catchUp — server returns empty (cursor already past)
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => ({
+                status: 200, headers: {},
+                body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }),
+            }),
+        );
+        // bootstrap route for re-bootstrap after key ring refresh
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/render"),
+            () => ({
+                status: 200, headers: {},
+                body: JSON.stringify({ links: [wireLink], revision: "rev-1" }),
+            }),
+        );
+
+        emittedDiffs = [];
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 1, "catchUp must call refreshKeyRing from pending set");
+        assert.ok(emittedDiffs.length > 0, "re-bootstrap must emit the recovered link");
+        const recoveredLinks = emittedDiffs.flatMap((d) => d.additions);
+        assert.ok(
+            recoveredLinks.some((l) => l.data.source === "ws-recovery"),
+            "recovered link must have the original plaintext data",
+        );
+    });
+
+    it("clearPendingMissingVersions prevents redundant retries", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+
+        // Populate and then clear
+        syncModule.trackMissingKeyVersions(new Set([1, 2, 3]));
+        syncModule.clearPendingMissingVersions();
+
+        let refreshCalled = false;
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => { refreshCalled = true; return false; },
+        });
+
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 0 }) }),
+        );
+
+        await syncModule.catchUp();
+        assert.equal(refreshCalled, false, "refreshKeyRing must not be called after clear");
+    });
+
     it("performSync never throws — logs and reports LinkLanguageInstalledButNotSynced on failure", async () => {
         const transport = new MockTransport();
         setup(transport);
@@ -271,13 +586,13 @@ describe("sync: commit", () => {
 
         assert.ok(posted);
         assert.deepEqual(posted.additions[0].data, link.data);
-        assert.equal(posted.additions[0].encrypted, undefined);
+        assert.ok(!isEncryptedLinkData(posted.additions[0].data));
     });
 
-    it("posts an encrypted wire diff when a room key is set", async () => {
+    it("posts an encrypted wire diff when a key ring is set", async () => {
         const transport = new MockTransport();
         setup(transport);
-        roomKey = generateRoomKey();
+        keyRing = new Map([[1, generateRoomKey()]]);
         const link = makeLink();
         let posted: any = null;
 
@@ -291,8 +606,7 @@ describe("sync: commit", () => {
 
         await syncModule.commit({ additions: [link], removals: [] });
 
-        assert.ok(posted.additions[0].encrypted);
-        assert.equal(posted.additions[0].data, undefined);
+        assert.ok(isEncryptedLinkData(posted.additions[0].data));
     });
 
     it("propagates a network failure to the caller", async () => {
@@ -317,11 +631,7 @@ describe("sync: bootstrap", () => {
 
         transport.route(
             (url, method) => method === "GET" && url.endsWith("/render"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [linkA, linkB], revision: "rev-snap" }) }),
-        );
-        transport.route(
-            (url, method) => method === "GET" && url.endsWith("/revision"),
-            () => ({ status: 200, headers: {}, body: JSON.stringify({ revision: "rev-snap", sequence: 7 }) }),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [linkA, linkB], revision: "rev-snap", sequence: 7 }) }),
         );
 
         await syncModule.bootstrap();
@@ -330,6 +640,28 @@ describe("sync: bootstrap", () => {
         assert.equal(store.getRevision(), "rev-snap");
         assert.equal(store.getSequence(), 7);
         assert.equal(emittedDiffs.length, 0);
+    });
+
+    it("replaces stale local links with the server snapshot", async () => {
+        const transport = new MockTransport();
+        setup(transport);
+
+        // Pre-populate with a stale link that the server no longer has.
+        const staleLink = makeLink({ source: "stale" });
+        store.putLink(staleLink);
+        assert.equal(store.allLinks().links.length, 1);
+
+        const freshLink = makeLink({ source: "fresh" });
+        transport.route(
+            (url, method) => method === "GET" && url.endsWith("/render"),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ links: [freshLink], revision: "rev-2", sequence: 5 }) }),
+        );
+
+        await syncModule.bootstrap();
+
+        const links = store.allLinks().links;
+        assert.equal(links.length, 1, "stale link should have been removed");
+        assert.equal(links[0].data.source, "fresh");
     });
 });
 
@@ -613,14 +945,14 @@ describe("sync: enqueueCommitBatched", () => {
         store.initStore(simpleHash);
         emittedDiffs = [];
         syncStates = [];
-        roomKey = null;
+        keyRing = null;
         // Throw from emitSyncState — simulates a torn-down runtime.
         syncModule.initSync({
             config,
             getToken: async () => "test-token",
             emitDiff: (diff) => emittedDiffs.push(diff),
             emitSyncState: () => { throw new Error("runtime torn down"); },
-            getRoomKey: () => roomKey,
+            getKeyRing: () => keyRing,
         });
 
         // First flush: hard-fails all retries → tries to emit → emitter throws.
@@ -631,11 +963,14 @@ describe("sync: enqueueCommitBatched", () => {
             proof: { signature: "sig-X", key: "k" },
         };
         syncModule.enqueueCommitBatched({ additions: [X], removals: [] });
-        await syncModule.drainCommitBatch();
+        // Await one flush cycle only — drainCommitBatch would re-schedule
+        // the permanently-failing segment indefinitely.
+        await syncModule._awaitInflightForTests();
         assert.equal(posts.length, 3, "first flush must attempt all 3 retries");
 
         // Now the server recovers. The chain must still be live — the
-        // next enqueue must actually POST.
+        // next enqueue must actually POST. The re-enqueued X from the
+        // failed flush coalesces with Y into one successful commit.
         shouldFail = false;
         const Y: LinkExpression = {
             author: "did:key:zAuthor",
@@ -645,8 +980,12 @@ describe("sync: enqueueCommitBatched", () => {
         };
         syncModule.enqueueCommitBatched({ additions: [Y], removals: [] });
         await syncModule.drainCommitBatch();
-        assert.equal(posts.length, 4, "chain must still be live after the poisoning attempt");
-        assert.deepEqual(posts[3].additions[0].data, Y.data);
+        assert.ok(posts.length > 3, "chain must still be live after the poisoning attempt");
+        const successfulAdds = posts.slice(3).flatMap((p: any) => p.additions);
+        assert.ok(
+            successfulAdds.some((a: any) => a.data.source === "y"),
+            "Y must appear in a successful commit after the chain survived",
+        );
     });
 
     it("re-enqueues failed segments for the next flush cycle", async () => {

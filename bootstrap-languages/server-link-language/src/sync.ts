@@ -16,13 +16,15 @@ import * as store from "./store.js";
 import * as api from "./api.js";
 import type { RoomConfig } from "./adapters.js";
 import type {
+    Link,
     LinkExpression,
     PerspectiveDiff,
     SyncDiffEntry,
     WireLinkExpression,
     WirePerspectiveDiff,
 } from "./types.js";
-import { decryptLinkFromWire, encryptLinkForWire, statusField } from "./encryption.js";
+import { isEncryptedLinkData } from "./types.js";
+import { decryptLinkFromWire, encryptLinkForWire, latestKeyVersion, statusField, type KeyRing } from "./encryption.js";
 
 export interface SyncDeps {
     config: RoomConfig;
@@ -31,14 +33,53 @@ export interface SyncDeps {
     /** MUST be called for every inbound diff — see module doc above. */
     emitDiff: (diff: PerspectiveDiff) => void;
     emitSyncState?: (state: string) => void;
-    /** Returns the current room key, or null for a plaintext (non-E2E) room. */
-    getRoomKey: () => Uint8Array | null;
+    /** Returns the current key ring, or null for a plaintext (non-E2E) room. */
+    getKeyRing: () => KeyRing | null;
+    /** Re-fetches the key ring from the server. Returns true if new versions
+     *  were obtained (callers should re-bootstrap to recover skipped links). */
+    refreshKeyRing?: () => Promise<boolean>;
+    /** Called after every successful sync cycle. The admin uses this to grant
+     *  historical keys to members who joined while WS was down — the periodic
+     *  HTTP sync is the fallback discovery path when onPeerJoined never fires. */
+    onPostSync?: () => Promise<void>;
 }
 
 let _deps: SyncDeps | null = null;
 
+/**
+ * Key versions that appeared in a catch-up batch but could not be
+ * decrypted because the key ring lacked them at the time. Persists
+ * across sync cycles: because the sequence cursor advances past
+ * encrypted diffs even when links get skipped, a failed
+ * refreshKeyRing on the FIRST attempt would otherwise leave those
+ * links permanently unreachable — subsequent syncs see empty diffs
+ * (cursor already past) and never trigger another refresh. By
+ * tracking the missing versions here, every subsequent
+ * performSync/catchUp retries the refresh until it succeeds.
+ */
+let _pendingMissingVersions = new Set<number>();
+
 export function initSync(deps: SyncDeps): void {
     _deps = deps;
+    _pendingMissingVersions = new Set();
+}
+
+/**
+ * Register key versions that could not be decrypted so the next
+ * HTTP sync cycle retries the key-ring refresh.  The WebSocket
+ * `onDiff` path needs this: it calls `applyInboundWireDiff`
+ * directly (outside `catchUp`), so missed versions never reach the
+ * `_pendingMissingVersions` set that `catchUp` checks.  Without
+ * this bridge the cursor advances past the encrypted diffs and no
+ * retry ever triggers.
+ */
+export function trackMissingKeyVersions(versions: Set<number>): void {
+    for (const v of versions) _pendingMissingVersions.add(v);
+}
+
+/** Clear the pending-missing-versions set after successful recovery. */
+export function clearPendingMissingVersions(): void {
+    _pendingMissingVersions.clear();
 }
 
 function deps(): SyncDeps {
@@ -53,8 +94,8 @@ function deps(): SyncDeps {
 // ---------------------------------------------------------------------------
 
 function toWireLink(link: LinkExpression): WireLinkExpression {
-    const roomKey = deps().getRoomKey();
-    if (!roomKey) {
+    const keyRing = deps().getKeyRing();
+    if (!keyRing) {
         return {
             author: link.author,
             timestamp: link.timestamp,
@@ -63,26 +104,35 @@ function toWireLink(link: LinkExpression): WireLinkExpression {
             data: link.data,
         };
     }
-    return encryptLinkForWire(link, roomKey);
+    const version = latestKeyVersion(keyRing);
+    const key = keyRing.get(version);
+    if (!key) {
+        throw new Error("toWireLink: key ring has no keys");
+    }
+    return encryptLinkForWire(link, key, version);
 }
 
 function fromWireLink(wireLink: WireLinkExpression): LinkExpression {
-    const roomKey = deps().getRoomKey();
-    if (wireLink.encrypted && roomKey) {
-        return decryptLinkFromWire(wireLink, roomKey);
+    const keyRing = deps().getKeyRing();
+    if (isEncryptedLinkData(wireLink.data) && keyRing) {
+        return decryptLinkFromWire(wireLink, keyRing);
     }
-    if (wireLink.encrypted && !roomKey) {
-        throw new Error(
-            "sync: received an encrypted link but no room key is available yet " +
-            "(E2E key fetch may still be in flight, or this instance failed to decrypt it)",
-        );
+    if (isEncryptedLinkData(wireLink.data) && !keyRing) {
+        // Throw the same shape as a missing-version error so
+        // fromWireDiff() catches it and skips the link instead of
+        // crashing the entire sync. Recovery happens via the
+        // refreshKeyRing → re-bootstrap path once the admin grants
+        // keys. The version from the wire link (default 1) ensures
+        // the refresh request knows which version(s) to ask for.
+        const v = wireLink.key_version ?? 1;
+        throw new Error(`no key for version ${v} (key ring not yet available)`);
     }
     return {
-        author: wireLink.author,
-        timestamp: wireLink.timestamp,
-        proof: wireLink.proof,
+        author: wireLink.author ?? "",
+        timestamp: wireLink.timestamp ?? "",
+        proof: wireLink.proof ?? { signature: "", key: "" },
         ...statusField(wireLink.status),
-        data: wireLink.data ?? { source: "", target: "" },
+        data: (wireLink.data as Link) ?? { source: "", target: "" },
     };
 }
 
@@ -93,11 +143,62 @@ function toWireDiff(diff: PerspectiveDiff): WirePerspectiveDiff {
     };
 }
 
-function fromWireDiff(wire: WirePerspectiveDiff): PerspectiveDiff {
-    return {
-        additions: (wire.additions ?? []).map(fromWireLink),
-        removals: (wire.removals ?? []).map(fromWireLink),
-    };
+interface FromWireDiffResult {
+    diff: PerspectiveDiff;
+    /** Key versions that appeared in the wire batch but could not be
+     *  decrypted because the key ring lacks them. Empty when everything
+     *  decrypted successfully (or the room uses plaintext). */
+    missingVersions: Set<number>;
+}
+
+/**
+ * Converts a wire diff to a local diff. When a link cannot be decrypted
+ * — whether the key ring lacks that specific version OR the key ring
+ * has not arrived yet (freshly joined member awaiting grant) — the link
+ * gets **skipped** (not thrown) and its `key_version` is collected into
+ * `missingVersions`. This prevents a single undecryptable link from
+ * blocking the entire sync cursor. Recovery happens via
+ * refreshKeyRing → re-bootstrap once the admin grants keys.
+ */
+function fromWireDiff(wire: WirePerspectiveDiff): FromWireDiffResult {
+    const missingVersions = new Set<number>();
+    const additions: LinkExpression[] = [];
+    const removals: LinkExpression[] = [];
+
+    for (const wireLink of wire.additions ?? []) {
+        try {
+            additions.push(fromWireLink(wireLink));
+        } catch (err) {
+            if (isMissingVersionError(err)) {
+                missingVersions.add(extractMissingVersion(wireLink));
+            } else {
+                throw err; // non-crypto errors propagate
+            }
+        }
+    }
+    for (const wireLink of wire.removals ?? []) {
+        try {
+            removals.push(fromWireLink(wireLink));
+        } catch (err) {
+            if (isMissingVersionError(err)) {
+                missingVersions.add(extractMissingVersion(wireLink));
+            } else {
+                throw err;
+            }
+        }
+    }
+
+    return { diff: { additions, removals }, missingVersions };
+}
+
+/** Matches the error shape thrown by decryptLinkFromWire when the key ring
+ *  has entries but lacks the specific version needed. */
+function isMissingVersionError(err: unknown): boolean {
+    return err instanceof Error && /no key for version \d+/.test(err.message);
+}
+
+function extractMissingVersion(wireLink: WireLinkExpression): number {
+    return wireLink.key_version ?? 1;
 }
 
 function normalizeSyncEntry(
@@ -120,13 +221,28 @@ function normalizeSyncEntry(
 // Inbound — the single choke point (see module doc)
 // ---------------------------------------------------------------------------
 
-export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): PerspectiveDiff {
-    const diff = fromWireDiff(wireDiff);
+export interface ApplyResult {
+    diff: PerspectiveDiff;
+    /** Key versions that could not be decrypted — if non-empty, some links
+     *  were skipped and a key ring refresh + re-bootstrap should follow. */
+    missingVersions: Set<number>;
+}
+
+export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: number, revision: string): ApplyResult {
+    const { diff, missingVersions } = fromWireDiff(wireDiff);
+
+    if (missingVersions.size > 0) {
+        console.warn(
+            `[server-link-language] skipped ${missingVersions.size} undecryptable key version(s): ` +
+            `${[...missingVersions].join(", ")} — will request key grant`,
+        );
+    }
+
     store.applyDiff(diff);
     if (revision) store.setRevision(revision);
     if (Number.isFinite(sequence)) store.setSequence(sequence);
     deps().emitDiff(diff); // <-- CRITICAL. Do not remove. Do not bypass.
-    return diff;
+    return { diff, missingVersions };
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +257,10 @@ export function applyInboundWireDiff(wireDiff: WirePerspectiveDiff, sequence: nu
 export async function commit(diff: PerspectiveDiff): Promise<void> {
     const { config, getToken } = deps();
     const token = await getToken();
+    console.log(
+        `[server-link-language] POST /commit: ${diff.additions.length} adds, ` +
+        `${diff.removals.length} removes → room=${config.roomId}`,
+    );
     await api.commitDiff(config, token, toWireDiff(diff));
     emitSyncStateSafe("Synced");
 }
@@ -182,9 +302,12 @@ export async function commit(diff: PerspectiveDiff): Promise<void> {
 const MAX_COMMIT_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 200;
 
+const MAX_RETRY_DELAY_MS = 5 * 60 * 1000;
 let _pendingQueue: PerspectiveDiff[] = [];
 let _flushScheduled = false;
 let _inflight: Promise<void> = Promise.resolve();
+let _retryTimer: ReturnType<typeof setTimeout> | null = null;
+let _retryDelay = 2_500;
 
 /** Enqueue a diff to be flushed on the next microtask. */
 export function enqueueCommitBatched(diff: PerspectiveDiff): void {
@@ -237,21 +360,28 @@ async function flushBatch(): Promise<void> {
                 `for next flush cycle:\n${requeueSummary}`,
             );
             _pendingQueue.unshift(...requeue);
-            if (!_flushScheduled) {
-                _flushScheduled = true;
-                _inflight = _inflight
-                    .then(() => flushBatch())
-                    .catch((err) => {
-                        console.error(
-                            "[server-link-language] re-enqueued batch flush crashed:",
-                            err,
-                        );
-                    });
+            if (!_retryTimer) {
+                _retryDelay = Math.min(_retryDelay * 2, MAX_RETRY_DELAY_MS);
+                _retryTimer = setTimeout(() => {
+                    _retryTimer = null;
+                    if (_pendingQueue.length > 0 && !_flushScheduled) {
+                        _flushScheduled = true;
+                        _inflight = _inflight
+                            .then(() => flushBatch())
+                            .catch((err) => {
+                                console.error(
+                                    "[server-link-language] retry flush crashed; keeping the flush chain live:",
+                                    err,
+                                );
+                            });
+                    }
+                }, _retryDelay);
             }
             emitSyncStateSafe("LinkLanguageInstalledButNotSynced");
             return;
         }
     }
+    _retryDelay = 2_500;
 }
 
 /**
@@ -326,28 +456,23 @@ export function coalesceDiffs(queue: PerspectiveDiff[]): PerspectiveDiff[] {
 }
 
 function linkIdentity(link: LinkExpression): string {
-    // Canonical fields ONLY — matches link-server's canonicalLinkPayload
-    // for plaintext data (link-server/src/types.ts::canonicalLinkPayload:
-    // {source, predicate, target, author, timestamp}). We deliberately do
-    // NOT include proof.signature: two links with identical canonical
-    // fields but different signatures (e.g. re-signed after a key
-    // rotation) are the SAME link from the server's perspective, and
-    // treating them as different identities would let a remove(oldSig)
-    // + add(newSig) sequence merge into one segment → additions:[X],
-    // removals:[X] → server applies add-then-remove → X gone, contrary
-    // to the caller's intent.
-    //
-    // JSON.stringify is collision-resistant: separators and quotes in any
-    // string field are escaped rather than interpretable as boundaries, so
-    // (author: "a|b", timestamp: "t") and (author: "a", timestamp: "b|t")
-    // never produce the same key.
-    return JSON.stringify([
-        link.author,
-        link.timestamp,
-        link.data?.source ?? "",
-        link.data?.predicate ?? null,
-        link.data?.target ?? "",
-    ]);
+    // Must match the SAME canonical field set (and key order) as the
+    // server's canonicalLinkPayload (link-server/src/types.ts) so that two
+    // links the server considers identical also collapse here. We
+    // deliberately do NOT include proof.signature: two links with
+    // identical canonical fields but different signatures (e.g. re-signed
+    // after a key rotation) are the SAME link from the server's
+    // perspective, and treating them as different identities would let a
+    // remove(oldSig) + add(newSig) sequence merge into one segment →
+    // additions:[X], removals:[X] → server applies add-then-remove → X
+    // gone, contrary to the caller's intent.
+    return JSON.stringify({
+        source: link.data?.source ?? "",
+        predicate: link.data?.predicate ?? null,
+        target: link.data?.target ?? "",
+        author: link.author,
+        timestamp: link.timestamp,
+    });
 }
 
 /** Test/teardown hook: await any in-flight flush + drain everything still
@@ -363,13 +488,15 @@ function linkIdentity(link: LinkExpression): string {
  * serialisation invariant that other flushes rely on.
  */
 export async function drainCommitBatch(): Promise<void> {
-    const MAX_LAPS = 100;
+    // Cap at 10 laps (not 100) — each lap can trigger up to 3 retry POSTs
+    // per segment. 10 laps × 3 attempts = 30 POSTs max, which keeps the
+    // teardown/outage burst bounded while still giving a genuine queue a
+    // reasonable chance to flush.
+    const MAX_LAPS = 10;
     for (let lap = 0; lap < MAX_LAPS; lap++) {
         await _inflight;
         if (_pendingQueue.length === 0) return;
         if (!_flushScheduled) {
-            // Nudge the chain to pick up the residual queue without
-            // duplicating scheduling logic here.
             _flushScheduled = true;
             _inflight = _inflight
                 .then(() => flushBatch())
@@ -381,10 +508,13 @@ export async function drainCommitBatch(): Promise<void> {
                 });
         }
     }
-    console.error(
-        `[server-link-language] drainCommitBatch: bailed after ${MAX_LAPS} laps — ` +
-        `a caller is enqueuing commits faster than they can flush.`,
-    );
+    if (_pendingQueue.length > 0) {
+        console.warn(
+            `[server-link-language] drainCommitBatch: bailed after ${MAX_LAPS} laps with ` +
+            `${_pendingQueue.length} segment(s) still pending — they will flush on the next ` +
+            `enqueueCommitBatched call.`,
+        );
+    }
 }
 
 /** Test-only: clear all batch state without draining. Used by unit tests
@@ -394,6 +524,16 @@ export function _resetBatchStateForTests(): void {
     _pendingQueue = [];
     _flushScheduled = false;
     _inflight = Promise.resolve();
+    if (_retryTimer) { clearTimeout(_retryTimer); _retryTimer = null; }
+    _retryDelay = 2_500;
+}
+
+/** Test-only: await the current in-flight flush without the drain loop.
+ * Unlike drainCommitBatch (which re-schedules until the queue empties),
+ * this resolves after exactly one flush cycle — useful when testing
+ * failure paths where the queue never empties. */
+export async function _awaitInflightForTests(): Promise<void> {
+    await _inflight;
 }
 
 // ---------------------------------------------------------------------------
@@ -404,13 +544,35 @@ export async function bootstrap(): Promise<void> {
     const { config, getToken } = deps();
     const token = await getToken();
 
+    // The render response now includes revision + sequence, so we avoid the
+    // extra fetchRevision round-trip that the old code made.
     const rendered = await api.fetchRender(config, token);
-    const additions = rendered.links.map(fromWireLink);
-    store.applyDiff({ additions, removals: [] });
 
-    const rev = await api.fetchRevision(config, token);
-    if (rev.revision) store.setRevision(rev.revision);
-    store.setSequence(rev.sequence);
+    // Route through fromWireDiff so encrypted links that can't be
+    // decrypted yet (freshly joined member awaiting key grant) get
+    // skipped instead of crashing the entire bootstrap. The
+    // catchUp() → refreshKeyRing → re-bootstrap path recovers them
+    // once the admin grants keys.
+    const renderDiff: WirePerspectiveDiff = { additions: rendered.links, removals: [] };
+    const { diff, missingVersions } = fromWireDiff(renderDiff);
+
+    if (missingVersions.size > 0) {
+        console.warn(
+            `[server-link-language] bootstrap: skipped ${missingVersions.size} undecryptable ` +
+            `key version(s): ${[...missingVersions].join(", ")} — will recover after key grant`,
+        );
+    }
+
+    // Replace the local link set atomically: remove any stale links left
+    // from a previous session, then apply the authoritative server snapshot.
+    // Without this, links deleted while the language was stopped would
+    // remain visible locally.
+    const existing = store.allLinks();
+    store.applyDiff({ additions: [], removals: existing.links });
+    store.applyDiff({ additions: diff.additions, removals: [] });
+
+    if (rendered.revision) store.setRevision(rendered.revision);
+    if (typeof rendered.sequence === "number") store.setSequence(rendered.sequence);
 }
 
 // ---------------------------------------------------------------------------
@@ -429,16 +591,65 @@ export async function catchUp(): Promise<PerspectiveDiff> {
     const token = await getToken();
     const since = store.getSequence();
     const res = await api.fetchSync(config, token, since);
+    console.log(
+        `[server-link-language] catchUp: since=${since}, received ${res.diffs.length} diff(s), ` +
+        `revision=${res.revision}, sequence=${res.sequence}`,
+    );
 
     let last: PerspectiveDiff = { additions: [], removals: [] };
+    const allMissingVersions = new Set<number>();
     for (const rawEntry of res.diffs) {
         const entry = normalizeSyncEntry(rawEntry, res.revision, res.sequence);
-        last = applyInboundWireDiff(entry.diff, entry.sequence, entry.revision);
+        const result = applyInboundWireDiff(entry.diff, entry.sequence, entry.revision);
+        last = result.diff;
+        for (const v of result.missingVersions) allMissingVersions.add(v);
     }
 
     if (res.diffs.length === 0 && res.revision) {
         store.setRevision(res.revision);
         store.setSequence(res.sequence);
+    }
+
+    // Merge any newly discovered missing versions into the persistent set.
+    // This set survives across sync cycles so that a failed refreshKeyRing
+    // on one cycle retries on the next — the sequence cursor has already
+    // advanced past the encrypted diffs, so subsequent catchUp() calls
+    // will see empty batches and never re-discover the same versions.
+    for (const v of allMissingVersions) _pendingMissingVersions.add(v);
+
+    // If there are ANY unresolved missing versions — from this cycle or
+    // carried over from a previous one — attempt a key ring refresh.
+    if (_pendingMissingVersions.size > 0 && _deps?.refreshKeyRing) {
+        const isRetry = allMissingVersions.size === 0;
+        console.log(
+            `[server-link-language] ${_pendingMissingVersions.size} pending missing key version(s)` +
+            `${isRetry ? " (retry from previous cycle)" : ""} — refreshing key ring…`,
+        );
+        try {
+            const gotNew = await _deps.refreshKeyRing();
+            if (gotNew) {
+                console.log("[server-link-language] key ring refreshed with new versions — re-bootstrapping");
+                _pendingMissingVersions.clear();
+                await bootstrap();
+                // Emit the full store so the executor's perspective layer
+                // sees the recovered links. bootstrap() itself does not
+                // emit (correct for cold start — the executor queries the
+                // store directly for initial state). The recovery path
+                // here must emit because the executor only surfaces
+                // runtime-added links via emitPerspectiveDiff.
+                const recovered = store.allLinks();
+                if (recovered.links.length > 0) {
+                    deps().emitDiff({ additions: recovered.links, removals: [] });
+                }
+            } else {
+                console.warn(
+                    "[server-link-language] key ring refresh returned no new versions — " +
+                    "admin has not yet granted historical keys",
+                );
+            }
+        } catch (err) {
+            console.error("[server-link-language] key ring refresh failed:", err);
+        }
     }
 
     emitSyncStateSafe("Synced");
@@ -450,7 +661,19 @@ export async function catchUp(): Promise<PerspectiveDiff> {
  * the runtime's polling loop. */
 export async function performSync(): Promise<PerspectiveDiff> {
     try {
-        return await catchUp();
+        const result = await catchUp();
+        // Post-sync admin duties: grant historical keys to members who
+        // joined while the WebSocket was down. Without this, key grants
+        // depend entirely on the WS `peer-joined` event, which may
+        // never fire if the WebSocket can't connect (CI, firewalls,
+        // transient outages). Running here makes every successful HTTP
+        // sync a fallback discovery path for new members.
+        if (_deps?.onPostSync) {
+            void _deps.onPostSync().catch((err) => {
+                console.error("[server-link-language] post-sync callback failed:", err);
+            });
+        }
+        return result;
     } catch (err) {
         console.error("[server-link-language] sync failed:", err);
         // See index.ts comment on the same value — must be a valid

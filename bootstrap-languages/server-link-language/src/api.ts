@@ -11,10 +11,10 @@ import type {
     AclResponse,
     AuthChallengeResponse,
     AuthTokenResponse,
+    MissingKeysResponse,
     KeysResponse,
     PeersResponse,
     RenderResponse,
-    RevisionResponse,
     SyncResponse,
     WirePerspectiveDiff,
 } from "./types.js";
@@ -29,7 +29,8 @@ export class ApiError extends Error {
 }
 
 function roomUrl(config: RoomConfig, path: string): string {
-    return `${config.serverUrl}/rooms/${encodeURIComponent(config.roomId)}${path}`;
+    const base = config.serverUrl.replace(/\/+$/, "");
+    return `${base}/rooms/${encodeURIComponent(config.roomId)}${path}`;
 }
 
 function jsonHeaders(token?: string): Record<string, string> {
@@ -90,9 +91,11 @@ export async function verifyChallenge(
     challenge: string,
     signature: string,
     x25519PublicKeyHex?: string,
+    x25519Signature?: string,
 ): Promise<string> {
     const payload: Record<string, unknown> = { did, challenge, signature };
     if (x25519PublicKeyHex) payload.x25519PublicKey = x25519PublicKeyHex;
+    if (x25519Signature) payload.x25519Signature = x25519Signature;
 
     const res = await request<AuthTokenResponse>(
         roomUrl(config, "/auth"),
@@ -123,7 +126,11 @@ export async function fetchSync(config: RoomConfig, token: string, since: number
 
 export async function fetchRender(config: RoomConfig, token: string): Promise<RenderResponse> {
     const res = await request<Partial<RenderResponse>>(roomUrl(config, "/render"), "GET", jsonHeaders(token));
-    return { links: res.links ?? [], revision: res.revision ?? "" };
+    return {
+        links: res.links ?? [],
+        revision: res.revision ?? "",
+        sequence: typeof res.sequence === "number" ? res.sequence : 0,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -135,37 +142,115 @@ export async function fetchPeers(config: RoomConfig, token: string): Promise<str
     return res.peers ?? [];
 }
 
-export async function fetchRevision(config: RoomConfig, token: string): Promise<RevisionResponse> {
-    const res = await request<Partial<RevisionResponse>>(roomUrl(config, "/revision"), "GET", jsonHeaders(token));
-    return { revision: res.revision ?? "", sequence: typeof res.sequence === "number" ? res.sequence : 0 };
+// ---------------------------------------------------------------------------
+// E2E key rotation (client-side, server never sees plaintext)
+// ---------------------------------------------------------------------------
+
+export interface RotateKeyEntry {
+    did: string;
+    encryptedKey: { ephemeralPublicKey: string; nonce: string; ciphertext: string };
 }
 
-export async function fetchAcl(config: RoomConfig, token: string): Promise<AclResponse> {
-    const res = await request<Partial<AclResponse>>(roomUrl(config, "/acl"), "GET", jsonHeaders(token));
-    return { admin: res.admin ?? "", members: res.members ?? [] };
+export interface RotateResponse {
+    version: number;
+    recipients: string[];
 }
 
-/** Returns null when the room has no E2E key configured (server responds
- * 404/204, or omits/empties `encryptedKey`). */
-export async function fetchRoomKey(config: RoomConfig, token: string): Promise<KeysResponse | null> {
+/**
+ * Rotates the room's E2E key. The caller generates the room key locally,
+ * seals it to each member's X25519 public key, and sends only the sealed
+ * envelopes. The server never touches the plaintext key.
+ */
+export async function rotateKeys(
+    config: RoomConfig,
+    token: string,
+    keys: RotateKeyEntry[],
+): Promise<RotateResponse> {
+    return request<RotateResponse>(
+        roomUrl(config, "/keys/rotate"),
+        "POST",
+        jsonHeaders(token),
+        JSON.stringify({ keys }),
+    );
+}
+
+/**
+ * Fetches the room's E2E keys for this agent.
+ *
+ * Returns null when the room has no E2E at all (server responds 404).
+ * Returns `{ keys: [], e2e_enabled: true }` when the room HAS E2E but
+ * this agent has no keys yet (freshly added member awaiting grant).
+ */
+export async function fetchRoomKeys(config: RoomConfig, token: string): Promise<KeysResponse | null> {
     try {
         const res = await request<Partial<KeysResponse>>(roomUrl(config, "/keys"), "GET", jsonHeaders(token));
-        if (!res || !res.encryptedKey) return null;
-        return { encryptedKey: res.encryptedKey, version: res.version ?? 0 };
+        if (!res) return null;
+        return {
+            keys: res.keys ?? [],
+            e2e_enabled: res.e2e_enabled ?? (!!res.keys && res.keys.length > 0),
+        };
     } catch (err) {
         if (err instanceof ApiError && (err.status === 404 || err.status === 204)) {
-            return null;
+            return null; // Room has no E2E — 404
         }
         throw err;
     }
 }
 
 // ---------------------------------------------------------------------------
+// E2E key grant (admin re-seals historical versions for late members)
+// ---------------------------------------------------------------------------
+
+export interface GrantKeyEntry {
+    version: number;
+    encryptedKey: { ephemeralPublicKey: string; nonce: string; ciphertext: string };
+}
+
+export async function grantKeys(
+    config: RoomConfig,
+    token: string,
+    targetDid: string,
+    keys: GrantKeyEntry[],
+): Promise<number[]> {
+    const res = await request<{ granted: number[] }>(
+        roomUrl(config, "/keys/grant"),
+        "POST",
+        jsonHeaders(token),
+        JSON.stringify({ targetDid, keys }),
+    );
+    return res.granted ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// E2E admin: missing keys + ACL query
+// ---------------------------------------------------------------------------
+
+/** Admin only. Returns members missing historical key versions. */
+export async function fetchMissingKeys(config: RoomConfig, token: string): Promise<MissingKeysResponse> {
+    const res = await request<Partial<MissingKeysResponse>>(
+        roomUrl(config, "/keys/missing"), "GET", jsonHeaders(token),
+    );
+    return { membersNeedingHistoricalKeys: res.membersNeedingHistoricalKeys ?? [] };
+}
+
+/** Returns the room's admin DID and full member list (with X25519 public keys). */
+export async function fetchAclInfo(config: RoomConfig, token: string): Promise<AclResponse> {
+    const res = await request<Partial<AclResponse>>(roomUrl(config, "/acl"), "GET", jsonHeaders(token));
+    return { admin: res.admin ?? "", members: res.members ?? [] };
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket URL
 // ---------------------------------------------------------------------------
 
-export function wsUrl(config: RoomConfig, token: string): string {
+/**
+ * Returns the WebSocket endpoint URL for a room. The token is NOT
+ * included in the URL — auth happens via a first-message frame
+ * (`{type:"auth",token:"..."}`) sent immediately after the upgrade
+ * completes. This keeps JWTs out of access logs, CDN caches, and
+ * browser history.
+ */
+export function wsUrl(config: RoomConfig): string {
     const httpUrl = roomUrl(config, "/ws");
-    const wsBase = httpUrl.replace(/^http/, "ws"); // http(s):// -> ws(s)://
-    return `${wsBase}?token=${encodeURIComponent(token)}`;
+    return httpUrl.replace(/^http/, "ws"); // http(s):// -> ws(s)://
 }

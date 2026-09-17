@@ -124,6 +124,15 @@ export interface SHACLPropertyShape {
   /** Expected datatype (e.g., xsd:string, xsd:integer) */
   datatype?: string;
 
+  /**
+   * CRDT ordering strategy for this collection ("linkedList"), when it has one.
+   *
+   * Declared in the shape rather than passed per query so the executor applies
+   * it to every writer — the ORM, MCP agents, raw WS-RPC callers, another app
+   * on the same neighbourhood.
+   */
+  ordering?: string;
+
   /** Node kind constraint (IRI, Literal, BlankNode) */
   nodeKind?: 'IRI' | 'Literal' | 'BlankNode';
 
@@ -486,6 +495,13 @@ export class SHACLShape {
       });
       
       // Constraints
+      if (prop.ordering) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://ordering",
+          target: `literal:string:${prop.ordering}`
+        } as any);
+      }
       if (prop.datatype) {
         links.push({
           source: propShapeId,
@@ -782,6 +798,15 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://datatype"
       );
       if (datatypeLink) prop.datatype = datatypeLink.target;
+
+      const orderingLink = links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://ordering"
+      );
+      if (orderingLink) {
+        prop.ordering = orderingLink.target.replace(
+          /^literal:\/\/string:|^literal:string:/, ''
+        );
+      }
       
       const nodeKindLink = links.find(l => 
         l.source === propShapeId && l.predicate === "sh://nodeKind"
@@ -1091,6 +1116,11 @@ export class SHACLShape {
         transform: p.transform,
         interpretation_hint: p.interpretationHint,
         identity: p.identity,
+        // The backend reads the ordering declaration back from the
+        // `ad4m://ordering` link that `parse_shacl_to_links` writes from this
+        // field. `ensureSubjectClass` ships `toJSON()`, so omitting it here
+        // leaves `@HasMany({ ordering })` inert no matter what `toLinks()` does.
+        ordering: p.ordering,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -1143,6 +1173,7 @@ export class SHACLShape {
         transform: p.transform,
         interpretationHint: p.interpretation_hint,
         identity: p.identity,
+        ordering: p.ordering,
       });
     }
 

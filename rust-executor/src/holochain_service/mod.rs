@@ -20,13 +20,13 @@ use holochain::test_utils::itertools::Either;
 
 use holochain_types::dna::ValidatedDnaManifest;
 use holochain_types::websocket::AllowedOrigins;
-use kitsune_p2p_types::dependencies::url2::Url2;
 use log::{error, info};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::time::timeout;
+use url2::Url2;
 
 use tokio_stream::StreamExt;
 
@@ -343,7 +343,14 @@ impl HolochainService {
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
                                         },
                                         Err(err) => {
-                                            error!("GetNetworkMetrics timed out after 30s");
+                                            // KEEP AT warn (Nico + CodeRabbit, PR #942 round 2):
+                                            // this path is reachable from `runtime.networkMetrics`
+                                            // via WS-RPC, so a real user request just failed. Do not
+                                            // downgrade in future cleanups; if there's a caller-
+                                            // specific periodic path that wants debug, gate the
+                                            // downgrade behind that path only.
+                                            // See rust-executor/LOGGING.md.
+                                            log::warn!("⚠️ 🐝 GetNetworkMetrics timed out after 30s");
                                             let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
                                         },
                                     }
@@ -486,44 +493,48 @@ impl HolochainService {
     }
 
     pub async fn new(local_config: LocalConductorConfig) -> Result<HolochainService, AnyError> {
-        let conductor_yaml_path =
-            std::path::Path::new(&local_config.conductor_path).join("conductor_config.yaml");
-        let mut config = if conductor_yaml_path.exists() {
-            ConductorConfig::load_yaml(&conductor_yaml_path)?
+        // Resolve the relay_url once. Precedence: use_proxy → explicit
+        // relay_url → default. CodeRabbit review PR #907 finding #4.
+        let resolved_relay_url = resolve_relay_url(&local_config);
+
+        // The conductor config is always constructed in code from
+        // LocalConductorConfig. Nothing in AD4M has ever written a
+        // conductor_config.yaml into conductor_path, so the old
+        // "load_yaml if the file exists" branch (added 2023) only ever
+        // served hand-authored files — and silently overrode the launcher/
+        // CLI flags when one was present. Dropped on PR #907 (per Nico's
+        // review question) together with the HC 0.6→0.7 yaml migration
+        // shim that existed only to keep that branch loadable.
+        let mut config = ConductorConfig::default();
+        let data_root_path: DataRootPath =
+            PathBuf::from(local_config.conductor_path.clone()).into();
+        config.data_root_path = Some(data_root_path);
+        config.admin_interfaces = None;
+
+        let mut network_config = NetworkConfig::default();
+
+        if local_config.use_bootstrap {
+            network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
         } else {
-            let mut config = ConductorConfig::default();
-            let data_root_path: DataRootPath =
-                PathBuf::from(local_config.conductor_path.clone()).into();
-            config.data_root_path = Some(data_root_path);
-            config.admin_interfaces = None;
+            network_config.bootstrap_url = Url2::parse("http://bootstrap.ad4m.dev:4433");
+        }
 
-            let mut network_config = NetworkConfig::default();
+        // HC 0.7.0 dropped NetworkConfig.signal_url — the signal-server
+        // concept was folded into bootstrap+relay. Old AD4M code set
+        // signal_url to a WS URL for direct peer signaling; under 0.7
+        // this responsibility moved to the iroh relay (relay_url).
+        network_config.relay_url = Url2::parse(resolved_relay_url.as_str());
 
-            if local_config.use_bootstrap {
-                network_config.bootstrap_url = Url2::parse(local_config.bootstrap_url.as_str());
-            } else {
-                network_config.bootstrap_url = Url2::parse("http://bootstrap.ad4m.dev:4433");
-            }
+        config.network = network_config;
 
-            if local_config.use_proxy {
-                network_config.signal_url = Url2::parse(local_config.proxy_url.as_str());
-            } else {
-                network_config.signal_url = Url2::parse("ws://bootstrap.ad4m.dev:4433");
-            }
-
-            if let Some(relay_url) = local_config.relay_url {
-                network_config.relay_url = Url2::parse(relay_url.as_str());
-            } else {
-                network_config.relay_url = Url2::parse("http://bootstrap.ad4m.dev:4433/relay");
-            }
-
-            config.network = network_config;
-
-            config
-        };
-
-        // Apply unyt space override: the unyt DNA gets its own bootstrap, signal,
+        // Apply unyt space override: the unyt DNA gets its own bootstrap,
         // relay, and auth material. All other DNAs use the AD4M defaults above.
+        //
+        // HC 0.7.0: SpaceNetworkOverride no longer carries signal_url — the
+        // signal-server responsibility moved to the iroh relay. We drop that
+        // field and keep bootstrap_url + relay_url + base64_auth_material.
+        // UNYT_SIGNAL_URL is intentionally ignored (legacy WS signaller,
+        // not part of the 0.7 topology).
         let dna_hash_opt = crate::db::Ad4mDb::global_instance()
             .lock()
             .ok()
@@ -533,20 +544,34 @@ impl HolochainService {
                     .and_then(|db| db.get_setting("unyt_dna_hash").ok().flatten())
             });
         if let Some(dna_hash) = dna_hash_opt {
-            //if let Ok(Some(auth_material)) =
-            //    crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
-            //{
-            info!("Applying unyt space override for DNA {}", dna_hash);
+            // Grab the auth material stashed by setup_bootstrap_auth().
+            // Without this the authenticated Unyt bootstrap will refuse the
+            // connection. CodeRabbit review PR #907 finding #5.
+            let auth_material =
+                crate::db::Ad4mDb::with_global_instance(|db| db.get_setting("unyt_auth_material"))
+                    .ok()
+                    .flatten();
+            if auth_material.is_none() {
+                info!(
+                    "Applying unyt space override for DNA {} (no auth material \
+                     stashed yet — first-run bootstrap; setup_bootstrap_auth \
+                     will populate it)",
+                    dna_hash
+                );
+            } else {
+                info!(
+                    "Applying unyt space override for DNA {} with base64 auth material",
+                    dna_hash
+                );
+            }
             config.network.space_overrides.insert(
                 dna_hash,
                 SpaceNetworkOverride {
                     bootstrap_url: Some(Url2::parse(crate::unyt_service::UNYT_BOOTSTRAP_URL)),
-                    signal_url: Some(Url2::parse(crate::unyt_service::UNYT_SIGNAL_URL)),
-                    base64_auth_material: None,
+                    base64_auth_material: auth_material,
                     relay_url: Some(Url2::parse(crate::unyt_service::UNYT_RELAY_URL)),
                 },
             );
-            //}
         }
 
         info!("Starting holochain conductor with config: {:#?}", config);
@@ -643,9 +668,19 @@ impl HolochainService {
             }
         }
 
-        // Wait for all cells to complete their network join.
-        // This uses Holochain's event-driven readiness signaling instead of
-        // retry loops or arbitrary timeouts.
+        // Wait per-cell for the fork's `JoinComplete` event via its built-in
+        // event-driven method. Fast (~ms) once the k2 space join returns Ok.
+        // The fork's own enum doc says JoinComplete means "the agent has
+        // successfully joined the k2 space, but peers may not yet be
+        // discovered via bootstrap" — so an immediately-following
+        // `add_agent_infos` may still hit K2SpaceNotFound. Handling that
+        // was previously done here via a second sync per-DNA peer-store
+        // wait, but that punished the common solo-node startup with ~11s
+        // per DNA (Nico's PR #907 review). Fire-and-forget instead:
+        // `add_agent_infos` already has bounded per-space retries plus a
+        // fingerprint cache to short-circuit truly-unavailable spaces, so
+        // the empty-store case is handled at the correct layer and
+        // install_app returns as soon as the k2 join completes.
         for cell_id in &app_cell_ids {
             if let Err(e) = self
                 .conductor
@@ -662,6 +697,60 @@ impl HolochainService {
         let app_info = self.conductor.get_app_info(&app_id).await?;
         let app_info = app_info.ok_or_else(|| anyhow!("App not found: {}", app_id))?;
         Ok(app_info)
+    }
+
+    // Note: `await_initial_peer_discovery` (a synchronous per-DNA wait for the
+    // first peer to appear in the peer store, gated on
+    // `ConductorNetworkState::is_bootstrap_complete`) was removed in response
+    // to Nico's PR #907 review. It made solo-node startup pay up to ~11s per
+    // DNA of dead time before the first zome call, and the empty-peer-store
+    // case it was defending against is now handled entirely by
+    // `add_agent_infos` below via bounded per-space retries + a fingerprint
+    // cache. If a future flow again needs a peer-arrival gate, the correct
+    // shape is a `Conductor` wrapper method on the fork that subscribes to
+    // `NetworkEvent::BootstrapComplete` (see
+    // `crates/holochain/src/conductor/conductor.rs` next to
+    // `await_cell_network_join_complete`), not an AD4M-side poll loop.
+    // Historical shape preserved in git via commit that removed it.
+
+    #[cfg(any())]
+    async fn _removed_await_initial_peer_discovery(
+        &self,
+        dna_hash: &DnaHash,
+        timeout: std::time::Duration,
+    ) {
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+        let start = std::time::Instant::now();
+        loop {
+            let discovered = {
+                let state = self.conductor.network_state.read().await;
+                state.is_bootstrap_complete(dna_hash)
+            };
+            if discovered {
+                info!(
+                    "await_initial_peer_discovery: first peer observed for DNA {:?} after {:?}",
+                    dna_hash,
+                    start.elapsed()
+                );
+                return;
+            }
+            if start.elapsed() >= timeout {
+                // Not fatal — the fork's peer monitor also emits
+                // BootstrapComplete after its internal cap even with zero
+                // peers (which flips the state field we're polling), so
+                // this branch normally shouldn't trip. If it does, we
+                // surface it and continue: subsequent gossip rounds may
+                // still recover.
+                error!(
+                    "await_initial_peer_discovery: no peer observed within {:?} for DNA {:?} \
+                     (peer store may still be empty; add_agent_infos rounds may skip this space)",
+                    timeout, dna_hash
+                );
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 
     pub async fn call_zome_function(
@@ -841,40 +930,125 @@ impl HolochainService {
 
     pub async fn add_agent_infos(&self, agent_infos: Vec<String>) -> Result<(), AnyError> {
         // Add agent infos individually. K2 spaces should already be available
-        // since install_app awaits cell network join completion.
-        // If an agent info is for a space we haven't joined (e.g., another
-        // agent's unique DNA), it will be skipped.
-        let mut success_count = 0;
-        let mut skipped_count = 0;
+        // since install_app awaits cell network join completion — but under HC
+        // 0.7's cell-init races, the space is occasionally still spinning up
+        // when the first burst of agent-info gossip arrives.
+        //
+        // CodeRabbit review PR #907 finding #2: earlier version swallowed
+        // every error into the `skipped` bucket, hiding real problems. New
+        // shape:
+        //   - transient K2SpaceNotFound  → short retry with backoff, then skip
+        //     if it still doesn't come up (space genuinely isn't ours to join)
+        //   - other errors               → keep going but log at ERROR and
+        //     surface via failure_count in the summary line, so a real
+        //     conductor bug doesn't fall off silently
+        //
+        // CodeRabbit round-2 finding @949: the dispatcher wraps this whole
+        // fn in a 30s timeout. Per-item retries of 200+400+800ms = 1.4s
+        // each; ~21 items for an unavailable K2 space burn the full budget
+        // and the caller gets a Timeout instead of the skip summary. Fix:
+        // once we've exhausted retries for a given K2SpaceNotFound error
+        // fingerprint, cache it and short-circuit further items whose error
+        // matches — no sleep, straight to `skipped`. The K2SpaceNotFound
+        // error string embeds the space id/hash, so distinct spaces have
+        // distinct fingerprints.
+        const K2_SPACE_RETRIES: usize = 3;
+        const K2_SPACE_RETRY_BASE_MS: u64 = 200;
+
+        let mut success_count = 0usize;
+        let mut skipped_count = 0usize;
+        let mut failure_count = 0usize;
+        let mut exhausted_spaces: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        /// Extract a stable per-space fingerprint from the K2SpaceNotFound
+        /// error string. The error typically formats as
+        /// `K2SpaceNotFound(<hex-space-id>)` — slicing the whole `{:?}` is
+        /// good enough as a set key: distinct spaces give distinct debug
+        /// strings; identical errors give identical strings.
+        fn space_fingerprint(err_str: &str) -> String {
+            // Trim to the substring starting at K2SpaceNotFound (or K2 Space)
+            // so trailing context that varies per-call doesn't defeat the cache.
+            if let Some(idx) = err_str.find("K2SpaceNotFound") {
+                err_str[idx..]
+                    .split(&[',', ')', '\n'][..])
+                    .next()
+                    .unwrap_or(err_str)
+                    .to_string()
+            } else if let Some(idx) = err_str.find("K2 Space") {
+                err_str[idx..]
+                    .split(&['\n'][..])
+                    .next()
+                    .unwrap_or(err_str)
+                    .to_string()
+            } else {
+                err_str.to_string()
+            }
+        }
 
         for agent_info in agent_infos {
-            match self
-                .conductor
-                .add_agent_infos(vec![agent_info.clone()])
-                .await
-            {
-                Ok(()) => {
-                    success_count += 1;
-                }
-                Err(e) => {
-                    let error_str = format!("{:?}", e);
-                    if error_str.contains("K2SpaceNotFound")
-                        || (error_str.contains("K2 Space") && error_str.contains("does not exist"))
-                    {
-                        // Space we haven't joined - expected for other agent's unique DNAs
-                        skipped_count += 1;
-                    } else {
+            let mut attempt = 0usize;
+            loop {
+                match self
+                    .conductor
+                    .add_agent_infos(vec![agent_info.clone()])
+                    .await
+                {
+                    Ok(()) => {
+                        success_count += 1;
+                        break;
+                    }
+                    Err(e) => {
+                        let error_str = format!("{:?}", e);
+                        let is_space_not_found = error_str.contains("K2SpaceNotFound")
+                            || (error_str.contains("K2 Space")
+                                && error_str.contains("does not exist"));
+
+                        if is_space_not_found {
+                            let fp = space_fingerprint(&error_str);
+                            if exhausted_spaces.contains(&fp) {
+                                // Same space we already gave up on — skip
+                                // immediately, no sleep. This keeps the whole
+                                // batch within the 30s dispatcher budget even
+                                // if hundreds of agent infos target the same
+                                // never-going-to-arrive space.
+                                skipped_count += 1;
+                                break;
+                            }
+                            if attempt < K2_SPACE_RETRIES {
+                                // First-in-space — try backoff. Space may
+                                // still be initialising.
+                                let delay_ms = K2_SPACE_RETRY_BASE_MS * (1u64 << attempt as u32);
+                                tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                    .await;
+                                attempt += 1;
+                                continue;
+                            }
+                            // Retries exhausted for THIS space — cache the
+                            // fingerprint so subsequent items with the same
+                            // failure short-circuit.
+                            exhausted_spaces.insert(fp);
+                            skipped_count += 1;
+                            break;
+                        }
+
+                        // Not a K2 space error — real problem, surface it.
                         error!("Failed to add agent info: {:?}", e);
-                        skipped_count += 1;
+                        failure_count += 1;
+                        break;
                     }
                 }
             }
         }
 
-        if skipped_count > 0 {
+        if skipped_count > 0 || failure_count > 0 {
             info!(
-                "Added {} agent infos, skipped {} (spaces not available)",
-                success_count, skipped_count
+                "Added {} agent infos, skipped {} (K2 space unavailable across {} distinct \
+                 space(s)), failed {} (other errors)",
+                success_count,
+                skipped_count,
+                exhausted_spaces.len(),
+                failure_count
             );
         }
 
@@ -923,10 +1097,10 @@ impl HolochainService {
                 include_dht_summary: true,
             })
             .await?;
-        info!("Network metrics: {:?}", metrics);
+        log::debug!("🐝 network metrics: {:?}", metrics);
 
         let stats = self.conductor.dump_network_stats().await?;
-        info!("Network stats: {:?}", stats);
+        log::debug!("🐝 network stats: {:?}", stats);
 
         Ok(())
     }
@@ -1011,24 +1185,107 @@ impl HolochainService {
     }
 }
 
-pub async fn run_local_hc_services() -> Result<(), AnyError> {
-    let ops = holochain_cli_run_local_services::HcRunLocalServices::new(
-        None,
-        String::from("127.0.0.1"),
-        0,
-        false,
-        None,
-        String::from("127.0.0.1"),
-        0,
-        false,
-    );
-    ops.run().await;
-    Ok(())
+/// Resolve the relay_url that HC 0.7's NetworkConfig requires.
+///
+/// Precedence (matches pre-0.7 AD4M semantics):
+///   1. `use_proxy=true` + non-empty `proxy_url` → use `proxy_url` as relay
+///   2. explicit `relay_url` (from launcher config)          → use it
+///   3. hard-coded default (public AD4M bootstrap relay)     → fallback
+///
+/// # Path suffix
+///
+/// `kitsune2-bootstrap-srv` (>=0.4.0) serves the iroh relay at the
+/// `/relay` path on the *same* port as the bootstrap endpoints — verified
+/// against `kitsune2_bootstrap_srv-0.5.0/src/http.rs:525` and
+/// `src/lib.rs`. iroh dials the WebSocket upgrade at that exact path, so
+/// the URL we hand to `NetworkConfig.relay_url` MUST include `/relay`.
+///
+/// Legacy launcher configs still carry `proxy_url` / `relay_url` values
+/// from the pre-0.7 days when the relay was hosted at the port root, so
+/// we defensively append `/relay` to any candidate that lacks it. If a
+/// self-hoster explicitly wants a different sub-path they can set it
+/// explicitly; leaving `/relay` absent produces silent 404s that only
+/// surface downstream as "cross-node discovery never completes", which
+/// is the exact multi-user failure mode we've been chasing on this PR.
+/// (Data's PR #907 review MED-2 — defaults disagreed; Nico confirmed
+/// the relay was folded into the same binary but is still at `/relay`.)
+///
+/// CodeRabbit review PR #907 finding #4.
+fn resolve_relay_url(local_config: &LocalConductorConfig) -> String {
+    let url = if local_config.use_proxy && !local_config.proxy_url.is_empty() {
+        local_config.proxy_url.clone()
+    } else if let Some(ref relay_url) = local_config.relay_url {
+        relay_url.clone()
+    } else {
+        "http://bootstrap.ad4m.dev:4433/relay".to_string()
+    };
+    let url = normalize_relay_scheme(&url);
+    ensure_relay_path(&url)
+}
+
+/// Ensure the resolved relay URL carries the `/relay` path suffix that
+/// `kitsune2-bootstrap-srv` expects. Pre-0.7 AD4M launcher configs
+/// carry base URLs without a path (the old proxy server was hosted at
+/// the port root); the new kitsune2 relay lives at `/relay` on the
+/// same port as the bootstrap endpoints. Trailing slashes on the base
+/// are tolerated.
+fn ensure_relay_path(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/relay") {
+        trimmed.to_string()
+    } else {
+        format!("{}/relay", trimmed)
+    }
+}
+
+/// Normalize a relay URL to the scheme iroh expects.
+///
+/// HC 0.7's `relay_url` is the iroh relay's BASE URL: `https://` for TLS
+/// relays, `http://` for plain-text ones (the iroh client performs the
+/// websocket upgrade itself). Pre-0.7 AD4M configs carry websocket-scheme
+/// proxy URLs (`wss://` / `ws://`), and `resolve_relay_url` reuses
+/// `proxy_url` as the relay — so those legacy schemes still reach us here.
+/// iroh happens to dial TLS for `wss` too, but kitsune2's plain-text guard
+/// only recognises `http`, so a plain-text `ws://` URL would slip past it
+/// and then fail the TLS handshake. Map ws→http and wss→https so both the
+/// guard and the dialer see the canonical scheme.
+/// CodeRabbit review PR #907, relay_url-scheme thread.
+fn normalize_relay_scheme(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("wss://") {
+        format!("https://{}", rest)
+    } else if let Some(rest) = url.strip_prefix("ws://") {
+        format!("http://{}", rest)
+    } else {
+        url.to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use tokio::time::{Duration, Instant};
+
+    #[test]
+    fn test_normalize_relay_scheme() {
+        // Legacy websocket schemes from pre-0.7 proxy_url configs map to
+        // the base-URL schemes iroh expects.
+        assert_eq!(
+            super::normalize_relay_scheme("wss://proxy.ad4m.dev:443/relay"),
+            "https://proxy.ad4m.dev:443/relay"
+        );
+        assert_eq!(
+            super::normalize_relay_scheme("ws://127.0.0.1:4433"),
+            "http://127.0.0.1:4433"
+        );
+        // Canonical schemes pass through untouched.
+        assert_eq!(
+            super::normalize_relay_scheme("https://relay.example/"),
+            "https://relay.example/"
+        );
+        assert_eq!(
+            super::normalize_relay_scheme("http://bootstrap.ad4m.dev:4433/relay"),
+            "http://bootstrap.ad4m.dev:4433/relay"
+        );
+    }
 
     /// Integration test: start a real Holochain conductor and generate signing keypairs.
     #[tokio::test(flavor = "multi_thread")]
@@ -1041,7 +1298,7 @@ mod tests {
             static V8_INIT: Once = Once::new();
             V8_INIT.call_once(|| {
                 deno_core::v8::V8::set_flags_from_string("--max-opt=0");
-                deno_core::JsRuntime::init_platform(None, false);
+                deno_core::JsRuntime::init_platform(None);
             });
         }
 

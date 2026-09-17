@@ -8,8 +8,8 @@
  *     tested without pulling in the ad4m:host runtime.
  *   - Server-facing "wire" types describe the JSON shapes exchanged
  *     with link-server over HTTP and WebSocket. When a room has
- *     E2E encryption enabled, wire link expressions carry an opaque
- *     `encrypted` blob instead of plaintext `data` — see src/encryption.ts.
+ *     E2E encryption enabled, encrypted rooms carry an `EncryptedLinkData`
+ *     shape (`{ciphertext, nonce}`) in the `data` field — see src/encryption.ts.
  */
 
 // ---------------------------------------------------------------------------
@@ -37,6 +37,23 @@ export interface Link {
     source: string;
     target: string;
     predicate?: string;
+}
+
+/** Encrypted link payload — matches link-server's EncryptedLinkData shape. */
+export interface EncryptedLinkData {
+    ciphertext: string;
+    nonce: string;
+}
+
+export function isEncryptedLinkData(
+    data: Link | EncryptedLinkData | null | undefined
+): data is EncryptedLinkData {
+    return (
+        !!data &&
+        typeof data === "object" &&
+        typeof (data as EncryptedLinkData).ciphertext === "string" &&
+        typeof (data as EncryptedLinkData).nonce === "string"
+    );
 }
 
 export interface LinkExpression extends Expression<Link> {
@@ -80,19 +97,22 @@ export interface OnlineAgent {
 
 /**
  * A LinkExpression as it travels over the wire. In a plaintext room this
- * is structurally identical to LinkExpression. In an E2E room, `data` is
- * replaced by an opaque `encrypted` envelope (hex-encoded nonce+ciphertext)
- * and `data` is omitted — see src/encryption.ts encryptLinkForWire /
- * decryptLinkFromWire.
+ * is structurally identical to LinkExpression. In an E2E room, the `data`
+ * field carries an `EncryptedLinkData` shape (`{ciphertext, nonce}`)
+ * instead of a plaintext `Link` — there is no separate `encrypted` field.
+ * See src/encryption.ts encryptLinkForWire / decryptLinkFromWire.
  */
 export interface WireLinkExpression {
-    author: DID;
-    timestamp: string;
-    proof: ExpressionProof;
+    author?: DID;
+    timestamp?: string;
+    proof?: ExpressionProof;
     status?: string;
-    data?: Link;
-    /** Present instead of `data` when the room has E2E encryption enabled. */
-    encrypted?: string;
+    data?: Link | EncryptedLinkData;
+    /** Client-computed SHA-256 of the canonical plaintext, for OR-Set
+     * dedup/removal when author/timestamp are encrypted away. */
+    link_hash?: string;
+    /** Key version used to encrypt this link (absent → version 1). */
+    key_version?: number;
 }
 
 export interface WirePerspectiveDiff {
@@ -140,25 +160,45 @@ export interface SyncResponse {
 export interface RenderResponse {
     links: WireLinkExpression[];
     revision: string;
+    sequence: number;
 }
 
 export interface PeersResponse {
     peers: DID[];
 }
 
-export interface RevisionResponse {
-    revision: string;
-    sequence: number;
+export interface AclMember {
+    did: DID;
+    x25519PublicKey: string | null;
+    x25519Signature: string | null;
 }
 
 export interface AclResponse {
     admin: DID;
-    members: DID[];
+    members: AclMember[];
+}
+
+export interface KeysResponseEntry {
+    encryptedKey: SealedRoomKeyEnvelope;
+    version: number;
 }
 
 export interface KeysResponse {
-    encryptedKey: string;
-    version: number;
+    keys: KeysResponseEntry[];
+    /** True when the room has E2E enabled (even if this agent has no keys
+     *  yet). Absent on 404 responses (room has no E2E at all). */
+    e2e_enabled?: boolean;
+}
+
+export interface MemberMissingKeys {
+    did: string;
+    missingVersions: number[];
+    x25519PublicKey: string;
+    x25519Signature: string | null;
+}
+
+export interface MissingKeysResponse {
+    membersNeedingHistoricalKeys: MemberMissingKeys[];
 }
 
 // ---------------------------------------------------------------------------
@@ -171,9 +211,12 @@ export type ServerWsMessage =
     | { type: "telepresence-broadcast"; fromDid: DID; payload: unknown }
     | { type: "online-agents"; agents: OnlineAgent[] }
     | { type: "peer-joined"; did: DID }
-    | { type: "peer-left"; did: DID };
+    | { type: "peer-left"; did: DID }
+    | { type: "status-changed"; did: DID; status: unknown }
+    | { type: "auth-error"; error: string };
 
 export type ClientWsMessage =
+    | { type: "auth"; token: string }
     | { type: "telepresence-signal"; toDid: DID; payload: unknown }
     | { type: "telepresence-broadcast"; payload: unknown }
     | { type: "set-online-status"; status: unknown };

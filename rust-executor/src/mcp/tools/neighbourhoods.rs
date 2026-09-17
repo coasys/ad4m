@@ -58,7 +58,7 @@ pub struct NeighbourhoodJoinParams {
 impl Ad4mMcpHandler {
     /// List available link language templates for neighbourhood creation
     #[tool(
-        description = "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language_template` when calling `neighbourhood_publish_from_perspective`."
+        description = "List available link language templates that can be used when publishing a neighbourhood. Each template is a P2P synchronization engine. Returns address, name, and description for each template. Pass the address as `link_language` when calling `neighbourhood_publish_from_perspective`."
     )]
     pub async fn list_link_language_templates(&self) -> String {
         let capabilities = self.get_capabilities().await;
@@ -110,7 +110,7 @@ impl Ad4mMcpHandler {
         let result = json!({
             "templates": templates,
             "count": templates.len(),
-            "hint": "Pass the address of a template as link_language_template when publishing a neighbourhood."
+            "hint": "Pass the address of a template as link_language when publishing a neighbourhood."
         });
         serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
     }

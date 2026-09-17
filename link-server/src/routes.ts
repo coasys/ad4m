@@ -1,15 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { didToPublicKey, hashMessageForVerify, verifyHex, type AuthManager, type ChallengeStore } from "./auth.js";
 import type { LinkServerDB } from "./db.js";
-import { rotateRoomKey } from "./encryption.js";
-import type { FederateResult, FederationIdentity, FederationManager } from "./federation.js";
+import type { EncryptedKeyPayload } from "./encryption.js";
 import type { SlidingWindowLimiter } from "./rate-limit.js";
 import type { TelepresenceManager } from "./telepresence.js";
 import {
   isEncryptedLinkData,
-  type FederateRequestBody,
   type LinkExpression,
-  type ReconcileRequestBody,
   type RoomParams,
 } from "./types.js";
 import type { WsManager } from "./ws.js";
@@ -20,8 +17,6 @@ export interface RouteContext {
   challenges: ChallengeStore;
   ws: WsManager;
   telepresence: TelepresenceManager;
-  federation: FederationManager;
-  identity: FederationIdentity;
   autoAdmit: boolean;
   rateLimits: {
     authIp: SlidingWindowLimiter;
@@ -56,6 +51,7 @@ function requireAdmin(ctx: RouteContext) {
     const room = ctx.db.getRoom(claims.roomId);
     if (!room || room.admin_did !== claims.did) {
       reply.code(403).send({ error: "admin only" });
+      return;
     }
   };
 }
@@ -87,12 +83,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     return reply.send({ status: "ok" });
   });
 
-  // ---- server identity (public, not room-scoped) ----
-
-  app.get("/server/identity", async (_request, reply) => {
-    return reply.send({ publicKey: ctx.identity.publicKey });
-  });
-
   // ---- auth: DID challenge-response ----
 
   app.post(
@@ -105,6 +95,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         challenge?: string;
         signature?: string;
         x25519PublicKey?: string;
+        x25519Signature?: string;
       } | null;
 
       if (!body || typeof body.did !== "string") {
@@ -158,8 +149,26 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       // sealing. The language sends this during step 2 of the DID
       // challenge-response — the one point where DID ownership has
       // already been verified.
-      if (typeof body.x25519PublicKey === "string" && body.x25519PublicKey.length === 64) {
-        ctx.db.setX25519PublicKey(roomId, body.did, body.x25519PublicKey);
+      //
+      // When x25519Signature is provided, verify that the key genuinely
+      // belongs to the DID (prevents a MITM from substituting keys).
+      // The signature is: ed25519.sign(SHA-256(x25519PublicKey), privateKey)
+      // — same hashing convention as agentSignStringHex.
+      if (
+        typeof body.x25519PublicKey === "string" &&
+        body.x25519PublicKey.length === 64 &&
+        /^[0-9a-fA-F]{64}$/.test(body.x25519PublicKey)
+      ) {
+        let x25519Sig: string | undefined;
+        if (typeof body.x25519Signature === "string") {
+          const keyHash = hashMessageForVerify(body.x25519PublicKey);
+          const sigValid = await verifyHex(pubkey, keyHash, body.x25519Signature);
+          if (!sigValid) {
+            return reply.code(400).send({ error: "x25519 public key signature verification failed" });
+          }
+          x25519Sig = body.x25519Signature;
+        }
+        ctx.db.setX25519PublicKey(roomId, body.did, body.x25519PublicKey, x25519Sig);
       }
 
       const { token, expiresAt } = await ctx.auth.issueSession(body.did, roomId);
@@ -181,26 +190,55 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     async (request, reply) => {
       const claims = request.authClaims!;
       const body = request.body as { additions?: unknown; removals?: unknown } | null;
-      const additions = Array.isArray(body?.additions) ? (body!.additions as LinkExpression[]) : [];
-      const removals = Array.isArray(body?.removals) ? (body!.removals as LinkExpression[]) : [];
-      const room = ctx.db.getRoom(claims.roomId)!;
+      if (!body || typeof body !== "object") {
+        return reply.code(400).send({ error: "request body must be an object with additions and/or removals" });
+      }
+      if (body.additions !== undefined && !Array.isArray(body.additions)) {
+        return reply.code(400).send({ error: "additions must be an array" });
+      }
+      if (body.removals !== undefined && !Array.isArray(body.removals)) {
+        return reply.code(400).send({ error: "removals must be an array" });
+      }
+      const additions = (body.additions as LinkExpression[] | undefined) ?? [];
+      const removals = (body.removals as LinkExpression[] | undefined) ?? [];
+
+      if (additions.length === 0 && removals.length === 0) {
+        return reply.code(400).send({ error: "commit must contain at least one addition or removal" });
+      }
+
+      // Enforce E2E: once a room has been rotated to E2E, reject plaintext
+      // links.
+      const room = ctx.db.getRoom(claims.roomId);
+      if (room && room.e2e_enabled) {
+        for (const link of [...additions, ...removals]) {
+          if (link && typeof link === "object" && link.data && !isEncryptedLinkData(link.data)) {
+            return reply.code(400).send({
+              error: "this room requires end-to-end encryption; plaintext links are not accepted",
+            });
+          }
+        }
+      }
 
       for (const link of [...additions, ...removals]) {
-        if (!link || typeof link !== "object" || link.author !== claims.did) {
-          return reply
-            .code(400)
-            .send({ error: "every link's author must match the authenticated DID" });
+        if (!link || typeof link !== "object") {
+          return reply.code(400).send({ error: "each link must be an object" });
         }
-        // Link signatures travel as metadata — the server stores and relays
-        // them as-is. JWT auth (bound to the agent's DID) proves identity at
-        // the transport layer. Downstream consumers can verify signatures if
-        // they choose; the server does not need to.
-        const encrypted = isEncryptedLinkData(link.data);
-        if (room.e2e_enabled && !encrypted) {
-          return reply.code(400).send({ error: "room requires E2E-encrypted link data" });
+        if (!link.data || typeof link.data !== "object") {
+          return reply.code(400).send({ error: "each link must have a data object" });
         }
-        if (!room.e2e_enabled && encrypted) {
-          return reply.code(400).send({ error: "room does not have E2E enabled" });
+        if (isEncryptedLinkData(link.data)) {
+          if (!link.link_hash || typeof link.link_hash !== "string") {
+            return reply.code(400).send({ error: "encrypted links must include a link_hash" });
+          }
+        } else {
+          if (link.author !== claims.did) {
+            return reply
+              .code(400)
+              .send({ error: "every link's author must match the authenticated DID" });
+          }
+          if (typeof link.timestamp !== "string") {
+            return reply.code(400).send({ error: "each link must have a string timestamp" });
+          }
         }
       }
 
@@ -215,7 +253,6 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
         { type: "diff", payload: { additions, removals }, revision, sequence },
         { excludeDid: claims.did }
       );
-      void ctx.federation.forwardDiff(claims.roomId, { additions, removals }, sequence, revision);
 
       return reply.send({ sequence, revision });
     }
@@ -230,7 +267,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const claims = request.authClaims!;
       const query = request.query as { since?: string };
       const parsedSince = query.since !== undefined ? Number.parseInt(query.since, 10) : 0;
-      const since = Number.isFinite(parsedSince) ? parsedSince : 0;
+      const since = Number.isFinite(parsedSince) ? Math.max(parsedSince, 0) : 0;
       const rows = ctx.db.getDiffsSinceParsed(claims.roomId, since);
       const revision = ctx.db.getRoomRevision(claims.roomId);
       const sequence = ctx.db.getMaxSequence(claims.roomId);
@@ -245,7 +282,8 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const claims = request.authClaims!;
       const links = ctx.db.getActiveLinks(claims.roomId);
       const revision = ctx.db.getRoomRevision(claims.roomId);
-      return reply.send({ links, revision });
+      const sequence = ctx.db.getMaxSequence(claims.roomId);
+      return reply.send({ links, revision, sequence });
     }
   );
 
@@ -308,83 +346,16 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       const claims = request.authClaims!;
       const room = ctx.db.getRoom(claims.roomId)!;
       const acl = ctx.db.getAcl(claims.roomId);
-      return reply.send({ admin: room.admin_did, members: acl.map((a) => a.did) });
+      return reply.send({
+        admin: room.admin_did,
+        members: acl.map((a) => ({
+          did: a.did,
+          x25519PublicKey: a.x25519_public_key ?? null,
+          x25519Signature: a.x25519_signature ?? null,
+        })),
+      });
     }
   );
-
-  // ---- federation peer management ----
-
-  app.post(
-    "/rooms/:roomId/federation",
-    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
-    async (request, reply) => {
-      const claims = request.authClaims!;
-      const body = request.body as { action?: string; peerUrl?: string } | null;
-      if (body?.action !== "add" && body?.action !== "remove") {
-        return reply.code(400).send({ error: 'action must be "add" or "remove"' });
-      }
-      if (typeof body.peerUrl !== "string") {
-        return reply.code(400).send({ error: "peerUrl is required" });
-      }
-      if (body.action === "add") {
-        await ctx.federation.addPeer(claims.roomId, body.peerUrl);
-      } else {
-        ctx.federation.removePeer(claims.roomId, body.peerUrl);
-      }
-      return reply.send({ peers: ctx.federation.listPeers(claims.roomId) });
-    }
-  );
-
-  app.get(
-    "/rooms/:roomId/federation",
-    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
-    async (request, reply) => {
-      const claims = request.authClaims!;
-      return reply.send({ peers: ctx.federation.listPeers(claims.roomId) });
-    }
-  );
-
-  // ---- federation transport (server-to-server; authenticated by server signature, not JWT) ----
-
-  app.post("/rooms/:roomId/federate", async (request, reply) => {
-    const { roomId } = request.params as RoomParams;
-    const body = request.body as Partial<FederateRequestBody> | null;
-    if (
-      !body ||
-      !body.diff ||
-      !Array.isArray(body.diff.additions) ||
-      !Array.isArray(body.diff.removals) ||
-      typeof body.serverPublicKey !== "string" ||
-      typeof body.serverSignature !== "string" ||
-      typeof body.sequence !== "number" ||
-      typeof body.revision !== "string"
-    ) {
-      return reply.code(400).send({ error: "malformed federate payload" });
-    }
-    const result: FederateResult = await ctx.federation.handleIncomingFederate(
-      roomId,
-      body as FederateRequestBody
-    );
-    if (!result.ok) return reply.code(result.status).send({ error: result.error });
-    return reply.send({ applied: result.applied, revision: result.revision, sequence: result.sequence });
-  });
-
-  app.post("/rooms/:roomId/reconcile", async (request, reply) => {
-    const { roomId } = request.params as RoomParams;
-    const body = request.body as Partial<ReconcileRequestBody> | null;
-    if (
-      !body ||
-      !Array.isArray(body.linkHashes) ||
-      typeof body.revision !== "string" ||
-      typeof body.serverPublicKey !== "string" ||
-      typeof body.serverSignature !== "string"
-    ) {
-      return reply.code(400).send({ error: "malformed reconcile payload" });
-    }
-    const result = await ctx.federation.handleIncomingReconcile(roomId, body as ReconcileRequestBody);
-    if (!result.ok) return reply.code(result.status).send({ error: result.error });
-    return reply.send(result.response);
-  });
 
   // ---- E2E room keys ----
 
@@ -393,11 +364,20 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const row = ctx.db.getLatestRoomKey(claims.roomId, claims.did);
-      if (!row) {
+      const room = ctx.db.getRoom(claims.roomId);
+      const e2eEnabled = !!(room && room.e2e_enabled);
+      const rows = ctx.db.getAllRoomKeys(claims.roomId, claims.did);
+      if (rows.length === 0 && !e2eEnabled) {
+        // Room has never had E2E enabled — genuinely no keys.
         return reply.code(404).send({ error: "no room key available for this agent yet" });
       }
-      return reply.send({ encryptedKey: JSON.parse(row.encrypted_key), version: row.version });
+      // Room has E2E (agent may or may not have keys yet). Return the
+      // e2e_enabled flag so the client can distinguish "no E2E" (404)
+      // from "E2E but keys pending" (200, empty keys array).
+      return reply.send({
+        keys: rows.map((r) => ({ encryptedKey: JSON.parse(r.encrypted_key), version: r.version })),
+        e2e_enabled: e2eEnabled,
+      });
     }
   );
 
@@ -406,8 +386,194 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
     { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
     async (request, reply) => {
       const claims = request.authClaims!;
-      const result = rotateRoomKey(ctx.db, claims.roomId);
-      return reply.send({ version: result.version, recipients: result.recipients });
+      const body = request.body as {
+        keys?: Array<{ did: string; encryptedKey: unknown }>;
+      } | null;
+
+      if (!body || !Array.isArray(body.keys) || body.keys.length === 0) {
+        return reply.code(400).send({
+          error: "keys array is required and must not be empty — " +
+                 "generate the room key client-side and seal it to each member",
+        });
+      }
+
+      // Validate each entry: DID must exist in the room's ACL, encryptedKey
+      // must have the expected shape.
+      const aclDids = new Set(ctx.db.getAcl(claims.roomId).map((a) => a.did));
+      for (const entry of body.keys) {
+        if (!entry || typeof entry !== "object") {
+          return reply.code(400).send({ error: "each key entry must be a non-null object" });
+        }
+        if (typeof entry.did !== "string" || !aclDids.has(entry.did)) {
+          return reply.code(400).send({
+            error: `DID ${entry.did ?? "(missing)"} is not in this room's ACL`,
+          });
+        }
+        const ek = entry.encryptedKey as Partial<EncryptedKeyPayload> | null;
+        if (
+          !ek ||
+          typeof ek.ephemeralPublicKey !== "string" ||
+          typeof ek.nonce !== "string" ||
+          typeof ek.ciphertext !== "string"
+        ) {
+          return reply.code(400).send({
+            error: `malformed encryptedKey for DID ${entry.did}`,
+          });
+        }
+      }
+
+      const version = ctx.db.getLatestKeyVersion(claims.roomId) + 1;
+      const recipients: string[] = [];
+      for (const entry of body.keys) {
+        ctx.db.addRoomKey(
+          claims.roomId,
+          entry.did,
+          version,
+          JSON.stringify(entry.encryptedKey),
+        );
+        recipients.push(entry.did);
+      }
+      ctx.db.setE2eEnabled(claims.roomId, true);
+
+      // Detect members missing historical key versions so the admin can
+      // grant them (same logic as the old server-side rotate).
+      const membersNeedingHistoricalKeys: Array<{
+        did: string;
+        missingVersions: number[];
+        x25519PublicKey: string;
+        x25519Signature: string | null;
+      }> = [];
+      if (version > 1) {
+        const allAcl = ctx.db.getAcl(claims.roomId);
+        const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
+        const expected = Array.from({ length: version }, (_, i) => i + 1);
+        for (const row of allAcl) {
+          if (!row.x25519_public_key) continue;
+          const has = new Set(allVersions.get(row.did) ?? []);
+          const missing = expected.filter((v) => !has.has(v));
+          if (missing.length > 0) {
+            membersNeedingHistoricalKeys.push({
+              did: row.did,
+              missingVersions: missing,
+              x25519PublicKey: row.x25519_public_key,
+              x25519Signature: row.x25519_signature ?? null,
+            });
+          }
+        }
+      }
+
+      return reply.send({ version, recipients, membersNeedingHistoricalKeys });
+    }
+  );
+
+  // ---- E2E missing keys (admin query — who needs historical keys?) ----
+
+  app.get(
+    "/rooms/:roomId/keys/missing",
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    async (request, reply) => {
+      const claims = request.authClaims!;
+      const latestVersion = ctx.db.getLatestKeyVersion(claims.roomId);
+      if (latestVersion === 0) {
+        return reply.send({ membersNeedingHistoricalKeys: [] });
+      }
+      const aclRows = ctx.db.getAcl(claims.roomId);
+      const allVersions = ctx.db.getAllMemberKeyVersions(claims.roomId);
+      const expectedVersions = Array.from({ length: latestVersion }, (_, i) => i + 1);
+      const missingKeys: Array<{ did: string; missingVersions: number[]; x25519PublicKey: string; x25519Signature: string | null }> = [];
+      for (const row of aclRows) {
+        if (!row.x25519_public_key) continue;
+        const memberVersions = new Set(allVersions.get(row.did) ?? []);
+        const missing = expectedVersions.filter((v) => !memberVersions.has(v));
+        if (missing.length > 0) {
+          missingKeys.push({
+            did: row.did,
+            missingVersions: missing,
+            x25519PublicKey: row.x25519_public_key,
+            x25519Signature: row.x25519_signature ?? null,
+          });
+        }
+      }
+      return reply.send({ membersNeedingHistoricalKeys: missingKeys });
+    }
+  );
+
+  // ---- E2E key grant (admin re-seals historical versions for a member) ----
+
+  app.post(
+    "/rooms/:roomId/keys/grant",
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    async (request, reply) => {
+      const claims = request.authClaims!;
+      const body = request.body as {
+        targetDid?: string;
+        keys?: Array<{ version: number; encryptedKey: EncryptedKeyPayload }>;
+      } | null;
+
+      if (!body || typeof body.targetDid !== "string") {
+        return reply.code(400).send({ error: "targetDid is required" });
+      }
+      if (!Array.isArray(body.keys) || body.keys.length === 0) {
+        return reply.code(400).send({ error: "keys array is required and must not be empty" });
+      }
+
+      // Target must exist in the room ACL.
+      if (!ctx.db.isMember(claims.roomId, body.targetDid)) {
+        return reply.code(404).send({ error: "target DID is not a member of this room" });
+      }
+
+      // Validate each entry: version must be a positive integer, encryptedKey
+      // must have the expected shape. The server cannot verify the plaintext
+      // inside — the admin holds the trust anchor for the room.
+      const latestVersion = ctx.db.getLatestKeyVersion(claims.roomId);
+      const stored: number[] = [];
+      for (const entry of body.keys) {
+        if (typeof entry.version !== "number" || entry.version < 1 || entry.version > latestVersion) {
+          return reply.code(400).send({ error: `invalid version ${entry.version}; latest is ${latestVersion}` });
+        }
+        const ek = entry.encryptedKey;
+        if (
+          !ek ||
+          typeof ek.ephemeralPublicKey !== "string" ||
+          typeof ek.nonce !== "string" ||
+          typeof ek.ciphertext !== "string"
+        ) {
+          return reply.code(400).send({ error: `malformed encryptedKey for version ${entry.version}` });
+        }
+        const inserted = ctx.db.addRoomKeyIfMissing(
+          claims.roomId,
+          body.targetDid,
+          entry.version,
+          JSON.stringify(ek)
+        );
+        if (inserted) stored.push(entry.version);
+      }
+
+      return reply.send({ granted: stored });
+    }
+  );
+
+  // ---- admin transfer ----
+
+  app.post(
+    "/rooms/:roomId/admin/transfer",
+    { preHandler: [requireAuth(ctx), jwtRateLimit(ctx.rateLimits.roomJwt), requireAdmin(ctx)] },
+    async (request, reply) => {
+      const claims = request.authClaims!;
+      const body = request.body as { newAdminDid?: string } | null;
+      if (!body || typeof body.newAdminDid !== "string") {
+        return reply.code(400).send({ error: "newAdminDid is required" });
+      }
+      if (body.newAdminDid === claims.did) {
+        return reply.code(400).send({ error: "already the admin" });
+      }
+      if (!ctx.db.isMember(claims.roomId, body.newAdminDid)) {
+        return reply.code(400).send({ error: "newAdminDid must be a member of the room" });
+      }
+      ctx.db.transferAdmin(claims.roomId, body.newAdminDid);
+      const room = ctx.db.getRoom(claims.roomId)!;
+      const acl = ctx.db.getAcl(claims.roomId);
+      return reply.send({ admin: room.admin_did, members: acl.map((a) => a.did) });
     }
   );
 }

@@ -22,6 +22,16 @@ pub struct RequestContext {
     pub user_email: Option<String>,
     /// Cached user DID resolved once at connection time (multi-user mode).
     pub user_did: Option<String>,
+    /// Per-request cancellation token, populated by the WS RPC dispatcher
+    /// when the client may send `request.cancel`.  Handlers that want to
+    /// support mid-flight cancellation can clone this and pass it to
+    /// cancellation-aware APIs (e.g. `SparqlStore::query_*_cancellable`).
+    ///
+    /// `None` when the request was constructed outside the WS RPC
+    /// dispatcher (e.g. in tests, in REST handlers, or by internal code)
+    /// — handlers should treat the absence of a token as "no cancellation
+    /// signalling available" and proceed normally.
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]

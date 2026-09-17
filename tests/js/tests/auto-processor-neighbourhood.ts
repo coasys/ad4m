@@ -52,9 +52,18 @@ async function registerLlm(ad4m: any): Promise<void> {
   await ad4m.ai.setDefaultModel("LLM", modelId);
 }
 
+
+// LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
+// default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
+// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// `./scripts/run-llm-e2e.sh` at the repo root.
+const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
+  ? describe
+  : (describe.skip as unknown as Mocha.SuiteFunction));
+
 export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
   return () => {
-    describe("Auto-processor across two executors", function () {
+    describeIfLLM("Auto-processor across two executors", function () {
       // Cumulative wait budget in the slowest test:
       //   sharedChannel gossip warm-up (up to 180s)
       // + wave-1 processed (up to 240s)

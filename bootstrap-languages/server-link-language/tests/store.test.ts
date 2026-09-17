@@ -58,30 +58,27 @@ function makeLink(overrides?: Partial<LinkExpression["data"]>): LinkExpression {
 }
 
 // ---------------------------------------------------------------------------
-// putLink / getLink
+// putLink
 // ---------------------------------------------------------------------------
 
-describe("store: putLink / getLink", () => {
+describe("store: putLink", () => {
     beforeEach(setup);
 
-    it("stores a link and retrieves it by hash", () => {
+    it("stores a link retrievable via queryLinks", () => {
         const link = makeLink();
         const hash = store.putLink(link);
         assert.ok(hash);
-        const retrieved = store.getLink(hash);
-        assert.ok(retrieved);
-        assert.deepEqual(retrieved!.data, link.data);
+        const results = store.queryLinks({ source: link.data.source, target: link.data.target });
+        assert.equal(results.length, 1);
+        assert.deepEqual(results[0].data, link.data);
     });
 
-    it("returns null for unknown hash", () => {
-        assert.equal(store.getLink("nonexistent"), null);
-    });
-
-    it("is idempotent (same link stored twice → same hash)", () => {
+    it("is idempotent (same link stored twice → same hash, single entry)", () => {
         const link = makeLink();
         const h1 = store.putLink(link);
         const h2 = store.putLink(link);
         assert.equal(h1, h2);
+        assert.equal(store.allLinks().links.length, 1);
     });
 });
 
@@ -94,9 +91,10 @@ describe("store: removeLink", () => {
 
     it("removes a previously stored link", () => {
         const link = makeLink();
-        const hash = store.putLink(link);
+        store.putLink(link);
+        assert.equal(store.allLinks().links.length, 1);
         store.removeLink(link);
-        assert.equal(store.getLink(hash), null);
+        assert.equal(store.allLinks().links.length, 0);
     });
 
     it("is a no-op for links that don't exist", () => {

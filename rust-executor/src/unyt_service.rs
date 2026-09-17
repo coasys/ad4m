@@ -342,6 +342,11 @@ roles:
                     RoleSettings::Provisioned {
                         membrane_proof: Some(membrane_proof),
                         modifiers: None,
+                        // HC 0.7.0 added init_properties: opaque app-defined
+                        // bytes made available to the cell during init().
+                        // Unyt doesn't use this facility — None means "no
+                        // extra bytes at init".
+                        init_properties: None,
                     },
                 );
                 Some(settings)
@@ -389,6 +394,10 @@ roles:
         network_seed: None,
         roles_settings,
         ignore_genesis_failure: false,
+        // HC 0.7.0 added restore_from_dht: when true, suppresses genesis and
+        // rebuilds the source chain from the DHT (requires agent_key: Some).
+        // Fresh Unyt install — we want normal genesis.
+        restore_from_dht: false,
     };
 
     match hc.install_app(payload).await {
@@ -901,7 +910,7 @@ pub async fn create_proposal(
     };
 
     let result = call_zome("create_proposal", Some(encode_payload(&input)?)).await?;
-    info!("create_proposal raw result: {:?}", result);
+    log::trace!("🐝 create_proposal raw result: {:?}", result);
 
     // ActionHashB64 comes back as a string like "uhCkk..."
     match &result {
@@ -987,7 +996,7 @@ pub async fn accept_commitment(
     };
 
     let result = call_zome("create_accept", Some(encode_payload(&input)?)).await?;
-    info!("create_accept raw result: {:?}", result);
+    log::trace!("🐝 create_accept raw result: {:?}", result);
 
     match &result {
         JsonValue::String(hash) => Ok(hash.clone()),

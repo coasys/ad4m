@@ -4,8 +4,7 @@ import fs from "fs-extra";
 import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
-import { baseUrl, sleep, startExecutor } from "./utils";
-import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
+import { baseUrl, sleep, startExecutor, runHcLocalServices } from "./utils";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,6 +16,12 @@ const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootst
 const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
 const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
 const serverLinkLanguageHashPath = path.resolve(__dirname, '..', 'scripts', 'server-link-language-hash');
+// Allow env-var override so concurrent CI jobs can each use a unique port range
+// and avoid stomping on each other during the setup phase.
+// Defaults: 15700/15701/15702 (used by integration-tests-js / test-main)
+const apiPort = parseInt(process.env.AD4M_SETUP_API_PORT || '15700', 10);
+const hcAdminPort = parseInt(process.env.AD4M_SETUP_HC_ADMIN_PORT || '15701', 10);
+const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || '15702', 10);
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -89,7 +94,23 @@ async function publish() {
 
     createTestingAgent();
 
-    const executorProcess = await startExecutor(appDataPath, publishingBootstrapSeedPath, apiPort, hcAdminPort, hcAppPort, true);
+    // Publishing setup runs a temporary LOCAL kitsune2-bootstrap-srv so the
+    // setup executor never talks to dev-test-bootstrap2 (super old). See
+    // Nico's 2026-08-26 voice note + utils.ts:startExecutor comment.
+    const localServices = await runHcLocalServices();
+    if (!localServices.bootstrapUrl || !localServices.proxyUrl) {
+        throw new Error("publishTestLangs: runHcLocalServices did not yield bootstrap/proxy URLs");
+    }
+    const executorProcess = await startExecutor(
+        appDataPath,
+        publishingBootstrapSeedPath,
+        apiPort, hcAdminPort, hcAppPort,
+        true,
+        undefined,
+        localServices.proxyUrl,
+        localServices.bootstrapUrl,
+    );
+    (executorProcess as any).__localServicesProcess = localServices.process;
 
     try {
         const ad4mClient = new Ad4mClient(baseUrl(apiPort));

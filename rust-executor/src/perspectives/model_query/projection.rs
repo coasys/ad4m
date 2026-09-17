@@ -22,6 +22,7 @@ use super::types::{
 };
 use super::utils::{
     escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
+    values_or_str_filter,
 };
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -73,11 +74,7 @@ pub(super) async fn resolve_projections(
         return Ok(());
     }
 
-    let values_clause = parent_ids
-        .iter()
-        .map(|id| format!("<{id}>"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let parent_constraint = values_or_str_filter("parent", &parent_ids);
 
     for (key, proj) in projections {
         let predicate = match shape.properties.iter().find(|p| p.name == proj.from) {
@@ -119,13 +116,13 @@ pub(super) async fn resolve_projections(
             let sparql = format!(
                 concat!(
                     "SELECT ?parent (COUNT(DISTINCT ?t) AS ?n) WHERE {{\n",
-                    "    VALUES ?parent {{ {values_clause} }}\n",
+                    "    {parent_constraint}\n",
                     "    ?parent <{safe_pred}> ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
                     "}} GROUP BY ?parent"
                 ),
-                values_clause = values_clause,
+                parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
@@ -162,13 +159,13 @@ pub(super) async fn resolve_projections(
             let sparql = format!(
                 concat!(
                     "SELECT ?parent ?t WHERE {{\n",
-                    "    VALUES ?parent {{ {values_clause} }}\n",
+                    "    {parent_constraint}\n",
                     "    ?parent <{safe_pred}> ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
                     "}}{order_clause}"
                 ),
-                values_clause = values_clause,
+                parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
@@ -178,13 +175,38 @@ pub(super) async fn resolve_projections(
             let result_json = store.query(&sparql)?;
             let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
+            // Collapse duplicate targets per parent.
+            //
+            // Only reachable when the projection filters on `author` or
+            // `timestamp`: `build_projection_reifier_patterns` then joins the
+            // reifier, and a triple asserted twice by the same author carries two
+            // reifiers, so it matches twice. Without the filter the query selects
+            // the direct triple alone and RDF set semantics have already
+            // deduplicated it.
+            //
+            // The `count: true` branch above answers `COUNT(DISTINCT ?t)`, so
+            // without this a filtered projection's list disagreed with the count
+            // of the very same relation.
+            //
+            // Retaining the first sighting preserves `order_clause`'s ordering.
             let mut list_map: HashMap<String, Vec<Value>> = HashMap::new();
+            let mut seen_per_parent: HashMap<String, std::collections::HashSet<String>> =
+                HashMap::new();
             for row in &rows {
                 if let Some(parent) = row["parent"].as_str() {
                     let t = row["t"]
                         .as_str()
                         .map(|s| Value::String(s.to_string()))
                         .unwrap_or(Value::Null);
+                    if let Some(key) = t.as_str() {
+                        if !seen_per_parent
+                            .entry(parent.to_string())
+                            .or_default()
+                            .insert(key.to_string())
+                        {
+                            continue;
+                        }
+                    }
                     list_map.entry(parent.to_string()).or_default().push(t);
                 }
             }

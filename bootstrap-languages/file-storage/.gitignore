@@ -2,6 +2,9 @@ node_modules
 *.js
 *.js.map
 hc-dna/.cargo
+# Track only the hc-dna cargo config (holds wasm rustflags for zome builds).
+!hc-dna/.cargo/
+!hc-dna/.cargo/config.toml
 hc-dna/target
 hc-dna/workdir/*.dna
 

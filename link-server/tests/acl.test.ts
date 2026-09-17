@@ -28,13 +28,14 @@ test("GET acl lists the admin and all members", async () => {
 
     await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: member.did }, adminToken);
 
-    const res = await getJson<{ admin: string; members: string[] }>(
+    const res = await getJson<{ admin: string; members: Array<{ did: string; x25519PublicKey: string | null }> }>(
       `${server.url}/rooms/${roomId}/acl`,
       adminToken
     );
     assert.equal(res.status, 200);
     assert.equal(res.body.admin, admin.did);
-    assert.deepEqual(new Set(res.body.members), new Set([admin.did, member.did]));
+    const memberDids = new Set(res.body.members.map((m) => m.did));
+    assert.deepEqual(memberDids, new Set([admin.did, member.did]));
   });
 });
 
@@ -56,8 +57,8 @@ test("non-admin members cannot modify the ACL", async () => {
     );
     assert.equal(res.status, 403);
 
-    const acl = await getJson<{ members: string[] }>(`${server.url}/rooms/${roomId}/acl`, adminToken);
-    assert.ok(!acl.body.members.includes(outsider.did));
+    const acl = await getJson<{ members: Array<{ did: string }> }>(`${server.url}/rooms/${roomId}/acl`, adminToken);
+    assert.ok(!acl.body.members.some((m) => m.did === outsider.did));
   });
 });
 
@@ -89,8 +90,8 @@ test("admin cannot remove themselves from the ACL", async () => {
     );
     assert.equal(res.status, 400);
 
-    const acl = await getJson<{ members: string[] }>(`${server.url}/rooms/${roomId}/acl`, adminToken);
-    assert.ok(acl.body.members.includes(admin.did));
+    const acl = await getJson<{ members: Array<{ did: string }> }>(`${server.url}/rooms/${roomId}/acl`, adminToken);
+    assert.ok(acl.body.members.some((m) => m.did === admin.did));
   });
 });
 

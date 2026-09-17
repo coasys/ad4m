@@ -39,34 +39,37 @@ export class DenoTransport implements Transport {
         body: string,
     ): Promise<TransportResponse> {
         try {
-            const responseText = await httpFetch(
+            const res = await httpFetch(
                 url,
                 method,
                 JSON.stringify(headers),
                 body,
             );
-
+            // Executor versions before the 2b65ebbf0 fix return a plain
+            // string (response body) on success and throw for non-ok HTTP.
+            // Current dev returns { status, body }. Handle both.
+            if (typeof res === "string") {
+                return { status: 200, headers: {}, body: res };
+            }
             return {
-                status: 200,
+                status: res.status,
                 headers: {},
-                body: responseText || "",
+                body: res.body || "",
             };
         } catch (err: unknown) {
-            // LDK debt: httpFetch throws on non-2xx, encoding the HTTP status
-            // in the Error.message string instead of returning a response
-            // object. This regex scrapes the status code out. The proper fix
-            // belongs in @coasys/ad4m-ldk (httpFetch should return {status, body}).
+            // Old executors throw for non-ok HTTP status with the format:
+            //   "http_fetch METHOD URL -> STATUS: body"
+            // Current dev returns { status, body } for all responses, so
+            // only genuine network errors (DNS, connection refused) land here.
             const errMsg = err instanceof Error ? err.message : String(err);
-            const match = errMsg.match(/http_fetch\s+\S+\s+\S+\s+->\s+(\d+):\s*(.*)?$/s);
-            if (match) {
-                return {
-                    status: parseInt(match[1], 10),
-                    headers: {},
-                    body: match[2] || "",
-                };
+            const statusMatch = errMsg.match(/-> (\d+):/);
+            const status = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+            const bodyIdx = statusMatch ? errMsg.indexOf(": ", errMsg.indexOf("-> ")) + 2 : -1;
+            const responseBody = bodyIdx > 1 ? errMsg.substring(bodyIdx) : errMsg;
+            if (status === 0) {
+                console.error(`[transport] httpFetch network error: ${errMsg}`);
             }
-            console.error(`[transport] httpFetch error: ${errMsg}`);
-            return { status: 0, headers: {}, body: errMsg };
+            return { status, headers: {}, body: responseBody };
         }
     }
 }
@@ -116,7 +119,7 @@ export class DenoRuntimeAdapter implements RuntimeAdapter {
 /**
  * Wraps the native `WebSocket` global. This is what replaces socket.io in
  * this language: a plain, standards-compliant WebSocket client talking to
- * link-server's `/rooms/:roomId/ws?token=<jwt>` endpoint directly, no
+ * link-server's `/rooms/:roomId/ws` endpoint directly, no
  * client library, no polling-transport fallback.
  */
 export class DenoWebSocketFactory implements WebSocketFactory {

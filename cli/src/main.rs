@@ -163,11 +163,14 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Expose dynamic per-class SHACL tools over MCP in addition to the
+        /// static instance_* tools. Default: false.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        dynamic_class_tools: Option<bool>,
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         #[arg(long)]
         pid_file: Option<String>,
     },
-    RunLocalHcServices {},
     Eve {
         #[command(subcommand)]
         command: EveCommands,
@@ -246,6 +249,7 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        dynamic_class_tools,
         pid_file,
     } = args.domain
     {
@@ -269,6 +273,7 @@ async fn main() -> Result<()> {
                 enable_multi_user,
                 enable_mcp,
                 mcp_port,
+                dynamic_class_tools,
                 pid_file,
                 localhost: None,
                 auto_permit_cap_requests: None,
@@ -276,6 +281,7 @@ async fn main() -> Result<()> {
                 log_holochain_metrics: None,
                 hc_relay_url: None,
                 smtp_config: None,
+                ..Default::default()
             }).await
         }).await;
         
@@ -293,11 +299,6 @@ async fn main() -> Result<()> {
             sleep(Duration::from_secs(2)).await;
         }
     };
-
-    if let Domain::RunLocalHcServices {} = args.domain {
-        rust_executor::run_local_hc_services().await?;
-        return Ok(());
-    }
 
     if let Domain::Eve { command } = args.domain {
         eve::run(command).await?;
@@ -347,9 +348,9 @@ async fn main() -> Result<()> {
             enable_multi_user: _,
             enable_mcp: _,
             mcp_port: _,
+            dynamic_class_tools: _,
             pid_file: _,
         } => unreachable!(),
-        Domain::RunLocalHcServices {} => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),
     }
 

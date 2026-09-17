@@ -23,7 +23,16 @@ import crossPeerShapeSyncTests from "./cross-peer-shape-sync";
 import runtimeTests from "./runtime";
 import flatLanguageTests from "./flat-language.test";
 import agentLanguageTests from "./agent-language";
-import socialDNATests from "./social-dna-flow";
+import shaclRpcTests from "./shacl-rpc";
+
+// Both link-language hashes are required — prepare-test must publish both.
+// The absence check happens in the outer before(), so a missing file fails
+// loudly rather than silently dropping half the matrix.
+const SERVER_LINK_HASH_PATH = "./scripts/server-link-language-hash";
+const SERVER_LINK_HASH = fs.existsSync(SERVER_LINK_HASH_PATH)
+    ? fs.readFileSync(SERVER_LINK_HASH_PATH).toString().trim()
+    : "";
+const DIFF_SYNC_HASH = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString().trim();
 
 // Both link-language hashes are required — prepare-test must publish both.
 // The absence check happens in the outer before(), so a missing file fails
@@ -96,7 +105,7 @@ describe("Integration tests", function () {
     describe('Runtime', runtimeTests(testContext))
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
-    describe('Social DNA', socialDNATests(testContext))
+    describe('SHACL RPC', shaclRpcTests(testContext))
         describe('Flat Language (new flat export pattern)', flatLanguageTests(testContext))
 
         describe('with Alice and Bob', () => {

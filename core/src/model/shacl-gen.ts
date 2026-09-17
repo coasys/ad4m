@@ -309,9 +309,25 @@ export function buildSHACL(
             relShape.filter = false;
         }
 
+        // Ordering is declared in the type system so the executor can act on it
+        // for every writer, not just this client.
+        if (relMeta.ordering) {
+            relShape.ordering = relMeta.ordering.strategy;
+        }
+
         // AD4M-specific metadata
         if (relMeta.local !== undefined) {
             relShape.local = relMeta.local;
+        }
+
+        // Per-relation interpretation hint — sentence-level meaning that
+        // steers the harness LLM's `_propose_link_child` `predicate` field
+        // description. Read back on the Rust side by
+        // `ShaclProperty.interpretation_hint` and rendered into the tool
+        // schema alongside the predicate URI enum (so `basedOn` reads
+        // "prior beliefs this intention derives from", not just "some link").
+        if (relMeta.interpretationHint) {
+            relShape.interpretationHint = relMeta.interpretationHint;
         }
 
         // Adder / Remover actions — only meaningful for relations backed
@@ -453,6 +469,26 @@ export function buildSHACL(
         }
 
         shape.addProperty(relShape);
+    }
+
+    // ── Ordering links ─────────────────────────────────────────────────
+    // Ordering entries are stored on the *parent*, under one shared predicate,
+    // so that reconstruction needs no extra query: they arrive with the
+    // instance's own links. That only works if the instance query asks for them,
+    // and it builds its predicate filter from the shape's declared paths — so a
+    // class owning any ordered collection has to declare the predicate, or the
+    // very links the ordering depends on are filtered out of the read that needs
+    // them.
+    //
+    // One entry covers every ordered relation on the class; each entry names the
+    // relation it belongs to.
+    const hasOrderedRelation = Object.values(allRelationsMeta).some((m) => m.ordering);
+    if (hasOrderedRelation) {
+        shape.addProperty({
+            name: '_collectionOrder',
+            path: 'ad4m://collection_order',
+            nodeKind: 'IRI',
+        });
     }
 
     // Always set constructor and destructor actions on the shape, even

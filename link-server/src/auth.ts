@@ -17,7 +17,7 @@ import type { LinkServerDB } from "./db.js";
 const ED25519_MULTICODEC_PREFIX = new Uint8Array([0xed, 0x01]);
 
 /** Strip an optional "#fragment" key-id suffix from a DID URL, e.g. "did:key:z6Mk...#primary". */
-export function didBase(did: string): string {
+function didBase(did: string): string {
   const hashIdx = did.indexOf("#");
   return hashIdx === -1 ? did : did.slice(0, hashIdx);
 }
@@ -152,26 +152,6 @@ export class ChallengeStore {
   close(): void {
     clearInterval(this.sweepTimer);
   }
-}
-
-/**
- * Server's own ed25519 identity keypair, generated on first run and
- * persisted in `<data-dir>/data.sqlite` (server_identity table, key_type
- * "server-ed25519"). Used to sign outbound federation requests.
- */
-export async function ensureServerIdentity(
-  db: LinkServerDB
-): Promise<{ publicKey: string; privateKey: string }> {
-  const existing = db.getIdentity("server-ed25519");
-  if (existing) {
-    return { publicKey: existing.public_key, privateKey: existing.private_key };
-  }
-  const priv = ed.utils.randomPrivateKey();
-  const pub = await ed.getPublicKeyAsync(priv);
-  const publicKeyHex = ed.etc.bytesToHex(pub);
-  const privateKeyHex = ed.etc.bytesToHex(priv);
-  db.setIdentity("server-ed25519", publicKeyHex, privateKeyHex);
-  return { publicKey: publicKeyHex, privateKey: privateKeyHex };
 }
 
 function ensureJwtSecret(db: LinkServerDB): Uint8Array {
