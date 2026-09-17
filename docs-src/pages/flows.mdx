@@ -1,0 +1,480 @@
+import { Callout } from "nextra/components";
+
+# Flows: State Machines a Group Agrees On
+
+A flow is a state machine that a **group** advances together, over an expression that lives in a shared Perspective.
+
+That is the whole difference from a status field. A status field is whatever the last writer said it was. A flow's state is something the group's own rules produced: every transition is backed by an on-graph `FlowTransitionProposal`, optionally gated by a `ConsensusRule` saying how many distinct agents must sign before it counts — and every replica can recompute the answer for itself from links it can verify.
+
+Flow definitions are [Social DNA](/social-dna): a flow is data in the Perspective, shared like any other link. Two agents in a [Neighbourhood](/neighbourhoods) run the same flow because they hold the same definition, not because they run the same app.
+
+## The one rule
+
+**A flow's state is never stored. It is derived, every time, from the signed links present right now.**
+
+Everything on this page follows from that sentence, so it is worth making concrete. To answer *"what state is this task in?"*, the engine:
+
+1. starts at the flow's first state,
+2. looks at the declared edges out of it,
+3. takes whichever edge collected enough distinct, eligible signatures **earliest**,
+4. repeats from the state that edge leads to,
+5. stops at the first state where no edge has reached quorum — that state is the answer.
+
+Three consequences, all intended:
+
+- **Two replicas agree without talking.** Same links in, same state out. Every choice in the walk is made by an explicit sort key, never by the order a database returned rows.
+- **A third party can check the work.** The derivation is a pure function over plain data — no network, no database. Hand someone the links and they can re-run it and reach your verdict, or catch you claiming a state your links don't support.
+- **Retracting a vote moves the flow back.** Withdraw a signature that was the one settling an edge and the flow stands where it stood before you signed. That is not a bug to be patched with an "already fired" flag; it is what "the graph is the truth" costs, and it is what makes the second consequence possible. See [Reject is not cancel](#reject-is-not-cancel).
+
+<Callout type="info" emoji="ℹ️">
+  The engine does write a `currentState` value onto each flow instance, but it
+  is a **cache for readers, never authority** — see [The `currentState`
+  cache](#the-currentstate-cache). Nothing in the derivation reads it.
+</Callout>
+
+## The on-graph objects
+
+Four things make up a flow, and all four are ordinary links in the Perspective.
+
+### `SHACLFlow` — the definition
+
+The flow itself: a name, a namespace, the states, the transitions between them, and the English that tells an LLM what the states mean. Registered with `perspective.addFlow(name, flow)`, which serialises it to links and records it under `ad4m://self --ad4m://has_flow--> "name"`.
+
+Its canonical identity is `flowUri` — `${namespace}${name}Flow`, e.g. `delivery://DeliveryFlow`. Instances store that URI rather than the bare name, because bare names collide the moment two communities share social DNA.
+
+| member | meaning |
+| --- | --- |
+| `inputTypes: string[]` | subject-class URIs the flow accepts as its base expression. Empty, or containing the `"any"` wildcard, matches anything. |
+| `outputTypes: string[]` | subject-class URIs a completed run is expected to have produced. |
+| `interpretationHint?: string` | one-paragraph English frame for the whole flow. |
+| `creationHint?: string` | when an instance of this flow should be *started* (as opposed to advanced). |
+| `context?: ModelQuery[]` | background queries threaded into the LLM prompt as context — never as evidence. |
+| `consensusRule?: ConsensusRule` | default rule for transitions that don't override it. |
+| `states` / `transitions` | added with `addState()` / `addTransition()`. |
+
+### `FlowState` — one state
+
+```typescript
+interface FlowState {
+  name: string;                  // "Scoped"
+  value: number;                 // ordering key; lowest value is the initial state
+  interpretationHint?: string;   // what puts an instance IN this state (see below)
+  requires?: ModelQuery[];       // model-level guard, AND semantics
+  semanticCheck?: string;        // optional LLM confirmation after `requires` matches
+  consensusRule?: ConsensusRule; // per-state override of the flow-level default
+}
+```
+
+`value` is an ordering key, not a progress percentage — `0, 1, 2` and `0, 10, 20` behave identically. **The lowest-valued state is where every instance begins.**
+
+`requires` is where "Done" stops meaning *somebody clicked Done* and starts meaning *the graph contains what Done requires*. Each `ModelQuery` names a subject class, optional per-property conditions, a cardinality, and optionally an anchor (`linkedTo: "base"` / `"flow"`). All queries in the array must match.
+
+### `FlowTransition` — one edge
+
+```typescript
+interface FlowTransition {
+  actionName: string;   // "Scope" — the label a UI shows
+  fromState: string;
+  toState: string;
+  actions: AD4MAction[]; // link mutations to perform alongside the transition
+}
+```
+
+### `FlowInstance` — one run
+
+When a flow is started on a concrete expression, an instance node is minted. On the graph it is the hard-wired subject class `FlowInstance` (`ad4m://FlowInstance`); in TypeScript the raw `@Model` row is exported as **`FlowInstanceRecord`**, because the name `FlowInstance` is taken by the wrapper class you actually work with.
+
+| predicate | field | notes |
+| --- | --- | --- |
+| `ad4m://flow/flow_uri` | `flowUri` | which `SHACLFlow` this runs; the row's identity |
+| `ad4m://flow/base` | `subject` | the expression the flow rides on |
+| `ad4m://flow/current_state` | `currentState` | **`Local` link** — this replica's cache, never authority |
+
+### `FlowTransitionProposal` — one proposed move
+
+One node per proposed transition, `ad4m://flow/proposal/<uuid>` when the engine mints it.
+
+| predicate | field | notes |
+| --- | --- | --- |
+| `ad4m://flow/instance` | `flowInstance` | the instance this targets; the row's identity |
+| `ad4m://flow/from_state` | `fromState` | |
+| `ad4m://flow/to_state` | `toState` | |
+| `ad4m://flow/proposer` | `proposer` | DID that opened it |
+| `ad4m://flow/evidence` | `evidence[]` | URIs cited as satisfying `toState.requires` |
+| `ad4m://flow/evidence_hashes` | `evidenceHashes` | JSON `{ uri: sha256 }`, sealed at mint |
+| `ad4m://flow/run_uri` | `runUri?` | the `InterpretationRun` that produced it, when an LLM pass did |
+| `ad4m://flow/rationale` | `rationale?` | free-form justification |
+
+Two more predicates belong to the proposal but are not fields of the class:
+
+- **`ad4m://acceptedBy` → a DID** is a vote. There is no Vote class, because a signed link already is one.
+- **`ad4m://flow/resolved_as` → `"fired"`** is a history mark for UIs, written `Local`. **Never an input to the derivation.**
+
+<Callout type="warning" emoji="⚠️">
+  Every field of a proposal is read **only from links the proposer themselves
+  signed**, and only when the executor recorded the signature as valid. A
+  synced link claiming to be part of your proposal but signed by someone else
+  is invisible to the engine, and a proposer who published two different values
+  for one field invalidates their own proposal. There is no last-write-wins
+  anywhere in this path.
+</Callout>
+
+## `interpretationHint`, and how the LLM sees it
+
+Each state's `interpretationHint` is one English sentence, and it is not a comment. It is rendered into the prompt the interpretation engine hands the LLM, next to that state's guards, so an agent reasoning about a transition is reasoning about *what the group meant by "Scoped"* rather than guessing from the name. A flow whose hints are vague produces agent proposals that are vague in exactly the same way.
+
+When an extraction pass runs on a scope that has live flow instances, the prompt gains an `active_flows` array — one entry per instance:
+
+```json
+{
+  "instance": "ad4m://flow/instance/7f3a…",
+  "subject": "ad4m://task/1",
+  "flow": "Delivery",
+  "currentState": "Identified",
+  "tokens": {
+    "$flow.base": "ad4m://task/1",
+    "$flow.instance": "ad4m://flow/instance/7f3a…",
+    "$flow.uri": "ad4m://flow/instance/7f3a…",
+    "$did": "(acting DID - substituted at evaluation time)"
+  },
+  "hint": "Advance a Task through delivery: Identified → Scoped → …",
+  "consensus": "2 signers",
+  "nextStates": [
+    {
+      "name": "Scoped",
+      "hint": "The Task has an acceptance criterion.",
+      "requires": "at least 1 match of AcceptanceCriterion linked to the base",
+      "semanticCheck": "The scope was agreed on, not merely discussed.",
+      "consensus": "2 signers"
+    }
+  ]
+}
+```
+
+Three things worth noting about that block:
+
+- **Optional fields are omitted when unset**, so a flow costs prompt tokens in proportion to what it actually declares. When no flows are live the key is absent entirely — the LLM never sees empty flow scaffolding it might be tempted to fill in.
+- **`requires` is rendered to English**, not to raw query JSON, and the `$flow.*` tokens are preserved verbatim with the `tokens` legend telling the model what each resolves to for this instance. Tokens in, tokens out; the engine substitutes afterwards.
+- **A [contested](#contention) flow is flagged as stalled**, so the model does not read it as "awaiting votes".
+
+### Who actually writes the proposal
+
+Not the LLM, and this is the part most people get backwards.
+
+After an extraction pass commits its writes, a **deterministic** evaluator checks every live instance against the `requires` guards of the states reachable from its current one. Each fully satisfied `(instance, next-state)` pair becomes a `FlowTransitionProposal`, with the matched instances as its evidence bag and an order-independent SHA-256 over their canonicalised content as the seal. That is what keeps a flow moving when the LLM produces the evidence for a transition but forgets to propose it.
+
+The LLM's own proposals — from the strategy path's JSON output, or from the `{FlowName}_propose_transition` tool the harness offers it — **never fire a transition on their own**. When one names a transition the deterministic guard has already satisfied, its `reason` becomes that proposal's `rationale`. Otherwise it is dropped.
+
+Between guard and write sits one optional gate: a state carrying a `semanticCheck` hint gets a second, small LLM call asking whether the condition really holds. A clear YES lets the proposal through; NO, an unclear answer and an LLM error all discard the transition. An uncertain confirmation must never advance a flow.
+
+## The read surface
+
+```typescript
+import { FlowInstance, SHACLFlow } from "@coasys/ad4m";
+
+// Every flow registered on this perspective, by name.
+const names = await perspective.sdnaFlows();            // ["Delivery"]
+
+// Which of them accept this expression? Matches the expression's registered
+// subject classes against each flow's `inputTypes`.
+const available = await perspective.availableFlows("ad4m://task/1"); // ["Delivery"]
+
+// Load a definition back.
+const flow: SHACLFlow | null = await perspective.getFlow("Delivery");
+
+// Mint a run, seeded in the flow's lowest-valued state.
+const instance = await FlowInstance.start(perspective, "Delivery", "ad4m://task/1");
+
+// Enumerate runs. The filter is a flow name, or `{ flowName?, subject? }` —
+// pass `subject` to ask "what is running on this expression?".
+const all       = await FlowInstance.findAll(perspective);
+const deliveries = await FlowInstance.findAll(perspective, "Delivery");
+const onThisTask = await FlowInstance.findAll(perspective, { subject: "ad4m://task/1" });
+```
+
+On a `FlowInstance` wrapper:
+
+| member | type | |
+| --- | --- | --- |
+| `uri` | `string` | the instance node's URI — what proposals reference |
+| `subject` | `string` | the base expression |
+| `flowName` / `flowUri` | `string` | display name / canonical identity |
+| `currentStateName` | `string` | state name |
+| `currentState` | `FlowState` | the state object on the definition — hint and guards included |
+| `availableTransitions` | `FlowTransition[]` | edges leaving `currentStateName`; empty on a terminal state |
+| `startedAtMillis` | `number \| undefined` | from `Ad4mModel`'s synthesised `createdAt` |
+| `proposals()` | `Promise<FlowTransitionProposal[]>` | every proposal targeting this instance |
+| `shape` / `record` | `SHACLFlow` / `FlowInstanceRecord` | the two wrapped objects, if you need to reach past the wrapper |
+
+```typescript
+instance.currentStateName;                     // "Identified"
+instance.currentState.interpretationHint;      // the sentence the LLM was given
+
+for (const t of instance.availableTransitions) {
+  console.log(t.actionName, "→", t.toState);   // "Scope" → "Scoped"
+}
+
+const pending = await instance.proposals();
+```
+
+<Callout type="info" emoji="ℹ️">
+  `findAll` never registers classes. On a perspective that has never minted an
+  instance it returns `[]` rather than installing the shape — a read must not
+  sync a write to every peer in the neighbourhood. Registration happens in
+  `FlowInstance.start`, which is the write path.
+</Callout>
+
+## The write surface: accept and reject
+
+Two methods, and that is the entire flow-writing API an app has today.
+
+```typescript
+// Add my signature to a proposal, then re-derive.
+// Returns every transition that fired as a result.
+const fired: FlowFireOutcome[] = await instance.acceptProposal(proposal);
+
+// Withdraw my own links from a proposal. Returns how many went.
+const retracted: number = await instance.rejectProposal(proposal);
+```
+
+Both accept either a `FlowTransitionProposal` or its URI. The same pair is reachable over WS-RPC as `perspective.acceptFlowProposal` / `perspective.rejectFlowProposal`, and over MCP as the `flow_proposal_accept` / `flow_proposal_reject` tools.
+
+A fired transition is reported as:
+
+```typescript
+interface FlowFireOutcome {
+  instanceUri: string;
+  fromState: string;
+  toState: string;
+  voters: string[];                   // the distinct DIDs that settled the edge
+  contributingProposalUris: string[]; // every proposal that fed it — twins included
+}
+```
+
+**An empty array is a normal answer.** A vote that does not yet reach quorum is a landed vote, not a failure. More than one outcome happens when your signature unblocks an edge that later edges were already waiting behind.
+
+### Signing is where you check — and refusing is all you can do
+
+`acceptProposal` re-verifies the proposal's evidence seal **against your own copy of the graph** before it signs. If the cited content changed since the mint, your replica declines to co-sign and writes nothing. It does not delete the proposal: your graph may simply be behind, and deleting another agent's work over that would be a replica exceeding its authority. A replica may only ever refuse its own action.
+
+Accept also refuses when the proposal isn't engine-visible at all, and when it leaves a state the flow is no longer standing in.
+
+This is why the derivation itself re-runs no guards. Every vote it counts was cast by someone who checked the seal first, and settled history is never re-tested against the live graph — otherwise editing a task that a finished transition had cited would silently unwind the flow that consumed it.
+
+### Reject is not cancel
+
+<Callout type="warning" emoji="⚠️">
+  **`rejectProposal` withdraws what *you* signed. It does not cancel anyone
+  else's proposal.**
+
+  It deletes only links this DID signed — your vote, or your whole proposal if
+  you opened it — and returns how many links went: one for a withdrawn vote,
+  more when you retract a proposal you opened. It never touches another agent's
+  links, and if you signed nothing on the proposal it **errors** rather than
+  silently doing nothing. A link that merely *names* your DID but carries
+  someone else's signature is not yours to retract either.
+
+  And because state is recomputed from the links present now, **withdrawing a
+  vote that had settled an edge moves the flow back to where it stood before
+  that vote.** With your vote gone the edge is one short of quorum again, so
+  the walk stops earlier. There is no "already fired, refuse" guard, and there
+  must not be one: the `resolved_as → "fired"` mark is an index, not authority,
+  and guarding on it would contradict the rule this whole page rests on.
+</Callout>
+
+### What is deliberately not here
+
+These are **absent, not stubbed**. Do not go looking for them:
+
+| | |
+| --- | --- |
+| `FlowInstance.proposeTransition()` | no client-side propose API — proposals come from the engine's evaluator pass (above) |
+| `FlowInstance.fireAction()` | no direct fire — an edge fires only by reaching quorum |
+| `onStateChange` / `onProposalAdded` / `onProposalResolved` | no flow subscriptions — poll `findAll` / `proposals()` |
+
+They land with the manual-proposal and subscription-topic slices. Until then, an app's write surface is accept and reject.
+
+## A transition, end to end
+
+Alice and Bob share a Neighbourhood. Their Delivery flow requires two distinct signatures to enter `Scoped`:
+
+```typescript
+import { SHACLFlow, FlowInstance } from "@coasys/ad4m";
+
+const deliveryFlow = new SHACLFlow("Delivery", "delivery://");
+deliveryFlow.inputTypes = ["ad4m://Task"];
+deliveryFlow.interpretationHint =
+  "Advance a Task through delivery: Identified → Scoped → InProgress → Review → Done.";
+
+deliveryFlow.addState({
+  name: "Identified",
+  value: 0,
+  interpretationHint: "The Task has been named but not yet scoped.",
+});
+deliveryFlow.addState({
+  name: "Scoped",
+  value: 1,
+  interpretationHint: "The Task has an acceptance criterion.",
+  requires: [{ className: "AcceptanceCriterion", linkedTo: "base", count: { min: 1 } }],
+  consensusRule: { n: 2 },
+});
+deliveryFlow.addTransition({
+  actionName: "Scope",
+  fromState: "Identified",
+  toState: "Scoped",
+  actions: [],
+});
+
+await perspective.addFlow("Delivery", deliveryFlow);
+
+// Alice starts a run on a task. It begins in the lowest-valued state.
+const instance = await FlowInstance.start(perspective, "Delivery", "ad4m://task/1");
+instance.currentStateName; // "Identified"
+```
+
+The conversation on that task then produces an acceptance criterion, an extraction pass writes it as an `AcceptanceCriterion` instance, and the evaluator finds `Scoped`'s guard satisfied:
+
+```text
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │ 1. PROPOSAL                                                          │
+ │    Alice's evaluator pass writes ad4m://flow/proposal/abc,           │
+ │    every link signed by Alice:                                       │
+ │      flow/instance       → ad4m://flow/instance/7f3a…                │
+ │      flow/from_state     → "Identified"                              │
+ │      flow/to_state       → "Scoped"                                  │
+ │      flow/proposer       → did:key:alice                             │
+ │      flow/evidence       → ad4m://criterion/9 (the matched instance) │
+ │      flow/evidence_hashes→ {"ad4m://criterion/9":"a91f…"}  ← the seal │
+ │    The mint is Alice's own vote.                          [1 of n=2] │
+ └────────────────────────────────┬─────────────────────────────────────┘
+                                  │  sync
+                                  ▼
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │ 2. VOTE                                                              │
+ │    Bob calls instance.acceptProposal("ad4m://flow/proposal/abc").    │
+ │    His replica recomputes the seal over ad4m://criterion/9 on ITS    │
+ │    OWN graph first. Match ⇒ he signs:                                │
+ │      ad4m://acceptedBy → did:key:bob     (signed by Bob)             │
+ │    Mismatch ⇒ he declines and writes nothing.             [2 of n=2] │
+ └────────────────────────────────┬─────────────────────────────────────┘
+                                  │
+                                  ▼
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │ 3. QUORUM — counted per EDGE, not per proposal                       │
+ │    fold walks from "Identified":                                     │
+ │      edge Identified→Scoped                                          │
+ │        distinct eligible DIDs across ALL proposals for this edge     │
+ │          = { did:key:alice, did:key:bob }  = 2                       │
+ │        consensusRule for entry into "Scoped" = { n: 2 }              │
+ │        ⇒ settled, at the 2nd voter's own timestamp                   │
+ └────────────────────────────────┬─────────────────────────────────────┘
+                                  │
+                                  ▼
+ ┌──────────────────────────────────────────────────────────────────────┐
+ │ 4. TRANSITION                                                        │
+ │    The walk crosses the edge and stops in "Scoped" — no edge out of  │
+ │    it has quorum. acceptProposal resolves to:                        │
+ │      [{ instanceUri: "ad4m://flow/instance/7f3a…",                   │
+ │         fromState: "Identified", toState: "Scoped",                  │
+ │         voters: ["did:key:alice","did:key:bob"],                     │
+ │         contributingProposalUris: ["ad4m://flow/proposal/abc"] }]     │
+ │    The pass then writes Bob's Local currentState cache and a         │
+ │    resolved_as → "fired" mark. Neither is ever read back.            │
+ └──────────────────────────────────────────────────────────────────────┘
+```
+
+```typescript
+const fired = await instance.acceptProposal("ad4m://flow/proposal/abc");
+fired[0].toState;  // "Scoped"
+fired[0].voters;   // ["did:key:alice", "did:key:bob"]
+```
+
+Now Bob changes his mind:
+
+```typescript
+const retracted = await instance.rejectProposal("ad4m://flow/proposal/abc"); // 1
+
+const after = await FlowInstance.findAll(perspective, { subject: "ad4m://task/1" });
+after[0].currentStateName; // "Identified" — back where it stood
+```
+
+One link went: Bob's `acceptedBy`. Alice's proposal is untouched and still standing. But the edge is `1 < n = 2` again, so the walk no longer crosses it and the flow stands where it stood before Bob signed. Nothing was "undone" — the same derivation simply ran over one link fewer.
+
+### Why quorum belongs to the edge
+
+When two replicas mint proposals for the same transition at the same time — each not yet having seen the other's — you get twin proposals for one edge. If quorum were counted *per proposal*, a flow with `n: 2` and two twins holding one vote each would sit at genesis forever, both one short.
+
+So the question the engine asks is *"did this **edge** collect `n` distinct voters?"*, across every proposal for it. Twins converge instead of deadlocking, and both appear in the outcome's `contributingProposalUris`.
+
+## Roles: who is allowed to sign
+
+A `ConsensusRule` can require that voters hold a role:
+
+```typescript
+deliveryFlow.addState({
+  name: "Done",
+  value: 4,
+  interpretationHint: "The Task is accepted and complete.",
+  consensusRule: {
+    n: 2,
+    fromRole: {
+      className: "Membership",
+      where: { role: "reviewer" },
+      didProperty: "agent",
+    },
+  },
+});
+```
+
+`fromRole` is an ordinary `ModelQuery` over ordinary subject classes — roles are not a special kind of object, just data the flow points at. `didProperty` names the property on each match that holds the member's DID. (The alternative shape templates `$did` into `where` and treats a non-empty result as "this DID matches".)
+
+Each vote is gated **as of its own timestamp**. A voter who held the role when they signed still counts after the role is revoked, and a voter who signed before being granted it does not count retroactively. Revocation is an explicit signed tombstone; it stops future votes rather than rewriting settled history.
+
+A per-state `consensusRule` overrides the flow-level default — so the cheap early edges can take one signature while the irreversible last one takes two reviewers.
+
+## Contention
+
+If two edges out of the current state both reach quorum, the engine does **not** pick a winner. It reports contention and the walk stops there.
+
+That is a decision about honesty. Choosing by timestamp would mean adjudicating a race using numbers the racing agents wrote themselves. Rather than produce an authoritative-looking answer out of untrustworthy input, the engine says the group disagreed and needs to resolve it socially.
+
+A contested flow is **stalled, not waiting**: more votes cannot move it, because the obstacle is that two edges already carry a quorum. Anything that pays out on a completed flow must refuse a contested derivation, and a UI must never render one as "awaiting votes".
+
+The verdict is deliberately three-valued, and the third value is the interesting one:
+
+| status | meaning |
+| --- | --- |
+| not contested | a fresh derivation ran and found no conflict |
+| contested | two settled edges out of the current state |
+| unknown | the state came from the cache, so contention was **not computed** — not a claim either way |
+
+`unknown` exists so a cache read cannot be mistaken for a verdict. It renders as nothing in the LLM prompt rather than as "no contention", because an `Option` that conflates *"verified clear"* with *"never checked"* always fails in the permissive direction.
+
+## The `currentState` cache
+
+Each instance carries a `currentState` property so a reader who cannot afford a full derivation — a list view, a query filter, a prompt block — still sees an answer.
+
+Two properties keep it from becoming a second, competing source of truth:
+
+- **It is written as a `Local` link.** It never syncs. Your replica's cache is yours, and a peer's value cannot overwrite it or be mistaken for a shared claim.
+- **The derivation never reads it.** The background pass heals it toward the derived state, in one direction only.
+
+The history marks (`resolved_as → "fired"`) are `Local` for the same reason, with one extra consequence: the first pass a replica runs over an instance it has never derived before is a **silent catch-up**. It marks what has already settled and writes the cache without emitting outcomes, so joining a flow with history doesn't produce a flood of events for transitions that happened before you were watching.
+
+Read the cache for display. Never decide anything on it. Anything that acts — minting, voting, firing, paying — derives.
+
+## What flows are for
+
+A flow is the smallest thing that makes a group's process **explicit, shared, and checkable**:
+
+- **Explicit**, because "what does Done mean here?" has an answer in the data — the guards and the hint — instead of living in someone's head or an app's source.
+- **Shared**, because the definition is Social DNA. An agent joining the Neighbourhood gets your process along with your data, without installing your app.
+- **Checkable**, because state is derived from signed links, so every participant can verify a transition rather than trust the app that displayed it.
+
+And because the definition carries English for every state, the same structure that renders your UI is the structure an agent reasons over. That is the point of the hints: one description of the process, serving both the humans and the machines taking part in it.
+
+<Callout type="info" emoji="📄">
+  The full design — the ordering and back-dating guarantees, the role-grant
+  windows, and why the derivation is pure and synchronous — is in
+  [`docs/flow-interpretation-hints-design.md`](https://github.com/coasys/ad4m/blob/dev/docs/flow-interpretation-hints-design.md).
+</Callout>
