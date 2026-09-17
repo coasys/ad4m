@@ -16,7 +16,7 @@ import { Ad4mClient, Link, LinkQuery, Literal, PerspectiveProxy,
     path as shaclPath,
 } from "@coasys/ad4m";
 import { readFileSync } from "node:fs";
-import { startExecutor, baseUrl, quitExecutor } from "../utils/utils";
+import { startExecutor, baseUrl, quitExecutor, pollUntil, assertStaysFalse, sleep } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
 import { fileURLToPath } from 'url';
@@ -383,11 +383,12 @@ describe("Prolog + Literals", () => {
                     let message = new Message(perspective!, messageEntry)
                     await message.save()
 
-                    // Allow SPARQL to index the new type flag
-                    await sleep(500)
-                    
-                    // Refresh todo data to apply collection filtering
-                    await todo.get()
+                    // Poll until SPARQL indexes the new type flag
+                    await pollUntil(async () => {
+                        await todo.get()
+                        const msgs = await todo.messages
+                        return msgs.length === 1
+                    }, { timeoutMs: 5000, intervalMs: 100, label: "SPARQL indexes message type flag" })
                     messageEntries = await todo.messages
                     expect(messageEntries.length).to.equal(1)
                 })
@@ -606,8 +607,8 @@ describe("Prolog + Literals", () => {
                     // Register the class
                     await perspective!.ensureSDNASubjectClass(RecipeWithSparqlFilter);
                     
-                    // Wait for SHACL metadata to be indexed
-                    await sleep(500);
+                    // SHACL metadata indexing happens asynchronously — no fixed
+                    // wait needed; downstream pollUntil on query results handles it
 
                     // See note on the SPARQL collection-where test above —
                     // use a NamedNode-friendly `ad4m://test/` ID scheme so the
@@ -631,15 +632,18 @@ describe("Prolog + Literals", () => {
                         target: "recipe://test"
                     }));
 
-                    // Small delay for SPARQL indexing
-                    await sleep(500);
-
-                    const recipe2 = new RecipeWithSparqlFilter(perspective!, root);
-                    await recipe2.get();
+                    // Poll until SPARQL indexes the ingredient link
+                    let recipe2: RecipeWithSparqlFilter;
+                    await pollUntil(async () => {
+                        recipe2 = new RecipeWithSparqlFilter(perspective!, root);
+                        await recipe2.get();
+                        return recipe2.ingredients.length === 1;
+                    }, { timeoutMs: 5000, intervalMs: 100, label: "SPARQL indexes ingredient link" });
+                    recipe2 = recipe2!;
 
                     // Should have 2 entries total
                     expect(recipe2.entries.length).to.equal(2);
-                    
+
                     // But only 1 ingredient (entry1 which has the ingredient link)
                     expect(recipe2.ingredients.length).to.equal(1);
                     expect(recipe2.ingredients[0]).to.equal(entry1);
@@ -1208,14 +1212,10 @@ describe("Prolog + Literals", () => {
                     task1.dueDate = start;
                     await task1.save();
 
-                    // Small delay to ensure different timestamps
-                    await sleep(10);
+                    // Wait for clock to advance past start
+                    await pollUntil(() => Date.now() > start, { timeoutMs: 1000, intervalMs: 1, label: "clock advances past start" });
 
                     let mid = new Date().getTime();
-                    // Ensure mid > start even if system clock resolution is low
-                    if (mid <= start) {
-                        mid = start + 1;
-                    }
 
                     const task2 = new TaskDue(perspective!);
                     task2.title = "Medium priority task";
@@ -1229,14 +1229,10 @@ describe("Prolog + Literals", () => {
                     task3.dueDate = mid + 2;
                     await task3.save();
 
-                    // Small delay to ensure different timestamps
-                    await sleep(10);
+                    // Wait for clock to advance past mid
+                    await pollUntil(() => Date.now() > mid, { timeoutMs: 1000, intervalMs: 1, label: "clock advances past mid" });
 
                     let end = new Date().getTime();
-                    // Ensure end > mid even if system clock resolution is low
-                    if (end <= mid) {
-                        end = mid + 1;
-                    }
 
                     // Check all tasks are there
                     const allTasks = await TaskDue.findAll(perspective!);
@@ -1583,7 +1579,9 @@ describe("Prolog + Literals", () => {
                         });
                     expect(subscription).to.equal(3);
 
-                    // Small delay to ensure subscription is fully registered before triggering changes
+                    // Subscription-init delay: SPARQL change-watchers register
+                    // asynchronously inside the executor — no observable "ready"
+                    // state exists to poll for, so a fixed delay is required.
                     await sleep(500);
 
                     // Add another recipe and verify callback is called
@@ -1736,7 +1734,8 @@ describe("Prolog + Literals", () => {
                     // Reset lastResult to verify we get an update
                     lastResult = null;
 
-                    // Small delay to ensure subscription is fully registered before triggering changes
+                    // Subscription-init delay: SPARQL change-watchers register
+                    // asynchronously — no observable "ready" state to poll for.
                     await sleep(500);
 
                     // Add a new recipe and verify subscription updates
@@ -1820,11 +1819,10 @@ describe("Prolog + Literals", () => {
                     notification1.read = false;
                     await notification1.save();
 
-                    // Wait for subscription to fire with smart polling
-                    for (let i = 0; i < 30; i++) {
-                        if (updateCount >= 1 && notifications.length === 1) break;
-                        await sleep(50);
-                    }
+                    // Wait for subscription to fire
+                    await pollUntil(() => updateCount >= 1 && notifications.length === 1, {
+                        timeoutMs: 5000, intervalMs: 50, label: "first notification subscription fires"
+                    });
                     expect(updateCount).to.be.at.least(1);
                     expect(notifications.length).to.equal(1);
 
@@ -1835,10 +1833,9 @@ describe("Prolog + Literals", () => {
                     notification2.read = false;
                     await notification2.save();
 
-                    for (let i = 0; i < 30; i++) {
-                        if (updateCount >= 2 && notifications.length === 2) break;
-                        await sleep(50);
-                    }
+                    await pollUntil(() => updateCount >= 2 && notifications.length === 2, {
+                        timeoutMs: 5000, intervalMs: 50, label: "second notification subscription fires"
+                    });
                     expect(updateCount).to.be.at.least(2);
                     expect(notifications.length).to.equal(2);
 
@@ -1849,20 +1846,18 @@ describe("Prolog + Literals", () => {
                     notification3.read = false;
                     await notification3.save();
 
-                    await sleep(200); // Give it time but don't wait the full second
-                    // With SPARQL we get 3 updates because we do comparison filtering in the client
-                    // and not the query. So the raw query result actually is different, even though
-                    // the ultimate result is the same.
-                    //expect(updateCount).to.equal(2);
+                    // Verify non-matching notification does not add to filtered results
+                    await assertStaysFalse(() => notifications.length > 2, {
+                        waitMs: 500, intervalMs: 50, label: "low-priority notification stays out of filtered results"
+                    });
                     expect(notifications.length).to.equal(2);
 
                     // Mark notification1 as read - should trigger subscription to remove it
                     notification1.read = true;
                     await notification1.save();
-                    for (let i = 0; i < 30; i++) {
-                        if (notifications.length === 1) break;
-                        await sleep(50);
-                    }
+                    await pollUntil(() => notifications.length === 1, {
+                        timeoutMs: 5000, intervalMs: 50, label: "read notification removed from subscription"
+                    });
                     expect(notifications.length).to.equal(1);
 
                     // Dispose the subscription to prevent cross-test interference
@@ -2041,7 +2036,10 @@ describe("Prolog + Literals", () => {
                     task3.assignee = "bob";
                     await task3.save();
 
-                    await sleep(1000);
+                    // Verify non-matching task does not trigger subscription
+                    await assertStaysFalse(() => updateCount > 2 || tasks.length > 2, {
+                        waitMs: 1000, intervalMs: 50, label: "wrong-assignee task does not trigger subscription"
+                    });
                     expect(updateCount).to.equal(2);
                     expect(tasks.length).to.equal(2);
 
@@ -2284,10 +2282,9 @@ describe("Prolog + Literals", () => {
                         // `subscriptionLatency`, so a real regression would
                         // surface as a slow log line rather than be hidden by
                         // the bumped ceiling.
-                        while (!subscriptionCallback.called) {
-                            await sleep(10);
-                            if (Date.now() - saveTime > 60000) throw new Error("Timeout waiting for subscription update");
-                        }
+                        await pollUntil(() => subscriptionCallback.called, {
+                            timeoutMs: 60000, intervalMs: 10, label: "subscription callback fires after save"
+                        });
 
                         const saveLatency = saveTime - start;
                         const subscriptionLatency = Date.now() - saveTime;
@@ -2402,10 +2399,10 @@ describe("Prolog + Literals", () => {
                         model3.status = "active";
                         await model3.save();
 
-                        // Wait to ensure no callbacks
-                        await sleep(1000);
-
-                        // Verify no new callbacks after dispose
+                        // Verify no callbacks fire after dispose
+                        await assertStaysFalse(() => callback1.callCount > 1 || callback2.callCount > 1, {
+                            waitMs: 1000, intervalMs: 50, label: "no callbacks after dispose"
+                        });
                         // callback1: 1 (model1 save only)
                         // callback2: 1 (model2 save only)
                         expect(callback1.callCount).to.equal(1);
@@ -2420,7 +2417,8 @@ describe("Prolog + Literals", () => {
                         const initialCount = await builder.countSubscribe(countCallback);
                         expect(initialCount).to.equal(0);
 
-                        // Small delay to ensure subscription is fully registered before triggering changes
+                        // Subscription-init delay: SPARQL change-watchers register
+                        // asynchronously — no observable "ready" state to poll for.
                         await sleep(500);
 
                         // Add a matching model
@@ -2454,10 +2452,10 @@ describe("Prolog + Literals", () => {
                         model2.status = "active";
                         await model2.save();
 
-                        // Wait to ensure no callback (still using sleep since we're verifying no change)
-                        await sleep(1000);
-
-                        // Verify no new callbacks
+                        // Verify no callbacks fire after dispose
+                        await assertStaysFalse(() => countCallback.callCount > count, {
+                            waitMs: 1000, intervalMs: 50, label: "no count callbacks after dispose"
+                        });
                         expect(countCallback.callCount).to.equal(count);
                     });
 
@@ -2470,7 +2468,8 @@ describe("Prolog + Literals", () => {
                         expect(initialPage.results.length).to.equal(0);
                         expect(initialPage.totalCount).to.equal(0);
 
-                        // Small delay to ensure subscription is fully registered before triggering changes
+                        // Subscription-init delay: SPARQL change-watchers register
+                        // asynchronously — no observable "ready" state to poll for.
                         await sleep(500);
 
                         // Add the first model and synchronize on its dispatch before
@@ -2522,10 +2521,10 @@ describe("Prolog + Literals", () => {
                         model3.status = "active";
                         await model3.save();
 
-                        // Wait to ensure no callback
-                        await sleep(1000);
-
-                        // Verify no new callbacks
+                        // Verify no callbacks fire after dispose
+                        await assertStaysFalse(() => pageCallback.callCount > count, {
+                            waitMs: 1000, intervalMs: 50, label: "no page callbacks after dispose"
+                        });
                         expect(pageCallback.callCount).to.equal(count);
                     });
                 });
@@ -2875,8 +2874,7 @@ describe("Prolog + Literals", () => {
                     await perspective!.ensureSDNASubjectClass(Article);
                     await perspective!.ensureSDNASubjectClass(ArticleWithString);
 
-                    // Give perspective time to fully index the SDNA classes
-                    await sleep(200);
+                    // SDNA class indexing handled by downstream pollUntil checks
                 });
 
                 it("should filter collection by type with class reference", async () => {
@@ -2902,9 +2900,6 @@ describe("Prolog + Literals", () => {
                     comment2.text = "This is another valid comment";
                     await comment2.save();
 
-                    // Add delay to allow SPARQL to finish indexing
-                    await sleep(1500);
-
                     // Add links to article
                     await perspective!.add(new Link({
                         source: articleRoot,
@@ -2922,10 +2917,14 @@ describe("Prolog + Literals", () => {
                         target: validComment2
                     }));
 
-                    await sleep(500);
-
-                    const retrievedArticle = new Article(perspective!, articleRoot);
-                    await retrievedArticle.get();
+                    // Poll until SPARQL indexes links and type-filter resolves correctly
+                    let retrievedArticle: Article;
+                    await pollUntil(async () => {
+                        retrievedArticle = new Article(perspective!, articleRoot);
+                        await retrievedArticle.get();
+                        return retrievedArticle.comments.length === 2;
+                    }, { timeoutMs: 10000, intervalMs: 200, label: "type-filtered comments resolve to 2" });
+                    retrievedArticle = retrievedArticle!;
 
                     // Should only contain valid Comments, not the invalid item
                     expect(retrievedArticle.comments).to.have.lengthOf(2);
@@ -2948,9 +2947,6 @@ describe("Prolog + Literals", () => {
                     comment.text = "Valid comment text";
                     await comment.save();
 
-                    // Add delay to allow SPARQL to finish indexing
-                    await sleep(1500);
-
                     // Add both to article
                     await perspective!.add(new Link({
                         source: articleRoot,
@@ -2963,10 +2959,14 @@ describe("Prolog + Literals", () => {
                         target: invalidItem
                     }));
 
-                    await sleep(500);
-
-                    const retrievedArticle = new ArticleWithString(perspective!, articleRoot);
-                    await retrievedArticle.get();
+                    // Poll until SPARQL indexes and type-filter resolves
+                    let retrievedArticle: ArticleWithString;
+                    await pollUntil(async () => {
+                        retrievedArticle = new ArticleWithString(perspective!, articleRoot);
+                        await retrievedArticle.get();
+                        return retrievedArticle.comments.length === 1;
+                    }, { timeoutMs: 10000, intervalMs: 200, label: "string-name type-filtered comments resolve to 1" });
+                    retrievedArticle = retrievedArticle!;
 
                     expect(retrievedArticle.comments).to.have.lengthOf(1);
                     expect(retrievedArticle.comments[0]).to.equal(validComment);
@@ -3001,9 +3001,6 @@ describe("Prolog + Literals", () => {
                     c2.text = "Comment 2 text";
                     await c2.save();
 
-                    // Add delay to allow SPARQL to finish indexing
-                    await sleep(1500);
-
                     // Add comments to articles (mix of valid and invalid)
                     await perspective!.add(new Link({
                         source: article1Root,
@@ -3026,11 +3023,17 @@ describe("Prolog + Literals", () => {
                         target: invalid2
                     }));
 
-                    await sleep(500);
+                    // Poll until SPARQL indexes and findAll returns both articles with filtered comments
+                    let articles: Article[];
+                    await pollUntil(async () => {
+                        articles = await Article.findAll(perspective!);
+                        if (articles.length !== 2) return false;
+                        const a1 = articles.find(a => a.title === "Article 1");
+                        const a2 = articles.find(a => a.title === "Article 2");
+                        return !!a1 && a1.comments.length === 1 && !!a2 && a2.comments.length === 1;
+                    }, { timeoutMs: 10000, intervalMs: 200, label: "findAll type-filter resolves both articles" });
+                    articles = articles!;
 
-                    // Use findAll and verify filtering
-                    const articles = await Article.findAll(perspective!);
-                    
                     expect(articles).to.have.lengthOf(2);
                     
                     const foundArticle1 = articles.find(a => a.title === "Article 1");
@@ -3776,34 +3779,29 @@ describe("Prolog + Literals", () => {
 
 })
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+// sleep() removed — all callers now use pollUntil/assertStaysFalse from utils
 
 /**
- * Wait for a condition to become true with exponential backoff.
- * This is more reliable than fixed sleep() for async operations.
+ * Wait for a condition to become true, polling at fixed intervals.
+ * Delegates to the shared pollUntil from utils.ts.
  */
 async function waitForCondition(
   condition: () => boolean,
-  options: { 
-    timeoutMs?: number, 
+  options: {
+    timeoutMs?: number,
     checkIntervalMs?: number,
-    errorMessage?: string 
+    errorMessage?: string
   } = {}
 ): Promise<void> {
-  const { 
-    timeoutMs = 5000, 
+  const {
+    timeoutMs = 5000,
     checkIntervalMs = 50,
     errorMessage = 'Condition was not met within timeout'
   } = options;
-  
-  const startTime = Date.now();
-  
-  while (!condition()) {
-    if (Date.now() - startTime > timeoutMs) {
-      throw new Error(`${errorMessage} (timeout: ${timeoutMs}ms)`);
-    }
-    await sleep(checkIntervalMs);
-  }
+
+  await pollUntil(condition, {
+    timeoutMs,
+    intervalMs: checkIntervalMs,
+    label: errorMessage,
+  });
 }
