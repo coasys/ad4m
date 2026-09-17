@@ -36,8 +36,9 @@ export interface SyncDeps {
     /** Returns the current key ring, or null for a plaintext (non-E2E) room. */
     getKeyRing: () => KeyRing | null;
     /** Re-fetches the key ring from the server. Returns true if new versions
-     *  were obtained (callers should re-bootstrap to recover skipped links). */
-    refreshKeyRing?: () => Promise<boolean>;
+     *  were obtained, false if refreshed but nothing new, or null if the
+     *  call was skipped (e.g. cooldown). */
+    refreshKeyRing?: () => Promise<boolean | null>;
     /** Called after every successful sync cycle. The admin uses this to grant
      *  historical keys to members who joined while WS was down — the periodic
      *  HTTP sync is the fallback discovery path when onPeerJoined never fires. */
@@ -628,16 +629,14 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         );
         try {
             const gotNew = await _deps.refreshKeyRing();
-            if (gotNew) {
+            if (gotNew === null) {
+                console.log(
+                    "[server-link-language] key ring refresh skipped (cooldown) — will retry next cycle",
+                );
+            } else if (gotNew) {
                 console.log("[server-link-language] key ring refreshed with new versions — re-bootstrapping");
                 _pendingMissingVersions.clear();
                 await bootstrap();
-                // Emit the full store so the executor's perspective layer
-                // sees the recovered links. bootstrap() itself does not
-                // emit (correct for cold start — the executor queries the
-                // store directly for initial state). The recovery path
-                // here must emit because the executor only surfaces
-                // runtime-added links via emitPerspectiveDiff.
                 const recovered = store.allLinks();
                 if (recovered.links.length > 0) {
                     deps().emitDiff({ additions: recovered.links, removals: [] });

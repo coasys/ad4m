@@ -83,12 +83,21 @@ type KeyRingStatus = "none" | "ready" | "pending" | "error";
 let keyRingStatus: KeyRingStatus = "none";
 /** True when this agent has been identified as the room admin. */
 let isRoomAdmin = false;
-/** Cooldown for commit-path key ring retries (ms since epoch). */
+/** Cooldown for background (dep) key ring retries (ms since epoch). */
 let lastKeyRingRetry = 0;
 const KEY_RING_RETRY_COOLDOWN_MS = 10_000;
+/** In-flight setupKeyRing promise for single-flight deduplication. */
+let keyRingInflight: Promise<void> | null = null;
 
 function isPlaceholder(value: string): boolean {
     return !value || value === "<to-be-filled>";
+}
+
+function setupKeyRingCoalesced(): Promise<void> {
+    if (!keyRingInflight) {
+        keyRingInflight = setupKeyRing().finally(() => { keyRingInflight = null; });
+    }
+    return keyRingInflight;
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +155,7 @@ async function setupKeyRing(): Promise<void> {
  */
 async function refreshKeyRingIfNeeded(): Promise<boolean> {
     const prevSize = keyRing?.size ?? 0;
-    await setupKeyRing();
+    await setupKeyRingCoalesced();
     const newSize = keyRing?.size ?? 0;
     if (newSize > prevSize) {
         console.log("[server-link-language] key ring refreshed — re-bootstrapping");
@@ -313,11 +322,11 @@ const language = defineLanguage({
             refreshKeyRing: async () => {
                 const now = Date.now();
                 if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
-                    return false;
+                    return null;
                 }
                 lastKeyRingRetry = now;
                 const prevSize = keyRing?.size ?? 0;
-                await setupKeyRing();
+                await setupKeyRingCoalesced();
                 return (keyRing?.size ?? 0) > prevSize;
             },
             // Periodic admin key grants — fallback for when the WS
@@ -494,6 +503,7 @@ const language = defineLanguage({
         keyRingStatus = "none";
         isRoomAdmin = false;
         lastKeyRingRetry = 0;
+        keyRingInflight = null;
         auth.resetAuth();
         resetAdapters();
         console.log("[server-link-language] teardown");
@@ -514,29 +524,21 @@ const language = defineLanguage({
                 );
             }
             if (keyRingStatus === "error" || keyRingStatus === "pending") {
-                const now = Date.now();
-                if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
+                const prevStatus = keyRingStatus;
+                console.log(
+                    `[server-link-language] retrying E2E key ring acquisition before commit (status: ${keyRingStatus})...`,
+                );
+                await setupKeyRingCoalesced();
+                if (prevStatus !== "ready" && keyRingStatus === "ready") {
                     console.log(
-                        `[server-link-language] skipping key ring retry — cooldown (${KEY_RING_RETRY_COOLDOWN_MS}ms)`,
+                        "[server-link-language] key ring acquired — re-bootstrapping to recover skipped links",
                     );
-                } else {
-                    const prevStatus = keyRingStatus;
-                    console.log(
-                        `[server-link-language] retrying E2E key ring acquisition before commit (status: ${keyRingStatus})...`,
-                    );
-                    lastKeyRingRetry = now;
-                    await setupKeyRing();
-                    if (prevStatus === "pending" && keyRingStatus === "ready") {
-                        console.log(
-                            "[server-link-language] key ring acquired (was pending) — re-bootstrapping to recover skipped links",
-                        );
-                        await syncModule.bootstrap();
-                        const recovered = syncModule.render();
-                        if (recovered.links.length > 0) {
-                            getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
-                        }
-                        syncModule.clearPendingMissingVersions();
+                    await syncModule.bootstrap();
+                    const recovered = syncModule.render();
+                    if (recovered.links.length > 0) {
+                        getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
                     }
+                    syncModule.clearPendingMissingVersions();
                 }
             }
             if (keyRingStatus === "error") {

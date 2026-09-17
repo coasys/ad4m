@@ -1075,3 +1075,143 @@ describe("sync: enqueueCommitBatched", () => {
             "must report LinkLanguageInstalledButNotSynced on first failure");
     });
 });
+
+// ---------------------------------------------------------------------------
+// refreshKeyRing — cooldown and recovery
+// ---------------------------------------------------------------------------
+
+describe("sync: refreshKeyRing cooldown and recovery", () => {
+    it("returns null when skipped by cooldown and does not re-bootstrap", async () => {
+        const transport = new MockTransport();
+        resetAdapters();
+        syncModule._resetBatchStateForTests();
+        initAdapters({ storage: new MockStorage(), transport, config });
+        store.initStore(simpleHash);
+        emittedDiffs = [];
+        syncStates = [];
+        keyRing = null;
+
+        let refreshCallCount = 0;
+        let lastReturnValue: boolean | null = null;
+        let cooldownTimestamp = 0;
+
+        const refreshKeyRing = async (): Promise<boolean | null> => {
+            refreshCallCount++;
+            const now = Date.now();
+            if (now - cooldownTimestamp < 10_000) {
+                return null;
+            }
+            cooldownTimestamp = now;
+            return false;
+        };
+
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing,
+        });
+
+        const rk = generateRoomKey();
+        const encLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 3);
+
+        transport.route(
+            (url, method) => method === "GET" && url.endsWith("/render"),
+            () => ({
+                status: 200,
+                headers: {},
+                body: JSON.stringify({ links: [encLink], revision: "rev-1", sequence: 1 }),
+            }),
+        );
+
+        await syncModule.bootstrap();
+
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) }),
+        );
+
+        // First catchUp: refresh fires (not within cooldown)
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 1, "first catchUp should call refreshKeyRing");
+
+        // Second catchUp immediately: within cooldown window, should get null
+        await syncModule.catchUp();
+        assert.equal(refreshCallCount, 2, "second catchUp should still call refreshKeyRing");
+        // The dep returns null; _pendingMissingVersions survives for next cycle
+    });
+
+    it("catchUp re-bootstraps when refreshKeyRing returns true", async () => {
+        const transport = new MockTransport();
+        resetAdapters();
+        syncModule._resetBatchStateForTests();
+        initAdapters({ storage: new MockStorage(), transport, config });
+        store.initStore(simpleHash);
+        emittedDiffs = [];
+        syncStates = [];
+
+        const rk = generateRoomKey();
+        keyRing = new Map([[3, rk]]);
+
+        let callCount = 0;
+
+        syncModule.initSync({
+            config,
+            getToken: async () => "test-token",
+            emitDiff: (diff) => emittedDiffs.push(diff),
+            emitSyncState: (state) => syncStates.push(state),
+            getKeyRing: () => keyRing,
+            refreshKeyRing: async () => {
+                callCount++;
+                return callCount === 1 ? false : true;
+            },
+        });
+
+        const encLink = encryptLinkForWire(makeLink({ source: "secret" }), rk, 3);
+
+        // Bootstrap with null keyRing — link goes to pending
+        keyRing = null;
+        transport.route(
+            (url, method) => method === "GET" && url.endsWith("/render"),
+            () => ({
+                status: 200,
+                headers: {},
+                body: JSON.stringify({ links: [encLink], revision: "rev-1", sequence: 1 }),
+            }),
+        );
+
+        await syncModule.bootstrap();
+        assert.equal(store.allLinks().links.length, 0, "encrypted link should be skipped without key ring");
+
+        transport.route(
+            (url, method) => method === "GET" && url.includes("/sync"),
+            () => ({ status: 200, headers: {}, body: JSON.stringify({ diffs: [], revision: "rev-1", sequence: 1 }) }),
+        );
+
+        // First catchUp: refreshKeyRing returns false — no recovery
+        await syncModule.catchUp();
+        assert.equal(callCount, 1);
+        assert.equal(emittedDiffs.length, 0, "no emit when refresh returns false");
+
+        // Set keyRing so re-bootstrap can decrypt
+        keyRing = new Map([[3, rk]]);
+
+        // Re-route /render to return the encrypted link (re-bootstrap will re-fetch)
+        transport.route(
+            (url, method) => method === "GET" && url.endsWith("/render"),
+            () => ({
+                status: 200,
+                headers: {},
+                body: JSON.stringify({ links: [encLink], revision: "rev-2", sequence: 2 }),
+            }),
+        );
+
+        // Second catchUp: refreshKeyRing returns true — re-bootstraps and emits
+        await syncModule.catchUp();
+        assert.equal(callCount, 2);
+        assert.ok(emittedDiffs.length > 0, "should emit recovered links after re-bootstrap");
+        assert.equal(emittedDiffs[0].additions[0].data.source, "secret");
+    });
+});
