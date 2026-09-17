@@ -36,14 +36,27 @@
  *   present now, withdrawing a vote that had settled an edge moves the
  *   flow back to where it stood before it.
  *
+ * - `proposeTransition()` — the manual write path: propose an edge as this
+ *   agent, or co-sign the equivalent proposal another agent already opened.
+ *   Its `FlowProposeResult` is what tells queued from no-op from stalled.
+ *
  * Still absent (rather than shipped as `throw new Error("not yet")`
- * stubs): `proposeTransition`, `fireAction`, and the subscriptions
- * (`onStateChange`, `onProposalAdded`, `onProposalResolved`) — they land
- * with the manual-proposal and subscription-topic slices.
+ * stubs): `fireAction`, and the subscriptions (`onStateChange`,
+ * `onProposalAdded`, `onProposalResolved`) — they land with the
+ * subscription-topic slice.
+ *
+ * ## The guard-free rule
+ *
+ * A state with no `requires` guard is **never** proposed by the engine, on
+ * any replica, ever — `flow_evaluator`'s auto-proposal composer skips it by
+ * design. Nothing in the graph implies a human started work; they said so.
+ * So states like "in progress" and "in review" only ever advance through
+ * `proposeTransition`. This is a permanent contract, not a gap: wire the
+ * button, or the instance sits there.
  */
 
 import { PerspectiveProxy } from "./PerspectiveProxy";
-import { FlowFireOutcome } from "./PerspectiveClient";
+import { FlowFireOutcome, FlowProposeResult } from "./PerspectiveClient";
 import { Ad4mModel } from "../model/Ad4mModel";
 import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
@@ -383,20 +396,32 @@ export class FlowInstance {
   }
 
   /**
-   * Mint a manual flow-transition proposal for this instance.
+   * Propose a flow transition for this instance, as the calling agent.
    *
    * The executor evaluates the guard on its own replica, seals the evidence,
-   * writes the proposal, and — when the flow's `consensusRule.n` is 1 —
-   * fires immediately, returning the settled outcomes.
+   * and either writes a new proposal or — when an equivalent one is already
+   * open, i.e. another agent pressed the same button first — co-signs that
+   * one. When the resulting vote reaches the target state's
+   * `consensusRule.n`, the transition fires in the same call.
    *
-   * An empty array means the proposal is queued; other voters must
-   * `acceptProposal` to reach quorum.
+   * Read the result like this:
    *
-   * Throws when `toState` is not reachable from the derived state, or when
-   * the target state carries a `requires` guard that is not currently
-   * satisfied on this replica.
+   * | `outcomes` | `recordedVote` | `contested` | meaning |
+   * |---|---|---|---|
+   * | non-empty | — | — | the transition fired |
+   * | `[]` | `true` | `false` | your vote landed; waiting for other voters |
+   * | `[]` | `false` | `false` | you had already voted; nothing was written |
+   * | `[]` | — | `true` | the flow is stalled — do not show "awaiting votes" |
+   *
+   * `proposalUri` is always the live proposal for the edge, whether this call
+   * minted it or joined it, so a second agent can be handed it directly and a
+   * UI can offer `rejectProposal` on it.
+   *
+   * Throws when `toState` is not reachable from the derived state, when the
+   * target state carries a `requires` guard that is not currently satisfied
+   * on this replica, or when the instance is already contested.
    */
-  async proposeTransition(toState: string, rationale?: string): Promise<FlowFireOutcome[]> {
+  async proposeTransition(toState: string, rationale?: string): Promise<FlowProposeResult> {
     return this.perspective.proposeFlowTransition(this.uri, toState, rationale);
   }
 

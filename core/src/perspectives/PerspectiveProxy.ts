@@ -1,4 +1,4 @@
-import { LinkCallback, PerspectiveClient, SyncStateChangeCallback, FlowFireOutcome } from "./PerspectiveClient";
+import { LinkCallback, PerspectiveClient, SyncStateChangeCallback, FlowFireOutcome, FlowProposeResult } from "./PerspectiveClient";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
@@ -868,7 +868,7 @@ export class PerspectiveProxy {
         return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
     }
 
-    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string): Promise<FlowFireOutcome[]> {
+    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string): Promise<FlowProposeResult> {
         return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale)
     }
 

@@ -2091,7 +2091,11 @@ async fn propose_flow_transition_handler(
     .map_err(|e| WsRpcError::forbidden(e))?;
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-    let fired = crate::perspectives::flow_instance::propose::propose_flow_transition(
+    // A `ProposeOutcome`, not a bare outcome list: an empty list cannot say
+    // whether the click queued a live proposal, re-pressed one this agent had
+    // already voted on, or landed on a stalled instance — and those want
+    // different UI. See `flow_instance::propose`.
+    let outcome = crate::perspectives::flow_instance::propose::propose_flow_transition(
         &mut perspective,
         &instance_uri,
         &to_state,
@@ -2100,7 +2104,7 @@ async fn propose_flow_transition_handler(
     )
     .await
     .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(serde_json::to_value(fired)?)
+    Ok(serde_json::to_value(outcome)?)
 }
 
 // ── SHACL resolution endpoints ──

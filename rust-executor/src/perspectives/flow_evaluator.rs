@@ -671,6 +671,16 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     out
 }
 
+/// A recomputed [`EvidenceSeal`] together with the evidence it was computed
+/// over, for the one caller that has to *write* that evidence (the mint).
+///
+/// `evidence` is empty for `NoGuard` (the canonical seal is over an empty
+/// bag, by definition) and for `Unmet` (there is nothing to cite).
+pub(crate) struct SealedEvidence {
+    pub seal: EvidenceSeal,
+    pub evidence: Vec<EvidenceItem>,
+}
+
 /// Re-run one target state's `requires` against the CURRENT graph and return
 /// an [`EvidenceSeal`] that a voter can compare with the proposal's stored
 /// hash before co-signing.
@@ -688,6 +698,52 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 /// `acting_did` must be the PROPOSER's DID: `$did`-substituted guards
 /// resolved against the proposer at mint time, so re-verification must
 /// substitute the same identity or the hash could never match.
+///
+/// **This is the one definition of "the seal for state S".** Both places a
+/// vote comes into existence go through it — the co-sign in
+/// `flow_instance::accept` via [`recompute_evidence_hash`], and the mint in
+/// `flow_instance::propose` via this function — so the proposer's own vote is
+/// sealed by exactly the code every other replica re-runs against it.
+pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    flow: &SHACLFlow,
+    record: &FlowInstanceRecord,
+    to_state: &str,
+    acting_did: &str,
+) -> Result<SealedEvidence> {
+    let unmet = |seal| SealedEvidence {
+        seal,
+        evidence: Vec::new(),
+    };
+    let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
+        log::warn!(
+            "recompute_evidence_hash: state `{to_state}` no longer exists on flow `{}`",
+            flow.name
+        );
+        return Ok(unmet(EvidenceSeal::Unmet));
+    };
+    let requires = state.requires.as_deref().unwrap_or_default();
+    if requires.is_empty() {
+        return Ok(unmet(EvidenceSeal::NoGuard));
+    }
+    match evaluate_requires(perspective, requires, record, acting_did).await {
+        RequiresResult::Satisfied(class_names, evidence) => Ok(SealedEvidence {
+            seal: EvidenceSeal::Sealed(evidence_hash(&class_names, &evidence)),
+            evidence,
+        }),
+        RequiresResult::Unmet => Ok(unmet(EvidenceSeal::Unmet)),
+        RequiresResult::Untranslatable(e) => {
+            log::warn!(
+                "recompute_evidence_hash: `{}.{to_state}` became untranslatable: {e:#}",
+                flow.name
+            );
+            Ok(unmet(EvidenceSeal::Unmet))
+        }
+        RequiresResult::QueryFailed(e) => Err(e),
+    }
+}
+
+/// [`recompute_evidence_seal`] without the evidence — what a voter needs.
 pub(crate) async fn recompute_evidence_hash<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     flow: &SHACLFlow,
@@ -695,31 +751,11 @@ pub(crate) async fn recompute_evidence_hash<Q: RequiresQueryable + ?Sized>(
     to_state: &str,
     acting_did: &str,
 ) -> Result<EvidenceSeal> {
-    let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
-        log::warn!(
-            "recompute_evidence_hash: state `{to_state}` no longer exists on flow `{}`",
-            flow.name
-        );
-        return Ok(EvidenceSeal::Unmet);
-    };
-    let requires = state.requires.as_deref().unwrap_or_default();
-    if requires.is_empty() {
-        return Ok(EvidenceSeal::NoGuard);
-    }
-    match evaluate_requires(perspective, requires, record, acting_did).await {
-        RequiresResult::Satisfied(class_names, evidence) => {
-            Ok(EvidenceSeal::Sealed(evidence_hash(&class_names, &evidence)))
-        }
-        RequiresResult::Unmet => Ok(EvidenceSeal::Unmet),
-        RequiresResult::Untranslatable(e) => {
-            log::warn!(
-                "recompute_evidence_hash: `{}.{to_state}` became untranslatable: {e:#}",
-                flow.name
-            );
-            Ok(EvidenceSeal::Unmet)
-        }
-        RequiresResult::QueryFailed(e) => Err(e),
-    }
+    Ok(
+        recompute_evidence_seal(perspective, flow, record, to_state, acting_did)
+            .await?
+            .seal,
+    )
 }
 
 /// Load → evaluate → (confirm) → write, called by the extraction pass once
@@ -859,41 +895,39 @@ pub async fn run_engine_proposal_pass(
     minted
 }
 
-/// Check whether a proposal with the same evidence hash already exists for
-/// the same flow instance AND target state. Keeps the pass idempotent:
-/// minting does not advance `currentState`, so without this check every
-/// later pass re-proposes each satisfied-unconsumed transition — and a
-/// consensus rule counting proposals rather than distinct DIDs could then
-/// be gamed by one agent re-running its own pass. The `to_state` check
-/// matters because two distinct transitions can share identical `requires`
+/// The URI of a **live** proposal carrying this transition's dedup key —
+/// `(evidence_hash, instance_uri, to_state)` — or `None` when there is none.
+///
+/// *Live* excludes any proposal carrying `resolved_as`: that is the recorded
+/// history of a consensus event, not an open proposal, and it must not
+/// suppress a re-mint. Without the exclusion a cyclic flow wedges — same
+/// graph → same seal → the already-settled proposal matches the whole key,
+/// so the mint is skipped and the edge can never fire on the next visit.
+///
+/// The key deliberately carries **no proposer**. That is what lets a second
+/// agent find the one open proposal for an edge and co-sign it instead of
+/// minting an unreachable twin (`flow_instance::propose`). `to_state` is in
+/// the key because two distinct transitions can share identical `requires`
 /// guards and therefore identical evidence hashes.
-pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
+///
+/// Every store failure is an `Err`, with no disposition chosen here: the two
+/// callers need opposite ones. The engine pass fails closed
+/// ([`proposal_already_exists`]) because it retries on the next pass; the
+/// manual path surfaces the error, because a user's click has no next pass.
+pub(crate) async fn find_live_proposal<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
-) -> bool {
+) -> Result<Option<String>> {
     use crate::types::LinkQuery;
     let literal = |s: &str| format!("literal:string:{}", urlencoding::encode(s));
-    // Every lookup below fails CLOSED (treat as already-proposed): a missed
-    // mint on a transient store error is recovered on the next pass, while a
-    // duplicate mint is exactly what this function exists to prevent — see
-    // the invariant above.
-    let hash_links = match store
+    let hash_links = store
         .get_proposal_links(&LinkQuery {
             predicate: Some("ad4m://flow/evidence_hashes".into()),
             target: Some(literal(&transition.evidence_hash)),
             ..Default::default()
         })
         .await
-    {
-        Ok(links) => links,
-        Err(e) => {
-            log::warn!(
-                "proposal_already_exists: evidence-hash lookup failed ({e:#}); \
-                 treating as already-proposed (fail-closed, skipping mint)"
-            );
-            return true;
-        }
-    };
+        .map_err(|e| anyhow!("evidence-hash lookup failed ({e:#})"))?;
     for link in &hash_links {
         let proposal_uri = &link.data.source;
         let links_to = |predicate: &'static str, want: String| async move {
@@ -905,19 +939,9 @@ pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                 })
                 .await
                 .map(|links| links.iter().any(|l| l.data.target == want))
+                .map_err(|e| anyhow!("candidate lookup on {proposal_uri} failed ({e:#})"))
         };
-        let fail_closed = |e: anyhow::Error| {
-            log::warn!(
-                "proposal_already_exists: candidate lookup on {proposal_uri} failed \
-                 ({e:#}); treating as already-proposed (fail-closed, skipping mint)"
-            );
-        };
-        // A proposal carrying `resolved_as` is the recorded history of a
-        // consensus event, not a live proposal, and must not suppress a re-mint.
-        // Without this a cyclic flow wedges: same graph → same seal → the
-        // already-settled proposal matches the whole dedup key, so the mint
-        // is skipped and the edge can never fire on the next visit.
-        match store
+        let resolved = store
             .get_proposal_links(&LinkQuery {
                 source: Some(proposal_uri.clone()),
                 predicate: Some(
@@ -926,32 +950,51 @@ pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                 ..Default::default()
             })
             .await
-        {
-            Ok(links) if !links.is_empty() => continue,
-            Ok(_) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
+            .map_err(|e| anyhow!("candidate lookup on {proposal_uri} failed ({e:#})"))?;
+        if !resolved.is_empty() {
+            continue;
         }
-        match links_to("ad4m://flow/instance", transition.instance_uri.clone()).await {
-            Ok(false) => continue,
-            Ok(true) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
+        if !links_to("ad4m://flow/instance", transition.instance_uri.clone()).await? {
+            continue;
         }
-        match links_to("ad4m://flow/to_state", literal(&transition.to_state)).await {
-            Ok(true) => return true,
-            Ok(false) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
+        if links_to("ad4m://flow/to_state", literal(&transition.to_state)).await? {
+            return Ok(Some(proposal_uri.clone()));
         }
     }
-    false
+    Ok(None)
+}
+
+/// Idempotency for the **engine pass**: has a proposal with this transition's
+/// evidence hash already been minted for the same instance AND target state?
+///
+/// Minting does not advance `currentState`, so without this check every later
+/// pass re-proposes each satisfied-unconsumed transition — and a consensus
+/// rule counting proposals rather than distinct DIDs could then be gamed by
+/// one agent re-running its own pass.
+///
+/// **Both guarantees are about the engine pass**, and the fail-closed
+/// disposition below is too: it assumes a caller that runs again shortly and
+/// whose acting DID is this replica's. A caller that runs once, on a human's
+/// click, satisfies neither — it must call [`find_live_proposal`] and choose
+/// its own disposition. `flow_instance::propose` does exactly that; this
+/// wrapper exists so the engine's behaviour is unchanged by that split.
+pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
+    store: &S,
+    transition: &SatisfiedTransition,
+) -> bool {
+    match find_live_proposal(store, transition).await {
+        Ok(found) => found.is_some(),
+        // Fail CLOSED: a missed mint on a transient store error is recovered
+        // on the next pass, while a duplicate mint is exactly what this
+        // function exists to prevent — see the invariant above.
+        Err(e) => {
+            log::warn!(
+                "proposal_already_exists: {e:#}; treating as already-proposed \
+                 (fail-closed, skipping mint)"
+            );
+            true
+        }
+    }
 }
 
 /// The one perspective call the idempotency check needs, behind a trait so
