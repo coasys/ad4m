@@ -377,7 +377,7 @@ async function proposeTransition(
   // The engine mints proposals with `create_subject` on the hardwired
   // `FlowTransitionProposal` class (`flow_classes.rs::write_flow_transition_proposal`),
   // so creating the @Model instance produces byte-identical links.
-  return (await (FlowTransitionProposal as any).create(p, {
+  const proposal = (await (FlowTransitionProposal as any).create(p, {
     flowInstance: instance.uri,
     fromState,
     toState,
@@ -386,6 +386,26 @@ async function proposeTransition(
     evidence: evidence.map((e) => e.id),
     ...(rationale ? { rationale } : {}),
   })) as FlowTransitionProposal;
+
+  // GAP 4a — MINTING A PROPOSAL DOES NOT DERIVE ANYTHING.
+  // `schedule_flow_consensus_pass` is called from exactly one place:
+  // `perspective_instance.rs:1601`, inside `diff_from_link_language` — the
+  // INBOUND SYNC path. A local write never queues a pass. So on a local
+  // perspective (and for every write an app makes on its own replica) the
+  // proposal lands and the derived state simply never materialises.
+  //
+  // The one client-reachable trigger is `acceptProposal`, which ends in
+  // `run_flow_consensus_pass`. Re-signing a proposal this DID already signed
+  // writes no link (the `already` branch of `accept.rs`) but still runs the
+  // pass — so the proposer accepting their own mint is a no-op vote used
+  // purely as a "derive now" call. That is what this line is.
+  //
+  // It has one happy side effect worth keeping even after GAP 1 is closed:
+  // `acceptProposal` re-verifies the seal, so a client whose hash mirror has
+  // drifted finds out HERE, at mint time, with a clear error — instead of
+  // silently minting proposals nobody can ever co-sign.
+  await instance.acceptProposal(proposal.id);
+  return proposal;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -407,40 +427,34 @@ async function createUnder<T extends Ad4mModel>(
 }
 
 /**
- * GAP 4 — NO "DERIVE NOW".
+ * GAP 4 — NO "DERIVE NOW", AND NO PASS AT ALL ON LOCAL WRITES.
  *
  * `FlowInstance.currentStateName` reads `ad4m://flow/current_state`, a `Local`
- * link only this replica's own consensus pass writes. `acceptProposal` runs
- * that pass for the accepting agent, so their cache is fresh immediately — but
- * `rejectProposal` does not, and a third agent who merely watches never has a
- * fresh answer until a sync-triggered debounced sweep reaches them.
+ * link only this replica's own consensus pass writes. Two consequences an app
+ * hits immediately:
+ *
+ *   (a) The pass is scheduled only from `diff_from_link_language`
+ *       (`perspective_instance.rs:1601`) — the inbound sync path. Nothing a
+ *       client writes locally queues one. On a perspective that is not a
+ *       neighbourhood, the derived state NEVER materialises on its own.
+ *   (b) `rejectProposal` runs no pass either, so retracting a settling vote
+ *       leaves your cache claiming the state it had before the retraction.
  *
  * There is no `instance.derive()` / `perspective.deriveFlowState(uri)` and no
- * subscription (GAP 6), so the only thing an app can do is poll. This helper
- * is that poll, and its existence is the finding.
+ * subscription (GAP 6). The only client-reachable trigger is `acceptProposal`,
+ * and re-signing a proposal you already signed writes nothing while still
+ * running the pass — so this helper asks an agent to re-affirm a vote it has
+ * already cast, purely to force a re-derivation. The fact that this helper has
+ * to exist IS the finding.
  */
-async function waitForState(
+async function deriveNow(
   p: PerspectiveProxy,
   subject: string,
-  expected: string,
-  timeoutMs = 30_000,
+  alreadySignedProposalUri: string,
 ): Promise<FlowInstance> {
-  const deadline = Date.now() + timeoutMs;
-  let last = "(none)";
-  for (;;) {
-    const found = await FlowInstance.findAll(p, { subject });
-    if (found.length > 0) {
-      last = found[0].currentStateName;
-      if (last === expected) return found[0];
-    }
-    if (Date.now() > deadline) {
-      throw new Error(
-        `flow on ${subject} did not reach "${expected}" within ${timeoutMs}ms ` +
-          `(last derived: "${last}")`,
-      );
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
+  const inst = await instanceOn(p, subject);
+  await inst.acceptProposal(alreadySignedProposalUri);
+  return instanceOn(p, subject);
 }
 
 /** Re-read a live instance handle for a given agent's perspective. */
@@ -680,8 +694,8 @@ describe("Flow engine handover — a task flow driven by three agents", function
       );
 
       // `{ n: 1 }` into InProgress: the proposer's own mint IS the first vote,
-      // so this edge is already settled. Bob's own pass materialises it.
-      const afterStart = await waitForState(bobP, task.id, "InProgress");
+      // so this edge settles on the pass `proposeTransition` had to force.
+      const afterStart = await instanceOn(bobP, task.id);
       expect(afterStart.currentStateName).to.equal("InProgress");
       expect(
         afterStart.availableTransitions.map((t) => t.actionName),
@@ -707,7 +721,7 @@ describe("Flow engine handover — a task flow driven by three agents", function
         "InReview",
         bobDid,
       );
-      const afterSubmit = await waitForState(bobP, task.id, "InReview");
+      const afterSubmit = await instanceOn(bobP, task.id);
       expect(afterSubmit.currentStateName).to.equal("InReview");
 
       // ── 6. The Done edge: two distinct signatures ──────────────────────
@@ -747,7 +761,7 @@ describe("Flow engine handover — a task flow driven by three agents", function
       expect(fired[0].voters).to.have.members([aliceDid, bobDid]);
       expect(fired[0].contributingProposalUris).to.include(doneProposal.id);
 
-      const done = await waitForState(bobP, task.id, "Done");
+      const done = await instanceOn(bobP, task.id);
       expect(done.currentStateName).to.equal("Done");
       expect(done.availableTransitions, "Done is terminal — no buttons").to.deep.equal([]);
 
@@ -761,7 +775,17 @@ describe("Flow engine handover — a task flow driven by three agents", function
       const retracted = await bobsInst.rejectProposal(doneProposal.id);
       expect(retracted, "exactly one link goes: Bob's acceptedBy").to.equal(1);
 
-      const regressed = await waitForState(bobP, task.id, "InReview");
+      // GAP 4b, visible: `rejectProposal` runs no consensus pass, so Bob's own
+      // cache still claims "Done" — a UI that renders `currentStateName` right
+      // after a retraction shows a state the graph no longer supports.
+      expect(
+        (await instanceOn(bobP, task.id)).currentStateName,
+        "the Local cache is stale immediately after a retraction (GAP 4b)",
+      ).to.equal("Done");
+
+      // Alice re-affirms the vote she already cast when she minted. No link is
+      // written; the pass runs; the truth comes out.
+      const regressed = await deriveNow(aliceP, task.id, doneProposal.id);
       expect(
         regressed.currentStateName,
         "retracting a settling vote moves the flow BACK — this is the contract, not a bug",
@@ -769,7 +793,7 @@ describe("Flow engine handover — a task flow driven by three agents", function
 
       // Alice's proposal is untouched and still standing: reject withdraws
       // your own links, it does not cancel anyone else's proposal.
-      const survivors = await (await instanceOn(bobP, task.id)).proposals();
+      const survivors = await regressed.proposals();
       expect(
         survivors.map((x) => x.id),
         "Alice's proposal survives Bob's retraction",
@@ -779,10 +803,17 @@ describe("Flow engine handover — a task flow driven by three agents", function
       const refired = await (await instanceOn(bobP, task.id)).acceptProposal(doneProposal.id);
       expect(refired.map((f) => f.toState)).to.include("Done");
 
-      // Charlie, who has voted on nothing, is the GAP 4 case: his Local cache
-      // was never written by his own pass. He must poll for it.
-      const charlieSees = await waitForState(charlieP, task.id, "Done", 60_000);
-      expect(charlieSees.currentStateName).to.equal("Done");
+      // GAP 4c — CHARLIE IS THE PURE READER, AND HE IS STUCK.
+      // Charlie has signed nothing on this flow. `acceptProposal` is the only
+      // client-reachable way to run a pass, so the one thing that would give
+      // him a derived state is casting a vote he may not want to cast. His
+      // cache is therefore whatever it was — on a local perspective, nothing.
+      // Every list view in WE is this case.
+      const charlieSees = await instanceOn(charlieP, task.id);
+      expect(
+        charlieSees.currentStateName,
+        "a reader who has not voted has no way to derive — this is GAP 4, asserted",
+      ).to.not.equal("Done");
     });
   });
 
@@ -848,7 +879,7 @@ describe("Flow engine handover — a task flow driven by three agents", function
       expect(afterCharlie[0].toState).to.equal("Granted");
       expect(afterCharlie[0].voters).to.have.members([aliceDid, bobDid, charlieDid]);
 
-      const granted = await waitForState(charlieP, frontend.id, "Granted");
+      const granted = await instanceOn(charlieP, frontend.id);
       expect(granted.currentStateName).to.equal("Granted");
 
       // ── Now the task flow, with Done gated on frontend reviewers ───────
@@ -885,7 +916,7 @@ describe("Flow engine handover — a task flow driven by three agents", function
         "InProgress",
         aliceDid,
       );
-      await waitForState(aliceP, task.id, "InProgress");
+      expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("InProgress");
       await proposeTransition(
         aliceP,
         taskFlow,
@@ -894,7 +925,7 @@ describe("Flow engine handover — a task flow driven by three agents", function
         "InReview",
         aliceDid,
       );
-      await waitForState(aliceP, task.id, "InReview");
+      expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("InReview");
 
       // Alice is the `ad4m` reviewer, not a frontend one. Her proposal into
       // Done is a vote that the gate does not count, so the edge stays open.
@@ -1030,7 +1061,7 @@ describe("Flow engine handover — a task flow driven by three agents", function
           "InProgress",
           aliceDid,
         );
-        await waitForState(aliceP, task.id, "InProgress");
+        expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("InProgress");
         await proposeTransition(
           aliceP,
           taskFlow,
@@ -1039,7 +1070,7 @@ describe("Flow engine handover — a task flow driven by three agents", function
           "InReview",
           aliceDid,
         );
-        await waitForState(aliceP, task.id, "InReview");
+        expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("InReview");
 
         // Charlie — whose grant flow never left `Proposed` — proposes Done.
         // His own mint is his own vote, and `{ n: 1, fromRole: frontend }`
@@ -1055,7 +1086,7 @@ describe("Flow engine handover — a task flow driven by three agents", function
           "Closing this as the (allegedly) frontend reviewer.",
         );
 
-        const settled = await waitForState(charlieP, task.id, "Done");
+        const settled = await instanceOn(charlieP, task.id);
         expect(
           settled.currentStateName,
           "THE HOLE: an ungranted reviewer settled a fromRole-gated edge, because " +
