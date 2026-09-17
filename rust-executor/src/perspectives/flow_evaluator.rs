@@ -896,7 +896,7 @@ pub async fn run_engine_proposal_pass(
 }
 
 /// **Every** live proposal carrying this transition's dedup key —
-/// `(evidence_hash, instance_uri, to_state)` — in store order; empty when
+/// `(evidence_hash, instance_uri, to_state)` — sorted by URI; empty when
 /// there is none.
 ///
 /// *Live* excludes any proposal carrying `resolved_as`: that is the recorded
@@ -920,6 +920,16 @@ pub async fn run_engine_proposal_pass(
 /// breaking invariant 4 (`flow_instance::propose`). Returning the whole set
 /// lets that caller prefer its own edge. The engine pass only asks whether the
 /// set is non-empty, which is what it asked before.
+///
+/// **Sorted by URI**, because the store's own iteration order is arbitrary —
+/// `query_links` walks matched quads and never orders them, so the same graph
+/// can hand back the same two candidates in either order on two runs. Two
+/// things need that not to be true. The manual path picks the first
+/// `Joinable` among twins, and unordered input makes that pick vary run to
+/// run and replica to replica for no reason (harmless to quorum, since
+/// `fold::settle_edge` pools across twins, but it scatters co-signs). And the
+/// ordering-dependent bug above cannot be tested through the store at all
+/// unless the order is fixed. A total order over URIs is enough for both.
 ///
 /// Every store failure is an `Err`, with no disposition chosen here: the two
 /// callers need opposite ones. The engine pass fails closed
@@ -973,6 +983,7 @@ pub(crate) async fn find_live_proposals<S: ProposalLookup + ?Sized>(
             found.push(proposal_uri.clone());
         }
     }
+    found.sort();
     Ok(found)
 }
 
@@ -2118,6 +2129,10 @@ mod tests {
         /// the dedup key exists to gather. Only this caller can tell the two
         /// apart (it knows the acting DID and the derived `from_state`), so
         /// the lookup's whole job is to not decide for it.
+        ///
+        /// It does decide the ORDER, though: sorted by URI, not however the
+        /// store happened to iterate. Two runs over one graph must classify
+        /// the same candidate first.
         #[tokio::test]
         async fn every_proposal_sharing_the_dedup_key_is_returned_not_just_the_first() {
             let both = |uri: &str| {
@@ -2126,26 +2141,28 @@ mod tests {
                     link(uri, "ad4m://flow/instance", "ad4m://flow/instance/1"),
                 )
             };
-            let (a, link_a) = both("proposal://other-edge");
-            let (b, link_b) = both("proposal://our-edge");
+            let (a, link_a) = both("proposal://aaa");
+            let (b, link_b) = both("proposal://bbb");
+            // Fed to the store in DESCENDING order, which the real store is
+            // free to do: `query_links` never orders its matches.
             let store = ScriptedStore {
                 by_predicate: HashMap::from([
                     (
                         "ad4m://flow/evidence_hashes".to_string(),
                         Some(vec![
-                            link(&a, "ad4m://flow/evidence_hashes", "literal:string:hash"),
                             link(&b, "ad4m://flow/evidence_hashes", "literal:string:hash"),
+                            link(&a, "ad4m://flow/evidence_hashes", "literal:string:hash"),
                         ]),
                     ),
                     (
                         "ad4m://flow/instance".to_string(),
-                        Some(vec![link_a, link_b]),
+                        Some(vec![link_b, link_a]),
                     ),
                     (
                         "ad4m://flow/to_state".to_string(),
                         Some(vec![
-                            link(&a, "ad4m://flow/to_state", "literal:string:scoped"),
                             link(&b, "ad4m://flow/to_state", "literal:string:scoped"),
+                            link(&a, "ad4m://flow/to_state", "literal:string:scoped"),
                         ]),
                     ),
                 ]),
@@ -2156,7 +2173,8 @@ mod tests {
                     .await
                     .expect("a clean store must not error"),
                 vec![a, b],
-                "both matches, in store order — the caller picks its own edge"
+                "both matches, sorted by URI rather than left in the store's arbitrary \
+                 order — the caller picks its own edge, and it must pick the same one twice"
             );
             // The engine pass asked "is there one?" before and still does.
             assert!(proposal_already_exists(&store, &transition()).await);

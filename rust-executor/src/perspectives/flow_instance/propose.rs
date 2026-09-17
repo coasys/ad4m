@@ -200,6 +200,14 @@ pub async fn propose_flow_transition(
                 break;
             }
             // First one wins; a second is a twin we must not also sign.
+            //
+            // Ignoring the rest is safe ONLY because `fold::settle_edge`
+            // pools votes across every atom on one `(from_state, to_state)`
+            // edge — `quorum_is_counted_across_twin_proposals_on_one_edge`
+            // pins it. Our vote on whichever twin we pick therefore counts
+            // toward the same quorum as the votes sitting on the others. If
+            // that pooling ever goes away this line quietly becomes a
+            // vote-splitter, and nothing near it would say so.
             LiveProposalRole::Joinable => {
                 joinable.get_or_insert_with(|| uri.clone());
             }
@@ -211,6 +219,11 @@ pub async fn propose_flow_transition(
     }
 
     let (proposal_uri, minted, recorded_vote, outcomes) = match (already_voted, joinable) {
+        // `already_voted` beats an earlier-found `Joinable` — the `break`
+        // above argued in one direction, this arm is the same argument in the
+        // other. Our vote is already on this edge, and because the fold pools
+        // across twins it already counts; co-signing a twin as well would add
+        // a second link the fold ignores and a second atom to keep in sync.
         (Some(uri), _) => {
             log::debug!(
                 "propose_flow_transition: {instance_uri} → {to_state} already carries a \
@@ -233,10 +246,15 @@ pub async fn propose_flow_transition(
         // another edge. Both mean this edge has no open proposal to join.
         (None, None) => {
             if !live.is_empty() {
+                // Name them. The per-candidate reason is `debug!`, so at
+                // `info` this warn is all an operator gets — and "3 of them"
+                // without saying which three leaves them nowhere to look.
                 log::warn!(
                     "propose_flow_transition: {} proposal(s) share the dedup key of \
-                     {instance_uri} → {to_state} but none is on this edge; minting our own",
-                    live.len()
+                     {instance_uri} → {to_state} but none is on this edge; minting our \
+                     own. Candidates: {}",
+                    live.len(),
+                    live.join(", ")
                 );
             }
             mint(perspective, &transition, &acting_did, rationale, context).await?

@@ -1941,3 +1941,127 @@ async fn the_engine_pass_never_reaches_quorum_by_itself_however_many_dids_run_it
         derived.settled
     );
 }
+
+// ---------------------------------------------------------------------------
+// The manual path: two candidates on one dedup key, foreign one first
+// ---------------------------------------------------------------------------
+
+/// Two guard-identical edges into ONE state. The dedup key
+/// `(evidence_hash, instance, to_state)` carries no `from_state`, so a
+/// proposal on `elsewhere → merged` shares the whole key of a call proposing
+/// `here → merged`. What orders the two in the store is their URIs, which say
+/// nothing about which edge either sits on.
+fn merge_flow() -> serde_json::Value {
+    let guard = serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]);
+    serde_json::json!({
+        "name": "Merge",
+        "namespace": "merge://",
+        "states": [
+            { "name": "here", "value": 0.0, "requires": guard },
+            { "name": "elsewhere", "value": 0.0, "requires": guard },
+            { "name": "merged", "value": 1.0, "requires": guard },
+        ],
+        "transitions": [
+            { "action_name": "FromHere", "from_state": "here", "to_state": "merged", "actions": [] },
+            { "action_name": "FromElsewhere", "from_state": "elsewhere", "to_state": "merged", "actions": [] },
+        ],
+    })
+}
+
+/// A joinable proposal sitting BEHIND a foreign one is still the one co-signed.
+///
+/// This is the ordering the fix exists for, and the only test that pins it:
+/// two live proposals share the call's dedup key, the FOREIGN one is first in
+/// scan order, and the joinable one is second. A first-match lookup — or a
+/// classification loop replaced by `.first()`, or one that `break`s on the
+/// first non-joinable candidate — classifies the foreign proposal, never
+/// reaches Bob's, and mints. That mint is invariant 4 broken in the one shape
+/// it exists to cover: the vote is split across two atoms on one edge, and the
+/// next press mints again.
+///
+/// Every other test on this path has exactly one candidate, so all of them
+/// pass on the broken code.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_joinable_proposal_behind_a_foreign_one_is_still_the_one_co_signed() {
+    let mut f = seed_flow(merge_flow(), "here").await;
+    f.seed_task(TASK, "Merge the two branches").await;
+    set_consensus_rule(&mut f, "merge://Merge.merged", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    // One seal for `merged`, so both proposals below carry the whole key.
+    let seal = seal_for(&f, "merged").await;
+
+    // Scan order is `find_live_proposals`' sort, which is by URI — NOT the
+    // write order, and not the store's own iteration order, which is
+    // arbitrary. So the ids are what put the foreign proposal first.
+    let carol = TestSigner::generate();
+    let foreign =
+        sync_proposal_from(&mut f, &carol, "foreign-1", "elsewhere", "merged", &seal).await;
+    let bob = TestSigner::generate();
+    let joinable = sync_proposal_from(&mut f, &bob, "joinable-1", "here", "merged", &seal).await;
+
+    assert!(
+        foreign < joinable,
+        "this test only exercises the ordering bug while the FOREIGN proposal is scanned \
+         first, and scan order is the URI sort; rename the two above until it is — do not \
+         drop this assertion, without it the test can pass vacuously"
+    );
+    assert_eq!(
+        f.derived().await.state,
+        "here",
+        "one vote each at n = 2 settles nothing; the instance has not moved"
+    );
+
+    let out = propose_flow_transition(&mut f.perspective, &instance, "merged", None, &f.ctx)
+        .await
+        .expect("propose must reach past the foreign candidate");
+
+    assert_eq!(
+        out.proposal_uri, joinable,
+        "the proposal on OUR edge is the one co-signed, not the one leaving `elsewhere`"
+    );
+    assert!(
+        !out.minted,
+        "minting past a joinable proposal splits the vote and mints again on the next \
+         press: {out:?}"
+    );
+    assert!(out.recorded_vote, "our vote landed on Bob's proposal");
+    assert_eq!(
+        out.outcomes.len(),
+        1,
+        "two DIDs on one edge IS quorum at n = 2"
+    );
+    assert_eq!(out.outcomes[0].to_state, "merged");
+
+    let mut both = vec![foreign.clone(), joinable.clone()];
+    both.sort();
+    assert_eq!(
+        proposals_to(&f, "merged").await,
+        both,
+        "no third proposal was written"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &joinable).await,
+        1,
+        "exactly one co-sign, on the joinable proposal"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &foreign).await,
+        0,
+        "and none on the foreign one — signing it would vote on an edge we are not on"
+    );
+
+    let derived = f.derived().await;
+    assert_eq!(derived.state, "merged", "the edge settled");
+    assert_eq!(derived.settled.len(), 1);
+    assert_eq!(
+        derived.settled[0].atom_uris,
+        vec![joinable],
+        "settled by the co-signed proposal alone"
+    );
+    let mut expected = vec![acting_did(&f), bob.did.clone()];
+    expected.sort();
+    assert_eq!(
+        derived.settled[0].voters, expected,
+        "both DIDs on the `here → merged` edge are counted"
+    );
+}
