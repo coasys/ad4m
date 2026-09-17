@@ -142,7 +142,7 @@ pub(super) fn matches_where(
 /// Handles all [`WhereCondition`] variants: exact match (string, number,
 /// bool), set membership (string/number arrays), and operator-based
 /// comparisons ([`WhereOps`]).
-pub(super) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool {
+pub(crate) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool {
     match condition {
         WhereCondition::String(expected) => match val {
             Value::String(s) => s == expected,

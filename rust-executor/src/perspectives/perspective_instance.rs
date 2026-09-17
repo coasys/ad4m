@@ -481,7 +481,7 @@ pub struct PerspectiveInstance {
     pub is_fast_polling: bool,
     pub retries: u32,
 
-    is_teardown: Arc<AtomicBool>,
+    pub(crate) is_teardown: Arc<AtomicBool>,
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
@@ -501,6 +501,12 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// The one debounced flow consensus pass this perspective may have
+    /// queued for inbound neighbourhood links — see
+    /// `flow_instance::trigger`. A std mutex: held for a field swap, never
+    /// across an await.
+    pub(crate) flow_pass_queue:
+        Arc<std::sync::Mutex<crate::perspectives::flow_instance::trigger::FlowPassQueue>>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -572,6 +578,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
         }
@@ -1586,6 +1593,13 @@ impl PerspectiveInstance {
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
+
+        // A peer's proposal, vote or flow-instance row changes what this
+        // replica's flow consensus pass would derive, and only that pass can
+        // update the (Local) cache and marks here — so queue one. Debounced
+        // and scoped; a no-op for diffs outside the flow vocabulary.
+        self.schedule_flow_consensus_pass(&decorated_diff);
+
         self.pubsub_publish_diff(decorated_diff).await;
 
         Ok(())
