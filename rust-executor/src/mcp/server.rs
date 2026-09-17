@@ -76,6 +76,23 @@ impl Default for McpServerConfig {
     }
 }
 
+/// Why the HTTPS listener has no port, when it has none.
+///
+/// One variant per reason rather than an `Option`, because the two refusals
+/// need different warnings and different operator actions: one says lower
+/// `--mcp-port`, the other says move it away from the RPC HTTPS port. Folding
+/// them into `None` would make the log say "choose a lower MCP port" to an
+/// operator whose port is fine and whose collision is elsewhere.
+#[derive(Debug, PartialEq, Eq)]
+enum TlsPort {
+    /// `mcp_port + 1`, free of the RPC port's HTTPS port as far as config says.
+    Use(u16),
+    /// `--mcp-port` is `u16::MAX`; there is no port above it.
+    NoPortAbove,
+    /// `mcp_port + 1` is the RPC server's own HTTPS port, which binds first.
+    ClashesWithRpcTls(u16),
+}
+
 /// The port the HTTPS listener takes: one above the plain MCP port.
 ///
 /// Derived rather than configured because an operator who has already chosen
@@ -83,10 +100,18 @@ impl Default for McpServerConfig {
 /// higher is a knob with no decision behind it. A deployment that needs the
 /// two ports apart is the reason to add the flag, and it does not exist yet.
 ///
-/// `None` at the top of the range, where there is no port above: the plain
-/// listener still starts, and the caller says why HTTPS did not.
-fn resolve_tls_port(plain_port: u16) -> Option<u16> {
-    plain_port.checked_add(1)
+/// Derivation is cheap to get wrong, so the one collision this executor can
+/// see from config — its own RPC HTTPS port — is checked here rather than left
+/// to the bind. Every other collision (a neighbouring executor's plain MCP
+/// port, say: two executors per host is this fleet's normal shape, and `+1`
+/// walks straight into the neighbour) is invisible to config and is caught by
+/// binding the socket before the caller is told HTTPS is up.
+fn resolve_tls_port(plain_port: u16, rpc_tls_port: u16) -> TlsPort {
+    match plain_port.checked_add(1) {
+        None => TlsPort::NoPortAbove,
+        Some(port) if port == rpc_tls_port => TlsPort::ClashesWithRpcTls(port),
+        Some(port) => TlsPort::Use(port),
+    }
 }
 
 /// Where to bind, given whether anything gates access.
@@ -287,8 +312,16 @@ fn mcp_router(context: &McpContext, initial_token: Option<String>) -> axum::Rout
 ///
 /// Returns whether the HTTPS listener actually bound. The plain listener reads
 /// that to decide whether it can narrow to loopback — see
-/// [`resolve_plain_host`] — so the two warn-and-continue paths below must
-/// report `false`, not merely log.
+/// [`resolve_plain_host`] — so every warn-and-continue path below must report
+/// `false`, not merely log.
+///
+/// "Actually bound" is why the socket is created here, synchronously, and
+/// handed to `from_tcp_rustls`, rather than letting `bind_rustls` bind inside
+/// the spawned task. Spawning first would make the returned `true` a
+/// prediction: on a port conflict the cleartext listener would already have
+/// narrowed to loopback, and the failure would arrive later, from a detached
+/// task, with no remote MCP surface left at all. Binding first turns that
+/// outcome into `false` — no HTTPS, cleartext stays reachable, loud warning.
 async fn start_tls_listener(
     context: &McpContext,
     initial_token: Option<String>,
@@ -304,12 +337,23 @@ async fn start_tls_listener(
         );
         return Ok(false);
     }
-    let Some(tls_port) = resolve_tls_port(plain_port) else {
-        warn!(
-            "MCP: no port above --mcp-port={plain_port}, so the HTTPS MCP listener is not \
-             started. Choose a lower MCP port."
-        );
-        return Ok(false);
+    let tls_port = match resolve_tls_port(plain_port, tls.tls_port) {
+        TlsPort::Use(port) => port,
+        TlsPort::NoPortAbove => {
+            warn!(
+                "MCP: no port above --mcp-port={plain_port}, so the HTTPS MCP listener is not \
+                 started. Choose a lower MCP port."
+            );
+            return Ok(false);
+        }
+        TlsPort::ClashesWithRpcTls(port) => {
+            warn!(
+                "MCP: the HTTPS MCP port is --mcp-port + 1 = {port}, which is already the \
+                 executor's RPC HTTPS port, so the HTTPS MCP listener is not started. Move \
+                 --mcp-port so that --mcp-port + 1 is free."
+            );
+            return Ok(false);
+        }
     };
 
     let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
@@ -320,18 +364,37 @@ async fn start_tls_listener(
     .map_err(|e| anyhow::anyhow!("MCP TLS config error: {}", e))?;
 
     let addr = SocketAddr::from(([0, 0, 0, 0], tls_port));
+
+    // Bind before reporting success: a conflict here has to degrade to "no
+    // HTTPS", not to "no remote MCP at all". See the doc comment above.
+    let std_listener = match std::net::TcpListener::bind(addr) {
+        Ok(listener) => listener,
+        Err(e) => {
+            warn!(
+                "MCP: could not bind the HTTPS MCP listener on {addr}: {e}. HTTPS MCP is not \
+                 started; the cleartext listener keeps its usual address. Free port {tls_port} \
+                 and restart the executor to serve MCP over TLS."
+            );
+            return Ok(false);
+        }
+    };
+    // axum-server drives this socket from tokio; a blocking accept would stall
+    // the runtime thread it lands on.
+    std_listener.set_nonblocking(true)?;
+
     let router = mcp_router(context, initial_token);
     info!("Starting AD4M MCP server (HTTPS) on https://{}", addr);
     tokio::spawn(async move {
-        axum_server::bind_rustls(addr, rustls_config)
+        axum_server::from_tcp_rustls(std_listener, rustls_config)
             .serve(router.into_make_service())
             .await
-            // Name the outage, not just the listener that caused it. We already
-            // returned `true`, so `resolve_plain_host` has narrowed the cleartext
-            // listener to loopback on the strength of this task binding. An
-            // operator reading "TLS server error" reasonably concludes HTTPS is
-            // missing and the rest still works; what actually happened is that
-            // MCP has no remote surface at all.
+            // Reached only if serving stops after the socket was ours, so this
+            // is a running listener dying rather than a failure to start.
+            // Name the outage, not just the listener that caused it: by now
+            // `resolve_plain_host` has narrowed the cleartext listener to
+            // loopback, so an operator reading "TLS server error" reasonably
+            // concludes HTTPS is missing and the rest still works; what
+            // actually happened is that MCP has no remote surface at all.
             .unwrap_or_else(|e| {
                 log::error!(
                     "MCP HTTPS listener on port {tls_port} stopped: {e}. Remote MCP is now \
@@ -375,14 +438,27 @@ mod tests {
 
     #[test]
     fn the_https_port_sits_one_above_the_plain_one() {
-        assert_eq!(resolve_tls_port(3001), Some(3002));
-        assert_eq!(resolve_tls_port(0), Some(1));
+        assert_eq!(resolve_tls_port(3001, 12000), TlsPort::Use(3002));
+        assert_eq!(resolve_tls_port(0, 12000), TlsPort::Use(1));
     }
 
     #[test]
     fn there_is_no_https_port_above_the_last_one() {
         // The plain listener still starts; only HTTPS is refused, loudly.
-        assert_eq!(resolve_tls_port(u16::MAX), None);
+        assert_eq!(resolve_tls_port(u16::MAX, 12000), TlsPort::NoPortAbove);
+    }
+
+    #[test]
+    fn the_rpc_https_port_is_not_taken_from_the_rpc_server() {
+        // --mcp-port one below the RPC HTTPS port would send MCP to bind a
+        // port the executor itself is about to take. Refused by name, so the
+        // warning tells the operator which of the two ports to move.
+        assert_eq!(
+            resolve_tls_port(12000, 12001),
+            TlsPort::ClashesWithRpcTls(12001)
+        );
+        // One away in the other direction is fine: only the derived port matters.
+        assert_eq!(resolve_tls_port(12001, 12001), TlsPort::Use(12002));
     }
 
     #[test]
