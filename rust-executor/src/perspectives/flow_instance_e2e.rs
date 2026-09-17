@@ -2019,3 +2019,138 @@ async fn the_engine_pass_never_reaches_quorum_by_itself_however_many_dids_run_it
         derived.settled
     );
 }
+
+/// **The real `get_links` seam, not a stub of it.**
+///
+/// Every other test that touches role grants asserts on a *derived state*, and
+/// the unit suite in `flow_instance/roles.rs` hands `resolve` grant links that
+/// it constructed itself — links the production path could not have fetched.
+/// So when `didProperty` resolution was broken (a property **name** sent to
+/// `get_links`, which wants an RDF **predicate**), a fully green suite said
+/// nothing: the seam that was broken was precisely the seam the tests stubbed.
+/// Since #1027 that meant every `didProperty` role grant was dated from the
+/// instance's own timestamp instead of the assignment link — a wider
+/// eligibility window than any rule asked for.
+///
+/// This test walks the production path and pins the contract at the store
+/// boundary itself, so the next spelling drift is a red test rather than a
+/// silently widened window:
+///
+/// 1. the property **name** finds the assignment link through the class shape;
+/// 2. the predicate spelling finds the same link (a hand-written SDNA may use
+///    either, and a role rule must not gate differently depending on which);
+/// 3. a name the class does not declare is an `Err`, never an empty predicate;
+/// 4. the window `resolve` recomputes is dated from the **assignment**, and is
+///    strictly later than the fallback it used to silently take.
+///
+/// Fails on `8bb33678d~1` at assertion 1: `grant_links` comes back empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_did_property_grant_link_travels_through_the_real_store() {
+    use super::flow_evaluator::{requires_query_input, RequiresQueryable};
+    use super::flow_instance::roles::resolve_role_grants;
+    use super::flow_instance::time::parse_link_timestamp;
+    use super::shacl_parser::ModelQuery;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE).await;
+    // The instance's own links are written first; the assignment comes after,
+    // so the two datings are distinguishable and the fallback is the earlier.
+    tick().await;
+    grant_owner_role(&mut f).await;
+    let me = acting_did(&f);
+
+    // 1. The store boundary: `owner` is the SDNA property NAME; the graph
+    //    holds `ns://owner`. Before the fix this vector was empty.
+    let by_name = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("owner"), &me)
+        .await
+        .expect("role_grant_links by property name");
+    assert_eq!(
+        by_name.grant_links.len(),
+        1,
+        "the assignment link must be reachable by the didProperty NAME the SDNA declares, \
+         not only by the predicate the graph stores: {:?}",
+        by_name.grant_links
+    );
+    assert_eq!(
+        by_name.grant_links[0].data.predicate.as_deref(),
+        Some("ns://owner"),
+        "and the link found must be the assignment itself"
+    );
+
+    // 2. Either spelling, one answer.
+    let by_predicate = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("ns://owner"), &me)
+        .await
+        .expect("role_grant_links by predicate");
+    assert_eq!(
+        by_predicate.grant_links, by_name.grant_links,
+        "name and predicate spellings must resolve to the same links"
+    );
+
+    // 3. Unresolvable fails closed rather than degrading to an empty
+    //    predicate — which is what "granted since forever" looked like.
+    let err = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("noSuchProperty"), &me)
+        .await
+        .expect_err("a didProperty the class does not declare must be an Err");
+    assert!(
+        format!("{err:#}").contains("noSuchProperty"),
+        "the error must name the property that could not be resolved: {err:#}"
+    );
+
+    // 4. End to end: the evidence that travels in a receipt carries the
+    //    assignment, and the window is dated from it.
+    let role: ModelQuery =
+        serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
+            .expect("role query");
+    let record = f.instances().await.remove(0);
+    let evidence = resolve_role_grants(
+        &f.perspective,
+        "delivery://Delivery.scoped",
+        &role,
+        &record,
+        std::slice::from_ref(&me),
+    )
+    .await
+    .expect("resolve_role_grants");
+
+    let instance = evidence[0]
+        .instances
+        .iter()
+        .find(|i| i.instance_id == TASK)
+        .expect("the owned task is a matched role instance");
+    assert_eq!(
+        instance.grant_links.len(),
+        1,
+        "the receipt must carry the assignment link, not just the instance's word: {:?}",
+        instance.grant_links
+    );
+
+    let translated = requires_query_input(&role, &record, &me).expect("role query translates");
+    let grant = evidence[0].resolve(&translated).expect("resolve");
+    let window = grant
+        .windows
+        .iter()
+        .find(|w| w.instance_id == TASK)
+        .expect("a window for the owned task");
+    assert_eq!(
+        window.granted_at, instance.grant_links[0].timestamp,
+        "granted_at is the assignment link's own timestamp"
+    );
+
+    let fallback = instance
+        .asserted_instance_timestamp
+        .clone()
+        .expect("the instance is datable, so the fallback exists and is the wrong answer");
+    assert!(
+        parse_link_timestamp(&window.granted_at) > parse_link_timestamp(&fallback),
+        "the assignment must date the grant STRICTLY LATER than the instance fallback \
+         ({} vs {}) — taking the fallback is what widened every didProperty window",
+        window.granted_at,
+        fallback
+    );
+}
