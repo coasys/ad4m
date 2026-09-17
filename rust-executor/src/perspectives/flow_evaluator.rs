@@ -88,7 +88,11 @@ pub struct SatisfiedTransition {
 /// is what turns "this hash matches nothing I can see" into an inspectable
 /// object a reader can re-hash with [`evidence_hash`] and compare against the
 /// seal every voter verified before co-signing.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// `Deserialize` for the other end of that trip: a receipt that arrived from
+/// elsewhere is read back before it is verified
+/// (`flow_instance::receipt::EvidencePreimage`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceItem {
     pub id: String,
     /// SHACL class the matching guard queried for.
