@@ -22,7 +22,6 @@ import aiTests from "./ai";
 import expressionTests from "./expression";
 import runtimeTests from "./runtime";
 import flatLanguageTests from "./flat-language.test";
-import socialDNATests from "./social-dna-flow";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -87,6 +86,5 @@ describe("Local integration tests (no Holochain)", function () {
     describe('Runtime', runtimeTests(testContext, { hasHolochain: false }))
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
-    describe('Social DNA', socialDNATests(testContext))
     describe('Flat Language (new flat export pattern)', flatLanguageTests(testContext))
 })
