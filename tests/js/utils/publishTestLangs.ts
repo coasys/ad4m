@@ -33,7 +33,7 @@ const languagesToPublish = {
     // bootstrap-languages/server-link-language/index.ts. `name` + `description`
     // aren't code-templated — they get through to the language meta so tests
     // can assert on `socialContext.name` the same way they do for p-diff-sync.
-    "server-link-language": {name: "server-link-language", description: "", possibleTemplateParams: ["SERVER_URL", "ROOM_ID", "name", "description"]} as LanguageMetaInput,
+    "server-link-language": {name: "server-link-language", description: "", possibleTemplateParams: ["SERVER_URL", "ROOM_ID", "UID", "name", "description"]} as LanguageMetaInput,
 }
 
 const languageHashes = {
