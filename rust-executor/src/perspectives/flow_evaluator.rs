@@ -131,9 +131,29 @@ pub(crate) fn canonical_json(v: &Value) -> String {
 }
 
 /// Order-independent seal over a satisfied guard's evidence: SHA256 over the
-/// class names followed by each evidence item's `(class, id,
-/// canonical-content)` triple, sorted. Every field is length-prefixed before
-/// hashing, so no field's *content* can shift bytes across a boundary.
+/// *number* of class names, then the class names, then each evidence item's
+/// `(class, id, canonical-content)` triple, sorted. Every field is
+/// length-prefixed before hashing, so no field's *content* can shift bytes
+/// across a boundary.
+///
+/// # Why the class-name count is framed too
+///
+/// Framing every field makes the digest input decode to a unique flat
+/// sequence of strings. That is not enough: fields cannot shift, but
+/// **sections can**. With no count, nothing marks where the class names end
+/// and the items begin, so any `k` with `(total - k) % 3 == 0` reads back as
+/// a valid `(class_names, items)` split and distinct preimages share a seal.
+///
+/// The dangerous direction is unfolding class names *into* an item. A
+/// negative guard (`count: { max: 0 }`) contributes a class name with zero
+/// items, so a re-partition can move names into the `class` / `id` /
+/// `content` slots of a fabricated item. Before the count was framed,
+/// `["Reviewer", "Blocker", "task://99", "{…}"] + []` and
+/// `["Reviewer"] + [("Blocker", "task://99", "{…}")]` hashed identically —
+/// and the second asserts a cited instance that never existed while still
+/// satisfying `EvidencePreimage::rehashes_to_seal` against a seal the real
+/// voters computed. Framing the count pins the boundary, so one digest has
+/// one preimage partition.
 ///
 /// Two evaluations of the same guard against the same graph produce the same
 /// hash regardless of result order; **editing a cited instance changes the
@@ -154,6 +174,7 @@ pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> Strin
         .collect();
     items.sort();
     let mut hasher = Sha256::new();
+    hasher.update((class_names.len() as u64).to_le_bytes());
     for name in class_names {
         frame(&mut hasher, name);
     }
@@ -1408,6 +1429,62 @@ mod tests {
         let mut reordered = abc.clone();
         reordered[1].content = r#"{"title":"two","id":"b"}"#.into();
         assert_eq!(a, evidence_hash(&classes, &reordered), "key order ignored");
+    }
+
+    /// Framing every *field* stops a field's content from shifting bytes
+    /// across a boundary. It does not stop a *section* from shifting: without
+    /// the `class_names` count in the digest, the hash input decodes to a
+    /// unique flat sequence of strings but not to a unique
+    /// `(class_names, items)` split — any `k` with `(total - k) % 3 == 0`
+    /// reads back as a valid partition.
+    ///
+    /// The second pair is the direction that matters. A negative guard
+    /// contributes a class name with zero items, so re-partitioning is
+    /// *productive*: `["Reviewer"] + [("Blocker", "task://99", …)]` asserts a
+    /// cited instance that never existed, while still satisfying
+    /// `EvidencePreimage::rehashes_to_seal` against a seal the real voters
+    /// computed.
+    ///
+    /// Red if the `class_names.len()` framing is removed from
+    /// `evidence_hash`: the pairs then collide on `de92f359…` and
+    /// `e34627f9…` respectively.
+    #[test]
+    fn evidence_hash_pins_where_the_class_names_end_and_the_items_begin() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let item = |class: &str, id: &str, content: &str| EvidenceItem {
+            id: id.into(),
+            class_name: class.into(),
+            content: content.into(),
+        };
+
+        // An item folded forward into the class-name list.
+        assert_ne!(
+            evidence_hash(
+                &names(&["Task"]),
+                &[item("Task", "task://1", r#"{"title":"x"}"#)],
+            ),
+            evidence_hash(
+                &names(&["Task", "Task", "task://1", r#"{"title":"x"}"#]),
+                &[]
+            ),
+            "a guard over one matched Task must not share a seal with a guard \
+             whose class list swallowed that match"
+        );
+
+        // Class names unfolded backwards into an item: the preimage that
+        // invents cited evidence under a seal real voters signed.
+        assert_ne!(
+            evidence_hash(
+                &names(&["Reviewer", "Blocker", "task://99", r#"{"approved":true}"#]),
+                &[],
+            ),
+            evidence_hash(
+                &names(&["Reviewer"]),
+                &[item("Blocker", "task://99", r#"{"approved":true}"#)],
+            ),
+            "satisfied negative guards must not share a seal with a guard that \
+             cites an instance"
+        );
     }
 
     #[test]
