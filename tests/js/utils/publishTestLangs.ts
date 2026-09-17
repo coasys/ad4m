@@ -116,6 +116,7 @@ async function publish() {
         undefined,
         false,
         undefined,
+        undefined,
         runHolochain,
     );
     if (localServices.process) {

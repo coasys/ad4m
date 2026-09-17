@@ -217,11 +217,11 @@ export async function startExecutor(dataPath: string,
     relayUrl?: string,
     enableMcp: boolean = false,
     mcpPort?: number,
-    runHolochain: boolean = true,
     // Expose the dynamic per-class SHACL tools over MCP (`--dynamic-class-tools`).
     // Off by default, matching the executor's default: only the static
     // instance_* surface is advertised.
     dynamicClassTools: boolean = false,
+    runHolochain: boolean = true,
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();

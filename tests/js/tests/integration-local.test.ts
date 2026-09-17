@@ -67,6 +67,7 @@ describe("Local integration tests (no Holochain)", function () {
             undefined,                                          // relayUrl
             false,                                              // enableMcp
             undefined,                                          // mcpPort
+            undefined,                                          // dynamicClassTools
             false,                                              // runHolochain
         );
 

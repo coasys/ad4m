@@ -65,10 +65,10 @@ describe("Email Verification with Mock Service", () => {
         executorProcess = proxyUrl && bootstrapUrl
             ? await startExecutor(appDataPath, bootstrapSeedPath,
                 apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl, bootstrapUrl,
-                undefined, false, undefined, runHolochain)
+                undefined, false, undefined, undefined, runHolochain)
             : await startExecutor(appDataPath, bootstrapSeedPath,
                 apiPort, hcAdminPort, hcAppPort, false,
-                undefined, undefined, undefined, undefined, false, undefined, runHolochain);
+                undefined, undefined, undefined, undefined, false, undefined, undefined, runHolochain);
 
         adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, undefined, false)
 

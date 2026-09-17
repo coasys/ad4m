@@ -26,7 +26,8 @@ function loadState() {
             links = state.links || [];
             revision = state.revision || 0;
         }
-    } catch (_) {
+    } catch (e) {
+        console.error("[local-link-language] Failed to parse link-state, starting empty:", e);
         links = [];
         revision = 0;
     }
