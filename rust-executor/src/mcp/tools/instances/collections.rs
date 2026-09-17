@@ -223,8 +223,17 @@ impl Ad4mMcpHandler {
             predicate: Some(predicate),
             target,
         };
+        // This path writes the membership link directly rather than running
+        // the collection's `adder` action, so the action's `local` flag never
+        // reaches it — resolve the status from the property shape instead, or
+        // a `local: true` collection would be gossiped by this tool alone.
+        let status = if info.local() {
+            LinkStatus::Local
+        } else {
+            LinkStatus::Shared
+        };
         match perspective
-            .add_link(link, LinkStatus::Shared, None, &agent_context)
+            .add_link(link, status, None, &agent_context)
             .await
         {
             Ok(_) => pretty(&json!({

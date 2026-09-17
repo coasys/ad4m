@@ -274,11 +274,16 @@ describe("FlowInstanceRecord — @Model", function () {
       predicate: "ad4m://flow/base",
       target: "literal:string:ad4m%3A%2F%2Fsome-subject",
     }));
+    // `currentState` is declared `local: true`, so #1028's status filter
+    // hydrates it from `Local` links and from nothing else: a Shared link on
+    // this predicate is a peer asserting what state *this* replica is in, and
+    // is withheld on purpose. `write_local_current_state` writes `Local`, so
+    // this is also the status the engine really produces.
     await p.add(new Link({
       source: instance,
       predicate: "ad4m://flow/current_state",
       target: "literal:string:Scoped",
-    }));
+    }), "local");
 
     const all = await FlowInstanceRecord.findAll(p);
     expect(all.length).to.equal(1);

@@ -357,9 +357,14 @@ async fn the_cache_and_the_marks_are_local_links() {
 }
 
 /// A `Shared` `currentState` from a peer (what the pre-#987 executor wrote)
-/// is neither believed nor deleted: this replica writes its own derivation
-/// beside it, which is what hydration then serves, and the peer's link stays
-/// — the pass deletes nothing shared.
+/// is neither believed nor deleted: hydration withholds it because the class
+/// declares `currentState` `local: true`, this replica keeps deriving its own
+/// value, and the peer's link stays — the pass deletes nothing shared.
+///
+/// The withholding is #1028's `local_status_filter`, not anything this module
+/// does: the peer's link is the *later* one, so a latest-wins hydration would
+/// serve `"scoped"` here. That is what the pre-#1028 executor did, and what
+/// `local_cached_state` had to read raw links to work around.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_peer_written_shared_cache_is_overridden_not_deleted() {
     let mut f = seed_satisfied_fixture(None).await;
@@ -376,10 +381,21 @@ async fn a_peer_written_shared_cache_is_overridden_not_deleted() {
         .add_link_expression(LinkExpression::from(peer_cache), LinkStatus::Shared, None)
         .await
         .expect("sync a peer's currentState");
+    // The peer's link really is on the graph, and really does say something
+    // else — so the assertion below is about withholding, not about a link
+    // that never arrived.
+    assert!(
+        current_state_links(&f).await.iter().any(|l| {
+            l.status == Some(LinkStatus::Shared)
+                && l.author == bob.did
+                && l.data.target == literal("scoped")
+        }),
+        "the peer's Shared currentState is on the graph"
+    );
     assert_eq!(
         f.cached_state().await,
-        "scoped",
-        "the peer's later write is what hydration serves until we derive"
+        "identified",
+        "hydration serves our own Local cache and withholds the peer's Shared one"
     );
 
     consensus_pass(&mut f).await;
