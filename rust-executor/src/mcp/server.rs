@@ -7,14 +7,18 @@
 //! Authentication: clients authenticate via MCP tools (`request_capability` + `login_email`).
 //! Bearer header auth is not yet supported for multi-session setups — each session gets
 //! its own isolated token state, so a shared HTTP middleware cannot route tokens correctly.
+//!
+//! What the server binds follows from that: a node with no admin credential
+//! authenticates every caller, so it is reachable from the node itself and
+//! nowhere else. See [`resolve_host`].
 
 use super::tools::Ad4mMcpHandler;
 use anyhow::Result;
-use log::info;
+use log::{info, warn};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -38,12 +42,13 @@ pub struct McpContext {
 pub struct McpServerConfig {
     /// Port to listen on (default: 3001)
     pub port: u16,
-    /// Host to bind to. Read from `MCP_HOST`, defaulting to `0.0.0.0` so the MCP
-    /// server stays reachable from sibling containers (an agent harness on the
-    /// same Docker network); access stays gated by `--admin-credential`.
-    /// SECURITY: `0.0.0.0` also exposes MCP to the LAN on a bare-metal node — a
-    /// deployment that wants to restrict it sets `MCP_HOST=127.0.0.1`.
-    pub host: String,
+    /// The address an operator asked for, or `None` to let
+    /// [`resolve_host`] choose from whether access is gated.
+    ///
+    /// An IP literal, not a hostname: the address is parsed as a
+    /// [`SocketAddr`], which does not resolve names, so `localhost` fails to
+    /// start where `127.0.0.1` binds.
+    pub host: Option<String>,
     /// Expose dynamic per-class SHACL tools over MCP (see
     /// [`McpContext::dynamic_class_tools`]). Default `false`.
     pub dynamic_class_tools: bool,
@@ -53,10 +58,51 @@ impl Default for McpServerConfig {
     fn default() -> Self {
         Self {
             port: 3001,
-            host: std::env::var("MCP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string()),
+            host: None,
             dynamic_class_tools: false,
         }
     }
+}
+
+/// Where to bind, given whether anything gates access.
+///
+/// Without an admin credential every caller is authenticated —
+/// `check_auth`'s last step is the single-user local trust model the REST
+/// server uses, and it grants `request_capability`, which mints
+/// `ALL_CAPABILITY`. That premise is true on loopback and false anywhere
+/// else, so an ungated server binds loopback and nothing else. Configure a
+/// credential and the default widens back to `0.0.0.0`, where a sibling
+/// container on the same Docker network can reach it.
+///
+/// `MCP_HOST` is the operator saying it outright and is honoured either way.
+/// Saying it on an ungated node hands every tool to whoever can route to the
+/// address, so that combination warns rather than passing quietly.
+fn resolve_host(requested: Option<&str>, has_credential: bool) -> String {
+    match requested {
+        Some(host) => {
+            if !has_credential && !is_loopback(host) {
+                warn!(
+                    "MCP: MCP_HOST={host} binds beyond loopback with no --admin-credential set. \
+                     Every caller that can reach this address is authenticated and may mint \
+                     ALL_CAPABILITY. Set an admin credential, or bind 127.0.0.1."
+                );
+            }
+            host.to_string()
+        }
+        None if has_credential => "0.0.0.0".to_string(),
+        None => "127.0.0.1".to_string(),
+    }
+}
+
+/// Whether this address reaches only the node itself.
+///
+/// Unparseable reads as *not* loopback: the warning is the fail-safe
+/// direction, and an address that does not parse fails to bind a line later
+/// anyway.
+fn is_loopback(host: &str) -> bool {
+    host.parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 /// Start the MCP server with HTTP transport
@@ -68,7 +114,12 @@ pub async fn start_mcp_server(
     auth_token: Option<String>,
     config: McpServerConfig,
 ) -> Result<()> {
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
+    let requested = config
+        .host
+        .clone()
+        .or_else(|| std::env::var("MCP_HOST").ok());
+    let host = resolve_host(requested.as_deref(), admin_credential.is_some());
+    let addr: SocketAddr = format!("{}:{}", host, config.port).parse()?;
     info!("Starting AD4M MCP server on http://{}", addr);
 
     let initial_token = auth_token;
@@ -118,4 +169,46 @@ pub async fn start_mcp_server(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ungated_server_binds_loopback() {
+        // check_auth's last step authenticates any caller when no admin
+        // credential is configured. Loopback is the only place that is true.
+        assert_eq!(resolve_host(None, false), "127.0.0.1");
+    }
+
+    #[test]
+    fn a_credential_widens_the_default_to_every_interface() {
+        // A sibling container on the same Docker network reaches it here, and
+        // the credential is what stands between it and the tools.
+        assert_eq!(resolve_host(None, true), "0.0.0.0");
+    }
+
+    #[test]
+    fn an_explicit_host_is_honoured_either_way() {
+        // MCP_HOST is the operator's own decision, including the ungated case:
+        // refusing it would break a deployment that fronts MCP with its own
+        // gateway. It warns there; the binding still happens.
+        assert_eq!(resolve_host(Some("10.0.0.5"), false), "10.0.0.5");
+        assert_eq!(resolve_host(Some("10.0.0.5"), true), "10.0.0.5");
+        assert_eq!(resolve_host(Some("127.0.0.1"), true), "127.0.0.1");
+    }
+
+    #[test]
+    fn loopback_is_every_spelling_of_it() {
+        // 127.0.0.0/8 is loopback in full, not just .1, and v6 has its own.
+        assert!(is_loopback("127.0.0.1"));
+        assert!(is_loopback("127.1.2.3"));
+        assert!(is_loopback("::1"));
+        assert!(!is_loopback("0.0.0.0"));
+        assert!(!is_loopback("10.0.0.5"));
+        // Not an address at all. Reads as non-loopback so the warning fires;
+        // the bind that follows fails on it regardless.
+        assert!(!is_loopback("localhost"));
+    }
 }
