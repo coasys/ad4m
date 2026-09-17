@@ -514,10 +514,40 @@ impl RequiresQueryable for PerspectiveInstance {
     }
 }
 
+/// Tri-state seal result for one target state's guard, used by the manual
+/// proposal path and by `accept.rs` when re-verifying a co-sign.
+///
+/// - `Sealed(hash)` — guard is present and currently satisfied; hash is
+///   the SHA256 over the evidence, exactly as [`evidence_hash`] produces.
+/// - `NoGuard` — the target state carries no `requires` guard; the seal is
+///   defined as `evidence_hash(&[], &[])` (the hash of an empty bag), so
+///   proposer and voter always agree on it by construction.
+/// - `Unmet` — the guard exists but is not currently satisfied, or the flow
+///   / state definition changed since the proposal was minted.  The caller
+///   must refuse its own action and write nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EvidenceSeal {
+    Sealed(String),
+    NoGuard,
+    Unmet,
+}
+
+impl EvidenceSeal {
+    /// Canonical hash string: `Sealed(h) → h`, `NoGuard → hash of empty bag`.
+    /// Returns `None` for `Unmet` so callers can treat it as "unverifiable".
+    pub(crate) fn hash(&self) -> Option<String> {
+        match self {
+            EvidenceSeal::Sealed(h) => Some(h.clone()),
+            EvidenceSeal::NoGuard => Some(evidence_hash(&[], &[])),
+            EvidenceSeal::Unmet => None,
+        }
+    }
+}
+
 /// Outcome of AND-ing a state's `requires`. Translation failures are
 /// split from query failures so the composer can `warn!` the former
 /// (persistent misconfig) and `debug!` the latter (transient).
-enum RequiresResult {
+pub(crate) enum RequiresResult {
     Satisfied(Vec<String>, Vec<EvidenceItem>),
     Unmet,
     Untranslatable(anyhow::Error),
@@ -556,7 +586,7 @@ pub(crate) async fn run_query<Q: RequiresQueryable + ?Sized>(
 /// AND across a state's `requires`. Unmet as soon as one guard misses;
 /// `Satisfied` (class names and hydrated evidence, both deduplicated in
 /// first-seen order, evidence by instance ID) when every guard holds.
-async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
+pub(crate) async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     requires: &[ModelQuery],
     record: &FlowInstanceRecord,
@@ -642,15 +672,15 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 }
 
 /// Re-run one target state's `requires` against the CURRENT graph and return
-/// the freshly-computed evidence hash. Used at **vote time**: a replica
-/// re-checks a proposal's seal on its own graph before co-signing it
-/// (`flow_instance::accept`).
+/// an [`EvidenceSeal`] that a voter can compare with the proposal's stored
+/// hash before co-signing.
 ///
-/// - `Ok(Some(hash))` — guard still satisfied; the caller compares it with
-///   the proposal's sealed hash.
-/// - `Ok(None)` — nothing verifiable remains: the guard no longer holds, or
-///   the flow/state/guard definition changed out from under the proposal.
-/// - `Err` — transient query/store failure.
+/// - `Ok(Sealed(hash))` — guard satisfied; compare with `atom.evidence_hash`.
+/// - `Ok(NoGuard)` — the target state carries no guard; the canonical seal
+///   is `evidence_hash(&[], &[])` (see [`EvidenceSeal::hash`]).
+/// - `Ok(Unmet)` — guard exists but is not currently satisfied, or the
+///   flow / state definition changed.  The caller must refuse its own action.
+/// - `Err` — transient query / store failure.
 ///
 /// A caller may only ever refuse its own action on any of these; none of
 /// them is grounds for touching somebody else's proposal.
@@ -664,33 +694,29 @@ pub(crate) async fn recompute_evidence_hash<Q: RequiresQueryable + ?Sized>(
     record: &FlowInstanceRecord,
     to_state: &str,
     acting_did: &str,
-) -> Result<Option<String>> {
+) -> Result<EvidenceSeal> {
     let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
         log::warn!(
             "recompute_evidence_hash: state `{to_state}` no longer exists on flow `{}`",
             flow.name
         );
-        return Ok(None);
+        return Ok(EvidenceSeal::Unmet);
     };
     let requires = state.requires.as_deref().unwrap_or_default();
     if requires.is_empty() {
-        log::warn!(
-            "recompute_evidence_hash: `{}.{to_state}` no longer carries a `requires` guard",
-            flow.name
-        );
-        return Ok(None);
+        return Ok(EvidenceSeal::NoGuard);
     }
     match evaluate_requires(perspective, requires, record, acting_did).await {
         RequiresResult::Satisfied(class_names, evidence) => {
-            Ok(Some(evidence_hash(&class_names, &evidence)))
+            Ok(EvidenceSeal::Sealed(evidence_hash(&class_names, &evidence)))
         }
-        RequiresResult::Unmet => Ok(None),
+        RequiresResult::Unmet => Ok(EvidenceSeal::Unmet),
         RequiresResult::Untranslatable(e) => {
             log::warn!(
                 "recompute_evidence_hash: `{}.{to_state}` became untranslatable: {e:#}",
                 flow.name
             );
-            Ok(None)
+            Ok(EvidenceSeal::Unmet)
         }
         RequiresResult::QueryFailed(e) => Err(e),
     }
@@ -841,7 +867,7 @@ pub async fn run_engine_proposal_pass(
 /// be gamed by one agent re-running its own pass. The `to_state` check
 /// matters because two distinct transitions can share identical `requires`
 /// guards and therefore identical evidence hashes.
-async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
+pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
 ) -> bool {
@@ -950,7 +976,7 @@ impl ProposalLookup for PerspectiveInstance {
 
 /// Write one proposal inside its own batch, so readers never see a
 /// half-written proposal and one failed write does not roll back the rest.
-async fn write_proposal(
+pub(crate) async fn write_proposal(
     perspective: &mut PerspectiveInstance,
     transition: &SatisfiedTransition,
     proposer_did: &str,
