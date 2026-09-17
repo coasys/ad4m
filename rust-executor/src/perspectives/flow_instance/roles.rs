@@ -42,7 +42,8 @@
 //!
 //! ## Where the timestamps come from
 //!
-//! - `granted_at` is the earliest `instance --didProperty--> did` link, when the
+//! - `granted_at` is the earliest **signed** `instance --didProperty--> did`
+//!   link, when the
 //!   query names a `didProperty` and that link exists — there the grant is
 //!   dated from the assignment itself; otherwise the instance's own timestamp
 //!   (its earliest link, as `model_query` reports it). Only that fallback is
@@ -91,28 +92,48 @@
 //! Before #1027 roles were re-derived live against the current graph and
 //! revocation meant deleting the instance, so revoking someone later un-settled
 //! an edge their vote had settled and replicas disagreed depending on when
-//! they first derived. The [`RoleGrant`]s in the read-set now carry each
-//! instance's [`RoleGrantWindow`] — grant time and the tombstones honoured — so a
-//! minted token's backing names a fully resolvable history.
+//! they first derived. Windows fixed that; they were then *asserted* by the
+//! replica that read them. Now the read-set carries the
+//! [`RoleGrantEvidence`] — the grant links and tombstones themselves — and
+//! [`RoleGrantEvidence::resolve`] recomputes the [`RoleGrantWindow`]s from
+//! them, so a minted token's backing states no chronology of its own: it
+//! hands over the signed material and lets the reader do the arithmetic.
+//!
+//! ## One filter, both sides
+//!
+//! A link counts toward a DID's membership — grant or tombstone alike — iff
+//! its signature verified and its target names the DID
+//! ([`link_counts_for_did`]). The same predicate runs at the store boundary
+//! when evidence is collected and in [`RoleGrantEvidence::resolve`] when it
+//! is read. Before this, tombstones were signature-filtered and grant links
+//! were not, while `granted_at` was the *earliest* of them — so one unsigned
+//! or forged grant link back-dated a window and won votes the DID was never
+//! eligible to cast. The asymmetry, not the missing check, was the bug: a
+//! filter that differs between the two sides mints receipts that fail their
+//! own verification in one direction and admits forged material in the other.
 
 use super::atom::{TransitionAtom, Vote};
 use super::time::parse_link_timestamp;
 use crate::perspectives::flow_context::FlowInstanceRecord;
 pub use crate::perspectives::flow_evaluator::RoleRevocation;
 use crate::perspectives::flow_evaluator::{
-    cardinality_satisfied, requires_query_input, run_query, EvidenceItem, RequiresQueryable,
+    cardinality_satisfied, did_literal_url, link_counts_for_did, requires_query_input, run_query,
+    EvidenceItem, RequiresQueryable,
 };
 use crate::perspectives::model_query::{matches_condition, WhereCondition};
 use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery, ModelQueryCount};
+use crate::types::DecoratedLinkExpression;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 /// One matched role instance's history for one DID: when it started to count and
 /// every authorised tombstone that ended it.
 ///
-/// Serialisable so the history rides in the read-set: a minted token's
-/// backing names the instances *and* the tombstones its verdict rested on, and
-/// nothing referenced is ever deleted.
+/// A **computed view**, never a carried value. It is what
+/// [`RoleGrantEvidence::resolve`] derives from the signed links in the
+/// read-set, so the chronology a verdict rests on is re-derived by whoever
+/// reads it rather than asserted by whoever wrote it. `Serialize` stays only
+/// because surfaces render this shape; nothing in the read-set holds one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleGrantWindow {
     /// The instance the role query matched for this DID.
@@ -185,9 +206,13 @@ impl RoleGrantWindow {
 
 /// The role instances behind one `(target state, DID)` pair, with their history.
 ///
-/// Part of the read-set, so a verdict is auditable after the fact: "Bob
-/// counted toward `approved` at 10:02 because instance r1 said he was a Reviewer
-/// from 09:00 and its tombstone is from 11:00".
+/// A **computed view** over [`RoleGrantEvidence`], produced by
+/// [`RoleGrantEvidence::resolve`] and consumed by [`eligible_votes`]. It is
+/// what makes a verdict readable after the fact — "Bob counted toward
+/// `approved` at 10:02 because instance r1 said he was a Reviewer from 09:00
+/// and its tombstone is from 11:00" — but it is not what travels: the
+/// read-set carries the links those sentences were derived from, so a reader
+/// re-derives the sentence instead of believing it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleGrant {
     /// The state whose rule asked the question — rules are per target state,
@@ -214,6 +239,159 @@ impl RoleGrant {
     /// uses (`None` = at least one).
     pub fn eligible_at(&self, at: &str, count: Option<&ModelQueryCount>) -> bool {
         cardinality_satisfied(count, self.instances_open_at(at))
+    }
+}
+
+/// The signed history of one role instance for one DID: the links themselves.
+///
+/// Nothing derived is stored here — `granted_at`, `revoked_at` and the
+/// authority filter are all computed by the reader
+/// ([`RoleGrantEvidence::resolve`]). That is what retires the "audit record,
+/// not proof" caveat for the chronology: a minter can no longer state when a
+/// grant began, only hand over the links that say so.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoleInstanceHistory {
+    /// URI of the instance the role query matched for this DID.
+    pub instance_id: String,
+    /// Every signed `instance --<didProperty>--> did` link, as read from the
+    /// store. May be empty: non-`didProperty` queries, or membership acquired
+    /// without a dated assignment link.
+    pub grant_links: Vec<DecoratedLinkExpression>,
+    /// Every signed tombstone on the instance naming this DID, carried
+    /// **before** authority filtering so the reader applies
+    /// [`revocation_authorised`] itself against the flow definition it holds.
+    /// Never truncated: dropping a tombstone can only widen a window.
+    pub revocation_links: Vec<DecoratedLinkExpression>,
+    /// Fallback dating when `grant_links` yields nothing: the instance's
+    /// hydrated timestamp. **Asserted** by the minter — a hydration product
+    /// with no single link behind it, and the one field here that stays
+    /// audit-grade until `model_query` results carry per-link signatures.
+    /// Flows whose role queries use `didProperty` never need it.
+    pub asserted_instance_timestamp: Option<String>,
+}
+
+/// The evidence behind one `(target state, candidate DID)` pair: same keying
+/// as the [`RoleGrant`] view it resolves to, links instead of derived fields.
+///
+/// This is what rides in [`ReadSet::role_grants`](super::ReadSet::role_grants).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RoleGrantEvidence {
+    /// The state whose rule asked the question — rules are per target state,
+    /// so the same DID can be eligible for one edge and not another.
+    pub to_state: String,
+    /// The role query's class, for readability of a serialised read-set.
+    pub role_class: String,
+    pub did: String,
+    /// One history per instance the role query matched for this DID.
+    pub instances: Vec<RoleInstanceHistory>,
+}
+
+impl RoleGrantEvidence {
+    /// Recompute the [`RoleGrant`] view the fold consumes, from carried
+    /// material only. **Pure**: no store, no clock, no network — so a reader
+    /// holding a serialised read-set reaches the same windows this replica did.
+    ///
+    /// `translated_role_query` is the role's `ModelQuery` with `$did` /
+    /// `$flow.base` / `$flow.instance` already substituted for this
+    /// candidate ([`requires_query_input`]); the authority rule is read from
+    /// it, so it must be the query for *this* `did`.
+    ///
+    /// Per instance:
+    /// - `granted_at` = earliest RFC 3339-parseable timestamp among the grant
+    ///   links that count for this DID ([`link_counts_for_did`] — signed, and
+    ///   naming the DID). No qualifying link: the asserted instance
+    ///   timestamp, if parseable. Neither: **`Err`**, the same fail-closed
+    ///   rule the loader applies — a grant that cannot be placed in time
+    ///   gates nothing rather than gating everything.
+    /// - revocations = the carried tombstones that count for this DID and
+    ///   whose author [`revocation_authorised`] accepts, as `(by, at)`.
+    ///
+    /// # Signatures
+    ///
+    /// The filter reads each link's carried `proof.valid`, which is the rule
+    /// the whole fold layer uses (`atom::signed_by` reads it for votes). It
+    /// is a **verdict about a link, and a reader must not take the minter's
+    /// word for it**: before folding a read-set that arrived from elsewhere,
+    /// re-decorate every carried link — proposals and role evidence alike —
+    /// with [`DecoratedLinkExpression::verify_signature`], which recomputes
+    /// `proof.valid` from the signature itself. Doing it there rather than
+    /// here keeps one trust rule in the fold and puts the cryptography at the
+    /// one boundary where the material is untrusted.
+    pub fn resolve(&self, translated_role_query: &Value) -> anyhow::Result<RoleGrant> {
+        let did_literal = did_literal_url(&self.did)?;
+        let counts = |l: &&DecoratedLinkExpression| link_counts_for_did(l, &self.did, &did_literal);
+
+        let mut windows = Vec::with_capacity(self.instances.len());
+        for instance in &self.instances {
+            // Earliest by parsed instant, never by string: timestamps are
+            // client-asserted and clients disagree on RFC 3339 flavour, so
+            // string order diverges from instant order inside a second (#1000).
+            let from_links = instance
+                .grant_links
+                .iter()
+                .filter(counts)
+                .filter_map(|l| parse_link_timestamp(&l.timestamp).map(|dt| (dt, &l.timestamp)))
+                .min()
+                .map(|(_, ts)| ts.clone());
+            let Some(granted_at) = from_links
+                .or_else(|| instance.asserted_instance_timestamp.clone())
+                .filter(|t| parse_link_timestamp(t).is_some())
+            else {
+                anyhow::bail!(
+                    "RoleGrantEvidence::resolve: role instance `{}` (`{}`) for `{}` carries no signed, RFC 3339-parseable grant link and no parseable instance timestamp, so the grant cannot be placed in time; refusing to gate (fail-closed)",
+                    instance.instance_id,
+                    self.role_class,
+                    self.did
+                );
+            };
+
+            // Sorted here, not by the store: the view must not depend on the
+            // order a store happens to return links in.
+            let mut revocations: Vec<RoleRevocation> = instance
+                .revocation_links
+                .iter()
+                .filter(counts)
+                .filter(|l| revocation_authorised(translated_role_query, &l.author))
+                .map(|l| RoleRevocation {
+                    by: l.author.clone(),
+                    at: l.timestamp.clone(),
+                })
+                .collect();
+            revocations.sort_by(|a, b| {
+                (parse_link_timestamp(&a.at), &a.at, &a.by).cmp(&(
+                    parse_link_timestamp(&b.at),
+                    &b.at,
+                    &b.by,
+                ))
+            });
+            revocations.dedup();
+
+            windows.push(RoleGrantWindow {
+                instance_id: instance.instance_id.clone(),
+                granted_at,
+                revocations,
+            });
+        }
+        windows.sort_by(|a, b| {
+            (
+                parse_link_timestamp(&a.granted_at),
+                &a.granted_at,
+                &a.instance_id,
+            )
+                .cmp(&(
+                    parse_link_timestamp(&b.granted_at),
+                    &b.granted_at,
+                    &b.instance_id,
+                ))
+        });
+
+        Ok(RoleGrant {
+            to_state: self.to_state.clone(),
+            role_class: self.role_class.clone(),
+            did: self.did.clone(),
+            instances: windows.iter().map(|w| w.instance_id.clone()).collect(),
+            windows,
+        })
     }
 }
 
@@ -268,8 +446,10 @@ fn instance_timestamp(item: &EvidenceItem) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Ask a `fromRole` gate about each candidate and record each matched instance's
-/// history, so the fold can gate every vote as of its own timestamp.
+/// Ask a `fromRole` gate about each candidate and collect the links behind
+/// each matched instance's history, so the fold can gate every vote as of its
+/// own timestamp — and so a reader can re-derive that gating from the links
+/// rather than from our summary of them.
 ///
 /// Both role-query shapes collapse into one per-candidate membership check,
 /// because the fold only ever intersects the role set with the DIDs that
@@ -282,22 +462,24 @@ fn instance_timestamp(item: &EvidenceItem) -> Option<String> {
 /// A query that references the DID in neither way cannot discriminate
 /// between candidates, and "I cannot determine membership" must never
 /// degrade to "everyone is a member" — so it is an `Err`, as is any store or
-/// translation failure, and a matched instance that carries no timestamp at all.
-/// The caller then abandons the read.
+/// translation failure. Timing is **not** decided here any more: an instance
+/// that cannot be placed in time fails closed in [`RoleGrantEvidence::resolve`],
+/// on both sides of the wire, rather than only on this one.
 ///
-/// Per matched instance there is one
-/// [`RequiresQueryable::role_grant_timestamps`] call for the grant link and
-/// the signed tombstones — two `get_links` queries under the live impl, so
-/// the store fan-out is candidates × instances × 2; the tombstones are then
-/// filtered by [`revocation_authorised`] against this very query. Nothing
-/// here is queried again by the fold.
+/// Per matched instance there is one [`RequiresQueryable::role_grant_links`]
+/// call for the grant links and the signed tombstones — two `get_links`
+/// queries under the live impl, so the store fan-out is
+/// candidates × instances × 2. Authority is deliberately **not** applied
+/// here: the tombstones travel unfiltered and the reader applies
+/// [`revocation_authorised`] itself, so a minter cannot silently mis-apply
+/// the rule. Nothing here is queried again by the fold.
 pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     to_state: &str,
     role: &ModelQuery,
     record: &FlowInstanceRecord,
     candidates: &[String],
-) -> anyhow::Result<Vec<RoleGrant>> {
+) -> anyhow::Result<Vec<RoleGrantEvidence>> {
     // `unwrap_or(false)` routes a serde failure into the same `Err` below —
     // "couldn't even inspect the rule" is the purest can't-determine case.
     let did_dependent = role.did_property.is_some()
@@ -312,70 +494,36 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     }
 
     let grant_predicate = role.did_property.as_deref();
-    let mut grants = Vec::with_capacity(candidates.len());
+    let mut evidence = Vec::with_capacity(candidates.len());
     for did in candidates {
         let input = requires_query_input(role, record, did)?;
         let matched = run_query(perspective, &role.class_name, &input).await?;
 
-        let mut windows = Vec::with_capacity(matched.len());
+        let mut instances = Vec::with_capacity(matched.len());
         for item in &matched {
-            let history = perspective
-                .role_grant_timestamps(&item.id, grant_predicate, did)
+            let links = perspective
+                .role_grant_links(&item.id, grant_predicate, did)
                 .await?;
-            let Some(granted_at) = history
-                .granted_at
-                .or_else(|| instance_timestamp(item))
-                .filter(|t| parse_link_timestamp(t).is_some())
-            else {
-                anyhow::bail!(
-                    "resolve_role_grants: role instance `{}` (`{}`) carries no RFC 3339-parseable timestamp, so the grant cannot be placed in time; refusing to gate (fail-closed)",
-                    item.id,
-                    role.class_name
-                );
-            };
-            // Sorted here, not by the store: the read-set must not depend on
-            // the order a store happens to return links in.
-            let mut revocations: Vec<RoleRevocation> = history
-                .revocations
-                .into_iter()
-                .filter(|r| revocation_authorised(&input, &r.by))
-                .collect();
-            revocations.sort_by(|a, b| {
-                (parse_link_timestamp(&a.at), &a.at, &a.by).cmp(&(
-                    parse_link_timestamp(&b.at),
-                    &b.at,
-                    &b.by,
-                ))
-            });
-            revocations.dedup();
-            windows.push(RoleGrantWindow {
+            instances.push(RoleInstanceHistory {
                 instance_id: item.id.clone(),
-                granted_at,
-                revocations,
+                grant_links: links.grant_links,
+                revocation_links: links.revocation_links,
+                asserted_instance_timestamp: instance_timestamp(item),
             });
         }
-        windows.sort_by(|a, b| {
-            (
-                parse_link_timestamp(&a.granted_at),
-                &a.granted_at,
-                &a.instance_id,
-            )
-                .cmp(&(
-                    parse_link_timestamp(&b.granted_at),
-                    &b.granted_at,
-                    &b.instance_id,
-                ))
-        });
+        // Stable by instance URI: the read-set must not depend on the order a
+        // store happens to return matches in. The *view*'s order is
+        // `resolve`'s business (by grant time); this is only the carrier.
+        instances.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
 
-        grants.push(RoleGrant {
+        evidence.push(RoleGrantEvidence {
             to_state: to_state.to_string(),
             role_class: role.class_name.clone(),
             did: did.clone(),
-            instances: windows.iter().map(|w| w.instance_id.clone()).collect(),
-            windows,
+            instances,
         });
     }
-    Ok(grants)
+    Ok(evidence)
 }
 
 /// The votes on `atom` that its rule admits — pure, so the fold's inputs can
@@ -407,7 +555,8 @@ pub fn eligible_votes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::flow_evaluator::RoleGrantTimestamps;
+    use crate::perspectives::flow_evaluator::RoleGrantLinks;
+    use crate::types::{DecoratedExpressionProof, Link};
     use async_trait::async_trait;
     use serde_json::json;
     use std::collections::HashMap;
@@ -451,14 +600,77 @@ mod tests {
         }
     }
 
-    fn history(granted_at: Option<&str>, revocations: &[(&str, &str)]) -> RoleGrantTimestamps {
-        RoleGrantTimestamps {
-            granted_at: granted_at.map(str::to_string),
-            revocations: revocations
+    /// One link as `get_links` returns it. Author, target, signature verdict
+    /// and timestamp are all inputs the filters read, so every fixture states
+    /// them explicitly — `valid: false` is the forged/unsigned case.
+    fn role_link(
+        predicate: &str,
+        target: &str,
+        author: &str,
+        valid: bool,
+        timestamp: &str,
+    ) -> DecoratedLinkExpression {
+        DecoratedLinkExpression {
+            author: author.to_string(),
+            timestamp: timestamp.to_string(),
+            data: Link {
+                source: "r0".to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            },
+            proof: DecoratedExpressionProof {
+                key: format!("{author}#key"),
+                signature: "sig".to_string(),
+                valid: Some(valid),
+                invalid: Some(!valid),
+            },
+            status: None,
+        }
+    }
+
+    /// A signed `instance --agent--> did` grant link at `at`.
+    fn grant_link(did: &str, at: &str) -> DecoratedLinkExpression {
+        role_link("agent", did, ADMIN, true, at)
+    }
+
+    /// A signed tombstone by `by` at `at`.
+    fn tombstone(did: &str, by: &str, at: &str) -> DecoratedLinkExpression {
+        role_link(
+            crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE,
+            did,
+            by,
+            true,
+            at,
+        )
+    }
+
+    /// The store's answer for one DID: a grant link at `granted_at` (when
+    /// given) plus one signed tombstone per `(by, at)`.
+    fn history(did: &str, granted_at: Option<&str>, revocations: &[(&str, &str)]) -> RoleGrantLinks {
+        RoleGrantLinks {
+            grant_links: granted_at.map(|at| grant_link(did, at)).into_iter().collect(),
+            revocation_links: revocations
                 .iter()
-                .map(|(by, at)| revocation(by, at))
+                .map(|(by, at)| tombstone(did, by, at))
                 .collect(),
         }
+    }
+
+    /// The translated role query for `did` — what `resolve` reads the
+    /// authority rule from, exactly as `fold_read_set` builds it.
+    fn translated(role: &ModelQuery, did: &str) -> Value {
+        requires_query_input(role, &record(), did).expect("role query translates")
+    }
+
+    /// Resolve every candidate's evidence into the view the gate consumes.
+    fn views(evidence: &[RoleGrantEvidence], role: &ModelQuery) -> Vec<RoleGrant> {
+        evidence
+            .iter()
+            .map(|e| {
+                e.resolve(&translated(role, &e.did))
+                    .unwrap_or_else(|err| panic!("evidence for {} resolves: {err:#}", e.did))
+            })
+            .collect()
     }
 
     /// The DIDs whose grants satisfy `count` at [`NOW`].
@@ -483,7 +695,7 @@ mod tests {
         undated_instances: bool,
         error: Option<String>,
         calls: Mutex<Vec<String>>,
-        histories: HashMap<String, RoleGrantTimestamps>,
+        histories: HashMap<String, RoleGrantLinks>,
     }
 
     #[async_trait]
@@ -516,12 +728,12 @@ mod tests {
             Ok(json!({ "instances": instances, "totalCount": n }).to_string())
         }
 
-        async fn role_grant_timestamps(
+        async fn role_grant_links(
             &self,
             _instance_id: &str,
             _grant_predicate: Option<&str>,
             did: &str,
-        ) -> anyhow::Result<RoleGrantTimestamps> {
+        ) -> anyhow::Result<RoleGrantLinks> {
             Ok(self.histories.get(did).cloned().unwrap_or_default())
         }
     }
@@ -554,10 +766,11 @@ mod tests {
         for (name, role_json, member_dids, candidates, expected, expect_calls) in cases {
             let stub = members(member_dids);
             let role = role(role_json);
-            let grants =
+            let evidence =
                 resolve_role_grants(&stub, "approved", &role, &record(), &dids(candidates))
                     .await
                     .unwrap();
+            let grants = views(&evidence, &role);
             assert_eq!(eligible_now(&grants, role.count.as_ref()), expected.to_vec(), "{name}");
             assert_eq!(grants.len(), candidates.len(), "{name}: one verdict per candidate");
             for g in &grants {
@@ -598,9 +811,6 @@ mod tests {
              RoleStub::default(),
              json!({ "className": "ns://Reviewer", "didProperty": "agent",
                      "where": { "status": { "matches": ".*" } } }), ""),
-            ("a role instance that cannot be placed in time",
-             RoleStub { undated_instances: true, ..members(&[ALICE]) },
-             json!({ "className": "ns://Reviewer", "didProperty": "agent" }), "cannot be placed in time"),
         ];
 
         for (name, stub, role_json, expect_contains) in cases {
@@ -609,6 +819,19 @@ mod tests {
                 .expect_err(name);
             assert!(err.to_string().contains(expect_contains), "{name}: got {err:#}");
         }
+
+        // Timing fails closed one step later, in the pure resolve, so it fails
+        // the same way for a reader off-perspective: an instance with no signed
+        // grant link and no instance timestamp cannot be placed in time, and
+        // an unplaceable grant gates nothing rather than gating everything.
+        let stub = RoleStub { undated_instances: true, ..members(&[ALICE]) };
+        let undated = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+        let evidence = resolve_role_grants(&stub, "approved", &undated, &record(), &dids(&[ALICE]))
+            .await
+            .expect("collecting the links themselves cannot fail on timing");
+        let err = evidence[0].resolve(&translated(&undated, ALICE)).expect_err("undated instance");
+        assert!(err.to_string().contains("cannot be placed in time"), "got {err:#}");
+
         // And the undeterminable rule never even runs a query.
         let stub = RoleStub { unconditional_instances: Some(1), ..Default::default() };
         let _ = resolve_role_grants(
@@ -794,10 +1017,16 @@ mod tests {
         for (name, role_json, accepted, rejected) in cases {
             let mut stub = members(&[ALICE]);
             let revokers: Vec<(&str, &str)> = accepted.iter().chain(rejected).map(|by| (*by, T2)).collect();
-            stub.histories.insert(ALICE.into(), history(Some(T1), &revokers));
-            let grants = resolve_role_grants(&stub, "approved", &role(role_json), &record(), &dids(&[ALICE]))
+            stub.histories.insert(ALICE.into(), history(ALICE, Some(T1), &revokers));
+            let role = role(role_json);
+            let evidence = resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE]))
                 .await
                 .unwrap();
+            assert_eq!(
+                evidence[0].instances[0].revocation_links.len(), revokers.len(),
+                "{name}: every signed tombstone travels — the reader, not the minter, applies authority"
+            );
+            let grants = views(&evidence, &role);
             let kept: Vec<&str> = grants[0].windows[0].revocations.iter().map(|r| r.by.as_str()).collect();
             let mut expected: Vec<&str> = accepted.to_vec();
             expected.sort();
@@ -807,30 +1036,37 @@ mod tests {
         }
     }
 
-    /// The window records what the store said, in a deterministic order: the
-    /// grant link's timestamp when there is one, else the instance's own; the
-    /// authorised tombstones earliest first.
+    /// The window is derived from the carried links, in a deterministic order:
+    /// the grant link's timestamp when there is one, else the instance's own;
+    /// the authorised tombstones earliest first.
     #[tokio::test]
-    async fn windows_carry_the_history_the_store_reported() {
+    async fn windows_are_derived_from_the_carried_links() {
         let mut stub = RoleStub {
             rows_per_match: 2,
             ..members(&[ALICE, BOB])
         };
         stub.histories.insert(
             ALICE.into(),
-            history(Some(T1), &[(MALLORY, T3), (ADMIN, T2)]),
+            history(ALICE, Some(T1), &[(MALLORY, T3), (ADMIN, T2)]),
         );
         // Bob's instances have no `didProperty` link the store could date: they
         // date from the instances themselves (T0), and nothing revoked them.
-        let grants = resolve_role_grants(
+        let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+        let evidence = resolve_role_grants(
             &stub,
             "approved",
-            &role(json!({ "className": "ns://Reviewer", "didProperty": "agent" })),
+            &role,
             &record(),
             &dids(&[ALICE, BOB]),
         )
         .await
         .unwrap();
+        assert_eq!(
+            evidence[1].instances[0].asserted_instance_timestamp.as_deref(),
+            Some(T0),
+            "with no grant link to carry, the instance's hydrated timestamp is what travels — asserted, and named as such"
+        );
+        let grants = views(&evidence, &role);
         let alice = &grants[0];
         assert_eq!(alice.did, ALICE);
         assert_eq!(alice.instances, vec!["r0", "r1"]);
@@ -850,6 +1086,131 @@ mod tests {
             .all(|w| w.granted_at == T0 && w.revocations.is_empty()));
         assert!(bob.eligible_at(NOW, None));
         assert!(!alice.eligible_at(NOW, None));
+    }
+
+    /// **A grant link whose signature does not verify cannot date a grant.**
+    ///
+    /// The window opens at the earliest grant link, so an unsigned or forged
+    /// link is not a harmless extra: it is a back-dating primitive. Write one
+    /// at T0 beside the genuine T3 grant and, unfiltered, the window opens at
+    /// T0 — handing the DID every vote they cast in between, none of which
+    /// they were eligible to cast. The filter is the same predicate the store
+    /// boundary applies when it collects the evidence
+    /// (`link_counts_for_did`), so mint and read agree by construction.
+    ///
+    /// Both directions are asserted: the forged link must not widen the
+    /// window, and it must not be allowed to *narrow* a legitimate one either
+    /// — a forgery that could collapse a window would be a censorship
+    /// primitive in the other direction.
+    #[test]
+    fn a_grant_link_with_a_broken_signature_cannot_back_date_a_window() {
+        let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+        let query = translated(&role, ALICE);
+        let forged = role_link("agent", ALICE, MALLORY, false, T0);
+
+        let evidence = |grant_links: Vec<DecoratedLinkExpression>| RoleGrantEvidence {
+            to_state: "approved".into(),
+            role_class: "ns://Reviewer".into(),
+            did: ALICE.into(),
+            instances: vec![RoleInstanceHistory {
+                instance_id: "r0".into(),
+                grant_links,
+                revocation_links: vec![],
+                asserted_instance_timestamp: None,
+            }],
+        };
+
+        let honest = evidence(vec![grant_link(ALICE, T3)])
+            .resolve(&query)
+            .expect("a signed grant link dates the grant");
+        assert_eq!(honest.windows[0].granted_at, T3);
+
+        let attacked = evidence(vec![forged.clone(), grant_link(ALICE, T3)])
+            .resolve(&query)
+            .expect("the genuine link still dates the grant");
+        assert_eq!(
+            attacked.windows[0].granted_at, T3,
+            "a forged grant link must not back-date the window"
+        );
+        assert_eq!(
+            attacked.windows, honest.windows,
+            "adding a forged link changes nothing at all — it neither widens nor narrows"
+        );
+
+        // A vote in the window the forgery tried to open wins nothing.
+        let atom = atom_with_votes(&[(ALICE, T1)]);
+        assert!(
+            eligible_votes(&atom, &gated_rule(None), &[attacked]).is_empty(),
+            "the vote the back-dated window would have bought is not eligible"
+        );
+
+        // With nothing but the forgery, the grant cannot be placed in time at
+        // all: the window collapses rather than opening at the forged instant.
+        let err = evidence(vec![forged])
+            .resolve(&query)
+            .expect_err("a forged link alone cannot place a grant in time");
+        assert!(err.to_string().contains("cannot be placed in time"), "got {err:#}");
+    }
+
+    /// The same filter, on the other kind of link: an unsigned tombstone is
+    /// not a revocation. Asserted here because `resolve` reads both kinds
+    /// through one predicate — if that ever splits, this fails with the test
+    /// above and says which direction split.
+    #[test]
+    fn an_unsigned_tombstone_does_not_revoke() {
+        let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+        let query = translated(&role, ALICE);
+        let mut unsigned = tombstone(ALICE, ADMIN, T2);
+        unsigned.proof.valid = Some(false);
+        unsigned.proof.invalid = Some(true);
+
+        let grant = RoleGrantEvidence {
+            to_state: "approved".into(),
+            role_class: "ns://Reviewer".into(),
+            did: ALICE.into(),
+            instances: vec![RoleInstanceHistory {
+                instance_id: "r0".into(),
+                grant_links: vec![grant_link(ALICE, T1)],
+                revocation_links: vec![unsigned],
+                asserted_instance_timestamp: None,
+            }],
+        }
+        .resolve(&query)
+        .expect("resolves");
+        assert!(
+            grant.windows[0].revocations.is_empty(),
+            "an unsigned tombstone is not a link anyone wrote"
+        );
+        assert!(grant.eligible_at(NOW, None), "so the grant is still open");
+    }
+
+    /// A tombstone naming *someone else* is not this DID's revocation, and a
+    /// grant link naming someone else does not date this DID's grant — the
+    /// target half of the same predicate.
+    #[test]
+    fn links_naming_another_did_are_not_this_dids_history() {
+        let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+        let grant = RoleGrantEvidence {
+            to_state: "approved".into(),
+            role_class: "ns://Reviewer".into(),
+            did: ALICE.into(),
+            instances: vec![RoleInstanceHistory {
+                instance_id: "r0".into(),
+                grant_links: vec![grant_link(BOB, T0), grant_link(ALICE, T3)],
+                revocation_links: vec![tombstone(BOB, ADMIN, T4)],
+                asserted_instance_timestamp: None,
+            }],
+        }
+        .resolve(&translated(&role, ALICE))
+        .expect("resolves");
+        assert_eq!(
+            grant.windows[0].granted_at, T3,
+            "Bob's earlier grant link does not date Alice's grant"
+        );
+        assert!(
+            grant.windows[0].revocations.is_empty(),
+            "Bob's tombstone does not revoke Alice"
+        );
     }
 
     /// `revoked_at` must share `open_at`'s fail direction: a revocation that
