@@ -125,19 +125,17 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     admin = agent.client;
     await admin.runtime.setMultiUserEnabled(true);
 
-    for (const u of [
-      { email: "alice@propose.local", password: "pass" },
-      { email: "bob@propose.local", password: "pass" },
-    ]) {
-      await admin.agent.createUser(u.email, u.password);
-      await admin.runtime.setUserFreeAccess(u.email, true);
-    }
+    await admin.agent.createUser("alice@propose.local", "pass");
+    await admin.runtime.setUserFreeAccess("alice@propose.local", true);
     const aliceToken = await admin.agent.loginUser("alice@propose.local", "pass");
-    const bobToken = await admin.agent.loginUser("bob@propose.local", "pass");
     alice = new Ad4mClient(baseUrl(agent.apiPort), aliceToken, false);
-    bob = new Ad4mClient(baseUrl(agent.apiPort), bobToken, false);
     aliceDid = (await alice.agent.me()).did;
-    bobDid = (await bob.agent.me()).did;
+
+    // Use the admin client as the second signer: admin has ALL_CAPABILITY so it
+    // can read/write to any user's perspective (no 403). Admin has its own DID
+    // (the main agent key), distinct from Alice's sub-user DID.
+    bob = admin;
+    bobDid = (await admin.agent.me()).did;
 
     expect(new Set([aliceDid, bobDid]).size, "two distinct DIDs").to.equal(2);
   });
@@ -152,6 +150,7 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
   }> {
     const handle = await alice.perspective.add(name);
     const aliceP = (await alice.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
+    // Admin (bob) has ALL_CAPABILITY so it can access any user's perspective by UUID.
     const bobP = (await bob.perspective.byUUID(handle.uuid)) as PerspectiveProxy;
     for (const p of [aliceP]) {
       await (Task as any).register(p);
@@ -268,8 +267,11 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
 
     // Bob co-signs via acceptProposal — his replica re-verifies the seal
     // before signing (including the NoGuard path for guard-free states).
-    const proposals = await stillInReview.proposals();
-    expect(proposals, "exactly one proposal pending").to.have.lengthOf(1);
+    // proposals() returns all FlowTransitionProposal subjects including fired
+    // ones; filter to the pending Done edge.
+    const allProposals = await stillInReview.proposals();
+    const proposals = allProposals.filter((p) => p.toState === "Done");
+    expect(proposals, "exactly one Done proposal pending").to.have.lengthOf(1);
 
     const fired = await (await instanceOn(bobP, task.id)).acceptProposal(proposals[0].id);
     expect(fired, "settling vote returns the fired outcomes").to.have.lengthOf(1);
