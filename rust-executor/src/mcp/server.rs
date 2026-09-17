@@ -11,8 +11,14 @@
 //! What the server binds follows from that: a node with no admin credential
 //! authenticates every caller, so it is reachable from the node itself and
 //! nowhere else. See [`resolve_host`].
+//!
+//! When the executor is configured for TLS, MCP is also served over HTTPS on
+//! `mcp_port + 1`, using the same certificate as the RPC port — see
+//! [`start_tls_listener`]. The plain listener stays up beside it for same-host
+//! clients such as `mcporter`.
 
 use super::tools::Ad4mMcpHandler;
+use crate::config::TlsConfig;
 use anyhow::Result;
 use log::{info, warn};
 use rmcp::transport::streamable_http_server::{
@@ -52,6 +58,10 @@ pub struct McpServerConfig {
     /// Expose dynamic per-class SHACL tools over MCP (see
     /// [`McpContext::dynamic_class_tools`]). Default `false`.
     pub dynamic_class_tools: bool,
+    /// The executor's TLS material, shared with the RPC port. `Some` starts a
+    /// second, HTTPS listener beside the plain one — see [`start_mcp_server`].
+    /// There is no separate MCP certificate to issue or renew.
+    pub tls: Option<TlsConfig>,
 }
 
 impl Default for McpServerConfig {
@@ -60,8 +70,22 @@ impl Default for McpServerConfig {
             port: 3001,
             host: None,
             dynamic_class_tools: false,
+            tls: None,
         }
     }
+}
+
+/// The port the HTTPS listener takes: one above the plain MCP port.
+///
+/// Derived rather than configured because an operator who has already chosen
+/// `--mcp-port` has said where MCP lives; a second flag to choose a port one
+/// higher is a knob with no decision behind it. A deployment that needs the
+/// two ports apart is the reason to add the flag, and it does not exist yet.
+///
+/// `None` at the top of the range, where there is no port above: the plain
+/// listener still starts, and the caller says why HTTPS did not.
+fn resolve_tls_port(plain_port: u16) -> Option<u16> {
+    plain_port.checked_add(1)
 }
 
 /// Where to bind, given whether anything gates access.
@@ -130,32 +154,23 @@ pub async fn start_mcp_server(
         info!("MCP: static tool surface only (dynamicClassTools=false); per-class tools hidden");
     }
 
+    let has_credential = admin_credential.is_some();
     let context = McpContext {
         admin_credential,
         auth_token: Arc::new(RwLock::new(initial_token.clone())),
         dynamic_class_tools: config.dynamic_class_tools,
     };
 
-    // Create the session manager for HTTP transport
-    let session_manager = Arc::new(LocalSessionManager::default());
-
-    // Create config for the HTTP server
-    let http_config = StreamableHttpServerConfig::default();
-
-    // Create the HTTP service with a factory that creates handlers
-    // Each session gets its own auth_token Arc to prevent cross-session token leaking.
-    let context_clone = context.clone();
-    let initial_token_clone = initial_token.clone();
-    let service = StreamableHttpService::new(
-        move || {
-            let mut ctx = context_clone.clone();
-            // Per-session auth token — prevents cross-session token leaking
-            ctx.auth_token = Arc::new(RwLock::new(initial_token_clone.clone()));
-            Ok(Ad4mMcpHandler::new(ctx))
-        },
-        session_manager,
-        http_config,
-    );
+    if let Some(tls) = config.tls.clone() {
+        start_tls_listener(
+            &context,
+            initial_token.clone(),
+            config.port,
+            has_credential,
+            tls,
+        )
+        .await?;
+    }
 
     // Create the TCP listener and serve using axum
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -164,10 +179,84 @@ pub async fn start_mcp_server(
     // NOTE: Bearer header auth removed — the per-session token isolation means an HTTP
     // middleware can't route tokens to the correct session without a session ID registry.
     // Clients authenticate via MCP tools (request_capability + login_email) instead.
-    let app = axum::Router::new().fallback_service(service);
+    axum::serve(listener, mcp_router(&context, initial_token)).await?;
 
-    axum::serve(listener, app).await?;
+    Ok(())
+}
 
+/// One MCP transport: a router with its own session manager.
+///
+/// Built per listener rather than shared, because a session id is a bearer
+/// credential — a session opened over HTTPS must not be resumable by anyone who
+/// guesses or intercepts its id on the plaintext port.
+fn mcp_router(context: &McpContext, initial_token: Option<String>) -> axum::Router {
+    let context = context.clone();
+    let service = StreamableHttpService::new(
+        move || {
+            let mut ctx = context.clone();
+            // Per-session auth token — prevents cross-session token leaking
+            ctx.auth_token = Arc::new(RwLock::new(initial_token.clone()));
+            Ok(Ad4mMcpHandler::new(ctx))
+        },
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    axum::Router::new().fallback_service(service)
+}
+
+/// Serve MCP over HTTPS as well, on `mcp_port + 1`, using the RPC port's cert.
+///
+/// This is what makes remote agent login safe without an SSH tunnel or a
+/// reverse proxy: the credential crosses an encrypted connection instead of
+/// riding on the client's `allowInsecureHttp` escape hatch.
+///
+/// It binds `0.0.0.0`, because a TLS endpoint nobody outside can reach answers
+/// no question. That is only sound while something authenticates the caller, so
+/// **without an admin credential the HTTPS listener does not start at all** —
+/// the same rule `resolve_host` applies to the plain listener, in the one place
+/// where the consequence is worse: TLS proves the server's identity to a caller
+/// whom the server would then not check at all.
+///
+/// A bad certificate path fails startup, matching the RPC server.
+async fn start_tls_listener(
+    context: &McpContext,
+    initial_token: Option<String>,
+    plain_port: u16,
+    has_credential: bool,
+    tls: TlsConfig,
+) -> Result<()> {
+    if !has_credential {
+        warn!(
+            "MCP: TLS is configured but no --admin-credential is set, so the HTTPS MCP listener \
+             is not started. An unauthenticated HTTPS endpoint would publish every AD4M tool to \
+             anyone who can reach it. Set an admin credential to enable it."
+        );
+        return Ok(());
+    }
+    let Some(tls_port) = resolve_tls_port(plain_port) else {
+        warn!(
+            "MCP: no port above --mcp-port={plain_port}, so the HTTPS MCP listener is not \
+             started. Choose a lower MCP port."
+        );
+        return Ok(());
+    };
+
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+        &tls.cert_file_path,
+        &tls.key_file_path,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("MCP TLS config error: {}", e))?;
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], tls_port));
+    let router = mcp_router(context, initial_token);
+    info!("Starting AD4M MCP server (HTTPS) on https://{}", addr);
+    tokio::spawn(async move {
+        axum_server::bind_rustls(addr, rustls_config)
+            .serve(router.into_make_service())
+            .await
+            .unwrap_or_else(|e| log::error!("MCP TLS server error: {}", e));
+    });
     Ok(())
 }
 
@@ -197,6 +286,18 @@ mod tests {
         assert_eq!(resolve_host(Some("10.0.0.5"), false), "10.0.0.5");
         assert_eq!(resolve_host(Some("10.0.0.5"), true), "10.0.0.5");
         assert_eq!(resolve_host(Some("127.0.0.1"), true), "127.0.0.1");
+    }
+
+    #[test]
+    fn the_https_port_sits_one_above_the_plain_one() {
+        assert_eq!(resolve_tls_port(3001), Some(3002));
+        assert_eq!(resolve_tls_port(0), Some(1));
+    }
+
+    #[test]
+    fn there_is_no_https_port_above_the_last_one() {
+        // The plain listener still starts; only HTTPS is refused, loudly.
+        assert_eq!(resolve_tls_port(u16::MAX), None);
     }
 
     #[test]
