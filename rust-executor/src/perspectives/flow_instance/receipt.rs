@@ -339,6 +339,30 @@ impl FlowReceipt {
     /// The distinct seals among the atoms the fold counted, in the order the
     /// settled edges were walked. What [`EvidencePreimage`] entries a mint
     /// has to collect.
+    ///
+    /// Exactly the counted atoms, nothing speculative: it folds first and
+    /// keeps only atoms named in `settled[].atom_uris` — the proposals that
+    /// contributed the counted votes.
+    ///
+    /// # The dedupe key is `seal`, and that is a contract
+    ///
+    /// The key is `seal` while the retained payload is `to_state` and
+    /// `proposer`, so two counted atoms sharing a seal collapse to one entry
+    /// and the survivor's `to_state` / `proposer` stand in for the dropped
+    /// one's. Atoms *can* share a seal — two states with identical `requires`
+    /// matching identical instances is the guard-identical sibling-edge shape
+    /// from #1062 — so this is a live case, not a theoretical one.
+    ///
+    /// It is sound only because those two fields exist **solely to re-derive
+    /// the seal** (see [`CountedAtom`]): anything that re-derives to the same
+    /// seal is interchangeable for that purpose, so which representative
+    /// survives cannot matter.
+    ///
+    /// That makes the invariant load-bearing: **add a field to
+    /// [`CountedAtom`] that a verifier consumes and that is not hashed into
+    /// the seal, and this dedupe silently drops the variant that differs.**
+    /// Such a field needs either the seal widened to cover it or the dedupe
+    /// key widened to include it — not a third `CountedAtom` member.
     pub fn counted_seals(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<CountedAtom>> {
         let derived = fold_read_set(flow, read_set)?;
         let counted: std::collections::BTreeSet<&str> = derived
@@ -369,6 +393,10 @@ impl FlowReceipt {
 /// seal needs: the guard belongs to `to_state`, and `$did`-substituted guards
 /// resolved against the **proposer** at mint time, so re-running the seal has
 /// to substitute that same identity.
+///
+/// "Reduced to what re-deriving its seal needs" is a contract, not a
+/// description — [`FlowReceipt::counted_seals`] dedupes on `seal` alone and
+/// relies on every other field here being redundant given it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CountedAtom {
     pub proposal_uri: String,
