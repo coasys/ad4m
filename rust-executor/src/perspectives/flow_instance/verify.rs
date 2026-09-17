@@ -807,6 +807,9 @@ mod tests {
             T2,
         ));
 
+        // And the other side of the same coin: a minter handed that material
+        // cannot produce the receipt in the first place. See
+        // `mint_refuses_material_a_verifier_would_refuse` below.
         assert_eq!(
             verify_receipt(&reader, &tampered),
             ReceiptVerdict::StateMismatch {
@@ -814,6 +817,60 @@ mod tests {
                 derived: "open".into(),
             },
             "a forged co-signature counts for nobody, so the edge never settles"
+        );
+    }
+
+    /// **Marvin's constraint, made falsifiable.** Mint and verify must fold
+    /// the same material; if only verify re-verifies, the two sides fold
+    /// different inputs by construction. That divergence is invisible on the
+    /// happy path — both sides agree on honest material — and surfaces only as
+    /// a receipt that minted cleanly on one replica and fails on another,
+    /// after the artifact is durable and the minter is gone.
+    ///
+    /// So the property is stated from the mint side: material a verifier would
+    /// refuse must not mint. Bob's co-signature claims `"valid": true` and is
+    /// signed with somebody else's key, `{ n: 2 }` makes it load-bearing, and
+    /// so the fold stays in `open` — which the flow can still leave, so there
+    /// is no completion to claim.
+    ///
+    /// Red with `fold_read_set(flow, &read_set)` in `FlowReceipt::mint`: the
+    /// forged verdict is inherited, quorum is reached, and `mint` produces a
+    /// receipt that `a_forged_co_signature_that_claims_to_be_valid_does_not_
+    /// reach_quorum` shows a verifier rejects.
+    #[test]
+    fn mint_refuses_material_a_verifier_would_refuse() {
+        let flow = flow_json(
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0, "consensusRule": { "n": 2 } },
+            ]),
+            json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+            ]),
+        );
+        let mut links = signed_proposal("ad4m://p/1", ALICE, "open", "done", "seal-1", T1);
+        links.push(signed_link(
+            "ad4m://p/1",
+            ACCEPTED_BY_PREDICATE,
+            did_of(BOB),
+            BOB,
+            false,
+            Some(true),
+            T2,
+        ));
+        let forged = read_set(
+            vec![ProposalLinks {
+                uri: "ad4m://p/1".into(),
+                links,
+            }],
+            Vec::new(),
+        );
+
+        let err = FlowReceipt::mint(&flow, forged, vec![BASE.to_string()], Vec::new())
+            .expect_err("a quorum resting on a forged signature is not a quorum");
+        assert!(
+            format!("{err:#}").contains("can still transition out"),
+            "the fold must stay in `open` rather than counting the forgery, got: {err:#}"
         );
     }
 
