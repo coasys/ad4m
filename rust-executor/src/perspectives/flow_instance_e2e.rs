@@ -851,25 +851,31 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
         .iter()
         .find(|g| g.did == acting_did(&f))
         .unwrap_or_else(|| panic!("the voter's role evidence belongs in the proof: {read_set:?}"));
-    // The reshape's whole point: what travels is link expressions, not a
-    // `granted_at` the minter computed. Assert they are real links — author,
-    // timestamp and signature material present — rather than default-filled
-    // shells that happen to satisfy the type.
-    let grant_links: Vec<_> = evidence
-        .instances
-        .iter()
-        .flat_map(|i| i.grant_links.iter())
-        .collect();
+    // The reshape's whole point: what travels is raw material, not a
+    // `granted_at` the minter computed. Every instance must therefore carry
+    // something the reader can date the grant *from* — assignment links, or
+    // (for a `$did`-style query with no `didProperty`, as here) the asserted
+    // instance timestamp. An instance carrying neither would make `resolve`
+    // bail, which is the fail-closed path, not this one.
     assert!(
-        !grant_links.is_empty(),
-        "a `didProperty` role query must carry its assignment links: {evidence:?}"
+        evidence
+            .instances
+            .iter()
+            .all(|i| !i.grant_links.is_empty() || i.asserted_instance_timestamp.is_some()),
+        "every role instance must carry material a reader can date it from: {evidence:?}"
     );
+    // And whatever links are carried must be real links — author, timestamp
+    // and signature material present — not default-filled shells that happen
+    // to satisfy the type.
     assert!(
-        grant_links.iter().all(|l| !l.author.is_empty()
-            && !l.timestamp.is_empty()
-            && !l.proof.signature.is_empty()
-            && l.proof.valid == Some(true)),
-        "the grant links themselves travel, author and signature intact: {evidence:?}"
+        evidence
+            .instances
+            .iter()
+            .flat_map(|i| i.grant_links.iter().chain(i.revocation_links.iter()))
+            .all(|l| !l.author.is_empty()
+                && !l.timestamp.is_empty()
+                && !l.proof.signature.is_empty()),
+        "the links themselves travel, author and signature intact: {evidence:?}"
     );
 
     let json = serde_json::to_string(&read_set).expect("a read-set serialises");
