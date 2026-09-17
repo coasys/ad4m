@@ -493,6 +493,16 @@ pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 300;
 /// two modules with nothing connecting them*. A literal `600` here would
 /// instantiate that same class again at a different ratio.
 ///
+/// **The coupling runs both ways: raising [`LAST_SEEN_WRITE_THROTTLE_S`] also
+/// raises reap latency by the same amount.** At a 600 s throttle this window
+/// becomes 900 s, so a genuinely dead loop lingers 15 minutes instead of 10.
+/// That direction is correct and is the entire point — the band *must* grow
+/// with the throttle — but it is a consequence the person making that change
+/// will not be looking for, because they will be thinking about write volume,
+/// not loop lifetimes. If that latency ever becomes the binding constraint, the
+/// fix is to shorten the throttle (which shortens both), not to pin this
+/// window back to a literal.
+///
 /// # What this window actually bounds
 ///
 /// Not maximum staleness — maximum tolerated **gap between authenticated
