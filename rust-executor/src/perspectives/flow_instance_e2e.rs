@@ -27,7 +27,7 @@ use super::flow_instance::atom::{
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::propose::propose_flow_transition;
-use super::flow_instance::{fold_read_set, ReadSet};
+use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
 
@@ -816,9 +816,9 @@ async fn n2_second_signer_accept_settles_and_replays() {
 
 /// The read-set travels: serialise everything the engine read, fold the JSON
 /// back on a machine with no perspective, and reach the same verdict. This is
-/// what a minted Synergy token would carry as its backing — proof for the
-/// signed proposals and votes, an audit record for the role verdicts, which
-/// is why `ReadSet::role_grants` says so on the field.
+/// what a minted Synergy token would carry as its backing — signed links for
+/// the proposals and votes, and signed links for the role history too, from
+/// which the reader recomputes the windows instead of trusting ours.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_serialised_read_set_re_derives_the_same_state() {
     let mut f = seed_satisfied_fixture(None).await;
@@ -840,23 +840,68 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
     assert_eq!(derived.state, "scoped");
 
     let read_set = f.read_set().await;
+    let records = f.instances().await;
+    assert_eq!(
+        read_set.subject, records[0].subject,
+        "the run's base expression travels: without it a reader cannot substitute `$flow.base` \
+         and would apply a different authority rule than we did"
+    );
+    let evidence = read_set
+        .role_grants
+        .iter()
+        .find(|g| g.did == acting_did(&f))
+        .unwrap_or_else(|| panic!("the voter's role evidence belongs in the proof: {read_set:?}"));
+    // The reshape's whole point: what travels is raw material, not a
+    // `granted_at` the minter computed. The rule carries
+    // `didProperty: "owner"` and the fixture writes the assignment link
+    // `TASK --ns://owner--> literal(did)`, so the assignment link itself must
+    // travel. `asserted_instance_timestamp` is the *fallback* for instances
+    // that carry no assignment link, and accepting it here would let the
+    // assertion pass on a read-set where nothing travels at all — which is
+    // exactly the hole #1065's first review found: `grant_links` was empty for
+    // every `didProperty` role because the store query used the property
+    // *name* where the graph holds the RDF *predicate*. No disjunction.
     assert!(
-        read_set
-            .role_grants
+        !evidence.instances.is_empty(),
+        "the voter's role query must have matched at least one instance: {evidence:?}"
+    );
+    assert!(
+        evidence.instances.iter().all(|i| !i.grant_links.is_empty()),
+        "every role instance must carry the assignment links the reader dates the grant from: \
+         {evidence:?}"
+    );
+    // And the carried links must be real links — author, timestamp and
+    // signature material present — not default-filled shells that happen to
+    // satisfy the type. `.all()` over an empty iterator is vacuously true, so
+    // this assert only means anything because of the one above.
+    assert!(
+        evidence
+            .instances
             .iter()
-            .any(|g| g.did == acting_did(&f)
-                && !g.instances.is_empty()
-                && g.windows.iter().all(|w| !w.granted_at.is_empty())),
-        "the role instances the verdict rested on, and when they were granted, belong in the proof: {read_set:?}"
+            .flat_map(|i| i.grant_links.iter().chain(i.revocation_links.iter()))
+            .all(|l| !l.author.is_empty()
+                && !l.timestamp.is_empty()
+                && !l.proof.signature.is_empty()),
+        "the links themselves travel, author and signature intact: {evidence:?}"
     );
 
     let json = serde_json::to_string(&read_set).expect("a read-set serialises");
     let parsed: ReadSet = serde_json::from_str(&json).expect("and deserialises");
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flow = &flows[&f.flow_uri];
     assert_eq!(
-        fold_read_set(&flows[&f.flow_uri], &parsed),
+        fold_read_set(flow, &parsed).expect("the carried evidence resolves off-perspective"),
         derived,
         "an off-perspective verifier must reach the same verdict"
+    );
+
+    // The reader's own translation input must match the one this replica used
+    // — the same role query has to mean the same thing on both sides, or the
+    // authority rule diverges silently.
+    assert_eq!(
+        parsed.as_record(flow),
+        FlowInstance::from_record(&records[0], flow).as_record(),
+        "the record rebuilt from carried fields must equal the live one"
     );
 }
 
@@ -865,18 +910,27 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
 // ---------------------------------------------------------------------------
 
 /// Test 12. A vote from outside the rule's `fromRole` counts for nothing, and
-/// the same vote counts the moment its author enters the role.
+/// a grant written *after* that vote does not retroactively enfranchise it —
+/// eligibility is as-of each vote's own timestamp, the same rule the
+/// revocation tests pin from the other side. A vote cast once the grant is
+/// already in place settles the edge.
+///
+/// The middle assertion used to read `scoped`, and passed only because of the
+/// bug #1065's review found: the grant-link query used the `didProperty`
+/// *name* where the graph holds the RDF predicate, so `grant_links` came back
+/// empty for every `didProperty` role and `granted_at` fell back to the
+/// instance's own (much earlier) timestamp. Under that fallback every grant
+/// looked retroactive. The assertion was a mirror of the defect, not a
+/// contract.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_role_member_vote_does_not_count() {
+    const OWNER_RULE_HERE: &str =
+        r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#;
+
     let mut f = seed_satisfied_fixture(None).await;
     // Eligible = "there is a Task this DID owns". The seeded task has no
     // owner, so nobody is in the role yet.
-    set_consensus_rule(
-        &mut f,
-        "delivery://Delivery.scoped",
-        r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#,
-    )
-    .await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE_HERE).await;
     f.mint_one().await;
 
     assert_eq!(
@@ -895,8 +949,25 @@ async fn a_non_role_member_vote_does_not_count() {
     .await;
     assert_eq!(
         f.derived().await.state,
+        "identified",
+        "the grant postdates the vote, so it cannot reach back and make it count"
+    );
+
+    // Same rule, same single vote — but cast while the grant is already live.
+    let mut g = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut g, "delivery://Delivery.scoped", OWNER_RULE_HERE).await;
+    g.link(
+        TASK,
+        "ns://owner",
+        &literal(&acting_did(&g)),
+        LinkStatus::Local,
+    )
+    .await;
+    g.mint_one().await;
+    assert_eq!(
+        g.derived().await.state,
         "scoped",
-        "and inside the role, the same vote settles the edge"
+        "inside the role at the time of the vote, the same vote settles the edge"
     );
 }
 
@@ -1188,11 +1259,18 @@ async fn a_newcomer_deriving_after_a_revocation_converges_on_the_settled_state()
     let json = serde_json::to_string(&read_set).expect("serialises");
     let parsed: ReadSet = serde_json::from_str(&json).expect("deserialises");
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
-    assert_eq!(fold_read_set(&flows[&f.flow_uri], &parsed), before);
+    assert_eq!(
+        fold_read_set(&flows[&f.flow_uri], &parsed).expect("the carried evidence resolves"),
+        before
+    );
     assert!(
         read_set.role_grants.iter().any(|g| g.did == acting_did(&f)
-            && g.windows.iter().any(|w| !w.revocations.is_empty())),
-        "the read-set records the revocation the verdict took into account: {read_set:?}"
+            && g.instances.iter().any(|i| i
+                .revocation_links
+                .iter()
+                .any(|l| l.proof.valid == Some(true)))),
+        "the read-set carries the tombstone link the verdict took into account — \
+         unfiltered by authority, so the reader applies that rule itself: {read_set:?}"
     );
 }
 
@@ -1939,6 +2017,141 @@ async fn the_engine_pass_never_reaches_quorum_by_itself_however_many_dids_run_it
         derived.settled.is_empty(),
         "no edge settled: {:?}",
         derived.settled
+    );
+}
+
+/// **The real `get_links` seam, not a stub of it.**
+///
+/// Every other test that touches role grants asserts on a *derived state*, and
+/// the unit suite in `flow_instance/roles.rs` hands `resolve` grant links that
+/// it constructed itself — links the production path could not have fetched.
+/// So when `didProperty` resolution was broken (a property **name** sent to
+/// `get_links`, which wants an RDF **predicate**), a fully green suite said
+/// nothing: the seam that was broken was precisely the seam the tests stubbed.
+/// Since #1027 that meant every `didProperty` role grant was dated from the
+/// instance's own timestamp instead of the assignment link — a wider
+/// eligibility window than any rule asked for.
+///
+/// This test walks the production path and pins the contract at the store
+/// boundary itself, so the next spelling drift is a red test rather than a
+/// silently widened window:
+///
+/// 1. the property **name** finds the assignment link through the class shape;
+/// 2. the predicate spelling finds the same link (a hand-written SDNA may use
+///    either, and a role rule must not gate differently depending on which);
+/// 3. a name the class does not declare is an `Err`, never an empty predicate;
+/// 4. the window `resolve` recomputes is dated from the **assignment**, and is
+///    strictly later than the fallback it used to silently take.
+///
+/// Fails on `8bb33678d~1` at assertion 1: `grant_links` comes back empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_did_property_grant_link_travels_through_the_real_store() {
+    use super::flow_evaluator::{requires_query_input, RequiresQueryable};
+    use super::flow_instance::roles::resolve_role_grants;
+    use super::flow_instance::time::parse_link_timestamp;
+    use super::shacl_parser::ModelQuery;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE).await;
+    // The instance's own links are written first; the assignment comes after,
+    // so the two datings are distinguishable and the fallback is the earlier.
+    tick().await;
+    grant_owner_role(&mut f).await;
+    let me = acting_did(&f);
+
+    // 1. The store boundary: `owner` is the SDNA property NAME; the graph
+    //    holds `ns://owner`. Before the fix this vector was empty.
+    let by_name = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("owner"), &me)
+        .await
+        .expect("role_grant_links by property name");
+    assert_eq!(
+        by_name.grant_links.len(),
+        1,
+        "the assignment link must be reachable by the didProperty NAME the SDNA declares, \
+         not only by the predicate the graph stores: {:?}",
+        by_name.grant_links
+    );
+    assert_eq!(
+        by_name.grant_links[0].data.predicate.as_deref(),
+        Some("ns://owner"),
+        "and the link found must be the assignment itself"
+    );
+
+    // 2. Either spelling, one answer.
+    let by_predicate = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("ns://owner"), &me)
+        .await
+        .expect("role_grant_links by predicate");
+    assert_eq!(
+        by_predicate.grant_links, by_name.grant_links,
+        "name and predicate spellings must resolve to the same links"
+    );
+
+    // 3. Unresolvable fails closed rather than degrading to an empty
+    //    predicate — which is what "granted since forever" looked like.
+    let err = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("noSuchProperty"), &me)
+        .await
+        .expect_err("a didProperty the class does not declare must be an Err");
+    assert!(
+        format!("{err:#}").contains("noSuchProperty"),
+        "the error must name the property that could not be resolved: {err:#}"
+    );
+
+    // 4. End to end: the evidence that travels in a receipt carries the
+    //    assignment, and the window is dated from it.
+    let role: ModelQuery =
+        serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
+            .expect("role query");
+    let record = f.instances().await.remove(0);
+    let evidence = resolve_role_grants(
+        &f.perspective,
+        "delivery://Delivery.scoped",
+        &role,
+        &record,
+        std::slice::from_ref(&me),
+    )
+    .await
+    .expect("resolve_role_grants");
+
+    let instance = evidence[0]
+        .instances
+        .iter()
+        .find(|i| i.instance_id == TASK)
+        .expect("the owned task is a matched role instance");
+    assert_eq!(
+        instance.grant_links.len(),
+        1,
+        "the receipt must carry the assignment link, not just the instance's word: {:?}",
+        instance.grant_links
+    );
+
+    let translated = requires_query_input(&role, &record, &me).expect("role query translates");
+    let grant = evidence[0].resolve(&translated).expect("resolve");
+    let window = grant
+        .windows
+        .iter()
+        .find(|w| w.instance_id == TASK)
+        .expect("a window for the owned task");
+    assert_eq!(
+        window.granted_at, instance.grant_links[0].timestamp,
+        "granted_at is the assignment link's own timestamp"
+    );
+
+    let fallback = instance
+        .asserted_instance_timestamp
+        .clone()
+        .expect("the instance is datable, so the fallback exists and is the wrong answer");
+    assert!(
+        parse_link_timestamp(&window.granted_at) > parse_link_timestamp(&fallback),
+        "the assignment must date the grant STRICTLY LATER than the instance fallback \
+         ({} vs {}) — taking the fallback is what widened every didProperty window",
+        window.granted_at,
+        fallback
     );
 }
 
