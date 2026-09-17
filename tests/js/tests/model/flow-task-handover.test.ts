@@ -101,10 +101,17 @@ import { expect } from "chai";
 import crypto from "node:crypto";
 import { Ad4mClient, PerspectiveProxy, SHACLFlow } from "@coasys/ad4m";
 import { FlowInstance, FlowTransitionProposal } from "@coasys/ad4m";
-import type { ConsensusRule, FlowFireOutcome, ModelQuery } from "@coasys/ad4m";
+import type { ConsensusRule, ModelQuery } from "@coasys/ad4m";
 import { Ad4mModel, Model, Property } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
 import type { AgentHandle } from "../../helpers/executor.js";
+import { baseUrl } from "../../utils/utils.js";
+
+// GAP 8 — `FlowFireOutcome`, the return type of the public `acceptProposal`,
+// is declared in `core/src/perspectives/PerspectiveClient.ts` and that module
+// is NOT re-exported from `core/src/index.ts`. A TypeScript app can call the
+// method but cannot name what it gets back. One line in `index.ts` fixes it.
+type FlowFireOutcome = Awaited<ReturnType<FlowInstance["acceptProposal"]>>[number];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // The domain classes. Ordinary @Model subject classes — nothing flow-specific
@@ -559,6 +566,10 @@ describe("Flow engine handover — a task flow driven by three agents", function
     // runtime-wide switch and must not leak into the other model tests.
     agent = await startAgent("flow-task-handover");
     admin = agent.client;
+    // `startAgent` already flips multi-user on; repeated here because this
+    // suite's whole premise is three distinct DIDs on one executor and a
+    // future change to the helper must break loudly, not silently collapse
+    // every vote onto one agent.
     await admin.runtime.setMultiUserEnabled(true);
 
     const users = [
@@ -571,7 +582,6 @@ describe("Flow engine handover — a task flow driven by three agents", function
       await admin.agent.createUser(u.email, u.password);
       await admin.runtime.setUserFreeAccess(u.email, true);
       const token = await admin.agent.loginUser(u.email, u.password);
-      const { baseUrl } = await import("../utils/utils.js");
       const c = new Ad4mClient(baseUrl(agent.apiPort), token, false);
       await c.agent.me(); // touches last_seen, which the supervisor filters on
       clients.push(c);
