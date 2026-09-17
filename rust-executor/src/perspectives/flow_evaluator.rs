@@ -405,18 +405,32 @@ pub struct RoleRevocation {
 /// serialised read-set. Carrying links rather than verdicts is what lets that
 /// reader check the chronology instead of believing the minter's summary.
 ///
-/// One rule decides what is carried, for both kinds:
-/// [`link_counts_for_did`] — signed, and naming this DID. Signature is
-/// checked here, at the store boundary, exactly as `flow_instance::atom::signed_by`
-/// checks it for votes: a link whose verdict is not `valid` is not a link
-/// anyone wrote. **Authority is deliberately not checked here** — whether a
-/// tombstone's author may revoke depends on the role query, so the reader
-/// applies [`revocation_authorised`](crate::perspectives::flow_instance::roles::revocation_authorised)
+/// What is carried differs by kind, and the asymmetry is on purpose *for now*:
+///
+/// - **Tombstones** must be signed ([`revocation_link_counts_for_did`]),
+///   exactly as `flow_instance::atom::signed_by` requires it for votes: a
+///   link whose verdict is not `valid` is not a link anyone wrote. This is
+///   the rule the pre-#1027 code already applied, carried over unchanged.
+/// - **Grant links** are carried on target match alone
+///   ([`grant_link_names_did`]), also unchanged from pre-#1027.
+///
+/// Signature-filtering grant links too is the obvious next step and is
+/// deliberately **not** taken here: `granted_at` falls back to the instance's
+/// own timestamp when no grant link qualifies, and that fallback is normally
+/// *earlier* than the assignment link — so dropping links can land the window
+/// wider than leaving them in. Closing that hole needs the fallback, the
+/// `proof.valid` tri-state (#1046, which conflates never-evaluated with
+/// evaluated-and-failed) and the missing author filter to move together.
+/// Tracked as <https://github.com/coasys/ad4m/issues/1063>.
+///
+/// **Authority is deliberately not checked here** — whether a tombstone's
+/// author may revoke depends on the role query, so the reader applies
+/// [`revocation_authorised`](crate::perspectives::flow_instance::roles::revocation_authorised)
 /// itself against the definition it holds, and cannot be handed a
 /// pre-filtered set to trust.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RoleGrantLinks {
-    /// Every signed `instance --didProperty--> did` link, earliest first.
+    /// Every `instance --didProperty--> did` link, earliest first.
     /// Empty when the role query has no `didProperty` or no such link exists;
     /// the reader then dates the grant from the instance itself, never from
     /// "always".
@@ -433,26 +447,37 @@ pub struct RoleGrantLinks {
 /// bounding what a receipt has to carry.
 pub(crate) const MAX_GRANT_LINKS: usize = 8;
 
-/// The one rule for whether a link speaks about this DID's membership:
-/// its signature verified, and its target names the DID.
+/// Whether a **grant** link speaks about this DID's membership: its target
+/// names the DID. No signature check — see [`RoleGrantLinks`] and #1063.
 ///
 /// Shared by the store boundary above and by the pure reader in
 /// `roles::RoleGrantEvidence::resolve`, on purpose. An asymmetric filter is
 /// not a style problem: a link the minter counts and the verifier drops
 /// mints receipts that fail their own verification, and — the direction that
 /// actually costs — a link the verifier counts and the minter dropped lets
-/// forged material widen a window. One predicate, both sites.
-pub(crate) fn link_counts_for_did(
+/// forged material widen a window. One predicate per kind, both sites.
+pub(crate) fn grant_link_names_did(
     link: &DecoratedLinkExpression,
     did: &str,
     did_literal: &str,
 ) -> bool {
-    link.proof.valid == Some(true) && target_names_did(&link.data.target, did, did_literal)
+    target_names_did(&link.data.target, did, did_literal)
+}
+
+/// Whether a **revocation** tombstone counts for this DID: its signature
+/// verified, and its target names the DID. Same both-sites rule as
+/// [`grant_link_names_did`], plus the vote-layer signature check.
+pub(crate) fn revocation_link_counts_for_did(
+    link: &DecoratedLinkExpression,
+    did: &str,
+    did_literal: &str,
+) -> bool {
+    link.proof.valid == Some(true) && grant_link_names_did(link, did, did_literal)
 }
 
 /// `literal:string:`-encode a DID for target matching — the form the SDNA
 /// setters write. Shared with the pure reader for the same reason
-/// [`link_counts_for_did`] is.
+/// [`grant_link_names_did`] is.
 pub(crate) fn did_literal_url(did: &str) -> anyhow::Result<String> {
     use ad4m_client::literal::Literal;
     Literal::from_string(did.to_string())
@@ -515,7 +540,9 @@ impl RequiresQueryable for PerspectiveInstance {
     ) -> anyhow::Result<RoleGrantLinks> {
         let did_literal = did_literal_url(did)
             .map_err(|e| anyhow::anyhow!("role_grant_links: {instance_id}: {e}"))?;
-        let counts = |l: &DecoratedLinkExpression| link_counts_for_did(l, did, &did_literal);
+        let grant_counts = |l: &DecoratedLinkExpression| grant_link_names_did(l, did, &did_literal);
+        let revocation_counts =
+            |l: &DecoratedLinkExpression| revocation_link_counts_for_did(l, did, &did_literal);
 
         // Sorted by parsed instant, not by string — grant links are
         // client-stamped and clients disagree on RFC 3339 flavour (#1000).
@@ -532,7 +559,7 @@ impl RequiresQueryable for PerspectiveInstance {
                 })
                 .await?
                 .into_iter()
-                .filter(|l| counts(l) && parse_link_timestamp(&l.timestamp).is_some())
+                .filter(|l| grant_counts(l) && parse_link_timestamp(&l.timestamp).is_some())
                 .collect(),
             None => Vec::new(),
         };
@@ -550,7 +577,7 @@ impl RequiresQueryable for PerspectiveInstance {
             })
             .await?
             .into_iter()
-            .filter(counts)
+            .filter(revocation_counts)
             .collect();
 
         Ok(RoleGrantLinks {
@@ -1222,15 +1249,20 @@ mod tests {
         );
     }
 
-    /// The predicate both sides of the wire share. A link counts for a DID's
-    /// membership iff its signature verified **and** its target names the
-    /// DID — in every spelling the graph uses for a DID target, since an
-    /// unrecognised tombstone spelling would fail open (#1014).
+    /// The two predicates both sides of the wire share, pinned together so a
+    /// change to one that should have touched the other is visible here.
     ///
-    /// `valid: None` is "not evaluated", never "fine": the option-conflation
-    /// direction that would make an unverified link count.
+    /// Target matching is identical for both and must accept every spelling
+    /// the graph uses for a DID target — an unrecognised *tombstone* spelling
+    /// would fail open (#1014).
+    ///
+    /// They differ on signatures, and that difference is the tested contract,
+    /// not an accident: a tombstone needs a verified signature, a grant link
+    /// does not (yet — #1063). For tombstones, `valid: None` is "not
+    /// evaluated", never "fine": the option-conflation direction that would
+    /// make an unverified link count.
     #[test]
-    fn a_link_counts_for_a_did_only_when_signed_and_naming_it() {
+    fn grant_and_revocation_predicates_differ_only_on_the_signature_check() {
         use ad4m_client::literal::Literal;
         let did = "did:key:alice";
         let did_literal = did_literal_url(did).unwrap();
@@ -1257,20 +1289,31 @@ mod tests {
 
         for target in [did, did_literal.as_str(), legacy.as_str()] {
             assert!(
-                link_counts_for_did(&signed(target, Some(true)), did, &did_literal),
-                "a signed link naming the DID as `{target}` counts"
+                revocation_link_counts_for_did(&signed(target, Some(true)), did, &did_literal),
+                "a signed tombstone naming the DID as `{target}` counts"
             );
             for verdict in [Some(false), None] {
                 assert!(
-                    !link_counts_for_did(&signed(target, verdict), did, &did_literal),
-                    "an unverified link ({verdict:?}) never counts, whatever it names"
+                    !revocation_link_counts_for_did(&signed(target, verdict), did, &did_literal),
+                    "an unverified tombstone ({verdict:?}) never counts, whatever it names"
+                );
+                assert!(
+                    grant_link_names_did(&signed(target, verdict), did, &did_literal),
+                    "a grant link is carried on target match alone ({verdict:?}); \
+                     signature-filtering it is #1063, not this PR"
                 );
             }
         }
-        assert!(
-            !link_counts_for_did(&signed(&other, Some(true)), did, &did_literal),
-            "a signed link naming another DID is not this DID's history"
-        );
+        for verdict in [Some(true), Some(false), None] {
+            assert!(
+                !revocation_link_counts_for_did(&signed(&other, verdict), did, &did_literal),
+                "a tombstone naming another DID is not this DID's history"
+            );
+            assert!(
+                !grant_link_names_did(&signed(&other, verdict), did, &did_literal),
+                "a grant link naming another DID is not this DID's history"
+            );
+        }
     }
 
     #[test]

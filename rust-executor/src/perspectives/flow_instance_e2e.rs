@@ -851,12 +851,25 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
         .iter()
         .find(|g| g.did == acting_did(&f))
         .unwrap_or_else(|| panic!("the voter's role evidence belongs in the proof: {read_set:?}"));
+    // The reshape's whole point: what travels is link expressions, not a
+    // `granted_at` the minter computed. Assert they are real links — author,
+    // timestamp and signature material present — rather than default-filled
+    // shells that happen to satisfy the type.
+    let grant_links: Vec<_> = evidence
+        .instances
+        .iter()
+        .flat_map(|i| i.grant_links.iter())
+        .collect();
     assert!(
-        evidence
-            .instances
-            .iter()
-            .all(|i| i.grant_links.iter().all(|l| l.proof.valid == Some(true))),
-        "the grant links themselves travel, signatures intact: {evidence:?}"
+        !grant_links.is_empty(),
+        "a `didProperty` role query must carry its assignment links: {evidence:?}"
+    );
+    assert!(
+        grant_links.iter().all(|l| !l.author.is_empty()
+            && !l.timestamp.is_empty()
+            && !l.proof.signature.is_empty()
+            && l.proof.valid == Some(true)),
+        "the grant links themselves travel, author and signature intact: {evidence:?}"
     );
 
     let json = serde_json::to_string(&read_set).expect("a read-set serialises");

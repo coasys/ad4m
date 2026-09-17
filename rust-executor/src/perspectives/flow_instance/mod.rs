@@ -99,13 +99,13 @@ pub mod trigger;
 pub(crate) use pass::local_cached_state;
 
 use crate::perspectives::flow_context::FlowInstanceRecord;
+use crate::perspectives::flow_evaluator::requires_query_input;
 use crate::perspectives::flow_spawn::initial_state_of;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::DecoratedLinkExpression;
 use atom::{marked_fired, TransitionAtom};
 use fold::{fold, rule_for, Contention, DerivedState, VouchedAtom};
-use crate::perspectives::flow_evaluator::requires_query_input;
 use roles::{eligible_votes, resolve_role_grants, RoleGrant, RoleGrantEvidence};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
