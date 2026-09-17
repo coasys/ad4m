@@ -5,6 +5,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { initAdapters, getConfig, resetAdapters } from "../src/adapters.js";
+import { commitNeedsKeyRetry } from "../src/key-ring-policy.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bundlePath = resolve(__dirname, "..", "build", "bundle.js");
@@ -83,5 +84,19 @@ describe("template uniqueness", () => {
         const roomB = getConfig().roomId;
 
         assert.notStrictEqual(roomA, roomB);
+    });
+});
+
+describe("commitNeedsKeyRetry", () => {
+    it("retries when status is error", () => {
+        assert.strictEqual(commitNeedsKeyRetry("error"), true);
+    });
+
+    it("retries when status is pending", () => {
+        assert.strictEqual(commitNeedsKeyRetry("pending"), true);
+    });
+
+    it("does not retry when status is ready", () => {
+        assert.strictEqual(commitNeedsKeyRetry("ready"), false);
     });
 });

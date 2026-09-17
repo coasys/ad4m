@@ -46,6 +46,7 @@ import {
     DenoTransport,
     DenoWebSocketFactory,
 } from "./src/adapters-deno.js";
+import { commitNeedsKeyRetry } from "./src/key-ring-policy.js";
 
 // ---------------------------------------------------------------------------
 // Template Variables
@@ -525,13 +526,12 @@ const language = defineLanguage({
                     "server-link-language: not configured (SERVER_URL/UID template variables unfilled)",
                 );
             }
-            if (keyRingStatus === "error" || keyRingStatus === "pending") {
-                const prevStatus = keyRingStatus;
+            if (commitNeedsKeyRetry(keyRingStatus)) {
                 console.log(
                     `[server-link-language] retrying E2E key ring acquisition before commit (status: ${keyRingStatus})...`,
                 );
                 await setupKeyRingCoalesced();
-                if (prevStatus !== "ready" && keyRingStatus === "ready") {
+                if (keyRingStatus === "ready") {
                     console.log(
                         "[server-link-language] key ring acquired — re-bootstrapping to recover skipped links",
                     );
