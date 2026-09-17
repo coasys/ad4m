@@ -477,18 +477,31 @@ impl SparqlStore {
 
         // 3. Metadata on the reifier node (all default graph)
         let proof = &link.proof;
-        let valid_str = proof.valid.unwrap_or(false).to_string();
 
-        let annotations: &[(&str, &str)] = &[
+        let mut annotations: Vec<(&str, &str)> = vec![
             (ONT_AUTHOR, &link.author),
             (ONT_TIMESTAMP, &link.timestamp),
             (ONT_PROOF_KEY, &proof.key),
             (ONT_PROOF_SIG, &proof.signature),
-            (ONT_PROOF_VALID, &valid_str),
             (ONT_STATUS, status_str(&link.status)),
         ];
 
-        for (pred_uri, value) in annotations {
+        // `proof.valid` is tri-state: `Some(true)` and `Some(false)` are
+        // verdicts ("verified" / "evaluated and wrong"), while `None` means the
+        // signature was never evaluated at all. Persisting `None` as `"false"`
+        // made those two indistinguishable on read. An unevaluated verdict is
+        // therefore stored as an *absent* annotation. Every reader already maps
+        // an absent `proofValid` back to `None` (`for_each_matched_link`,
+        // `link_from_solution`, `migrate_named_graphs_to_reifiers`), so absence
+        // is the faithful encoding rather than a new convention — and both
+        // SPARQL reads bind it through `OPTIONAL`.
+        let valid_str;
+        if let Some(valid) = proof.valid {
+            valid_str = valid.to_string();
+            annotations.push((ONT_PROOF_VALID, &valid_str));
+        }
+
+        for (pred_uri, value) in &annotations {
             let pred = NamedNodeRef::new_unchecked(pred_uri);
             let lit = literal(value);
             self.store.insert(QuadRef::new(
@@ -2849,6 +2862,145 @@ mod tests {
             .query_links(None, None, None, Some(exact_ts), Some(exact_ts), None)
             .unwrap();
         assert_eq!(results.len(), 1, "exact from+until should include the link");
+    }
+
+    // ── Proof-verdict tri-state round-trip ──
+    //
+    // `proof.valid` has three states and all three must survive a store
+    // round-trip: `Some(true)` = verified, `Some(false)` = evaluated and
+    // wrong, `None` = never evaluated. The store used to flatten `None` to
+    // the annotation `"false"`, which is indistinguishable from a real
+    // negative verdict on read. One test per read path, because each path
+    // decodes the annotation independently, plus a `Some(false)` control that
+    // proves the fix did not simply stop recording negative verdicts.
+
+    /// Read path 1: `link_from_solution`, reached via `get_all_links`.
+    #[test]
+    fn proof_valid_none_round_trips_as_none() {
+        let svc = new_service();
+        let mut link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        link.proof.valid = None;
+        link.proof.invalid = None;
+        svc.add_link(&link).unwrap();
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].proof.valid, None,
+            "an unevaluated verdict must read back as None, not as a negative \
+             verdict — got {:?} from get_all_links",
+            links[0].proof.valid
+        );
+        assert_eq!(links[0].proof.invalid, None);
+    }
+
+    /// Read path 2: `for_each_matched_link`, reached via `query_links`.
+    #[test]
+    fn proof_valid_none_round_trips_as_none_through_query_links() {
+        let svc = new_service();
+        let mut link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        link.proof.valid = None;
+        link.proof.invalid = None;
+        svc.add_link(&link).unwrap();
+
+        let links = svc
+            .query_links(Some("ad4m://src"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].proof.valid, None,
+            "an unevaluated verdict must read back as None, not as a negative \
+             verdict — got {:?} from query_links",
+            links[0].proof.valid
+        );
+        assert_eq!(links[0].proof.invalid, None);
+    }
+
+    /// Read path 3: `migrate_named_graphs_to_reifiers`. Named-graph-era data
+    /// with no `proofValid` annotation decodes to `None`; the migration then
+    /// re-persists it through `insert_link_triples`, so this covers the read
+    /// path *and* the write site it feeds.
+    #[test]
+    fn proof_valid_none_survives_named_graph_migration() {
+        let svc = new_service();
+
+        // Seed one link in the pre-reifier named-graph layout: the triple in a
+        // named graph, its metadata on the graph IRI in the default graph, and
+        // deliberately no `proofValid` annotation.
+        let graph = NamedNode::new("ad4m://graph/legacy1").unwrap();
+        let source = NamedNode::new("ad4m://src").unwrap();
+        let predicate = NamedNode::new("ad4m://pred").unwrap();
+        let target = NamedNode::new("ad4m://tgt").unwrap();
+        svc.store
+            .insert(QuadRef::new(
+                source.as_ref(),
+                predicate.as_ref(),
+                target.as_ref(),
+                GraphNameRef::NamedNode(graph.as_ref()),
+            ))
+            .unwrap();
+        for (pred_uri, value) in [
+            (ONT_AUTHOR, "did:key:z6Mktest"),
+            (ONT_TIMESTAMP, "2024-01-15T10:00:00.000Z"),
+            (ONT_PROOF_KEY, "testkey"),
+            (ONT_PROOF_SIG, "testsig"),
+            (ONT_STATUS, "Shared"),
+        ] {
+            let lit = Literal::new_simple_literal(value);
+            svc.store
+                .insert(QuadRef::new(
+                    graph.as_ref(),
+                    NamedNodeRef::new_unchecked(pred_uri),
+                    TermRef::Literal(lit.as_ref()),
+                    GraphNameRef::DefaultGraph,
+                ))
+                .unwrap();
+        }
+
+        let migrated = svc.migrate_named_graphs_to_reifiers().unwrap();
+        assert_eq!(migrated, 1, "the seeded legacy link should migrate");
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].proof.valid, None,
+            "a legacy link with no proofValid annotation must stay unevaluated \
+             across migration — got {:?}",
+            links[0].proof.valid
+        );
+        assert_eq!(links[0].proof.invalid, None);
+    }
+
+    /// Control: a real negative verdict must still be persisted and read back
+    /// as one. Without this, dropping the annotation entirely would pass every
+    /// test above.
+    #[test]
+    fn proof_valid_false_still_round_trips_as_false() {
+        let svc = new_service();
+        let mut link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        link.proof.valid = Some(false);
+        link.proof.invalid = Some(true);
+        svc.add_link(&link).unwrap();
+
+        let from_get_all = svc.get_all_links().unwrap();
+        assert_eq!(from_get_all.len(), 1);
+        assert_eq!(
+            from_get_all[0].proof.valid,
+            Some(false),
+            "an evaluated-and-failed verdict must survive get_all_links"
+        );
+        assert_eq!(from_get_all[0].proof.invalid, Some(true));
+
+        let from_query = svc
+            .query_links(Some("ad4m://src"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(from_query.len(), 1);
+        assert_eq!(
+            from_query[0].proof.valid,
+            Some(false),
+            "an evaluated-and-failed verdict must survive query_links"
+        );
+        assert_eq!(from_query[0].proof.invalid, Some(true));
     }
 
     // ── Migration tests ──
