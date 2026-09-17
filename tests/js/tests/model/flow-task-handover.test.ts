@@ -88,9 +88,61 @@
  * ---------------------------------------------------------------------------
  * Quorum counts DISTINCT DIDs, so this needs three real agents. One executor
  * in multi-user mode with three managed users (Alice, Bob, Charlie), each with
- * their own JWT'd `Ad4mClient` writing into one shared perspective — same
- * pattern as `tests/auto-processor-multi-user.test.ts`. No Holochain sync
- * latency, no three conductors.
+ * their own JWT'd `Ad4mClient` writing into one shared perspective.
+ *
+ * GAP 8 — THAT HARNESS CANNOT EXIST TODAY. Two managed users on one executor
+ *         cannot share a perspective. All three tests below fail in setup with
+ *         `bob.perspective.byUUID(...) === null`, and the cause is a product
+ *         hole, not a test-harness mistake:
+ *
+ *           - `perspective.create` stamps exactly ONE owner, the calling
+ *             session's DID:
+ *             rust-executor/src/api/perspectives_ws.rs:373-379
+ *             (`new_with_owner(name, ctx.user_did)`).
+ *           - Every read goes through `get_perspective_with_access`, which for
+ *             a non-admin-credential session requires
+ *             `can_access_perspective_with_did`:
+ *             rust-executor/src/api/perspectives_ws.rs:108-124
+ *             -> rust-executor/src/helpers.rs:37-45
+ *             -> `PerspectiveHandle::is_owned_by`
+ *                rust-executor/src/types/domain.rs:540-545.
+ *           - `is_owned_by` is a plain membership test on `owners`, and
+ *             `PerspectiveHandle::add_owner` (domain.rs:530+) is reachable from
+ *             NO RPC method. `perspective.update` only sets `name`
+ *             (perspectives_ws.rs:388-410). Grepping `owners` across
+ *             `rust-executor/src/api/` and `core/src/` finds no mutator.
+ *           - Creating the perspective as the unauthenticated admin client does
+ *             not help: that yields `owners = None`, and `is_owned_by` returns
+ *             `false` for `None` (`unwrap_or(false)`), so a managed user is
+ *             still denied. Only a session with `user_did == None` (the host
+ *             main agent) may read an unowned perspective.
+ *
+ *         Net: on a single executor, managed-user sessions are mutually
+ *         perspective-isolated by construction. The only sharing mechanism AD4M
+ *         has is a neighbourhood — each agent joins and gets their OWN owned
+ *         perspective, synced by the link language.
+ *
+ *         Do not "fix" this by giving all three clients the admin credential:
+ *         `get_perspective_with_access` skips the ownership check for
+ *         `is_admin_credential`, but such a session has `user_did == None`, so
+ *         all three collapse onto the host agent's DID — and quorum, which
+ *         counts DISTINCT DIDs, becomes a single-agent no-op. That would make
+ *         the suite green while testing nothing.
+ *
+ * GAP 9 — `tests/auto-processor-multi-user.test.ts` (~line 180) asserts the
+ *         opposite ("Bob (managed user on the same executor) must resolve
+ *         Alice's perspective") with a comment claiming the current hosted path
+ *         allows it. That assertion is false against the code above, and it has
+ *         never been observed to pass: the whole suite is gated behind
+ *         `describeIfLLM` (`process.env.LLM_E2E === "1"`) and is
+ *         `describe.skip`ped in every default run. Treat it as an untested
+ *         claim, not as precedent.
+ *
+ * Until GAP 8 is closed — either an `owners` param on `perspective.create` / an
+ * `addOwner` RPC, or this suite rebuilt on a neighbourhood with
+ * `runHcLocalServices` — the three tests below are expected to fail in setup.
+ * The bodies are the deliverable: they encode the flow-engine contract and
+ * GAPs 1-7, and must not be weakened to obtain a green run.
  *
  * Run standalone (with a built executor):
  *   pnpm ts-mocha -p tsconfig.json --timeout 900000 --exit \
