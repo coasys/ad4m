@@ -24,7 +24,7 @@ use super::flow_instance::atom::{
 };
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
-use super::flow_instance::{fold_read_set, ReadSet};
+use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
 
@@ -813,9 +813,9 @@ async fn n2_second_signer_accept_settles_and_replays() {
 
 /// The read-set travels: serialise everything the engine read, fold the JSON
 /// back on a machine with no perspective, and reach the same verdict. This is
-/// what a minted Synergy token would carry as its backing — proof for the
-/// signed proposals and votes, an audit record for the role verdicts, which
-/// is why `ReadSet::role_grants` says so on the field.
+/// what a minted Synergy token would carry as its backing — signed links for
+/// the proposals and votes, and signed links for the role history too, from
+/// which the reader recomputes the windows instead of trusting ours.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_serialised_read_set_re_derives_the_same_state() {
     let mut f = seed_satisfied_fixture(None).await;
@@ -837,23 +837,42 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
     assert_eq!(derived.state, "scoped");
 
     let read_set = f.read_set().await;
+    let records = f.instances().await;
+    assert_eq!(
+        read_set.subject, records[0].subject,
+        "the run's base expression travels: without it a reader cannot substitute `$flow.base` \
+         and would apply a different authority rule than we did"
+    );
+    let evidence = read_set
+        .role_grants
+        .iter()
+        .find(|g| g.did == acting_did(&f))
+        .unwrap_or_else(|| panic!("the voter's role evidence belongs in the proof: {read_set:?}"));
     assert!(
-        read_set
-            .role_grants
+        evidence
+            .instances
             .iter()
-            .any(|g| g.did == acting_did(&f)
-                && !g.instances.is_empty()
-                && g.windows.iter().all(|w| !w.granted_at.is_empty())),
-        "the role instances the verdict rested on, and when they were granted, belong in the proof: {read_set:?}"
+            .all(|i| i.grant_links.iter().all(|l| l.proof.valid == Some(true))),
+        "the grant links themselves travel, signatures intact: {evidence:?}"
     );
 
     let json = serde_json::to_string(&read_set).expect("a read-set serialises");
     let parsed: ReadSet = serde_json::from_str(&json).expect("and deserialises");
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flow = &flows[&f.flow_uri];
     assert_eq!(
-        fold_read_set(&flows[&f.flow_uri], &parsed),
+        fold_read_set(flow, &parsed),
         derived,
         "an off-perspective verifier must reach the same verdict"
+    );
+
+    // The reader's own translation input must match the one this replica used
+    // — the same role query has to mean the same thing on both sides, or the
+    // authority rule diverges silently.
+    assert_eq!(
+        parsed.as_record(flow),
+        FlowInstance::from_record(&records[0], flow).as_record(),
+        "the record rebuilt from carried fields must equal the live one"
     );
 }
 
@@ -1188,8 +1207,12 @@ async fn a_newcomer_deriving_after_a_revocation_converges_on_the_settled_state()
     assert_eq!(fold_read_set(&flows[&f.flow_uri], &parsed), before);
     assert!(
         read_set.role_grants.iter().any(|g| g.did == acting_did(&f)
-            && g.windows.iter().any(|w| !w.revocations.is_empty())),
-        "the read-set records the revocation the verdict took into account: {read_set:?}"
+            && g.instances.iter().any(|i| i
+                .revocation_links
+                .iter()
+                .any(|l| l.proof.valid == Some(true)))),
+        "the read-set carries the tombstone link the verdict took into account — \
+         unfiltered by authority, so the reader applies that rule itself: {read_set:?}"
     );
 }
 
