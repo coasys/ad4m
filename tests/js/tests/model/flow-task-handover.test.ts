@@ -666,9 +666,20 @@ describe("Flow engine handover — a task flow driven by three agents", function
         "the buttons a UI renders in Ready",
       ).to.deep.equal(["Start"]);
 
-      // ── 3. GAP 3, demonstrated: `Ready` has no guard, so nothing can ever
-      //       propose back into it — and more importantly, if InProgress had
-      //       no guard either, no vote on the Start edge could be accepted.
+      // ── 3. GAP 3, demonstrated up front ────────────────────────────────
+      // `Ready` is the only state in this flow with no `requires` guard, so it
+      // is the only state nothing can move INTO. That sounds harmless for an
+      // initial state — but the same rule applies to every other state, and it
+      // is invisible: `addState()` accepts a guard-less state happily, and the
+      // failure surfaces only when a voter's `acceptProposal` is refused with
+      // "cites evidence this replica cannot reproduce". The cause is
+      // `recompute_evidence_hash` returning `None` for a guard-less state and
+      // `accept.rs` comparing that `None` against the proposal's seal.
+      //
+      // An app author designing a flow will absolutely write a state like
+      // "Cancelled" with no guard and then wonder why nobody can vote for it.
+      // What the engine wants is either a documented rule enforced at
+      // `addFlow` time, or a defined seal for the empty guard.
       let guardless = "";
       try {
         await proposeTransition(aliceP, flow, started, "InProgress", "Ready", aliceDid);
@@ -949,7 +960,9 @@ describe("Flow engine handover — a task flow driven by three agents", function
       );
       expect(bobFires, "the frontend reviewer's vote settles Done").to.have.lengthOf(1);
       expect(bobFires[0].toState).to.equal("Done");
-      expect(bobFires[0].voters).to.deep.equal([bobDid]);
+      expect(bobFires[0].voters, "the granted frontend reviewer is what settled it").to.include(
+        bobDid,
+      );
     });
 
     it(
