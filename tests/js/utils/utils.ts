@@ -218,6 +218,10 @@ export async function startExecutor(dataPath: string,
     enableMcp: boolean = false,
     mcpPort?: number,
     runHolochain: boolean = true,
+    // Expose the dynamic per-class SHACL tools over MCP (`--dynamic-class-tools`).
+    // Off by default, matching the executor's default: only the static
+    // instance_* surface is advertised.
+    dynamicClassTools: boolean = false,
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
@@ -300,6 +304,7 @@ export async function startExecutor(dataPath: string,
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
     if (enableMcp) { args.push('--enable-mcp', 'true'); }
     if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
+    if (dynamicClassTools) { args.push('--dynamic-class-tools', 'true'); }
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
 
     executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
