@@ -12,7 +12,9 @@ use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
-use super::sparql_builder::{all_where_pushable, build_count_sparql, build_instance_sparql};
+use super::sparql_builder::{
+    all_where_pushable, build_count_sparql, build_instance_sparql, local_status_filter,
+};
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
     ShapeResolver, SortKey, SparqlPagination,
@@ -272,6 +274,7 @@ pub(super) async fn execute_model_query_inner(
                     vec![]
                 } else {
                     let source_constraint = values_or_str_filter("source", &source_ids);
+                    let local_status = local_status_filter(shape);
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}
@@ -280,7 +283,7 @@ pub(super) async fn execute_model_query_inner(
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-}}"#
+{local_status}}}"#
                     );
                     let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
