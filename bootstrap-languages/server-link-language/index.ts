@@ -46,7 +46,7 @@ import {
     DenoTransport,
     DenoWebSocketFactory,
 } from "./src/adapters-deno.js";
-import { commitNeedsKeyRetry } from "./src/key-ring-policy.js";
+import { commitNeedsKeyRetry, type KeyRingStatus } from "./src/key-ring-policy.js";
 
 // ---------------------------------------------------------------------------
 // Template Variables
@@ -72,7 +72,6 @@ let wsClient: WsClient | null = null;
 /** The room's versioned key ring (version → decrypted AES-256-GCM key).
  * Null for a plaintext room OR while E2E setup is still in flight. */
 let keyRing: KeyRing | null = null;
-type KeyRingStatus = "none" | "ready" | "pending" | "error";
 /**
  * - "none": room has no E2E — plaintext commits are fine.
  * - "ready": key ring acquired and decrypted — encrypted commits ready.

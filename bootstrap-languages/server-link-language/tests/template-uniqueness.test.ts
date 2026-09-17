@@ -99,4 +99,18 @@ describe("commitNeedsKeyRetry", () => {
     it("does not retry when status is ready", () => {
         assert.strictEqual(commitNeedsKeyRetry("ready"), false);
     });
+
+    it("does not retry when status is none", () => {
+        assert.strictEqual(commitNeedsKeyRetry("none"), false);
+    });
+
+    it("decides on status alone — no cooldown or timestamp input", () => {
+        // The original bug had the commit path consulting a shared
+        // lastKeyRingRetry timestamp, causing commits within 10s of a
+        // background sync to skip their retry and throw. This test pins
+        // the fix: commitNeedsKeyRetry takes only status, so a background
+        // retry that just happened cannot suppress a user-initiated commit.
+        assert.strictEqual(commitNeedsKeyRetry.length, 1);
+        assert.strictEqual(commitNeedsKeyRetry("error"), true);
+    });
 });
