@@ -47,6 +47,15 @@ pub struct FlowExprParams {
     pub expression_address: String,
 }
 
+/// Parameters for accepting or rejecting a FlowTransitionProposal
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FlowProposalParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// URI of the FlowTransitionProposal (e.g. "ad4m://flow/proposal/<id>")
+    pub proposal_uri: String,
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -233,15 +242,54 @@ impl Ad4mMcpHandler {
     /// state from exactly one place. Scoped to the single expression URI, so
     /// the loader pushes the filter down to `model_query` instead of sweeping
     /// every instance on the perspective (Model C scope discipline).
+    ///
+    /// **Cache-first (#987)**: when this replica's `Local` `currentState` link
+    /// is present it is returned directly — no fold, no flow catalogue load.
+    /// The cache is `Local`-verified (peers cannot write it since #987's Local
+    /// switch), so it is exactly what *this* replica last derived.  On a cache
+    /// miss (`None`) the full derive path runs as before, which is the only
+    /// path on a never-derived instance.
+    ///
+    /// Freshness note: the sync-triggered pass (`trigger.rs`) re-derives on
+    /// every incoming flow link, so residual staleness is bounded by the
+    /// debounce window plus the role-change gap documented there.
     async fn flow_instance_for(
         perspective: &PerspectiveInstance,
         expression: &str,
         flow_uri: &str,
     ) -> anyhow::Result<Option<FlowInstanceRecord>> {
         let instances = load_flow_instances(perspective, &[expression.to_string()]).await?;
-        Ok(instances
+        let Some(record) = instances
             .into_iter()
-            .find(|record| record.flow_uri == flow_uri))
+            .find(|record| record.flow_uri == flow_uri)
+        else {
+            return Ok(None);
+        };
+        if let Some(cached) = crate::perspectives::flow_instance::local_cached_state(
+            perspective,
+            &record.instance_uri,
+        )
+        .await?
+        {
+            return Ok(Some(FlowInstanceRecord {
+                current_state: cached,
+                ..record
+            }));
+        }
+        let flows = load_shacl_flows(perspective).await?;
+        let derived = crate::perspectives::flow_instance::derive_states(
+            perspective,
+            std::slice::from_ref(&record),
+            &flows,
+        )
+        .await;
+        Ok(Some(
+            derived
+                .into_iter()
+                .next()
+                .map(|df| df.record)
+                .unwrap_or(record),
+        ))
     }
 
     /// Get available actions for an expression in a flow
@@ -312,13 +360,61 @@ impl Ad4mMcpHandler {
         .unwrap_or_else(|e| format!("Error: {}", e))
     }
 
-    // Flow WRITE surfaces (start / run-action) deliberately do not exist on
-    // this endpoint. With the flow engine, external agents don't write state
-    // transitions directly — they propose them and consensus fires them,
-    // exactly like the internal LLM harness. That propose/accept surface
-    // ships with the firing-engine stack (flow_proposal_accept/reject, plus
-    // a propose tool as follow-up); offering direct-write tools here would
-    // bypass the consensus path.
+    #[tool(
+        description = "Accept a live FlowTransitionProposal on behalf of this agent: adds your DID to the proposal's acceptors (idempotent per DID) and immediately runs the flow consensus pass. When the flow's consensusRule threshold (distinct DIDs) is met, the transition fires and the fired outcomes are returned; otherwise 'fired' is empty and the proposal stays live for further acceptances. Errors on unknown proposal URIs, on proposals that are not engine-visible, on proposals that leave a state the flow is no longer standing in, and when the cited evidence does not recompute on this replica."
+    )]
+    pub async fn flow_proposal_accept(&self, params: Parameters<FlowProposalParams>) -> String {
+        let p = &params.0;
+
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
+                match crate::perspectives::flow_instance::accept::accept_flow_proposal(
+                    &mut perspective,
+                    &p.proposal_uri,
+                    &agent_context,
+                )
+                .await
+                {
+                    Ok(fired) => serde_json::to_string_pretty(&json!({
+                        "success": true,
+                        "proposal_uri": p.proposal_uri,
+                        "fired": fired,
+                    }))
+                    .unwrap_or_else(|e| format!("Error: {}", e)),
+                    Err(e) => format!("Error accepting proposal: {:#}", e),
+                }
+            }
+            Err(e) => e,
+        }
+    }
+
+    #[tool(
+        description = "Withdraw this agent's own contribution to a FlowTransitionProposal: deletes only the links this DID signed — your vote, or your whole proposal if you opened it. It never touches another agent's links, and it does not 'cancel' the proposal for anyone else. Because flow state is recomputed from the links present now, withdrawing a vote that had helped an edge settle moves the flow back to where it stood before that vote. Returns retracted_links: how many of your links were removed — one for a withdrawn vote, more when you retract a proposal you opened. Errors on unknown proposal URIs and when this DID signed nothing on the proposal."
+    )]
+    pub async fn flow_proposal_reject(&self, params: Parameters<FlowProposalParams>) -> String {
+        let p = &params.0;
+
+        match self.get_writable_perspective(&p.perspective_id).await {
+            Ok((mut perspective, agent_context)) => {
+                match crate::perspectives::flow_instance::accept::reject_flow_proposal(
+                    &mut perspective,
+                    &p.proposal_uri,
+                    &agent_context,
+                )
+                .await
+                {
+                    Ok(retracted) => serde_json::to_string_pretty(&json!({
+                        "success": true,
+                        "proposal_uri": p.proposal_uri,
+                        "retracted_links": retracted,
+                    }))
+                    .unwrap_or_else(|e| format!("Error: {}", e)),
+                    Err(e) => format!("Error rejecting proposal: {:#}", e),
+                }
+            }
+            Err(e) => e,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -511,6 +607,55 @@ mod tests {
             .expect("flow_instance_for(other subject)")
             .is_none(),
             "an unrelated expression must not match"
+        );
+    }
+
+    /// `flow_instance_for` must return the `Local` cache value without
+    /// running the fold.  Observable: advance the cache to "scoped" with no
+    /// proposals in the graph — the fold would return "identified" (genesis);
+    /// only a cache-first path produces "scoped".
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_instance_for_local_cache_hit_skips_derive() {
+        use crate::perspectives::flow_classes::advance_flow_instance_state;
+
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+        for link in
+            parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition)");
+        }
+
+        let base_uri = "ad4m://task/cache-mcp-test";
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "delivery://DeliveryFlow",
+            base_uri,
+            "identified",
+            "cache-mcp-inst-1",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+
+        // Advance the Local cache to "scoped" WITHOUT any proposals.
+        // Without cache-first, derive would return "identified" (no quorum).
+        advance_flow_instance_state(&mut perspective, &inst_uri, "scoped", None, &ctx)
+            .await
+            .expect("advance_flow_instance_state");
+
+        let record =
+            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "delivery://DeliveryFlow")
+                .await
+                .expect("flow_instance_for")
+                .expect("instance must be found");
+        assert_eq!(
+            record.current_state, "scoped",
+            "Local cache 'scoped' must win over fold-derived 'identified' (no proposals in graph)"
         );
     }
 }
