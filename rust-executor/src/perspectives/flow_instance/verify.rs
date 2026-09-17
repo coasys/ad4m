@@ -349,3 +349,608 @@ impl FlowReceipt {
         self.outputs.iter().any(|o| o == node)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::flow_instance::atom::fixtures::{
+        did_of, signed_link, signed_proposal, signed_vote, T1, T2, T3,
+    };
+    use crate::perspectives::flow_instance::atom::ACCEPTED_BY_PREDICATE;
+    use crate::perspectives::flow_instance::receipt::EvidencePreimage;
+    use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
+    use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
+    use crate::types::DecoratedLinkExpression;
+    use serde_json::{json, Value};
+
+    const INSTANCE: &str = "ad4m://flow/instance/i1";
+    const BASE: &str = "ad4m://task/t1";
+    const ALICE: &str = "alice";
+    const BOB: &str = "bob";
+    const REVIEWER: &str = "coasys://Reviewer";
+    /// Earlier than any grant link a test writes — the fallback dating a
+    /// dropped grant link must *not* be allowed to fall back to.
+    const INSTANCE_CREATED: &str = "2025-12-01T00:00:00.000Z";
+
+    // ---- fixtures --------------------------------------------------------
+
+    fn flow_json(states: Value, transitions: Value) -> SHACLFlow {
+        serde_json::from_value(json!({
+            "name": "Delivery",
+            "namespace": "coasys://",
+            "states": states,
+            "transitions": transitions,
+        }))
+        .expect("fixture flow parses")
+    }
+
+    /// `open → done`, `done` terminal, default `{ n: 1 }` quorum.
+    fn two_state_flow() -> SHACLFlow {
+        flow_json(
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0 },
+            ]),
+            json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+            ]),
+        )
+    }
+
+    fn catalogue(flows: Vec<SHACLFlow>) -> HashMap<String, SHACLFlow> {
+        flows.into_iter().map(|f| (f.flow_uri(), f)).collect()
+    }
+
+    /// One proposal, self-proposed and therefore self-voted. `proposer` is a
+    /// persona name; the links carry that persona's real signature.
+    fn proposal(uri: &str, proposer: &str, to: &str, at: &str) -> ProposalLinks {
+        ProposalLinks {
+            uri: uri.to_string(),
+            links: signed_proposal(uri, proposer, "open", to, "seal-1", at),
+        }
+    }
+
+    fn read_set(proposals: Vec<ProposalLinks>, role_grants: Vec<RoleGrantEvidence>) -> ReadSet {
+        ReadSet {
+            instance_uri: INSTANCE.to_string(),
+            subject: BASE.to_string(),
+            genesis: "open".to_string(),
+            proposals,
+            role_grants,
+        }
+    }
+
+    fn completed() -> ReadSet {
+        read_set(vec![proposal("ad4m://p/1", ALICE, "done", T1)], Vec::new())
+    }
+
+    fn mint(flow: &SHACLFlow, rs: ReadSet) -> FlowReceipt {
+        FlowReceipt::mint(flow, rs, vec![BASE.to_string()], Vec::new())
+            .expect("the fixture read-set mints")
+    }
+
+    // ---- the happy path, as the control for everything below --------------
+
+    /// The control: honest material, the reader's own copy of the flow, and
+    /// the fold re-derives what the receipt claims — including *who* settled
+    /// it, which is the "n distinct eligible DIDs" a receipt actually asserts.
+    ///
+    /// Red if `verify_receipt` reports `terminal_state` from the receipt
+    /// rather than from its own fold — e.g. `terminal_state:
+    /// receipt.terminal_state.clone()` in the `Verified` arm — because then
+    /// `StateMismatch` below could never distinguish the two.
+    #[test]
+    fn an_honest_receipt_verifies_and_names_the_quorum_that_settled_it() {
+        let flow = two_state_flow();
+        let receipt = mint(&flow, completed());
+
+        let verdict = verify_receipt(&catalogue(vec![flow]), &receipt);
+        assert_eq!(
+            verdict,
+            ReceiptVerdict::Verified {
+                terminal_state: "done".into(),
+                outputs: vec![BASE.to_string()],
+                voters: vec![did_of(ALICE).to_string()],
+            },
+            "got: {verdict}"
+        );
+        assert!(
+            receipt.speaks_for(BASE),
+            "the binding a `granted_by` edge is checked against"
+        );
+        assert!(
+            !receipt.speaks_for("ad4m://task/somebody-elses"),
+            "a receipt speaks only for the nodes it names"
+        );
+    }
+
+    // ---- (a) the ratchet ---------------------------------------------------
+
+    /// **The whole reason receipts exist.** The links a run settled on can be
+    /// retracted — deleting a settling vote moves the live flow back, which is
+    /// this engine's semantics and not a failure mode. A receipt froze those
+    /// links, so it keeps saying what it always said, and a reader reaches
+    /// that answer with no access to the graph the links came from.
+    ///
+    /// The first assertion is the precondition that gives the second its
+    /// meaning: the same fold, over the *live* material, has already moved on.
+    ///
+    /// Red with `fold_read_set(flow, &ReadSet { proposals: Vec::new(),
+    /// ..receipt.read_set.reverified() })` in `verify_receipt` — that is, with
+    /// any implementation that treats the carried proposals as a pointer to be
+    /// re-fetched rather than as the proof body itself. The receipt would then
+    /// fold to `open` and report `StateMismatch`.
+    #[test]
+    fn a_receipt_still_verifies_after_the_links_behind_it_are_retracted() {
+        let flow = two_state_flow();
+        let receipt = mint(&flow, completed());
+
+        let after_retraction = read_set(Vec::new(), Vec::new());
+        assert_eq!(
+            fold_read_set(&flow, &after_retraction.reverified())
+                .expect("an empty read-set folds")
+                .state,
+            "open",
+            "precondition: with the settling proposal retracted the LIVE flow stands \
+             where it stood before that vote"
+        );
+
+        let verdict = verify_receipt(&catalogue(vec![flow]), &receipt);
+        assert!(
+            verdict.is_verified(),
+            "the receipt froze the links; nothing in verification is re-queried — got: {verdict}"
+        );
+    }
+
+    // ---- (b) changed DNA, refused before the evidence step ------------------
+
+    /// Editing a flow definition edits the identity of the social organism, so
+    /// a receipt minted under the old DNA *should* stop verifying — and must
+    /// say so in its own words rather than as a finding about the material.
+    ///
+    /// The second half is the ordering contract: the receipt handed over has
+    /// **both** a changed DNA and a broken seal, and `DnaChanged` still wins.
+    /// Re-running a guard's seal under rules the quorum never agreed to is not
+    /// a well-posed question; a verifier that answered it would report a
+    /// confident wrong answer.
+    ///
+    /// Red if the DNA comparison moves below the seal check (or below the
+    /// fold) in `verify_receipt`: the second assertion then reports
+    /// `SealMismatch`.
+    #[test]
+    fn changed_dna_is_reported_in_its_own_words_and_before_any_evidence_step() {
+        let with_rule = |n: u32| {
+            flow_json(
+                json!([
+                    { "name": "open", "value": 0.0 },
+                    { "name": "done", "value": 1.0, "consensusRule": { "n": n } },
+                ]),
+                json!([
+                    { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+                ]),
+            )
+        };
+        let minted_under = with_rule(1);
+        let reader_holds = with_rule(2);
+        assert_eq!(
+            minted_under.flow_uri(),
+            reader_holds.flow_uri(),
+            "precondition: same organism URI, different DNA — otherwise this would be \
+             FlowUnknown"
+        );
+
+        let receipt = mint(&minted_under, completed());
+        let reader = catalogue(vec![reader_holds]);
+
+        assert!(
+            matches!(
+                verify_receipt(&reader, &receipt),
+                ReceiptVerdict::DnaChanged { .. }
+            ),
+            "a receipt minted under other rules is refused, not folded under the new ones"
+        );
+
+        // Same receipt, additionally carrying a preimage that does not
+        // re-hash. The DNA answer still comes first.
+        let mut also_broken = receipt;
+        also_broken.evidence_preimage.push(EvidencePreimage {
+            seal: "not-the-hash-of-anything".into(),
+            class_names: vec![REVIEWER.into()],
+            items: Vec::new(),
+        });
+        let verdict = verify_receipt(&reader, &also_broken);
+        assert!(
+            matches!(verdict, ReceiptVerdict::DnaChanged { .. }),
+            "the DNA check owes its answer before any evidence step — got: {verdict}"
+        );
+    }
+
+    // ---- (c) an unknown flow is not a finding about the receipt -------------
+
+    /// A reader who has never synced the definition has learned **nothing**
+    /// about the receipt. Reporting that as a fold failure would let "I do not
+    /// have the rules" be read as "the quorum did not settle this" — the
+    /// receipt would be slandered by the reader's own gap.
+    ///
+    /// Red if the catalogue miss falls into a generic failure, e.g.
+    /// `else { return ReceiptVerdict::Unfoldable { reason: "no such flow".into() } }`.
+    #[test]
+    fn an_unsynced_flow_definition_is_its_own_verdict_not_a_failure() {
+        let receipt = mint(&two_state_flow(), completed());
+
+        for (label, reader) in [
+            ("an empty catalogue", catalogue(Vec::new())),
+            (
+                "a catalogue holding only somebody else's flow",
+                catalogue(vec![flow_json(
+                    json!([{ "name": "start", "value": 0.0 }]),
+                    json!([]),
+                )
+                .tap_rename("Onboarding")]),
+            ),
+        ] {
+            let verdict = verify_receipt(&reader, &receipt);
+            assert_eq!(
+                verdict,
+                ReceiptVerdict::FlowUnknown {
+                    flow_uri: "coasys://DeliveryFlow".into()
+                },
+                "{label}: got {verdict}"
+            );
+        }
+    }
+
+    // ---- (d) a broken grant signature collapses the window ------------------
+
+    /// A role-gated flow: only a `coasys://Reviewer` may settle `done`.
+    fn role_gated_flow() -> SHACLFlow {
+        flow_json(
+            json!([
+                { "name": "open", "value": 0.0 },
+                {
+                    "name": "done", "value": 1.0,
+                    "consensusRule": {
+                        "n": 1,
+                        "fromRole": { "className": REVIEWER, "didProperty": "agent" },
+                    },
+                },
+            ]),
+            json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+            ]),
+        )
+    }
+
+    /// `r0 --agent--> did`, the assignment link that dates a grant.
+    /// `valid` is honoured cryptographically; `claims_valid` is what the
+    /// carried read-set *says* about it.
+    fn grant_link(who: &str, valid: bool, claims_valid: Option<bool>) -> DecoratedLinkExpression {
+        signed_link("r0", "agent", did_of(who), "admin", valid, claims_valid, T2)
+    }
+
+    fn reviewer_evidence(grant: DecoratedLinkExpression) -> RoleGrantEvidence {
+        RoleGrantEvidence {
+            to_state: "done".into(),
+            role_class: REVIEWER.into(),
+            did: did_of(ALICE).into(),
+            instances: vec![RoleInstanceHistory {
+                instance_id: "r0".into(),
+                grant_links: vec![grant],
+                revocation_links: Vec::new(),
+                // Earlier than the assignment link — the widening the
+                // suppression rule exists to prevent.
+                asserted_instance_timestamp: Some(INSTANCE_CREATED.into()),
+            }],
+        }
+    }
+
+    /// The fail-open direction #1063 is open on, closed at the ingest.
+    ///
+    /// Grant links are the one kind nothing downstream signature-checks, so a
+    /// forged one has to be dropped here. Dropping alone **inverts**: with no
+    /// grant link left, `RoleGrantEvidence::resolve` falls back to
+    /// `asserted_instance_timestamp` — the instance's own creation, earlier
+    /// than any assignment — and the forgery buys a *wider* window than the
+    /// genuine link it replaced. So dropping also drops the fallback, leaving
+    /// `resolve` to fail closed and abort the derivation.
+    ///
+    /// The receipt is minted from honest material and the grant link swapped
+    /// afterwards, because that is the shape of the threat: the artifact
+    /// arrives from elsewhere, already carrying what its sender chose.
+    ///
+    /// Red under either half of the fix:
+    /// - drop `asserted_instance_timestamp: None` from `reverified_history`
+    ///   (keep `history.asserted_instance_timestamp.clone()`) — the window
+    ///   widens to `INSTANCE_CREATED`, the vote at `T3` becomes eligible and
+    ///   the tampered receipt reports `Verified`;
+    /// - write the grant filter as `.filter(|l| l.proof.valid != Some(false))`
+    ///   over the *carried* links instead of `reverified_link` + `link_counts`
+    ///   — the forgery's own `"valid": true` is inherited, the link survives,
+    ///   and the tampered receipt reports `Verified`.
+    #[test]
+    fn a_forged_grant_link_collapses_the_eligibility_window_instead_of_widening_it() {
+        let flow = role_gated_flow();
+        let honest = read_set(
+            // Vote at T3, grant at T2: eligible as of its own timestamp.
+            vec![proposal("ad4m://p/1", ALICE, "done", T3)],
+            vec![reviewer_evidence(grant_link(ALICE, true, None))],
+        );
+        let receipt = mint(&flow, honest);
+        let reader = catalogue(vec![flow]);
+        assert!(
+            verify_receipt(&reader, &receipt).is_verified(),
+            "precondition: with the genuine assignment link this receipt verifies"
+        );
+
+        // What arrives: the same receipt, its assignment link replaced by one
+        // signed with somebody else's key and still claiming to be valid.
+        let mut tampered = receipt;
+        tampered.read_set.role_grants =
+            vec![reviewer_evidence(grant_link(ALICE, false, Some(true)))];
+
+        let verdict = verify_receipt(&reader, &tampered);
+        assert!(
+            !verdict.is_verified(),
+            "a forged assignment link must never buy eligibility — got: {verdict}"
+        );
+        let ReceiptVerdict::Unfoldable { reason } = &verdict else {
+            panic!(
+                "the window must COLLAPSE — an unresolvable candidate aborts the derivation \
+                 rather than de-quorating one edge — got: {verdict}"
+            );
+        };
+        assert!(
+            reason.contains("cannot be placed in time"),
+            "the refusal must name the fail-closed grant dating, got: {reason}"
+        );
+    }
+
+    // ---- the ingest seam itself (#1068) ------------------------------------
+
+    /// `proof.valid` is a per-replica read view over a signature. On a value
+    /// that arrived from elsewhere it is the *sender's* claim, and the ingest
+    /// replaces it with an answer this replica computed — in **both**
+    /// directions, which is the half a "drop what claims to be invalid" filter
+    /// would miss.
+    ///
+    /// Red if `ReadSet::reverified` clones without calling `verify_signature`,
+    /// and red in the second assertion if it merely *filters* on the carried
+    /// verdict instead of recomputing it.
+    #[test]
+    fn the_ingest_recomputes_every_carried_verdict_rather_than_inheriting_it() {
+        let forged_but_claims_valid = signed_link(
+            "ad4m://p/1",
+            ACCEPTED_BY_PREDICATE,
+            did_of(BOB),
+            BOB,
+            false,
+            Some(true),
+            T1,
+        );
+        let genuine_but_claims_nothing = {
+            let mut l = signed_vote("ad4m://p/1", BOB, T1);
+            l.proof.valid = None;
+            l.proof.invalid = None;
+            l
+        };
+
+        let ingested = read_set(
+            vec![ProposalLinks {
+                uri: "ad4m://p/1".into(),
+                links: vec![forged_but_claims_valid, genuine_but_claims_nothing],
+            }],
+            Vec::new(),
+        )
+        .reverified();
+
+        assert_eq!(
+            ingested.proposals[0].links[0].proof.valid,
+            Some(false),
+            "a forged link's own `\"valid\": true` is the sender's word, not a fact"
+        );
+        assert_eq!(
+            ingested.proposals[0].links[1].proof.valid,
+            Some(true),
+            "and a genuine link the sender never evaluated is not thereby worthless"
+        );
+    }
+
+    /// The vote half of #1068, end to end: a co-signature that claims to be
+    /// valid and is not must not reach quorum.
+    ///
+    /// `{ n: 2 }` makes Bob's vote load-bearing — Alice alone cannot settle
+    /// `done` — so inheriting the forgery is the difference between a verified
+    /// receipt and a refused one.
+    ///
+    /// Red with `fold_read_set(flow, &receipt.read_set)` in `verify_receipt`
+    /// — i.e. folding the carried value rather than the re-verified one: Bob's
+    /// forged `"valid": true` is inherited, quorum is reached, and the
+    /// tampered receipt verifies.
+    #[test]
+    fn a_forged_co_signature_that_claims_to_be_valid_does_not_reach_quorum() {
+        let flow = flow_json(
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0, "consensusRule": { "n": 2 } },
+            ]),
+            json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+            ]),
+        );
+        let with_bobs_vote = |vote: DecoratedLinkExpression| {
+            let mut links = signed_proposal("ad4m://p/1", ALICE, "open", "done", "seal-1", T1);
+            links.push(vote);
+            read_set(
+                vec![ProposalLinks {
+                    uri: "ad4m://p/1".into(),
+                    links,
+                }],
+                Vec::new(),
+            )
+        };
+
+        let receipt = mint(&flow, with_bobs_vote(signed_vote("ad4m://p/1", BOB, T2)));
+        let reader = catalogue(vec![flow]);
+        assert!(
+            verify_receipt(&reader, &receipt).is_verified(),
+            "precondition: two genuine signatures settle a `{{n: 2}}` edge"
+        );
+
+        let mut tampered = receipt;
+        tampered.read_set = with_bobs_vote(signed_link(
+            "ad4m://p/1",
+            ACCEPTED_BY_PREDICATE,
+            did_of(BOB),
+            BOB,
+            false,
+            Some(true),
+            T2,
+        ));
+
+        assert_eq!(
+            verify_receipt(&reader, &tampered),
+            ReceiptVerdict::StateMismatch {
+                claimed: "done".into(),
+                derived: "open".into(),
+            },
+            "a forged co-signature counts for nobody, so the edge never settles"
+        );
+    }
+
+    // ---- the remaining refusals --------------------------------------------
+
+    /// The seal is re-hashed from the preimage **carried in the receipt** —
+    /// never re-queried against a live graph. A preimage that does not
+    /// reproduce its seal is not the material the voters sealed, whatever the
+    /// graph says today.
+    ///
+    /// Red if the seal check is dropped from `verify_receipt`, which would
+    /// make the carried preimage decorative.
+    #[test]
+    fn a_preimage_that_does_not_rehash_to_its_seal_is_refused() {
+        let flow = two_state_flow();
+        let mut receipt = mint(&flow, completed());
+        receipt.evidence_preimage.push(EvidencePreimage {
+            seal: "a-seal-nothing-here-hashes-to".into(),
+            class_names: vec![REVIEWER.into()],
+            items: Vec::new(),
+        });
+
+        assert_eq!(
+            verify_receipt(&catalogue(vec![flow]), &receipt),
+            ReceiptVerdict::SealMismatch {
+                seal: "a-seal-nothing-here-hashes-to".into()
+            }
+        );
+    }
+
+    /// `mint` refuses an empty binding, so a receipt that arrived with one was
+    /// not made by `mint` — and a verifier that accepted it would hand out a
+    /// `Verified` that no `granted_by` edge could ever be checked against.
+    ///
+    /// Red without the `outputs.is_empty()` check in `verify_receipt`: the
+    /// receipt folds perfectly well, so it would verify.
+    #[test]
+    fn a_receipt_that_binds_to_nothing_is_refused() {
+        let flow = two_state_flow();
+        let mut receipt = mint(&flow, completed());
+        receipt.outputs.clear();
+
+        assert_eq!(
+            verify_receipt(&catalogue(vec![flow]), &receipt),
+            ReceiptVerdict::NoOutputs
+        );
+    }
+
+    /// A receipt is a completion claim. The reader's own copy of the flow
+    /// decides what terminal means — add an edge out of `done` and the same
+    /// carried material no longer describes a completed run.
+    ///
+    /// Reached only through a hand-built receipt: `mint` derives the state and
+    /// refuses a non-terminal one, and the DNA hash would otherwise catch the
+    /// edit first. That is the point — this arm exists for material that did
+    /// not come from `mint`.
+    ///
+    /// Red without the `is_terminal_state` check in `verify_receipt`.
+    #[test]
+    fn a_state_the_readers_flow_can_leave_is_not_a_completion() {
+        let minted_under = two_state_flow();
+        let receipt = mint(&minted_under, completed());
+
+        let reopenable = flow_json(
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0 },
+            ]),
+            json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+                { "action_name": "Reopen", "from_state": "done", "to_state": "open", "actions": [] },
+            ]),
+        );
+        // Re-stamp the claim so the DNA check passes and this arm is reached.
+        let mut arrived = receipt;
+        arrived.flow_dna_hash = flow_dna_hash(&reopenable).expect("hash");
+
+        assert_eq!(
+            verify_receipt(&catalogue(vec![reopenable]), &arrived),
+            ReceiptVerdict::NotTerminal {
+                state: "done".into()
+            }
+        );
+    }
+
+    /// Two declared edges out of `open` both carry quorum. Nothing that pays
+    /// out on a completed flow may honour a contested derivation — `mint`
+    /// refuses to produce one, and a verifier refuses to accept one.
+    ///
+    /// Red without the `contested` arm in `verify_receipt`: the walk stops in
+    /// `open`, so it would degrade to `StateMismatch` — a verdict that reads
+    /// as "not settled yet" for a run that can never settle.
+    #[test]
+    fn a_contested_derivation_is_refused_as_contested() {
+        let flow = flow_json(
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0 },
+                { "name": "rejected", "value": 1.0 },
+            ]),
+            json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+                { "action_name": "Reject", "from_state": "open", "to_state": "rejected", "actions": [] },
+            ]),
+        );
+        let receipt = mint(&flow, completed());
+
+        let mut arrived = receipt;
+        arrived.flow_dna_hash = flow_dna_hash(&flow).expect("hash");
+        arrived.read_set = read_set(
+            vec![
+                proposal("ad4m://p/1", ALICE, "done", T1),
+                proposal("ad4m://p/2", BOB, "rejected", T2),
+            ],
+            Vec::new(),
+        );
+
+        let verdict = verify_receipt(&catalogue(vec![flow]), &arrived);
+        let ReceiptVerdict::Contested {
+            from_state,
+            candidates,
+        } = &verdict
+        else {
+            panic!("a contested derivation has not completed — got: {verdict}");
+        };
+        assert_eq!(from_state, "open");
+        assert_eq!(candidates.len(), 2, "both settled edges are named");
+    }
+
+    /// Helper for the FlowUnknown fixture: a second flow whose URI differs.
+    trait Rename {
+        fn tap_rename(self, name: &str) -> Self;
+    }
+    impl Rename for SHACLFlow {
+        fn tap_rename(mut self, name: &str) -> Self {
+            self.name = name.to_string();
+            self
+        }
+    }
+}
