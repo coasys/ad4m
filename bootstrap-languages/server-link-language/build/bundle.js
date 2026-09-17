@@ -4333,6 +4333,8 @@ var DenoWebSocketFactory = class {
 var SERVER_URL = "<to-be-filled>";
 //!@ad4m-template-variable
 var ROOM_ID = "<to-be-filled>";
+//!@ad4m-template-variable
+var UID = "<to-be-filled>";
 var myDid = "";
 var configured = false;
 var localAgents = [];
@@ -4516,14 +4518,14 @@ var language = defineLanguage({
     });
     myDid = getAgent().did();
     initStore(hash);
-    configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(ROOM_ID);
+    configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(ROOM_ID) && !isPlaceholder(UID);
     if (!configured) {
       console.log(
-        `[server-link-language] init: did=${myDid}, template variables not filled in \u2014 running inert until published with SERVER_URL/ROOM_ID.`
+        `[server-link-language] init: did=${myDid}, template variables not filled in \u2014 running inert until published with SERVER_URL/ROOM_ID/UID.`
       );
       return;
     }
-    initAdapters({ config: { serverUrl: SERVER_URL, roomId: ROOM_ID } });
+    initAdapters({ config: { serverUrl: SERVER_URL, roomId: UID } });
     const config = getConfig();
     initSync({
       config,
@@ -4639,7 +4641,7 @@ var language = defineLanguage({
     void wsClient.connect().catch((err) => {
       console.error("[server-link-language] initial websocket connect failed:", err);
     });
-    console.log(`[server-link-language] init complete: did=${myDid}, room=${ROOM_ID}`);
+    console.log(`[server-link-language] init complete: did=${myDid}, room=${ROOM_ID}, uid=${UID}`);
   },
   async teardown() {
     lifecycleGen++;
@@ -4677,7 +4679,7 @@ var language = defineLanguage({
     async commit(diff) {
       if (!configured) {
         throw new Error(
-          "server-link-language: not configured (SERVER_URL/ROOM_ID template variables unfilled)"
+          "server-link-language: not configured (SERVER_URL/ROOM_ID/UID template variables unfilled)"
         );
       }
       if (keyRingStatus === "error" || keyRingStatus === "pending") {
@@ -4809,7 +4811,7 @@ var {
   telepresenceSendBroadcast
 } = language;
 var server_link_language_default = language;
-var possibleTemplateParams = ["SERVER_URL", "ROOM_ID"];
+var possibleTemplateParams = ["ROOM_ID", "SERVER_URL", "UID"];
 export {
   server_link_language_default as default,
   init,

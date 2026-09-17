@@ -59,6 +59,9 @@ const SERVER_URL = "<to-be-filled>";
 //!@ad4m-template-variable
 const ROOM_ID = "<to-be-filled>";
 
+//!@ad4m-template-variable
+const UID = "<to-be-filled>";
+
 // ---------------------------------------------------------------------------
 // Module state (fresh per perspective instance — see language-interface-spec.md §2)
 // ---------------------------------------------------------------------------
@@ -306,16 +309,16 @@ const language = defineLanguage({
         myDid = getAgent().did();
         store.initStore(hash);
 
-        configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(ROOM_ID);
+        configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(ROOM_ID) && !isPlaceholder(UID);
         if (!configured) {
             console.log(
                 `[server-link-language] init: did=${myDid}, template variables not filled in — ` +
-                "running inert until published with SERVER_URL/ROOM_ID.",
+                "running inert until published with SERVER_URL/ROOM_ID/UID.",
             );
             return;
         }
 
-        initAdapters({ config: { serverUrl: SERVER_URL, roomId: ROOM_ID } });
+        initAdapters({ config: { serverUrl: SERVER_URL, roomId: UID } });
         const config = getConfig();
 
         syncModule.initSync({
@@ -480,7 +483,7 @@ const language = defineLanguage({
             console.error("[server-link-language] initial websocket connect failed:", err);
         });
 
-        console.log(`[server-link-language] init complete: did=${myDid}, room=${ROOM_ID}`);
+        console.log(`[server-link-language] init complete: did=${myDid}, room=${ROOM_ID}, uid=${UID}`);
     },
 
     async teardown() {
@@ -522,7 +525,7 @@ const language = defineLanguage({
         async commit(diff: PerspectiveDiff) {
             if (!configured) {
                 throw new Error(
-                    "server-link-language: not configured (SERVER_URL/ROOM_ID template variables unfilled)",
+                    "server-link-language: not configured (SERVER_URL/ROOM_ID/UID template variables unfilled)",
                 );
             }
             if (keyRingStatus === "error" || keyRingStatus === "pending") {
@@ -703,4 +706,4 @@ export default language;
 // Template params metadata (for language.publish / LanguageMeta)
 // ---------------------------------------------------------------------------
 
-export const possibleTemplateParams: string[] = ["SERVER_URL", "ROOM_ID"];
+export const possibleTemplateParams: string[] = ["ROOM_ID", "SERVER_URL", "UID"];

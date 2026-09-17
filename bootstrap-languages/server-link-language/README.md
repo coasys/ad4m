@@ -52,7 +52,7 @@ Register the language code on the AD4M network. This only needs to happen once �
 ad4m languages publish ./build/bundle.js \
   --name server-link-language \
   --description "Link language syncing through a self-hosted link-server" \
-  --possible-template-params SERVER_URL,ROOM_ID
+  --possible-template-params ROOM_ID,SERVER_URL,UID
 ```
 
 This returns a **template address** (content hash). Save it — you need it in the next step.
@@ -61,12 +61,14 @@ If someone else already published the template, skip this step and use their tem
 
 #### 3. Create an instance pointing at your server
 
-Fill in the template with your server's URL and a room name of your choice:
+Fill in the template with your server's URL, a human-readable room name, and a unique identifier:
 
 ```bash
 ad4m languages apply-template-and-publish <template-address> \
-  '{"SERVER_URL": "https://your-server.example.com:3457", "ROOM_ID": "my-room"}'
+  '{"SERVER_URL": "https://your-server.example.com:3457", "ROOM_ID": "my-room", "UID": "'$(uuidgen)'"}'
 ```
+
+`UID` guarantees a unique language address and server-side room even when multiple neighbourhoods share the same `SERVER_URL` and `ROOM_ID`. `ROOM_ID` serves as a human-readable label in logs.
 
 This returns an **instantiated language address** — the template code with your server details baked in.
 
@@ -228,11 +230,19 @@ The `encryptedKey` wire framing (JSON `SealedRoomKeyEnvelope`) and the
 const SERVER_URL = "<to-be-filled>";  // e.g. "https://my-server.example.com"
 
 //!@ad4m-template-variable
-const ROOM_ID = "<to-be-filled>";     // UUID, set at neighbourhood creation
+const ROOM_ID = "<to-be-filled>";     // human-readable label, used in logs
+
+//!@ad4m-template-variable
+const UID = "<to-be-filled>";         // unique identifier (UUID), used as server-side room ID
 ```
 
 Filled in by the executor at publish time. Until then, `init()` runs in an
 inert mode (logs and returns without attempting any network I/O).
+
+`UID` serves as the server-side room identifier in all API paths
+(`/rooms/:uid/...`). `ROOM_ID` appears in log output for human readability.
+This split guarantees unique neighbourhoods even when multiple callers use
+the same `SERVER_URL` and `ROOM_ID` combination.
 
 E2E encryption activates automatically — the admin's language instance
 generates the initial room key during `init()` when no E2E exists yet.
@@ -247,7 +257,7 @@ There is no plaintext mode.
     "languageMeta": {
         "name": "server-link-language",
         "description": "AD4M link language syncing through a self-hosted link-server",
-        "possibleTemplateParams": ["SERVER_URL", "ROOM_ID"],
+        "possibleTemplateParams": ["ROOM_ID", "SERVER_URL", "UID"],
         "sourceCodeLink": "https://github.com/coasys/ad4m/tree/dev/bootstrap-languages/server-link-language"
     }
 }
