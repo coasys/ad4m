@@ -91,7 +91,16 @@ impl Ad4mMcpHandler {
         // leaving a live instance with partial collection membership.
         let mut collection_predicates: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        // Collection links are written directly here, not through the
+        // collection's `adder` action, so the status has to be resolved from
+        // the property shape (`ad4m://local`) for each one.
+        let mut collection_statuses: std::collections::HashMap<String, LinkStatus> =
+            std::collections::HashMap::new();
         for (collection, _) in &validated.collections {
+            collection_statuses.insert(
+                collection.clone(),
+                shacl::resolve_property_link_status(&perspective, &class_name, collection).await,
+            );
             match shacl::resolve_property_predicate(&perspective, &class_name, collection).await {
                 Ok(pred) => {
                     collection_predicates.insert(collection.clone(), pred);
@@ -138,6 +147,10 @@ impl Ad4mMcpHandler {
         let mut collections_set: Map<String, Value> = Map::new();
         for (collection, items) in &validated.collections {
             let predicate = collection_predicates[collection].clone();
+            let status = collection_statuses
+                .get(collection)
+                .cloned()
+                .unwrap_or(LinkStatus::Shared);
             let mut added = Vec::with_capacity(items.len());
             for item in items {
                 let item_str = match item {
@@ -158,12 +171,7 @@ impl Ad4mMcpHandler {
                     target,
                 };
                 if let Err(e) = perspective
-                    .add_link(
-                        link,
-                        LinkStatus::Shared,
-                        Some(batch_id.clone()),
-                        &agent_context,
-                    )
+                    .add_link(link, status.clone(), Some(batch_id.clone()), &agent_context)
                     .await
                 {
                     perspective.discard_batch(&batch_id).await;

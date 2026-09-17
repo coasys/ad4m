@@ -120,6 +120,54 @@ property's `path` predicate and write the link themselves. They never run your
 optional per-class tools do use them — but their absence will not stop the
 static tools.
 
+### 4. Whether a property is shared or local
+
+By default every link a class writes is **shared**: in a neighbourhood it is
+gossiped to the other agents, and it comes back when the perspective re-syncs.
+
+`"local": true` on a property shape makes every link written for that property
+`LinkStatus::Local` instead — it stays in this executor's own store. Remote
+agents never see it, and it is not recoverable from the network:
+
+```json
+"properties": [
+  {
+    "path": "flow://current_state",
+    "name": "currentState",
+    "datatype": "xsd://string",
+    "max_count": 1,
+    "writable": true,
+    "local": true,
+    "setter": [
+      {"action":"setSingleTarget","source":"this","predicate":"flow://current_state","target":"value"}
+    ]
+  }
+]
+```
+
+That is the whole declaration. **Put `local` on the property shape, not on the
+individual actions.** `add_model` propagates a property-level `local: true`
+into every action of that property (`setter`, `adder`, `remover`) and into the
+`constructor_actions` / `destructor_actions` entries that touch its predicate,
+so initial values, setter writes and collection adds all agree.
+
+`local` is also accepted *on an individual action*, where it applies to that
+one action only. That form is what decorator-generated SHACL used to rely on,
+and it is still honoured (an explicit action-level flag wins over the
+propagated property-level one), but it is easy to get wrong: a property whose
+setter says `local: true` while its constructor entry does not ends up with its
+creation-time value shared and its later values local — the same property
+stored two different ways. Declare it once on the property shape instead.
+
+`describe_perspective` reports a local property with `"local": true` and a
+`local_note` explaining the reach, so a client can tell before writing that the
+value will not leave this node.
+
+Use it for per-replica derived state — caches, local marks, anything each agent
+should recompute for itself rather than receive. Do not use it for privacy
+between users of the *same* executor: local means executor-private, not
+user-private (see issue #1024).
+
 ## A class, end to end
 
 Two classes, because one class on its own never shows you the relation
