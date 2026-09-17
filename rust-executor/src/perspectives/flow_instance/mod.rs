@@ -98,6 +98,7 @@ pub mod receipt;
 pub mod roles;
 pub mod time;
 pub mod trigger;
+pub mod verify;
 
 pub(crate) use pass::local_cached_state;
 
@@ -187,13 +188,16 @@ pub struct ProposalLinks {
 ///   [`DecoratedLinkExpression::verify_signature`](crate::types::DecoratedLinkExpression::verify_signature)
 ///   before filtering, and it is the only path from carried evidence to a
 ///   window — so there is no version of this call that skips the check.
-/// - **Proposals and votes still read the carried verdict**, via
-///   `atom::signed_by`. A reader folding a read-set that arrived from
-///   elsewhere must therefore re-decorate those links itself before calling
-///   [`fold_read_set`]. That is a documented obligation, not an enforced one:
-///   a caller who forgets it folds a forged `"valid": true` into quorum. See
-///   <https://github.com/coasys/ad4m/issues/1068>, which closes it at the
-///   ingest seam where the untrusted material actually enters.
+/// - **Proposals and votes read the carried verdict** inside the fold, via
+///   `atom::signed_by`. What makes that safe is [`ReadSet::reverified`]: the
+///   ingest seam of <https://github.com/coasys/ad4m/issues/1068>, which
+///   replaces every carried verdict with one this replica computed. Both
+///   [`FlowReceipt::mint`](receipt::FlowReceipt::mint) and
+///   [`verify_receipt`](verify::verify_receipt) fold through it, so the two
+///   sides fold the same material. It remains an obligation on any *future*
+///   caller that folds a read-set which arrived from elsewhere — #1074 is the
+///   follow-up that makes the obligation unrepresentable by carrying the
+///   links in wire form.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadSet {
     pub instance_uri: String,
@@ -258,6 +262,141 @@ impl ReadSet {
             .filter(|p| marked_fired(&p.links))
             .map(|p| p.uri.clone())
             .collect()
+    }
+
+    /// The same read-set with **every carried link's signature verdict
+    /// recomputed locally** — the ingest seam of #1068.
+    ///
+    /// `proof.valid` is a per-replica read view over a signature, not a
+    /// property of the link. On a read-set that arrived from elsewhere it is
+    /// therefore the *sender's* claim, and a sender who writes `"valid": true`
+    /// onto an unsigned vote gets it counted toward quorum by any reader that
+    /// folds the value as handed over. This function is the one place that
+    /// claim is replaced by an answer this replica computed.
+    ///
+    /// Pure — [`DecoratedLinkExpression::verify_signature`] is SHA256 plus an
+    /// Ed25519 check against the author's own `did:key`: no store, no clock,
+    /// no network.
+    ///
+    /// # Both sides run it, and that is the contract
+    ///
+    /// [`FlowReceipt::mint`](receipt::FlowReceipt::mint) and
+    /// [`verify_receipt`](verify::verify_receipt) both fold
+    /// `read_set.reverified()`, never the raw value. A verify-only rule would
+    /// have the two sides fold different inputs by construction: invisible on
+    /// the happy path, and surfacing only as a receipt that minted cleanly on
+    /// one replica and fails on another — after the artifact is durable and
+    /// the minter is gone. On the minting replica the links came from the
+    /// local store and already carry a locally computed verdict, so this is a
+    /// no-op there; it costs one signature check per carried link.
+    ///
+    /// # The three halves are treated differently, and each for a reason
+    ///
+    /// - **Proposal and vote links are re-decorated, not dropped.**
+    ///   [`atom::signed_by`] already demands `proof.valid == Some(true)`, so a
+    ///   link whose signature does not check out counts for nobody once the
+    ///   verdict is honest. Dropping would be the same answer with less to
+    ///   look at — and a proposal carries links from *every* author, so a
+    ///   third party who writes a garbage link onto someone else's proposal
+    ///   must not be able to make the whole receipt unverifiable.
+    /// - **Revocation tombstones are re-decorated** for symmetry;
+    ///   [`RoleGrantEvidence::resolve`] re-decorates them again by
+    ///   construction, which is deliberate redundancy — that call is the
+    ///   unskippable one.
+    /// - **Grant links are re-decorated and then FILTERED**, because nothing
+    ///   downstream checks their signatures at all
+    ///   ([`grant_link_names_did`](crate::perspectives::flow_evaluator) —
+    ///   #1063). See [`reverified_history`] for why dropping one also
+    ///   suppresses the fallback dating.
+    pub fn reverified(&self) -> ReadSet {
+        ReadSet {
+            instance_uri: self.instance_uri.clone(),
+            subject: self.subject.clone(),
+            genesis: self.genesis.clone(),
+            proposals: self
+                .proposals
+                .iter()
+                .map(|p| ProposalLinks {
+                    uri: p.uri.clone(),
+                    links: p.links.iter().map(reverified_link).collect(),
+                })
+                .collect(),
+            role_grants: self
+                .role_grants
+                .iter()
+                .map(|evidence| RoleGrantEvidence {
+                    to_state: evidence.to_state.clone(),
+                    role_class: evidence.role_class.clone(),
+                    did: evidence.did.clone(),
+                    instances: evidence.instances.iter().map(reverified_history).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// One carried link with its signature verdict recomputed from the signature.
+/// Never reads the carried `proof.valid`; see [`ReadSet::reverified`].
+fn reverified_link(link: &DecoratedLinkExpression) -> DecoratedLinkExpression {
+    let mut link = link.clone();
+    link.verify_signature();
+    link
+}
+
+/// Does a re-decorated link count?
+///
+/// **`== Some(true)`, never `!= Some(false)`.** The two forms differ on
+/// `None`, which means *never evaluated* — precisely the state this gate
+/// exists to reject. `!= Some(false)` is a fail-open wearing the shape of a
+/// fail-closed: it admits an unevaluated link, and on a value that arrived
+/// over the wire `None` is one field a sender omits.
+fn link_counts(link: &DecoratedLinkExpression) -> bool {
+    link.proof.valid == Some(true)
+}
+
+/// One role instance's carried history, re-verified.
+///
+/// # Dropping a grant link must not widen the window
+///
+/// Grant links are the one kind nothing downstream signature-checks (#1063),
+/// so the filter has to happen here. But filtering alone inverts:
+/// [`RoleGrantEvidence::resolve`] dates a grant from the earliest surviving
+/// grant link and, with none left, falls back to
+/// `asserted_instance_timestamp` — the instance's own creation, which is
+/// *earlier* than any assignment link. A forged grant link would then buy a
+/// **wider** window than a genuine one, which is the exact inversion #1065
+/// wrote the ordering rules to avoid.
+///
+/// So dropping any grant link also drops the fallback. With no dated grant
+/// link and no fallback, `resolve` fails closed — and an unresolvable
+/// candidate aborts the whole derivation ([`role_grant_views`]) rather than
+/// de-quorating one edge and letting the walk take a survivor contention
+/// would have held. A broken grant signature therefore **collapses** the
+/// eligibility window instead of widening it.
+///
+/// Tombstones are never dropped here, only re-decorated: dropping one could
+/// only widen a window, and `resolve` re-verifies them anyway.
+fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstanceHistory {
+    let grant_links: Vec<DecoratedLinkExpression> = history
+        .grant_links
+        .iter()
+        .map(reverified_link)
+        .filter(link_counts)
+        .collect();
+    let dropped_a_grant_link = grant_links.len() != history.grant_links.len();
+    roles::RoleInstanceHistory {
+        instance_id: history.instance_id.clone(),
+        grant_links,
+        revocation_links: history
+            .revocation_links
+            .iter()
+            .map(reverified_link)
+            .collect(),
+        asserted_instance_timestamp: if dropped_a_grant_link {
+            None
+        } else {
+            history.asserted_instance_timestamp.clone()
+        },
     }
 }
 

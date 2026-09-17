@@ -504,6 +504,133 @@ pub(super) mod fixtures {
     pub fn atom_of(links: &[DecoratedLinkExpression]) -> Result<TransitionAtom, AtomRejection> {
         TransitionAtom::from_links(INSTANCE, PROPOSAL, links)
     }
+
+    // -----------------------------------------------------------------------
+    // Cryptographically honest fixtures
+    //
+    // The builders above state a signature verdict; these ones *earn* it.
+    // Both kinds are needed and neither replaces the other:
+    //
+    // - `link` / `honest_proposal` exercise the checks that read a carried
+    //   verdict (`signed_by`, `from_links`), where the verdict is the input
+    //   under test and inventing a keypair would only obscure it;
+    // - `signed_*` exercise anything downstream of
+    //   [`ReadSet::reverified`](super::super::ReadSet::reverified), which
+    //   recomputes the verdict from the signature — there a fixture that
+    //   merely *claims* `valid: true` is exactly the minter's word the
+    //   reader no longer takes, so it has to sign for real.
+    // -----------------------------------------------------------------------
+
+    use crate::agent::signatures::TestSigner;
+    use crate::types::{Link as CoreLink, LinkExpression, LinkStatus as CoreLinkStatus};
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    /// A named persona holding a **real** Ed25519 keypair. Leaked on first use
+    /// so the DIDs read like the `&'static str` constants they stand beside.
+    /// One keypair per persona per process.
+    pub fn persona(name: &str) -> &'static TestSigner {
+        static SIGNERS: LazyLock<Mutex<HashMap<String, &'static TestSigner>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+        *SIGNERS
+            .lock()
+            .expect("persona registry")
+            .entry(name.to_string())
+            .or_insert_with(|| Box::leak(Box::new(TestSigner::generate())))
+    }
+
+    /// `persona(name).did`, for fixtures that need the identity rather than
+    /// the key.
+    pub fn did_of(name: &str) -> &'static str {
+        &persona(name).did
+    }
+
+    /// One link as `get_links` returns it, with its `valid` flag honoured
+    /// **cryptographically**: a valid link is signed by `author_name`'s own
+    /// key over its own data and timestamp, and a forged one carries a
+    /// signature from a key that is not theirs.
+    ///
+    /// `proof.valid` is still pre-set to match, because that is what a store
+    /// hands back — but every reader downstream of the ingest recomputes it,
+    /// so a fixture whose claim and signature disagree gets ruled on by the
+    /// signature. That disagreement is itself a fixture: pass
+    /// `claims_valid = Some(true)` with `valid = false` to build the forgery
+    /// a dishonest minter would carry.
+    pub fn signed_link(
+        source: &str,
+        predicate: &str,
+        target: &str,
+        author_name: &str,
+        valid: bool,
+        claims_valid: Option<bool>,
+        timestamp: &str,
+    ) -> DecoratedLinkExpression {
+        let at = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .unwrap_or_else(|e| panic!("fixture timestamp `{timestamp}`: {e}"))
+            .with_timezone(&chrono::Utc);
+        let author = persona(author_name);
+        let signing_key = if valid { author } else { persona("forger") };
+        let mut expr = signing_key.sign_at(
+            CoreLink {
+                source: source.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            }
+            .normalize(),
+            at,
+        );
+        expr.author = author.did.clone();
+        expr.proof.key = author.key_id.clone();
+        let mut link =
+            DecoratedLinkExpression::from((LinkExpression::from(expr), CoreLinkStatus::Shared));
+        let claimed = claims_valid.unwrap_or(valid);
+        link.proof.valid = Some(claimed);
+        link.proof.invalid = Some(!claimed);
+        link
+    }
+
+    /// The five links `write_flow_transition_proposal` emits, all genuinely
+    /// signed by the proposer, sourced at the proposal's own URI.
+    pub fn signed_proposal(
+        proposal_uri: &str,
+        proposer_name: &str,
+        from: &str,
+        to: &str,
+        seal: &str,
+        at: &str,
+    ) -> Vec<DecoratedLinkExpression> {
+        let signed = |predicate: &str, target: &str| {
+            signed_link(
+                proposal_uri,
+                predicate,
+                target,
+                proposer_name,
+                true,
+                None,
+                at,
+            )
+        };
+        vec![
+            signed(PROPOSER_PREDICATE, did_of(proposer_name)),
+            signed(FLOW_INSTANCE_PREDICATE, INSTANCE),
+            signed(FROM_STATE_PREDICATE, &literal(from)),
+            signed(TO_STATE_PREDICATE, &literal(to)),
+            signed(EVIDENCE_HASHES_PREDICATE, &literal(seal)),
+        ]
+    }
+
+    /// A genuinely signed `proposal --acceptedBy--> voter` co-signature.
+    pub fn signed_vote(proposal_uri: &str, voter_name: &str, at: &str) -> DecoratedLinkExpression {
+        signed_link(
+            proposal_uri,
+            ACCEPTED_BY_PREDICATE,
+            did_of(voter_name),
+            voter_name,
+            true,
+            None,
+            at,
+        )
+    }
 }
 
 #[cfg(test)]
