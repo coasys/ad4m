@@ -74,6 +74,21 @@ impl Default for McpServerConfig {
 /// credential and the default widens back to `0.0.0.0`, where a sibling
 /// container on the same Docker network can reach it.
 ///
+/// `has_credential` therefore has to mean exactly what that last step tests:
+/// `admin_cred.is_none() && session_token.is_empty() && !header_present`
+/// (`mcp::tools::check_auth`, step 4). The two are the same question asked
+/// from opposite ends — *is anything gating this port?* — and only the
+/// credential half of it is knowable at bind time, before any request has a
+/// token or a header to present. If they ever drift, the failure is silent in
+/// one of two directions: a wide bind on a node where every caller is
+/// authenticated, or a loopback-only bind on a node that does gate access and
+/// wanted to be reachable. Change one, change the other.
+///
+/// A multi-user node is **not** gated by having user accounts. A login JWT
+/// authenticates a user to the API; it is not an admin credential, and step 4
+/// does not consult the user table. `--enable-multi-user` without
+/// `--admin-credential` is an ungated node and binds loopback here.
+///
 /// `MCP_HOST` is the operator saying it outright and is honoured either way.
 /// Saying it on an ungated node hands every tool to whoever can route to the
 /// address, so that combination warns rather than passing quietly.
