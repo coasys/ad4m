@@ -1951,14 +1951,36 @@ async fn the_engine_pass_never_reaches_quorum_by_itself_however_many_dids_run_it
 /// proposal on `elsewhere → merged` shares the whole key of a call proposing
 /// `here → merged`. What orders the two in the store is their URIs, which say
 /// nothing about which edge either sits on.
+///
+/// Two separate things are being held apart here, and collapsing either one
+/// breaks the test:
+///
+/// * **`requires` is IDENTICAL on every state.** That is the mechanism: the
+///   seal is computed from the target state's guard, so guard-identical edges
+///   produce the same `evidence_hash` and therefore the same dedup key. Give
+///   the states different guards and the two proposals stop colliding, and
+///   the test stops covering anything.
+/// * **`value` is DISTINCT on every state.** `value` does not enter the seal
+///   — it is only the state ordering. But genesis is `states[0]`
+///   (`flow_spawn::initial_state_of`) and the parser's sort by `value` is
+///   *stable*, so equal values leave the tie to graph link-discovery order,
+///   which `shacl_parser` itself documents as arbitrary. `here` and
+///   `elsewhere` both at `0.0` therefore made the folded genesis undefined
+///   rather than `here`, and CI folded it to `elsewhere`.
+///
+/// Note that `seed_flow`'s `initial_state` argument cannot rescue this: it
+/// writes the `currentState` **cache**, and the fold never reads the cache —
+/// `read_set` takes its genesis from the flow definition alone.
 fn merge_flow() -> serde_json::Value {
     let guard = serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]);
     serde_json::json!({
         "name": "Merge",
         "namespace": "merge://",
         "states": [
+            // Lowest value, so genesis is `here` — deterministically, which is
+            // the whole point of not sharing a value with `elsewhere`.
             { "name": "here", "value": 0.0, "requires": guard },
-            { "name": "elsewhere", "value": 0.0, "requires": guard },
+            { "name": "elsewhere", "value": 0.5, "requires": guard },
             { "name": "merged", "value": 1.0, "requires": guard },
         ],
         "transitions": [
@@ -2008,7 +2030,12 @@ async fn a_joinable_proposal_behind_a_foreign_one_is_still_the_one_co_signed() {
     assert_eq!(
         f.derived().await.state,
         "here",
-        "one vote each at n = 2 settles nothing; the instance has not moved"
+        "one vote each at n = 2 settles nothing, so the instance is still in genesis — and \
+         genesis must be `here`, because that is the edge the call below is on. If this \
+         reads `elsewhere`, `merge_flow`'s state VALUES have been collapsed back together \
+         and genesis has gone arbitrary; fix the values, do NOT flip this expectation — \
+         with genesis `elsewhere` the joinable proposal sorts FIRST and the ordering bug \
+         is no longer exercised at all"
     );
 
     let out = propose_flow_transition(&mut f.perspective, &instance, "merged", None, &f.ctx)
