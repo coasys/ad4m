@@ -988,7 +988,12 @@ mod tests {
     #[test]
     fn a_missing_status_becomes_shared() {
         let signer = TestSigner::generate();
-        let input = input_claiming(&signer.did, "2026-09-17T06:00:00.000Z", &"ab".repeat(64), None);
+        let input = input_claiming(
+            &signer.did,
+            "2026-09-17T06:00:00.000Z",
+            &"ab".repeat(64),
+            None,
+        );
         assert_eq!(
             link_expression_input_to_decorated(&input).status,
             Some(LinkStatus::Shared)
