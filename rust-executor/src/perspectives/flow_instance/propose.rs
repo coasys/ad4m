@@ -31,11 +31,22 @@
 //!    A user's click has no next pass, so the same silence would report a
 //!    lost vote as success.
 //!
-//! The one residual: the dedup key does not carry `from_state`, so in a flow
-//! with two transitions into the same state under identical guards a stranded
-//! proposal on the *other* edge can match. It is not ours to co-sign — the
-//! fold would never count it from here — so we mint our own and say so in the
-//! log. Widening the key is not free: it is shared with the engine pass.
+//! The one residual, and **it is not on this path**: the dedup key does not
+//! carry `from_state`, so in a flow with two transitions into the same state
+//! under identical guards a stranded proposal on the *other* edge matches it.
+//! Here that is handled — the lookup returns every match, this module
+//! classifies all of them, co-signs one on its own edge if there is one, and
+//! otherwise mints and says so in the log.
+//!
+//! The engine pass shares the key and cannot do the same: it asks only whether
+//! *some* live proposal matched, so in that flow shape a stranded proposal on
+//! `A→C` suppresses it ever proposing `B→C`, and the instance stops advancing
+//! with a `debug!` line as the only trace. Adding `from_state` to the key is
+//! the fix, and it is safe for invariant 4 — the key would still carry no
+//! proposer, and two agents pressing one button share a derived state — but it
+//! changes what the engine skips, and this PR holds that path
+//! behaviour-preserving. Left for the change that owns the engine pass. See
+//! [`proposal_already_exists`](crate::perspectives::flow_evaluator).
 
 use super::accept::accept_flow_proposal;
 use super::atom::TransitionAtom;
@@ -47,7 +58,7 @@ use crate::perspectives::flow_context::{
     load_all_flow_instances, load_shacl_flows, reachable_next_states,
 };
 use crate::perspectives::flow_evaluator::{
-    find_live_proposal, recompute_evidence_seal, write_proposal, EvidenceSeal, SatisfiedTransition,
+    find_live_proposals, recompute_evidence_seal, write_proposal, EvidenceSeal, SatisfiedTransition,
 };
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::LinkQuery;
@@ -168,40 +179,86 @@ pub async fn propose_flow_transition(
     };
 
     // `?`, not fail-closed: there is no next pass behind a button.
-    let live = find_live_proposal(perspective, &transition).await?;
-    let (proposal_uri, minted, recorded_vote, outcomes) = match live {
-        Some(uri) => {
-            match live_proposal_role(perspective, &uri, instance_uri, &derived.state, &acting_did)
-                .await?
-            {
-                LiveProposalRole::AlreadyVoted => {
-                    log::debug!(
-                        "propose_flow_transition: {instance_uri} → {to_state} already carries a \
-                         vote by {acting_did} on {uri}; writing nothing, running consensus pass"
-                    );
-                    let outcomes = sweep(perspective, instance_uri, context).await;
-                    (uri, false, false, outcomes)
-                }
-                // The production accept path, so this vote is verified exactly
-                // as any other co-sign is: it re-derives the seal on this
-                // replica and refuses rather than signing what it cannot
-                // reproduce. It runs the consensus pass itself, and that pass
-                // is the one that can report a fire — a second sweep here
-                // would find every mark already written and return nothing.
-                LiveProposalRole::Joinable => {
-                    let outcomes = accept_flow_proposal(perspective, &uri, context).await?;
-                    (uri, false, true, outcomes)
-                }
-                LiveProposalRole::OtherEdge(why) => {
-                    log::warn!(
-                        "propose_flow_transition: {uri} shares the dedup key of \
-                         {instance_uri} → {to_state} but {why}; minting our own"
-                    );
-                    mint(perspective, &transition, &acting_did, rationale, context).await?
-                }
+    //
+    // Every candidate, not the first: the dedup key carries no `from_state`, so
+    // a proposal on a guard-identical sibling edge shares it and nothing orders
+    // the two. Classifying only the first would mint past a joinable proposal
+    // sitting behind a foreign one — and mint again on the next press, which is
+    // invariant 4 broken in the one shape it exists to cover.
+    let live = find_live_proposals(perspective, &transition).await?;
+    let mut already_voted = None;
+    let mut joinable = None;
+    for uri in &live {
+        match live_proposal_role(perspective, uri, instance_uri, &derived.state, &acting_did)
+            .await?
+        {
+            // Terminal: our vote is already on this edge, so nothing this call
+            // could write would add one. Stop — a later candidate can only be
+            // a twin, and co-signing it would split the vote.
+            LiveProposalRole::AlreadyVoted => {
+                already_voted = Some(uri.clone());
+                break;
             }
+            // First one wins; a second is a twin we must not also sign.
+            //
+            // Ignoring the rest is safe ONLY because `fold::settle_edge`
+            // pools votes across every atom on one `(from_state, to_state)`
+            // edge — `quorum_is_counted_across_twin_proposals_on_one_edge`
+            // pins it. Our vote on whichever twin we pick therefore counts
+            // toward the same quorum as the votes sitting on the others. If
+            // that pooling ever goes away this line quietly becomes a
+            // vote-splitter, and nothing near it would say so.
+            LiveProposalRole::Joinable => {
+                joinable.get_or_insert_with(|| uri.clone());
+            }
+            LiveProposalRole::OtherEdge(why) => log::debug!(
+                "propose_flow_transition: {uri} shares the dedup key of \
+                 {instance_uri} → {to_state} but {why}; not a candidate for this call"
+            ),
         }
-        None => mint(perspective, &transition, &acting_did, rationale, context).await?,
+    }
+
+    let (proposal_uri, minted, recorded_vote, outcomes) = match (already_voted, joinable) {
+        // `already_voted` beats an earlier-found `Joinable` — the `break`
+        // above argued in one direction, this arm is the same argument in the
+        // other. Our vote is already on this edge, and because the fold pools
+        // across twins it already counts; co-signing a twin as well would add
+        // a second link the fold ignores and a second atom to keep in sync.
+        (Some(uri), _) => {
+            log::debug!(
+                "propose_flow_transition: {instance_uri} → {to_state} already carries a \
+                 vote by {acting_did} on {uri}; writing nothing, running consensus pass"
+            );
+            let outcomes = sweep(perspective, instance_uri, context).await;
+            (uri, false, false, outcomes)
+        }
+        // The production accept path, so this vote is verified exactly as any
+        // other co-sign is: it re-derives the seal on this replica and refuses
+        // rather than signing what it cannot reproduce. It runs the consensus
+        // pass itself, and that pass is the one that can report a fire — a
+        // second sweep here would find every mark already written and return
+        // nothing.
+        (None, Some(uri)) => {
+            let outcomes = accept_flow_proposal(perspective, &uri, context).await?;
+            (uri, false, true, outcomes)
+        }
+        // Either nothing shares the key, or everything that does belongs to
+        // another edge. Both mean this edge has no open proposal to join.
+        (None, None) => {
+            if !live.is_empty() {
+                // Name them. The per-candidate reason is `debug!`, so at
+                // `info` this warn is all an operator gets — and "3 of them"
+                // without saying which three leaves them nowhere to look.
+                log::warn!(
+                    "propose_flow_transition: {} proposal(s) share the dedup key of \
+                     {instance_uri} → {to_state} but none is on this edge; minting our \
+                     own. Candidates: {}",
+                    live.len(),
+                    live.join(", ")
+                );
+            }
+            mint(perspective, &transition, &acting_did, rationale, context).await?
+        }
     };
 
     // Re-derive rather than report the pre-call fold: `derived_state` is the
@@ -258,7 +315,7 @@ enum LiveProposalRole {
     OtherEdge(String),
 }
 
-/// Classify the live proposal `find_live_proposal` matched.
+/// Classify one of the live proposals `find_live_proposals` matched.
 ///
 /// Reads it as [`TransitionAtom`] — the same identity-checked view the fold
 /// counts — so "already voted" means a vote the fold would count, not a link
