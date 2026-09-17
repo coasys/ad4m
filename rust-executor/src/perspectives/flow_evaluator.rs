@@ -1605,7 +1605,12 @@ mod tests {
         // Unmet cases: guard exists but is not satisfied, or state is gone.
         for (name, store, flow, to_state) in [
             ("guard no longer satisfied", &empty, &f, "scoped"),
-            ("target state vanished from the flow definition", &empty, &f, "shipped"),
+            (
+                "target state vanished from the flow definition",
+                &empty,
+                &f,
+                "shipped",
+            ),
         ] {
             assert_eq!(
                 recompute_evidence_hash(store, flow, &inst(), to_state, "did:key:me")
