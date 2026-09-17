@@ -12,6 +12,7 @@ pub mod interpretation;
 mod interpretation_e2e;
 #[cfg(test)]
 mod interpretation_harness_e2e;
+pub mod link_visibility;
 // `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
 // tools, which read flow state through the same loaders) can seed a real
 // `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,

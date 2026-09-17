@@ -59,6 +59,7 @@ pub(super) async fn resolve_projections(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    viewer_did: Option<&str>,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -111,6 +112,13 @@ pub(super) async fn resolve_projections(
 
         let where_patterns = build_projection_where_patterns(proj, resolver);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
+        // A projection walks the edge triple directly, which carries no
+        // author — without this, a count would include (and a list would
+        // return) edges another user wrote as Local links.
+        let visibility_patterns = crate::perspectives::link_visibility::viewer_triple_filter(
+            viewer_did,
+            &format!("?parent <{safe_pred}> ?t"),
+        );
 
         if proj.count {
             let sparql = format!(
@@ -120,12 +128,14 @@ pub(super) async fn resolve_projections(
                     "    ?parent <{safe_pred}> ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
+                    "{visibility_patterns}",
                     "}} GROUP BY ?parent"
                 ),
                 parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
+                visibility_patterns = visibility_patterns,
             );
 
             let result_json = store.query(&sparql)?;
@@ -163,12 +173,14 @@ pub(super) async fn resolve_projections(
                     "    ?parent <{safe_pred}> ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
+                    "{visibility_patterns}",
                     "}}{order_clause}"
                 ),
                 parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
+                visibility_patterns = visibility_patterns,
                 order_clause = order_clause,
             );
 
@@ -250,6 +262,7 @@ pub(super) async fn resolve_projections(
                                 &sub_query,
                                 resolver,
                                 depth + 1,
+                                viewer_did,
                             ))
                             .await
                             {

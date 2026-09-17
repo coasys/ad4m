@@ -35,6 +35,7 @@ pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
     relations: &[(String, String, bool)], // (name, predicate, is_single)
+    viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     if relations.is_empty() || instances.is_empty() {
         return Ok(());
@@ -58,9 +59,16 @@ pub fn resolve_reverse_relations(
             Err(_) => continue,
         };
 
+        // The edge triple alone says nothing about who wrote it, so a
+        // reverse relation would otherwise point back at instances linked
+        // only by another user's Local link.
+        let visibility = crate::perspectives::link_visibility::viewer_triple_filter(
+            viewer_did,
+            &format!("?source <{safe_pred}> ?target"),
+        );
         let sparql = format!(
-            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target . }}",
-            target_constraint
+            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .\n{} }}",
+            target_constraint, visibility
         );
         let result_json = store.query(&sparql)?;
         let rows: Vec<Value> = serde_json::from_str(&result_json)?;
@@ -115,6 +123,7 @@ pub(super) async fn resolve_includes_recursive(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
         match include_val {
@@ -141,9 +150,15 @@ pub(super) async fn resolve_includes_recursive(
         reject_pagination_on_polymorphic(rel_name, &sub_query)?;
 
         if rel.direction == "reverse" {
-            resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth).await?;
+            resolve_reverse_include(
+                store, instances, rel, &sub_query, resolver, depth, viewer_did,
+            )
+            .await?;
         } else {
-            resolve_forward_include(store, instances, rel, &sub_query, resolver, depth).await?;
+            resolve_forward_include(
+                store, instances, rel, &sub_query, resolver, depth, viewer_did,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -279,6 +294,7 @@ async fn hydrate_polymorphic(
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    viewer_did: Option<&str>,
     hydrated: &mut HashMap<String, Value>,
     ordered_ids: &mut Vec<String>,
 ) -> Result<(), Error> {
@@ -339,6 +355,7 @@ async fn hydrate_polymorphic(
             &group_query,
             resolver,
             depth + 1,
+            viewer_did,
         ))
         .await?;
 
@@ -382,6 +399,7 @@ async fn resolve_forward_include(
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     let mut seen = std::collections::HashSet::new();
     let mut all_ids: Vec<String> = Vec::new();
@@ -436,6 +454,7 @@ async fn resolve_forward_include(
             &query,
             resolver,
             depth,
+            viewer_did,
             &mut hydrated,
             &mut ordered_ids,
         )
@@ -460,6 +479,7 @@ async fn resolve_forward_include(
             &query,
             resolver,
             depth + 1,
+            viewer_did,
         ))
         .await?;
 
@@ -531,6 +551,7 @@ async fn resolve_reverse_include(
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     let all_ids: Vec<String> = instances
         .iter()
@@ -618,6 +639,7 @@ async fn resolve_reverse_include(
                 &query,
                 resolver,
                 depth,
+                viewer_did,
                 &mut hydrated,
                 &mut ordered_result_ids,
             )
@@ -641,6 +663,7 @@ async fn resolve_reverse_include(
                 &query,
                 resolver,
                 depth + 1,
+                viewer_did,
             ))
             .await?;
 

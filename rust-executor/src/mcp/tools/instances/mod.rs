@@ -396,9 +396,10 @@ pub(super) async fn run_model_query(
     perspective: &PerspectiveInstance,
     class_name: &str,
     query: &Value,
+    viewer_did: Option<&str>,
 ) -> Result<(Vec<Value>, usize), String> {
     let raw = perspective
-        .model_query(class_name, &query.to_string())
+        .model_query_for_viewer(class_name, &query.to_string(), viewer_did)
         .await
         .map_err(|e| format!("{e:#}"))?;
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
@@ -432,10 +433,11 @@ pub(crate) async fn fetch_instance(
     perspective: &PerspectiveInstance,
     class_name: &str,
     base_uri: &str,
+    viewer_did: Option<&str>,
 ) -> Result<Option<Value>, String> {
     let lookup = |uri: String| async move {
         let query = json!({ "where": { "id": uri }, "limit": 1 });
-        let (instances, _) = run_model_query(perspective, class_name, &query).await?;
+        let (instances, _) = run_model_query(perspective, class_name, &query, viewer_did).await?;
         Ok::<Option<Value>, String>(instances.into_iter().next())
     };
 

@@ -490,6 +490,23 @@ impl Ad4mMcpHandler {
         }
     }
 
+    /// Visibility scope for reads this MCP session makes on an agent's behalf.
+    ///
+    /// MCP is a user-facing surface, so its reads go through the
+    /// `*_for_viewer` entry points with this DID and do not see other users'
+    /// `Local` links — see
+    /// [`link_visibility`](crate::perspectives::link_visibility). A session
+    /// with no token is the single-user case, which resolves to the main
+    /// agent.
+    pub(crate) async fn viewer_did(&self) -> Result<Option<String>, String> {
+        let context = match self.get_auth_token().await {
+            Some(token) if !token.is_empty() => AgentContext::from_auth_token(token),
+            _ => AgentContext::main_agent(),
+        };
+        crate::perspectives::link_visibility::viewer_did_for_context(&context)
+            .map_err(|e| e.to_string())
+    }
+
     /// Get capabilities from the stored auth token (reuses same logic as REST RequestContext)
     pub(crate) async fn get_capabilities(&self) -> Result<Vec<Capability>, String> {
         let token = self.get_auth_token().await;

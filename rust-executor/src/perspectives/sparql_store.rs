@@ -613,6 +613,29 @@ impl SparqlStore {
         until_date: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        self.query_links_for_viewer(
+            source, predicate, target, from_date, until_date, limit, None,
+        )
+    }
+
+    /// [`Self::query_links`], restricted to the links `viewer_did` may see.
+    ///
+    /// `viewer_did == None` is executor scope and reads the whole row set; see
+    /// [`link_visibility`](crate::perspectives::link_visibility) for why that
+    /// scope exists. The predicate is applied inside the scan rather than to
+    /// the returned `Vec` so `limit` counts *visible* rows — post-filtering a
+    /// limited page would silently return short pages to the viewer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_links_for_viewer(
+        &self,
+        source: Option<&str>,
+        predicate: Option<&str>,
+        target: Option<&str>,
+        from_date: Option<&str>,
+        until_date: Option<&str>,
+        limit: Option<usize>,
+        viewer_did: Option<&str>,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::ops::ControlFlow;
         // Bail out early on the zero-page case: the closure below pushes first,
         // then checks `links.len() >= lim`, so without this guard `Some(0)`
@@ -621,13 +644,21 @@ impl SparqlStore {
             return Ok(Vec::new());
         }
         let mut links = Vec::new();
-        self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
-            links.push(link);
-            match limit {
-                Some(lim) if links.len() >= lim => ControlFlow::Break(()),
-                _ => ControlFlow::Continue(()),
-            }
-        })?;
+        self.for_each_matched_link(
+            source,
+            predicate,
+            target,
+            from_date,
+            until_date,
+            viewer_did,
+            |link| {
+                links.push(link);
+                match limit {
+                    Some(lim) if links.len() >= lim => ControlFlow::Break(()),
+                    _ => ControlFlow::Continue(()),
+                }
+            },
+        )?;
         Ok(links)
     }
 
@@ -646,6 +677,27 @@ impl SparqlStore {
         limit: usize,
         reverse: bool,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        self.query_links_top_n_by_timestamp_for_viewer(
+            source, predicate, target, from_date, until_date, limit, reverse, None,
+        )
+    }
+
+    /// [`Self::query_links_top_n_by_timestamp`], restricted to the links
+    /// `viewer_did` may see. The predicate runs inside the scan, before the
+    /// bounded heap, so the page holds `limit` links the viewer can actually
+    /// see instead of `limit` rows that are then thinned out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn query_links_top_n_by_timestamp_for_viewer(
+        &self,
+        source: Option<&str>,
+        predicate: Option<&str>,
+        target: Option<&str>,
+        from_date: Option<&str>,
+        until_date: Option<&str>,
+        limit: usize,
+        reverse: bool,
+        viewer_did: Option<&str>,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
         use std::ops::ControlFlow;
@@ -660,15 +712,24 @@ impl SparqlStore {
             // so evicting the top whenever size exceeds `limit` retains
             // exactly the K smallest.
             let mut heap: BinaryHeap<TimestampedLink> = BinaryHeap::with_capacity(limit + 1);
-            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
-                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
-                heap.push(TimestampedLink { dt, seq, link });
-                seq += 1;
-                if heap.len() > limit {
-                    heap.pop();
-                }
-                ControlFlow::Continue(())
-            })?;
+            self.for_each_matched_link(
+                source,
+                predicate,
+                target,
+                from_date,
+                until_date,
+                viewer_did,
+                |link| {
+                    let dt =
+                        ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                    heap.push(TimestampedLink { dt, seq, link });
+                    seq += 1;
+                    if heap.len() > limit {
+                        heap.pop();
+                    }
+                    ControlFlow::Continue(())
+                },
+            )?;
             let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
             while let Some(r) = heap.pop() {
                 out.push(r.link);
@@ -681,15 +742,24 @@ impl SparqlStore {
             // evicts the smallest whenever size exceeds `limit`.
             let mut heap: BinaryHeap<Reverse<TimestampedLink>> =
                 BinaryHeap::with_capacity(limit + 1);
-            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
-                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
-                heap.push(Reverse(TimestampedLink { dt, seq, link }));
-                seq += 1;
-                if heap.len() > limit {
-                    heap.pop();
-                }
-                ControlFlow::Continue(())
-            })?;
+            self.for_each_matched_link(
+                source,
+                predicate,
+                target,
+                from_date,
+                until_date,
+                viewer_did,
+                |link| {
+                    let dt =
+                        ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                    heap.push(Reverse(TimestampedLink { dt, seq, link }));
+                    seq += 1;
+                    if heap.len() > limit {
+                        heap.pop();
+                    }
+                    ControlFlow::Continue(())
+                },
+            )?;
             let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
             while let Some(Reverse(r)) = heap.pop() {
                 out.push(r.link);
@@ -705,6 +775,12 @@ impl SparqlStore {
     /// Shared by [`Self::query_links`] and
     /// [`Self::query_links_top_n_by_timestamp`] so the (gnarly) RocksDB
     /// reifier walk lives in exactly one place.
+    ///
+    /// `viewer_did` is the visibility scope of the read: `None` sees every
+    /// link, `Some(did)` drops the `Local` links `did` did not author. The
+    /// check sits here, at the single point where a link's `author` and
+    /// `status` are both known, so every scan-based read path inherits it.
+    #[allow(clippy::too_many_arguments)]
     fn for_each_matched_link<F>(
         &self,
         source: Option<&str>,
@@ -712,6 +788,7 @@ impl SparqlStore {
         target: Option<&str>,
         from_date: Option<&str>,
         until_date: Option<&str>,
+        viewer_did: Option<&str>,
         mut callback: F,
     ) -> Result<(), Error>
     where
@@ -899,6 +976,10 @@ impl SparqlStore {
                     },
                     status,
                 };
+
+                if !crate::perspectives::link_visibility::decorated_visible_to(&link, viewer_did) {
+                    continue;
+                }
 
                 if let ControlFlow::Break(_) = callback(link) {
                     return Ok(());

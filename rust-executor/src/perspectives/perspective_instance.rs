@@ -1,3 +1,4 @@
+use super::link_visibility;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
@@ -1720,6 +1721,12 @@ impl PerspectiveInstance {
         if let Some(owners) = owners_list {
             for link in &decorated_diff.additions {
                 for owner in owners {
+                    // Co-owners share one instance, so the per-owner fan-out
+                    // would otherwise hand every owner a link they cannot
+                    // read back through any query — issue #1024.
+                    if !link_visibility::decorated_visible_to(link, Some(owner)) {
+                        continue;
+                    }
                     pubsub
                         .publish(
                             &PERSPECTIVE_LINK_ADDED_TOPIC,
@@ -1737,6 +1744,9 @@ impl PerspectiveInstance {
             // Publish link removed events - one per owner for proper multi-user isolation
             for link in &decorated_diff.removals {
                 for owner in owners {
+                    if !link_visibility::decorated_visible_to(link, Some(owner)) {
+                        continue;
+                    }
                     pubsub
                         .publish(
                             &PERSPECTIVE_LINK_REMOVED_TOPIC,
@@ -2326,6 +2336,17 @@ impl PerspectiveInstance {
         &self,
         query: &LinkQuery,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        self.get_links_local_decorated_for_viewer(query, None)
+    }
+
+    /// [`Self::get_links_local_decorated`] in the visibility scope of
+    /// `viewer_did` — see
+    /// [`link_visibility`](crate::perspectives::link_visibility).
+    fn get_links_local_decorated_for_viewer(
+        &self,
+        query: &LinkQuery,
+        viewer_did: Option<&str>,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let from_date = query.from_date.as_ref().map(|d| {
             let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
             dt.to_rfc3339()
@@ -2335,13 +2356,14 @@ impl PerspectiveInstance {
             dt.to_rfc3339()
         });
 
-        Ok(self.sparql_store.query_links(
+        Ok(self.sparql_store.query_links_for_viewer(
             query.source.as_deref(),
             query.predicate.as_deref(),
             query.target.as_deref(),
             from_date.as_deref(),
             until_date.as_deref(),
             None, // limit is applied after sorting in get_links()
+            viewer_did,
         )?)
     }
 
@@ -2372,7 +2394,25 @@ impl PerspectiveInstance {
             .collect())
     }
 
+    /// Read links in **executor scope**: every link in the perspective,
+    /// including other users' `Local` links.
+    ///
+    /// This is the right call for the executor's own derivations (flow engine
+    /// state, auto-processor, SDNA loading, the Prolog fact base). Anything
+    /// serving a request on behalf of an agent — WS RPC, MCP — must call
+    /// [`Self::get_links_for_viewer`] with that agent's DID instead. See
+    /// [`link_visibility`](crate::perspectives::link_visibility).
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        self.get_links_for_viewer(q, None).await
+    }
+
+    /// [`Self::get_links`] in the visibility scope of `viewer_did`:
+    /// `Local` links authored by someone else are not returned.
+    pub async fn get_links_for_viewer(
+        &self,
+        q: &LinkQuery,
+        viewer_did: Option<&str>,
+    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let mut reverse = false;
         let mut query = q.clone();
 
@@ -2407,15 +2447,18 @@ impl PerspectiveInstance {
                 let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
                 dt.to_rfc3339()
             });
-            return Ok(self.sparql_store.query_links_top_n_by_timestamp(
-                query.source.as_deref(),
-                query.predicate.as_deref(),
-                query.target.as_deref(),
-                from_date.as_deref(),
-                until_date.as_deref(),
-                limit as usize,
-                reverse,
-            )?);
+            return Ok(self
+                .sparql_store
+                .query_links_top_n_by_timestamp_for_viewer(
+                    query.source.as_deref(),
+                    query.predicate.as_deref(),
+                    query.target.as_deref(),
+                    from_date.as_deref(),
+                    until_date.as_deref(),
+                    limit as usize,
+                    reverse,
+                    viewer_did,
+                )?);
         }
 
         // No limit: pull the already-decorated form from the SPARQL store and
@@ -2428,7 +2471,7 @@ impl PerspectiveInstance {
         // that's ~30K extra small allocations + 10K crypto ops every call.
         // The wind-tunnel S9 query path was the dominant remaining source of
         // RSS growth; this collapses it to a single Vec.
-        let mut links = self.get_links_local_decorated(&query)?;
+        let mut links = self.get_links_local_decorated_for_viewer(&query, viewer_did)?;
 
         links.sort_by(|a, b| {
             let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
@@ -2977,6 +3020,11 @@ impl PerspectiveInstance {
             }
             _ => Vec::new(), // Should never reach here given the callers
         };
+
+        // Local links are private to their author, including in the fact base
+        // a user's Prolog query runs against (#1024). Executor-internal Prolog
+        // work goes through the shared pool, not this per-context path.
+        links.retain(|link| link_visibility::decorated_visible_to(link, Some(user_did.as_str())));
 
         // Filter to only show SDNA links created by this user
         links.retain(|link| {
@@ -3703,6 +3751,20 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_for_viewer(class_name, query_json, None)
+            .await
+    }
+
+    /// [`Self::model_query`] in the visibility scope of `viewer_did`: instance
+    /// properties, relations and projections built from another user's `Local`
+    /// links are not hydrated, so an instance that exists only in those links
+    /// does not appear at all.
+    pub async fn model_query_for_viewer(
+        &self,
+        class_name: &str,
+        query_json: &str,
+        viewer_did: Option<&str>,
+    ) -> Result<String, deno_core::anyhow::Error> {
         let query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
@@ -3724,6 +3786,7 @@ impl PerspectiveInstance {
             shape.as_ref(),
             &query_input,
             &resolver,
+            viewer_did,
         )
         .await?;
 
@@ -5594,8 +5657,16 @@ impl PerspectiveInstance {
         query_json: String,
         user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
-        // 1. Run the initial model query
-        let initial_result = self.model_query(&class_name, &query_json).await?;
+        // 1. Run the initial model query, in the subscribing agent's scope —
+        //    `check_subscribed_queries` re-runs it the same way on each change.
+        let agent_context = match user_email.as_ref() {
+            Some(email) => crate::agent::AgentContext::for_user_email(email.clone()),
+            None => crate::agent::AgentContext::main_agent(),
+        };
+        let viewer_did = link_visibility::viewer_did_for_context(&agent_context)?;
+        let initial_result = self
+            .model_query_for_viewer(&class_name, &query_json, viewer_did.as_deref())
+            .await?;
 
         // 2. Build trigger SPARQL from shape predicates resolved through the cache.
         let trigger_predicates =
@@ -5806,10 +5877,26 @@ impl PerspectiveInstance {
                     crate::agent::AgentContext::main_agent()
                 };
 
+                // A subscription pushes results at the agent that opened it,
+                // so every re-run has to stay in that agent's visibility
+                // scope — otherwise the first update after a co-owner writes
+                // a Local link would deliver what the initial query withheld.
+                let viewer_did = match link_visibility::viewer_did_for_context(&_agent_context) {
+                    Ok(did) => did,
+                    Err(e) => {
+                        log::error!("❌ 🔗 subscription viewer DID unresolved: {}", e);
+                        return None;
+                    }
+                };
+
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL
                 let result_string = if let Some(ref params) = model_params {
                     match self_clone
-                        .model_query(&params.class_name, &params.query_json)
+                        .model_query_for_viewer(
+                            &params.class_name,
+                            &params.query_json,
+                            viewer_did.as_deref(),
+                        )
                         .await
                     {
                         Ok(r) => r,
