@@ -593,7 +593,8 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
     // Message via `new:<Class>:<n>` refs. Teaches the LLM (a) the per-class
     // 1-based ordinal counting, (b) that BOTH endpoints can be freshly-minted
     // siblings, (c) how relation fields carry references not free-form
-    // strings. A dedicated Message class is preferred over stuffing a
+    // strings, and (d) that a `many` relation is an array whether it carries
+    // two refs or one. A dedicated Message class is preferred over stuffing a
     // literal-URI value into `expression` — using only `new:` refs keeps the
     // example consistent with the "never invent an `id`" rule in the system
     // prompt.
@@ -602,7 +603,16 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
             {"name":"Message","hint":"An utterance exchanged in the transcript.","existing":[],
              "fields":[{"name":"content","required":true,"hint":"Short summary of what was said."}]},
             {"name":"Topic","hint":"A subject the participants discuss.","existing":[],
-             "fields":[{"name":"title","required":true,"hint":"Short topic label."}]},
+             "fields":[{"name":"title","required":true,"hint":"Short topic label."}],
+             // The `many` half of the cardinality rule (#1005). Declaring the
+             // rule without ever demonstrating it is what broke the harness:
+             // `basedOn` and `contradicts` are both `hasMany`, and with no
+             // example carrying an array the model stopped populating them at
+             // all. The outputs below show both cases the rule covers — two
+             // refs, and a single ref that is *still* wrapped in an array.
+             "relations":[
+                 {"name":"mentionedIn","targetClass":"Message","cardinality":"many","hint":"Every message that discusses this topic."}
+             ]},
             {"name":"SemanticRelationship",
              "hint":"An edge that tags a Message with a Topic and a relevance score.",
              "existing":[],
@@ -626,8 +636,8 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
     let ex4_out = serde_json::json!([
         {"class":"Message","content":"We should log all failed webhook retries to debug the payments outage."},
         {"class":"Message","content":"Retry logging is basically an observability question."},
-        {"class":"Topic","title":"Webhook retry logging"},
-        {"class":"Topic","title":"Observability"},
+        {"class":"Topic","title":"Webhook retry logging","mentionedIn":["new:Message:1","new:Message:2"]},
+        {"class":"Topic","title":"Observability","mentionedIn":["new:Message:2"]},
         {"class":"SemanticRelationship","relevance":0.9,
          "tag":"new:Topic:1","expression":"new:Message:1"},
         {"class":"SemanticRelationship","relevance":0.8,
@@ -1455,6 +1465,82 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Some example must actually *show* a `many` relation carrying an array.
+    ///
+    /// `few_shot_outputs_match_the_declared_cardinality` only catches an
+    /// example that contradicts the rule; it passes vacuously when every
+    /// fixture relation is `one`, which is what the first cut of #1005
+    /// shipped. Declaring a shape the model has never seen used turned out to
+    /// be worse than saying nothing: the real-LLM harness stopped populating
+    /// `basedOn` and `contradicts` — both `hasMany` — entirely.
+    ///
+    /// So the demonstration is a contract, not a nicety, and this is the test
+    /// that fails if someone removes it.
+    #[test]
+    fn some_example_demonstrates_a_many_relation_as_an_array() {
+        let mut demonstrated = Vec::new();
+        for ex in interpretation_examples() {
+            let input: serde_json::Value = serde_json::from_str(&ex.input).unwrap();
+            let mut many: std::collections::HashSet<(String, String)> = Default::default();
+            for class in input["classes"].as_array().unwrap() {
+                let cname = class["name"].as_str().unwrap_or_default().to_string();
+                let Some(rels) = class["relations"].as_array() else {
+                    continue;
+                };
+                for rel in rels {
+                    if rel["cardinality"].as_str() == Some("many") {
+                        many.insert((
+                            cname.clone(),
+                            rel["name"].as_str().unwrap_or_default().to_string(),
+                        ));
+                    }
+                }
+            }
+            if many.is_empty() {
+                continue;
+            }
+            let Ok(out) = serde_json::from_str::<serde_json::Value>(&ex.output) else {
+                continue;
+            };
+            for item in out.as_array().into_iter().flatten() {
+                let Some(obj) = item.as_object() else {
+                    continue;
+                };
+                let cname = obj
+                    .get("class")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                for (key, val) in obj {
+                    if many.contains(&(cname.clone(), key.clone())) && val.is_array() {
+                        demonstrated.push((
+                            cname.clone(),
+                            key.clone(),
+                            val.as_array().unwrap().len(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            !demonstrated.is_empty(),
+            "no few-shot example emits an array for a `many` relation — the rule is stated but \
+             never shown, which is the shape that regressed the harness in #1013"
+        );
+        // Both readings of "array": more than one ref, and a single ref that is
+        // still wrapped. The second is the one a model gets wrong on its own.
+        assert!(
+            demonstrated.iter().any(|(_, _, n)| *n > 1),
+            "no example shows a `many` relation with several refs: {demonstrated:?}"
+        );
+        assert!(
+            demonstrated.iter().any(|(_, _, n)| *n == 1),
+            "no example shows a single-target `many` relation still wrapped in an array — \
+             that is the case the rule spells out and the one models improvise on: {demonstrated:?}"
+        );
     }
 
     /// The preamble must actually state the value shape, not merely ship the
