@@ -24,6 +24,7 @@ use super::flow_instance::atom::{
 };
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
+use super::flow_instance::propose::propose_flow_transition;
 use super::flow_instance::{fold_read_set, ReadSet};
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
@@ -1588,4 +1589,263 @@ async fn reject_leaves_a_forged_link_claiming_our_did_alone() {
         Some(1),
         "the forgery is still on the graph — invisible to the fold, but not ours to delete"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The manual path: two humans, one button
+// ---------------------------------------------------------------------------
+//
+// The dedup key `(evidence_hash, instance, to_state)` carries no proposer, so
+// the second agent to press a button matches the first agent's proposal. These
+// pin what that must mean: join it, do not skip it. Before the fix the second
+// agent minted nothing, voted on nothing, and was told the empty vec the API
+// documents as "queued for other voters", so `{n: 2}` was unreachable for two
+// humans pressing one button.
+
+/// Every proposal on the graph targeting `to_state`, live or settled.
+async fn proposals_to(f: &Fixture, to_state: &str) -> Vec<String> {
+    let mut uris: Vec<String> = f
+        .perspective
+        .get_links(&LinkQuery {
+            predicate: Some(TO_STATE_PREDICATE.to_string()),
+            target: Some(literal(to_state)),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+        .into_iter()
+        .map(|l| l.data.source)
+        .collect();
+    uris.sort();
+    uris.dedup();
+    uris
+}
+
+async fn accepted_by_count(f: &Fixture, proposal: &str) -> usize {
+    f.links_by_predicate(proposal)
+        .await
+        .get(ACCEPTED_BY_PREDICATE)
+        .map_or(0, Vec::len)
+}
+
+/// Two distinct DIDs reach for the propose API on ONE edge, and nobody calls
+/// `accept`. Bob proposed on his replica and it synced in carrying his vote;
+/// this replica's agent presses the same button. Same graph ⇒ same seal ⇒ the
+/// whole dedup key matches, so this is exactly the collision that used to
+/// discard the second vote in silence.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_dids_proposing_one_edge_reach_quorum_without_anybody_accepting() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let bobs = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+    assert!(
+        consensus_pass(&mut f).await.is_empty(),
+        "Bob's own vote alone is 1 < n = 2"
+    );
+
+    propose_flow_transition(&mut f.perspective, &instance, "scoped", None, &f.ctx)
+        .await
+        .expect("propose must land this replica's vote on the edge");
+
+    let derived = f.derived().await;
+    assert_eq!(
+        derived.state, "scoped",
+        "two distinct DIDs on one edge IS quorum at n = 2"
+    );
+    assert_eq!(derived.settled.len(), 1);
+    let mut expected = vec![acting_did(&f), bob.did.clone()];
+    expected.sort();
+    assert_eq!(
+        derived.settled[0].voters, expected,
+        "both agents' votes are counted"
+    );
+    assert_eq!(
+        derived.settled[0].atom_uris,
+        vec![bobs.clone()],
+        "one proposal, co-signed — not a second, unreachable twin"
+    );
+    assert_eq!(
+        proposals_to(&f, "scoped").await,
+        vec![bobs.clone()],
+        "no duplicate proposal was written"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &bobs).await,
+        1,
+        "exactly one co-sign link, by this replica"
+    );
+}
+
+/// The same agent pressing the button twice stays a no-op. This is the other
+/// half of the fix: joining an existing proposal must be conditional on not
+/// having voted on it, or a re-press would append a redundant `acceptedBy`
+/// link to the agent's own proposal. It also must not become a second vote —
+/// `atom::valid_votes` dedups per DID, and this pins that from the outside.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_propose_by_the_same_did_writes_nothing_and_is_still_one_vote() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    propose_flow_transition(&mut f.perspective, &instance, "scoped", None, &f.ctx)
+        .await
+        .expect("first propose mints");
+    let after_first = proposals_to(&f, "scoped").await;
+    assert_eq!(after_first.len(), 1, "one proposal after the first press");
+
+    propose_flow_transition(&mut f.perspective, &instance, "scoped", None, &f.ctx)
+        .await
+        .expect("second propose is a no-op, not an error");
+
+    assert_eq!(
+        proposals_to(&f, "scoped").await,
+        after_first,
+        "re-pressing must not mint a twin"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &after_first[0]).await,
+        0,
+        "the proposer's own vote IS the proposal; re-pressing must add no acceptedBy link"
+    );
+    let derived = f.derived().await;
+    assert_eq!(
+        derived.state, "identified",
+        "one DID is 1 of 2 however many times they press"
+    );
+    assert!(derived.settled.is_empty());
+}
+
+/// Two terminal branches out of one state: whichever settles first forecloses
+/// the other, which is the shape the fold reports as contention.
+fn fork_flow() -> serde_json::Value {
+    let guard = serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]);
+    serde_json::json!({
+        "name": "Fork",
+        "namespace": "fork://",
+        "states": [
+            { "name": "start", "value": 0.0, "requires": guard },
+            { "name": "left", "value": 1.0, "requires": guard },
+            { "name": "right", "value": 1.0, "requires": guard },
+        ],
+        "transitions": [
+            { "action_name": "GoLeft", "from_state": "start", "to_state": "left", "actions": [] },
+            { "action_name": "GoRight", "from_state": "start", "to_state": "right", "actions": [] },
+        ],
+    })
+}
+
+/// A contested instance refuses a manual proposal, as the engine pass already
+/// refuses to mint into one (#998). Two edges out of `start` carry quorum, so
+/// the fold can never settle a third; minting would have handed the caller an
+/// empty result indistinguishable from "queued, waiting for other voters".
+#[tokio::test(flavor = "multi_thread")]
+async fn proposing_into_a_contested_instance_is_refused() {
+    let mut f = seed_flow(fork_flow(), "start").await;
+    f.seed_task(TASK, "Fork the road").await;
+    let instance = f.instance_uri.clone();
+
+    propose(&mut f, "left-1", "start", "left").await;
+    propose(&mut f, "right-1", "start", "right").await;
+    consensus_pass(&mut f).await;
+
+    let derived = f.derived().await;
+    assert!(
+        derived.contested.is_some(),
+        "fixture must actually be contested, else this test proves nothing: {derived:?}"
+    );
+    assert_eq!(derived.state, "start", "the walk stopped without choosing");
+
+    let err = propose_flow_transition(&mut f.perspective, &instance, "left", None, &f.ctx)
+        .await
+        .expect_err("a contested instance must refuse a new proposal");
+    assert!(
+        format!("{err:#}").contains("contested"),
+        "the error must name the reason: {err:#}"
+    );
+}
+
+/// The return shape. `Vec<FireOutcome>` could not tell "your vote landed,
+/// waiting for others" from "you had already voted" from "it fired" — all
+/// three were the empty vec or indistinguishable from it — and it discarded
+/// the proposal URI a co-signer needs. Every branch is exercised here,
+/// including the camelCase wire shape the TS `FlowProposeResult` mirrors.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_outcome_distinguishes_fired_queued_and_no_op() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    // 1. Queued: the vote landed, the edge is short of quorum.
+    let queued = propose_flow_transition(&mut f.perspective, &instance, "scoped", None, &f.ctx)
+        .await
+        .expect("mint");
+    assert!(queued.minted && queued.recorded_vote);
+    assert!(queued.outcomes.is_empty(), "1 of 2 must not fire");
+    assert_eq!(queued.derived_state, "identified");
+    assert!(!queued.contested);
+    assert!(
+        proposals_to(&f, "scoped").await.contains(&queued.proposal_uri),
+        "the URI names the proposal actually written — a co-signer's handle"
+    );
+
+    // 2. No-op: same agent, same button, nothing written.
+    let repeat = propose_flow_transition(&mut f.perspective, &instance, "scoped", None, &f.ctx)
+        .await
+        .expect("re-press");
+    assert!(
+        !repeat.minted && !repeat.recorded_vote,
+        "a re-press is distinguishable from a queued vote: {repeat:?}"
+    );
+    assert_eq!(
+        repeat.proposal_uri, queued.proposal_uri,
+        "a no-op still names the live proposal"
+    );
+
+    // 3. The wire shape the TS `FlowProposeResult` mirrors. Locked by field
+    //    count as well as by name, so a field added here without a matching
+    //    TS field fails in Rust rather than silently at a client.
+    //    (The join branch needs a second key; it is the next test.)
+    let wire = serde_json::to_value(&queued).expect("serialize");
+    let obj = wire.as_object().expect("object");
+    assert_eq!(obj.len(), 6, "unexpected field count on the wire: {obj:?}");
+    for key in [
+        "proposalUri",
+        "minted",
+        "recordedVote",
+        "outcomes",
+        "derivedState",
+        "contested",
+    ] {
+        assert!(obj.contains_key(key), "missing `{key}` on the wire: {obj:?}");
+    }
+}
+
+/// The join branch's return shape: `minted: false` (we did not write it) with
+/// `recordedVote: true` (we voted on it) and the fire in `outcomes`. Nothing
+/// in the old `Vec<FireOutcome>` could say the first two.
+#[tokio::test(flavor = "multi_thread")]
+async fn joining_someone_elses_proposal_reports_minted_false_and_a_recorded_vote() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let bobs = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+    consensus_pass(&mut f).await;
+
+    let joined = propose_flow_transition(&mut f.perspective, &instance, "scoped", None, &f.ctx)
+        .await
+        .expect("join");
+    assert_eq!(joined.proposal_uri, bobs, "we joined Bob's proposal");
+    assert!(!joined.minted, "we did not write it");
+    assert!(joined.recorded_vote, "we voted on it");
+    assert_eq!(joined.outcomes.len(), 1, "quorum met in this call");
+    assert_eq!(joined.outcomes[0].to_state, "scoped");
+    assert_eq!(joined.derived_state, "scoped");
+    assert!(!joined.contested);
 }

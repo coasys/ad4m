@@ -1971,5 +1971,119 @@ mod tests {
             };
             assert!(!proposal_already_exists(&store, &transition()).await);
         }
+
+        /// The split the manual path needed. Both callers run the same lookup
+        /// over the same failing store and must reach OPPOSITE dispositions:
+        /// the engine pass fails closed because it retries on the next pass,
+        /// and the manual path surfaces the error because a user's click has
+        /// no next pass — silence there reports a lost vote as success.
+        #[tokio::test]
+        async fn a_store_failure_is_an_error_for_the_manual_path_and_fail_closed_for_the_pass() {
+            let hash_lookup_fails = ScriptedStore {
+                by_predicate: HashMap::from([("ad4m://flow/evidence_hashes".to_string(), None)]),
+            };
+            let err = find_live_proposal(&hash_lookup_fails, &transition())
+                .await
+                .expect_err("a failed evidence-hash lookup must be an Err, not Ok(None)");
+            assert!(
+                format!("{err:#}").contains("evidence-hash lookup failed"),
+                "the error must name what failed: {err:#}"
+            );
+            assert!(
+                proposal_already_exists(&hash_lookup_fails, &transition()).await,
+                "the engine pass still fails closed on the very same store"
+            );
+
+            let candidate_lookup_fails = ScriptedStore {
+                by_predicate: HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/evidence_hashes",
+                            "literal:string:hash",
+                        )]),
+                    ),
+                    ("ad4m://flow/instance".to_string(), None),
+                ]),
+            };
+            let err = find_live_proposal(&candidate_lookup_fails, &transition())
+                .await
+                .expect_err("a failed candidate lookup must be an Err too");
+            assert!(
+                format!("{err:#}").contains("candidate lookup on proposal://1 failed"),
+                "the error must name the candidate: {err:#}"
+            );
+            assert!(
+                proposal_already_exists(&candidate_lookup_fails, &transition()).await,
+                "the engine pass still fails closed here as well"
+            );
+        }
+
+        /// The other half of the same split: on a clean store the two agree,
+        /// and `find_live_proposal` hands back the URI rather than a bool —
+        /// which is what lets the manual path co-sign what it found.
+        #[tokio::test]
+        async fn a_live_match_yields_the_proposal_uri_and_a_settled_one_yields_none() {
+            let matching = |extra: Vec<(String, Option<Vec<DecoratedLinkExpression>>)>| {
+                let mut by_predicate = HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/evidence_hashes",
+                            "literal:string:hash",
+                        )]),
+                    ),
+                    (
+                        "ad4m://flow/instance".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/instance",
+                            "ad4m://flow/instance/1",
+                        )]),
+                    ),
+                    (
+                        "ad4m://flow/to_state".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/to_state",
+                            "literal:string:scoped",
+                        )]),
+                    ),
+                ]);
+                by_predicate.extend(extra);
+                ScriptedStore { by_predicate }
+            };
+
+            let live = matching(vec![]);
+            assert_eq!(
+                find_live_proposal(&live, &transition())
+                    .await
+                    .expect("a clean store must not error"),
+                Some("proposal://1".to_string()),
+                "the URI, not a bool — the manual path co-signs what it finds"
+            );
+            assert!(proposal_already_exists(&live, &transition()).await);
+
+            // A `resolved_as` mark makes it history, not a live proposal: it
+            // must not suppress a re-mint, or a cyclic flow wedges.
+            let settled = matching(vec![(
+                crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE.to_string(),
+                Some(vec![link(
+                    "proposal://1",
+                    crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE,
+                    "literal:string:fired",
+                )]),
+            )]);
+            assert_eq!(
+                find_live_proposal(&settled, &transition())
+                    .await
+                    .expect("no error"),
+                None,
+                "a settled proposal is history and must not be found as live"
+            );
+            assert!(!proposal_already_exists(&settled, &transition()).await);
+        }
     }
 }

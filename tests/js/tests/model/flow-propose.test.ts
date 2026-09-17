@@ -202,8 +202,12 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     // `accept` call refused with "cannot reproduce evidence". After commit A,
     // the canonical empty-bag hash is used and the proposal settles.
     const cancelOutcome = await started.proposeTransition("Cancelled");
-    expect(cancelOutcome).to.have.lengthOf(1, "n:1 cancel fires immediately");
-    expect(cancelOutcome[0].toState).to.equal("Cancelled");
+    expect(cancelOutcome.outcomes).to.have.lengthOf(1, "n:1 cancel fires immediately");
+    expect(cancelOutcome.outcomes[0].toState).to.equal("Cancelled");
+    expect(cancelOutcome.minted, "this call wrote the proposal").to.be.true;
+    expect(cancelOutcome.recordedVote).to.be.true;
+    expect(cancelOutcome.derivedState).to.equal("Cancelled");
+    expect(cancelOutcome.proposalUri, "the created proposal is returned").to.be.a("string").and.not.be.empty;
 
     // ── Full lifecycle on a fresh task ─────────────────────────────────────
     const task2 = (await (Task as any).create(aliceP, { title: "Walk the flow" })) as Task;
@@ -214,9 +218,10 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     await createUnder<WorkLog>(WorkLog, bobP, task2.id, { note: "Picked up." });
     const bobInst = await instanceOn(bobP, task2.id);
     const startOutcome = await bobInst.proposeTransition("InProgress", "I've started — see the log");
-    expect(startOutcome, "n:1 into InProgress fires on propose").to.have.lengthOf(1);
-    expect(startOutcome[0].fromState).to.equal("Ready");
-    expect(startOutcome[0].toState).to.equal("InProgress");
+    expect(startOutcome.outcomes, "n:1 into InProgress fires on propose").to.have.lengthOf(1);
+    expect(startOutcome.outcomes[0].fromState).to.equal("Ready");
+    expect(startOutcome.outcomes[0].toState).to.equal("InProgress");
+    expect(startOutcome.derivedState).to.equal("InProgress");
 
     const afterStart = await instanceOn(bobP, task2.id);
     expect(afterStart.currentStateName).to.equal("InProgress");
@@ -224,8 +229,8 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     // SubmitForReview: Bob writes a Deliverable, then proposes
     await createUnder<Deliverable>(Deliverable, bobP, task2.id, { title: "deliver.ts" });
     const reviewOutcome = await (await instanceOn(bobP, task2.id)).proposeTransition("InReview");
-    expect(reviewOutcome, "n:1 into InReview fires on propose").to.have.lengthOf(1);
-    expect(reviewOutcome[0].toState).to.equal("InReview");
+    expect(reviewOutcome.outcomes, "n:1 into InReview fires on propose").to.have.lengthOf(1);
+    expect(reviewOutcome.outcomes[0].toState).to.equal("InReview");
 
     const afterReview = await instanceOn(aliceP, task2.id);
     expect(afterReview.currentStateName).to.equal("InReview");
@@ -257,7 +262,13 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
       "Done",
       "Deliverable present and reviewed.",
     );
-    expect(pending, "one of two signatures must not advance the flow").to.have.lengthOf(0);
+    expect(pending.outcomes, "one of two signatures must not advance the flow").to.have.lengthOf(0);
+    // The empty list alone said nothing. These are what tell a UI "your vote
+    // landed, waiting for others" from "nothing happened".
+    expect(pending.recordedVote, "Alice's vote landed").to.be.true;
+    expect(pending.minted).to.be.true;
+    expect(pending.contested).to.be.false;
+    expect(pending.derivedState).to.equal("InReview");
 
     const stillInReview = await instanceOn(aliceP, task.id);
     expect(
@@ -272,6 +283,10 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     const allProposals = await stillInReview.proposals();
     const proposals = allProposals.filter((p) => p.toState === "Done");
     expect(proposals, "exactly one Done proposal pending").to.have.lengthOf(1);
+    expect(
+      proposals[0].id,
+      "proposeTransition returned the URI of the proposal it minted — a co-signer's handle",
+    ).to.equal(pending.proposalUri);
 
     const fired = await (await instanceOn(bobP, task.id)).acceptProposal(proposals[0].id);
     expect(fired, "settling vote returns the fired outcomes").to.have.lengthOf(1);
@@ -302,11 +317,18 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
 
     // Alice proposes Done — first vote of two; flow does NOT advance.
     const first = await (await instanceOn(aliceP, task.id)).proposeTransition("Done");
-    expect(first, "one of two — not fired yet").to.have.lengthOf(0);
+    expect(first.outcomes, "one of two — not fired yet").to.have.lengthOf(0);
+    expect(first.minted).to.be.true;
+    expect(first.recordedVote).to.be.true;
 
     // Alice proposes Done a second time — idempotency: no duplicate written.
     const second = await (await instanceOn(aliceP, task.id)).proposeTransition("Done");
-    expect(second, "idempotent re-propose must not advance the flow").to.have.lengthOf(0);
+    expect(second.outcomes, "idempotent re-propose must not advance the flow").to.have.lengthOf(0);
+    // Same empty list as `first`, opposite meaning. This is the distinction
+    // the old bare-array return could not express.
+    expect(second.minted, "nothing was written the second time").to.be.false;
+    expect(second.recordedVote, "Alice had already voted").to.be.false;
+    expect(second.proposalUri, "the no-op still names the live proposal").to.equal(first.proposalUri);
 
     const proposals = await (await instanceOn(aliceP, task.id)).proposals();
     const doneProposals = proposals.filter((p) => p.toState === "Done");
@@ -343,7 +365,8 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
 
     // Alice proposes the guard-free transition — first of two votes.
     const pending = await inst.proposeTransition("Archived", "archive it");
-    expect(pending, "one of two — must not fire yet").to.have.lengthOf(0);
+    expect(pending.outcomes, "one of two — must not fire yet").to.have.lengthOf(0);
+    expect(pending.recordedVote).to.be.true;
     expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("Ready");
 
     // Bob co-signs: his replica must reproduce the same NoGuard seal hash,
@@ -359,5 +382,55 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
 
     const archived = await instanceOn(bobP, task.id);
     expect(archived.currentStateName).to.equal("Archived");
+  });
+
+  // ── Test 5: two DIDs both reach for `proposeTransition` on ONE edge ──────
+  // The case no test in this suite had: tests 2 and 4 route the second voter
+  // through `acceptProposal`, and test 3 pins the SAME agent re-proposing.
+  //
+  // The dedup key `(evidence_hash, instance, toState)` carries no proposer, so
+  // Bob's click matched Alice's proposal. Before the fix the mint was skipped
+  // and Bob cast no vote at all — he received the same empty array the API
+  // documents as "queued for other voters", and at {n: 2} the edge could never
+  // settle. Now Bob's click co-signs Alice's proposal.
+  it("two DIDs both calling proposeTransition on one n:2 edge reach quorum", async () => {
+    const { aliceP, bobP } = await sharedPerspective("flow-propose-two-proposers");
+
+    const flow = new SHACLFlow("TwoProposersFlow", "two-prop://");
+    flow.inputTypes = ["ProposeTask"];
+    flow.consensusRule = { n: 1 };
+    flow.addState({ name: "Ready", value: 0 });
+    flow.addState({ name: "Archived", value: 99, consensusRule: { n: 2 } });
+    flow.addTransition({ actionName: "Archive", fromState: "Ready", toState: "Archived", actions: [] });
+    await aliceP.addFlow("TwoProposersFlow", flow);
+
+    const task = (await (Task as any).create(aliceP, { title: "Two proposers" })) as Task;
+    const inst = await FlowInstance.start(aliceP, "TwoProposersFlow", task.id);
+
+    const alicePress = await inst.proposeTransition("Archived");
+    expect(alicePress.outcomes, "one of two — not yet").to.have.lengthOf(0);
+    expect(alicePress.minted).to.be.true;
+
+    // Bob presses the SAME button — not acceptProposal.
+    const bobPress = await (await instanceOn(bobP, task.id)).proposeTransition("Archived");
+
+    expect(
+      bobPress.outcomes,
+      "two distinct DIDs on one edge IS quorum at n:2 — an empty array here is the bug",
+    ).to.have.lengthOf(1);
+    expect(bobPress.outcomes[0].fromState).to.equal("Ready");
+    expect(bobPress.outcomes[0].toState).to.equal("Archived");
+    expect(bobPress.outcomes[0].voters, "both signers recorded").to.have.members([aliceDid, bobDid]);
+
+    // Bob joined Alice's proposal rather than minting an unreachable twin.
+    expect(bobPress.minted, "Bob did not write a second proposal").to.be.false;
+    expect(bobPress.recordedVote, "Bob's vote landed").to.be.true;
+    expect(bobPress.proposalUri).to.equal(alicePress.proposalUri);
+    expect(bobPress.derivedState).to.equal("Archived");
+
+    const settledInst = await instanceOn(bobP, task.id);
+    expect(settledInst.currentStateName).to.equal("Archived");
+    const archivedProposals = (await settledInst.proposals()).filter((p) => p.toState === "Archived");
+    expect(archivedProposals, "one proposal, co-signed — no twin").to.have.lengthOf(1);
   });
 });
