@@ -15,7 +15,8 @@
 //! When the executor is configured for TLS, MCP is also served over HTTPS on
 //! `mcp_port + 1`, using the same certificate as the RPC port — see
 //! [`start_tls_listener`]. The plain listener stays up beside it for same-host
-//! clients such as `mcporter`.
+//! clients such as `mcporter`, and narrows to loopback so that it serves only
+//! them: wide TLS, local plain — see [`resolve_plain_host`].
 
 use super::tools::Ad4mMcpHandler;
 use crate::config::TlsConfig;
@@ -118,6 +119,52 @@ fn resolve_host(requested: Option<&str>, has_credential: bool) -> String {
     }
 }
 
+/// Where the *plain* listener binds once HTTPS is up beside it.
+///
+/// [`resolve_host`] decides who may reach MCP at all. This decides something
+/// narrower: given that an encrypted port now exists, does the cleartext one
+/// still need to be reachable from off-box? It does not. Both listeners accept
+/// the same admin credential and the same JWTs, so leaving the plain one on
+/// `0.0.0.0` means the credential TLS was added to protect can still cross the
+/// network in the clear on the port next door — and the reason to add TLS on a
+/// LAN is that the LAN is not trusted. TLS that is merely *additive* changes
+/// what an attacker must do by nothing at all; they use the other port.
+///
+/// So HTTPS listening narrows plain to loopback, which is the audience the
+/// module doc already claims for it: same-host clients such as `mcporter`,
+/// which speak plain HTTP to `127.0.0.1` and would need `allowInsecureHttp`
+/// or a cert-trust dance to use the HTTPS port. Wide TLS, local plain.
+///
+/// Two cases deliberately keep the old binding:
+///
+/// - **An explicit `--mcp-host` / `MCP_HOST`.** Same rule as [`resolve_host`]:
+///   the operator said where MCP lives, and a deployment fronting the plain
+///   port with its own TLS gateway is exactly why that escape hatch exists.
+/// - **TLS configured but not listening** — no admin credential, or no port
+///   above `--mcp-port`. There is then no encrypted port to move to, and
+///   narrowing would take remote access away while offering nothing in its
+///   place. `tls_listening` is the *outcome* of starting the listener, not the
+///   config, so this cannot drift from the decisions
+///   [`start_tls_listener`] makes.
+///
+/// One thing `tls_listening` does **not** prove: that the HTTPS socket bound.
+/// `axum_server::bind_rustls` binds inside the spawned task (the same shape
+/// the RPC port uses), so a port conflict surfaces as an error log after this
+/// returns, and plain is on loopback by then. That is the fail-*closed*
+/// direction — MCP is unreachable rather than reachable in cleartext — and it
+/// is logged, not silent. Reversing it would mean binding eagerly here and on
+/// the RPC port both; worth doing, not worth diverging on.
+fn resolve_plain_host(
+    requested: Option<&str>,
+    has_credential: bool,
+    tls_listening: bool,
+) -> String {
+    match requested {
+        None if tls_listening => "127.0.0.1".to_string(),
+        _ => resolve_host(requested, has_credential),
+    }
+}
+
 /// Whether this address reaches only the node itself.
 ///
 /// Unparseable reads as *not* loopback: the warning is the fail-safe
@@ -142,9 +189,6 @@ pub async fn start_mcp_server(
         .host
         .clone()
         .or_else(|| std::env::var("MCP_HOST").ok());
-    let host = resolve_host(requested.as_deref(), admin_credential.is_some());
-    let addr: SocketAddr = format!("{}:{}", host, config.port).parse()?;
-    info!("Starting AD4M MCP server on http://{}", addr);
 
     let initial_token = auth_token;
 
@@ -161,16 +205,23 @@ pub async fn start_mcp_server(
         dynamic_class_tools: config.dynamic_class_tools,
     };
 
-    if let Some(tls) = config.tls.clone() {
-        start_tls_listener(
-            &context,
-            initial_token.clone(),
-            config.port,
-            has_credential,
-            tls,
-        )
-        .await?;
-    }
+    let tls_listening = match config.tls.clone() {
+        Some(tls) => {
+            start_tls_listener(
+                &context,
+                initial_token.clone(),
+                config.port,
+                has_credential,
+                tls,
+            )
+            .await?
+        }
+        None => false,
+    };
+
+    let host = resolve_plain_host(requested.as_deref(), has_credential, tls_listening);
+    let addr: SocketAddr = format!("{}:{}", host, config.port).parse()?;
+    info!("Starting AD4M MCP server on http://{}", addr);
 
     // Create the TCP listener and serve using axum
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -218,27 +269,32 @@ fn mcp_router(context: &McpContext, initial_token: Option<String>) -> axum::Rout
 /// whom the server would then not check at all.
 ///
 /// A bad certificate path fails startup, matching the RPC server.
+///
+/// Returns whether the HTTPS listener actually bound. The plain listener reads
+/// that to decide whether it can narrow to loopback — see
+/// [`resolve_plain_host`] — so the two warn-and-continue paths below must
+/// report `false`, not merely log.
 async fn start_tls_listener(
     context: &McpContext,
     initial_token: Option<String>,
     plain_port: u16,
     has_credential: bool,
     tls: TlsConfig,
-) -> Result<()> {
+) -> Result<bool> {
     if !has_credential {
         warn!(
             "MCP: TLS is configured but no --admin-credential is set, so the HTTPS MCP listener \
              is not started. An unauthenticated HTTPS endpoint would publish every AD4M tool to \
              anyone who can reach it. Set an admin credential to enable it."
         );
-        return Ok(());
+        return Ok(false);
     }
     let Some(tls_port) = resolve_tls_port(plain_port) else {
         warn!(
             "MCP: no port above --mcp-port={plain_port}, so the HTTPS MCP listener is not \
              started. Choose a lower MCP port."
         );
-        return Ok(());
+        return Ok(false);
     };
 
     let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
@@ -257,7 +313,7 @@ async fn start_tls_listener(
             .await
             .unwrap_or_else(|e| log::error!("MCP TLS server error: {}", e));
     });
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -311,5 +367,35 @@ mod tests {
         // Not an address at all. Reads as non-loopback so the warning fires;
         // the bind that follows fails on it regardless.
         assert!(!is_loopback("localhost"));
+    }
+
+    #[test]
+    fn https_listening_narrows_the_cleartext_port_to_loopback() {
+        // The case the pairing exists for: a credentialed node with TLS up.
+        // Both listeners accept the same credential, so leaving plain wide
+        // would let it cross the LAN in the clear on the port next door.
+        assert_eq!(resolve_plain_host(None, true, true), "127.0.0.1");
+    }
+
+    #[test]
+    fn tls_configured_but_not_listening_leaves_the_plain_bind_alone() {
+        // No credential, or no port above --mcp-port: start_tls_listener warns
+        // and returns false. There is no encrypted port to move to, so
+        // narrowing would remove remote access and offer nothing back.
+        // Ungated stays loopback for its own reason; gated stays wide.
+        assert_eq!(resolve_plain_host(None, false, false), "127.0.0.1");
+        assert_eq!(resolve_plain_host(None, true, false), "0.0.0.0");
+    }
+
+    #[test]
+    fn an_explicit_host_outranks_the_tls_pairing() {
+        // Same escape hatch resolve_host honours: a deployment fronting the
+        // plain port with its own TLS gateway needs it to stay reachable.
+        assert_eq!(resolve_plain_host(Some("10.0.0.5"), true, true), "10.0.0.5");
+        // Including the ungated case, which still only warns.
+        assert_eq!(
+            resolve_plain_host(Some("10.0.0.5"), false, true),
+            "10.0.0.5"
+        );
     }
 }
