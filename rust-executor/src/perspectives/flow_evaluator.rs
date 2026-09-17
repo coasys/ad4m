@@ -895,8 +895,9 @@ pub async fn run_engine_proposal_pass(
     minted
 }
 
-/// The URI of a **live** proposal carrying this transition's dedup key —
-/// `(evidence_hash, instance_uri, to_state)` — or `None` when there is none.
+/// **Every** live proposal carrying this transition's dedup key —
+/// `(evidence_hash, instance_uri, to_state)` — in store order; empty when
+/// there is none.
 ///
 /// *Live* excludes any proposal carrying `resolved_as`: that is the recorded
 /// history of a consensus event, not an open proposal, and it must not
@@ -910,15 +911,26 @@ pub async fn run_engine_proposal_pass(
 /// the key because two distinct transitions can share identical `requires`
 /// guards and therefore identical evidence hashes.
 ///
+/// **All matches, not the first.** The key carries no `from_state` either, so
+/// in a flow with two transitions into one state under identical guards a
+/// proposal on the *other* edge shares the key. Nothing orders these links,
+/// so a first-match lookup is a coin flip: the manual path would classify a
+/// foreign candidate, miss the joinable one sitting behind it, and mint — and
+/// mint *again* on the next press, splitting the vote it exists to gather and
+/// breaking invariant 4 (`flow_instance::propose`). Returning the whole set
+/// lets that caller prefer its own edge. The engine pass only asks whether the
+/// set is non-empty, which is what it asked before.
+///
 /// Every store failure is an `Err`, with no disposition chosen here: the two
 /// callers need opposite ones. The engine pass fails closed
 /// ([`proposal_already_exists`]) because it retries on the next pass; the
 /// manual path surfaces the error, because a user's click has no next pass.
-pub(crate) async fn find_live_proposal<S: ProposalLookup + ?Sized>(
+pub(crate) async fn find_live_proposals<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
-) -> Result<Option<String>> {
+) -> Result<Vec<String>> {
     use crate::types::LinkQuery;
+    let mut found = Vec::new();
     let literal = |s: &str| format!("literal:string:{}", urlencoding::encode(s));
     let hash_links = store
         .get_proposal_links(&LinkQuery {
@@ -958,10 +970,10 @@ pub(crate) async fn find_live_proposal<S: ProposalLookup + ?Sized>(
             continue;
         }
         if links_to("ad4m://flow/to_state", literal(&transition.to_state)).await? {
-            return Ok(Some(proposal_uri.clone()));
+            found.push(proposal_uri.clone());
         }
     }
-    Ok(None)
+    Ok(found)
 }
 
 /// Idempotency for the **engine pass**: has a proposal with this transition's
@@ -975,15 +987,24 @@ pub(crate) async fn find_live_proposal<S: ProposalLookup + ?Sized>(
 /// **Both guarantees are about the engine pass**, and the fail-closed
 /// disposition below is too: it assumes a caller that runs again shortly and
 /// whose acting DID is this replica's. A caller that runs once, on a human's
-/// click, satisfies neither — it must call [`find_live_proposal`] and choose
+/// click, satisfies neither — it must call [`find_live_proposals`] and choose
 /// its own disposition. `flow_instance::propose` does exactly that; this
 /// wrapper exists so the engine's behaviour is unchanged by that split.
+///
+/// **The `from_state`-free key bites here, and only here.** Asking whether the
+/// set is non-empty cannot tell an `A→C` proposal from a `B→C` one, so a
+/// stranded proposal on one edge suppresses the engine ever proposing the
+/// other, silently, for as long as it stays open. The manual path discriminates
+/// and recovers; this one has nowhere to put the distinction — skipping is its
+/// whole contract — so it does not. Narrow (it needs two guard-identical edges
+/// into one state) and pre-existing, but real: prefer widening the key here
+/// over re-flattening the manual path onto it.
 pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
 ) -> bool {
-    match find_live_proposal(store, transition).await {
-        Ok(found) => found.is_some(),
+    match find_live_proposals(store, transition).await {
+        Ok(found) => !found.is_empty(),
         // Fail CLOSED: a missed mint on a transient store error is recovered
         // on the next pass, while a duplicate mint is exactly what this
         // function exists to prevent — see the invariant above.
@@ -1982,7 +2003,7 @@ mod tests {
             let hash_lookup_fails = ScriptedStore {
                 by_predicate: HashMap::from([("ad4m://flow/evidence_hashes".to_string(), None)]),
             };
-            let err = find_live_proposal(&hash_lookup_fails, &transition())
+            let err = find_live_proposals(&hash_lookup_fails, &transition())
                 .await
                 .expect_err("a failed evidence-hash lookup must be an Err, not Ok(None)");
             assert!(
@@ -2007,7 +2028,7 @@ mod tests {
                     ("ad4m://flow/instance".to_string(), None),
                 ]),
             };
-            let err = find_live_proposal(&candidate_lookup_fails, &transition())
+            let err = find_live_proposals(&candidate_lookup_fails, &transition())
                 .await
                 .expect_err("a failed candidate lookup must be an Err too");
             assert!(
@@ -2021,7 +2042,7 @@ mod tests {
         }
 
         /// The other half of the same split: on a clean store the two agree,
-        /// and `find_live_proposal` hands back the URI rather than a bool —
+        /// and `find_live_proposals` hands back the URIs rather than a bool —
         /// which is what lets the manual path co-sign what it found.
         #[tokio::test]
         async fn a_live_match_yields_the_proposal_uri_and_a_settled_one_yields_none() {
@@ -2058,10 +2079,10 @@ mod tests {
 
             let live = matching(vec![]);
             assert_eq!(
-                find_live_proposal(&live, &transition())
+                find_live_proposals(&live, &transition())
                     .await
                     .expect("a clean store must not error"),
-                Some("proposal://1".to_string()),
+                vec!["proposal://1".to_string()],
                 "the URI, not a bool — the manual path co-signs what it finds"
             );
             assert!(proposal_already_exists(&live, &transition()).await);
@@ -2077,13 +2098,68 @@ mod tests {
                 )]),
             )]);
             assert_eq!(
-                find_live_proposal(&settled, &transition())
+                find_live_proposals(&settled, &transition())
                     .await
                     .expect("no error"),
-                None,
+                Vec::<String>::new(),
                 "a settled proposal is history and must not be found as live"
             );
             assert!(!proposal_already_exists(&settled, &transition()).await);
+        }
+
+        /// Two live proposals share the dedup key, because it carries no
+        /// `from_state` and the flow has two guard-identical edges into one
+        /// state. The lookup must hand back BOTH.
+        ///
+        /// Returning only the first is a coin flip on link order, and losing
+        /// that flip is not cosmetic: `flow_instance::propose` would classify
+        /// the foreign proposal, never see the joinable one behind it, and
+        /// mint — then mint again on the next press, splitting the very vote
+        /// the dedup key exists to gather. Only this caller can tell the two
+        /// apart (it knows the acting DID and the derived `from_state`), so
+        /// the lookup's whole job is to not decide for it.
+        #[tokio::test]
+        async fn every_proposal_sharing_the_dedup_key_is_returned_not_just_the_first() {
+            let both = |uri: &str| {
+                (
+                    uri.to_string(),
+                    link(uri, "ad4m://flow/instance", "ad4m://flow/instance/1"),
+                )
+            };
+            let (a, link_a) = both("proposal://other-edge");
+            let (b, link_b) = both("proposal://our-edge");
+            let store = ScriptedStore {
+                by_predicate: HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![
+                            link(&a, "ad4m://flow/evidence_hashes", "literal:string:hash"),
+                            link(&b, "ad4m://flow/evidence_hashes", "literal:string:hash"),
+                        ]),
+                    ),
+                    (
+                        "ad4m://flow/instance".to_string(),
+                        Some(vec![link_a, link_b]),
+                    ),
+                    (
+                        "ad4m://flow/to_state".to_string(),
+                        Some(vec![
+                            link(&a, "ad4m://flow/to_state", "literal:string:scoped"),
+                            link(&b, "ad4m://flow/to_state", "literal:string:scoped"),
+                        ]),
+                    ),
+                ]),
+            };
+
+            assert_eq!(
+                find_live_proposals(&store, &transition())
+                    .await
+                    .expect("a clean store must not error"),
+                vec![a, b],
+                "both matches, in store order — the caller picks its own edge"
+            );
+            // The engine pass asked "is there one?" before and still does.
+            assert!(proposal_already_exists(&store, &transition()).await);
         }
     }
 }

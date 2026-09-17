@@ -1861,7 +1861,7 @@ async fn joining_someone_elses_proposal_reports_minted_false_and_a_recorded_vote
 // The other side of the proposer-less key: the engine must NOT reach quorum
 // ---------------------------------------------------------------------------
 //
-// `find_live_proposal`'s key carries no proposer, and the two tests above rely
+// `find_live_proposals`' key carries no proposer, and the two tests above rely
 // on that: it is what lets a second human co-sign instead of minting an
 // unreachable twin. The cost of that choice is that the key is *shared* with
 // `run_engine_proposal_pass`, and this is the test that pins what the engine
