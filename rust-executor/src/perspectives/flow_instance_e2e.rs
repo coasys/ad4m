@@ -910,18 +910,27 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
 // ---------------------------------------------------------------------------
 
 /// Test 12. A vote from outside the rule's `fromRole` counts for nothing, and
-/// the same vote counts the moment its author enters the role.
+/// a grant written *after* that vote does not retroactively enfranchise it —
+/// eligibility is as-of each vote's own timestamp, the same rule the
+/// revocation tests pin from the other side. A vote cast once the grant is
+/// already in place settles the edge.
+///
+/// The middle assertion used to read `scoped`, and passed only because of the
+/// bug #1065's review found: the grant-link query used the `didProperty`
+/// *name* where the graph holds the RDF predicate, so `grant_links` came back
+/// empty for every `didProperty` role and `granted_at` fell back to the
+/// instance's own (much earlier) timestamp. Under that fallback every grant
+/// looked retroactive. The assertion was a mirror of the defect, not a
+/// contract.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_role_member_vote_does_not_count() {
+    const OWNER_RULE_HERE: &str =
+        r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#;
+
     let mut f = seed_satisfied_fixture(None).await;
     // Eligible = "there is a Task this DID owns". The seeded task has no
     // owner, so nobody is in the role yet.
-    set_consensus_rule(
-        &mut f,
-        "delivery://Delivery.scoped",
-        r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#,
-    )
-    .await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE_HERE).await;
     f.mint_one().await;
 
     assert_eq!(
@@ -940,8 +949,25 @@ async fn a_non_role_member_vote_does_not_count() {
     .await;
     assert_eq!(
         f.derived().await.state,
+        "identified",
+        "the grant postdates the vote, so it cannot reach back and make it count"
+    );
+
+    // Same rule, same single vote — but cast while the grant is already live.
+    let mut g = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut g, "delivery://Delivery.scoped", OWNER_RULE_HERE).await;
+    g.link(
+        TASK,
+        "ns://owner",
+        &literal(&acting_did(&g)),
+        LinkStatus::Local,
+    )
+    .await;
+    g.mint_one().await;
+    assert_eq!(
+        g.derived().await.state,
         "scoped",
-        "and inside the role, the same vote settles the edge"
+        "inside the role at the time of the vote, the same vote settles the edge"
     );
 }
 

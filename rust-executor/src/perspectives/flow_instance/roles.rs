@@ -509,7 +509,10 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
         );
     }
 
-    let grant_predicate = role.did_property.as_deref();
+    // A property NAME, not a predicate. The store boundary resolves it
+    // through the class's shape before querying links — see
+    // `flow_evaluator::PerspectiveInstance::did_property_predicate`.
+    let did_property = role.did_property.as_deref();
     let mut evidence = Vec::with_capacity(candidates.len());
     for did in candidates {
         let input = requires_query_input(role, record, did)?;
@@ -518,7 +521,7 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
         let mut instances = Vec::with_capacity(matched.len());
         for item in &matched {
             let links = perspective
-                .role_grant_links(&item.id, grant_predicate, did)
+                .role_grant_links(&role.class_name, &item.id, did_property, did)
                 .await?;
             instances.push(RoleInstanceHistory {
                 instance_id: item.id.clone(),
@@ -753,8 +756,9 @@ mod tests {
 
         async fn role_grant_links(
             &self,
+            _role_class: &str,
             _instance_id: &str,
-            _grant_predicate: Option<&str>,
+            _did_property: Option<&str>,
             did: &str,
         ) -> anyhow::Result<RoleGrantLinks> {
             Ok(self.histories.get(did).cloned().unwrap_or_default())

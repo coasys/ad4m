@@ -445,6 +445,11 @@ pub struct RoleGrantLinks {
 /// first. Only the earliest ever dates a grant, so the rest are redundancy;
 /// a cap can therefore only move `granted_at` later — fail-closed — while
 /// bounding what a receipt has to carry.
+///
+/// The cap is applied **after every collection-side filter** and to a
+/// signature-preferred ordering, so that a reader-side filter added later
+/// (#1063) cannot be inverted by forged links evicting a genuine one at
+/// collection time — see the comment at the truncation site.
 pub(crate) const MAX_GRANT_LINKS: usize = 8;
 
 /// Whether a **grant** link speaks about this DID's membership: its target
@@ -494,8 +499,11 @@ pub trait RequiresQueryable: Send + Sync {
     /// The store's links for one matched role instance and one DID — see
     /// [`RoleGrantLinks`].
     ///
+    /// `role_class` — the role query's class, needed because `did_property`
+    ///   is a **property name** and only that class's shape says which RDF
+    ///   predicate carries it (see [`did_property_predicate`]).
     /// `instance_id` — the instance URI `model_query` returned.
-    /// `grant_predicate` — the role query's `didProperty`, if any; `None`
+    /// `did_property` — the role query's `didProperty`, if any; `None`
     ///   for `$did`-style queries, where no single property carries the DID.
     /// `did` — the candidate's plain DID.
     ///
@@ -505,8 +513,9 @@ pub trait RequiresQueryable: Send + Sync {
     /// never turns into "granted since forever".
     async fn role_grant_links(
         &self,
+        _role_class: &str,
         _instance_id: &str,
-        _grant_predicate: Option<&str>,
+        _did_property: Option<&str>,
         _did: &str,
     ) -> anyhow::Result<RoleGrantLinks> {
         Ok(RoleGrantLinks::default())
@@ -526,6 +535,72 @@ fn target_names_did(target: &str, did: &str, did_literal: &str) -> bool {
     target == did || crate::utils::normalize_legacy_literal(target).as_ref() == did_literal
 }
 
+impl PerspectiveInstance {
+    /// Resolve a role query's `didProperty` — a **property name** — to the RDF
+    /// predicate the assignment links in the graph actually carry.
+    ///
+    /// This is the asymmetry that made every `didProperty` role's grant links
+    /// come back empty before #1065. `model_query` resolves names through the
+    /// SDNA (`compile_leaf_condition` matches `p.name` and emits
+    /// `p.predicate`), so a `where.owner = <did>` condition matches. But
+    /// `get_links` forwards its `predicate` string verbatim
+    /// (`perspective_instance::get_links`), so querying `predicate: "owner"`
+    /// against a graph holding `ns://owner` matched nothing. `granted_at` then
+    /// silently fell back to `asserted_instance_timestamp` — the instance's
+    /// *earliest* link, earlier than the assignment — so the window meant to
+    /// be narrow was the widest possible one. Revocations were never affected
+    /// because their query uses the literal constant
+    /// `ad4m://flow/role_grant_revoked`, not a property name; that asymmetry
+    /// was the tell.
+    ///
+    /// Both spellings resolve: the property name (`owner`, the SDNA form) and
+    /// the predicate itself (`ns://owner`), because a hand-written SDNA may
+    /// name either and a role rule that used to be inert must not start
+    /// gating differently depending on which one its author picked.
+    ///
+    /// Unresolvable is an **`Err`**, not an empty predicate: a role rule
+    /// naming a property this class does not declare cannot be evaluated, and
+    /// per [`resolve_role_grants`](super::flow_instance::roles::resolve_role_grants)
+    /// a translation failure fails closed rather than degrading to "granted
+    /// since forever".
+    fn did_property_predicate(
+        &self,
+        role_class: &str,
+        did_property: &str,
+    ) -> anyhow::Result<String> {
+        let shape = self.get_shape(role_class).map_err(|e| {
+            anyhow::anyhow!(
+                "role_grant_links: cannot load shape for role class `{role_class}` to resolve \
+                 didProperty `{did_property}`: {e}"
+            )
+        })?;
+        let by_name = shape
+            .properties
+            .iter()
+            .find(|p| p.name == did_property && !p.predicate.is_empty())
+            .map(|p| p.predicate.clone())
+            .or_else(|| {
+                shape
+                    .include_relations
+                    .iter()
+                    .find(|r| r.name == did_property && !r.predicate.is_empty())
+                    .map(|r| r.predicate.clone())
+            });
+        if let Some(predicate) = by_name {
+            return Ok(predicate);
+        }
+        let declares_predicate = shape.predicates().iter().any(|p| p == did_property);
+        if declares_predicate {
+            return Ok(did_property.to_string());
+        }
+        anyhow::bail!(
+            "role_grant_links: role class `{role_class}` declares no property or relation named \
+             `{did_property}` (and no predicate spelled that way), so the assignment links for \
+             this role cannot be found; refusing to gate (fail-closed)"
+        )
+    }
+}
+
 #[async_trait]
 impl RequiresQueryable for PerspectiveInstance {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
@@ -534,10 +609,19 @@ impl RequiresQueryable for PerspectiveInstance {
 
     async fn role_grant_links(
         &self,
+        role_class: &str,
         instance_id: &str,
-        grant_predicate: Option<&str>,
+        did_property: Option<&str>,
         did: &str,
     ) -> anyhow::Result<RoleGrantLinks> {
+        // `did_property` is a property NAME; the graph holds the predicate.
+        // Resolving it here is what makes grant links travel at all — see
+        // `did_property_predicate`.
+        let grant_predicate = match did_property {
+            Some(prop) => Some(self.did_property_predicate(role_class, prop)?),
+            None => None,
+        };
+        let grant_predicate = grant_predicate.as_deref();
         let did_literal = did_literal_url(did)
             .map_err(|e| anyhow::anyhow!("role_grant_links: {instance_id}: {e}"))?;
         let grant_counts = |l: &DecoratedLinkExpression| grant_link_names_did(l, did, &did_literal);
@@ -567,7 +651,29 @@ impl RequiresQueryable for PerspectiveInstance {
             (parse_link_timestamp(&a.timestamp), &a.timestamp)
                 .cmp(&(parse_link_timestamp(&b.timestamp), &b.timestamp))
         });
+        // Every filter runs before the cap, and the cap runs last. That order
+        // is load-bearing, not tidiness: the cap keeps the EARLIEST links, and
+        // a reader-side filter that only ever removes links (#1063 adds a
+        // signature one) then sees whatever survived collection. Cap first and
+        // the two invert — N forged early links evict the genuine later one
+        // here, the reader drops all N, `resolve` finds no grant link at all
+        // and falls back to `asserted_instance_timestamp`, which is *earlier*
+        // than the grant the filter existed to protect. Fail-open, from a
+        // filter meant to fail closed.
+        //
+        // So the cap is applied to a signature-preferred ordering: links whose
+        // carried proof already verifies claim slots first. This is a
+        // *preference*, never a filter — an unverified link is still carried
+        // while there is room, which is what keeps #1064 and #1063 out of this
+        // PR. Under the cap nothing changes; at the cap a forger cannot evict
+        // a genuine link, and dropping an unverified *earlier* link can only
+        // move `granted_at` later, which is the fail-closed direction.
+        grant_links.sort_by_key(|l| l.proof.valid != Some(true));
         grant_links.truncate(MAX_GRANT_LINKS);
+        grant_links.sort_by(|a, b| {
+            (parse_link_timestamp(&a.timestamp), &a.timestamp)
+                .cmp(&(parse_link_timestamp(&b.timestamp), &b.timestamp))
+        });
 
         let revocation_links: Vec<DecoratedLinkExpression> = self
             .get_links(&LinkQuery {
