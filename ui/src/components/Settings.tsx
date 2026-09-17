@@ -6,7 +6,6 @@ import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { join } from '@tauri-apps/api/path';
 import { save as dialogSave, open as dialogOpen, message as dialogMessage, ask as dialogAsk, type MessageDialogOptions } from "@tauri-apps/plugin-dialog";
 import { useCallback, useContext, useEffect, useState } from "react";
-import QRCode from "react-qr-code";
 import { PREDICATE_FIRSTNAME, PREDICATE_LASTNAME, PREDICATE_USERNAME } from "../constants/triples";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { AgentContext } from "../context/AgentContext";
@@ -71,17 +70,11 @@ const Profile = (props: Props) => {
   const [newAgentName, setNewAgentName] = useState("");
   const [file, setFile] = useState<File | null>(null);
 
-  const [proxy, setProxy] = useState("");
-
-  const [qrcodeModal, setQRCodeModal] = useState(false);
-
   const [copied, setCopied] = useState(false);
 
   const [password, setPassword] = useState("");
 
   const [showPassword, setShowPassword] = useState(false);
-
-  const [loadingProxy, setLoadingProxy] = useState(false);
 
   const [showAddHcAgentInfos, setShowAddHcAgentInfos] = useState(false);
 
@@ -300,15 +293,6 @@ const Profile = (props: Props) => {
     getAppState();
   }, [fetchCurrentAgentProfile, getTrustedAgents, getAppState]);
 
-  useEffect(() => {
-    const getProxy = async () => {
-      const proxy: string = await invoke("get_proxy");
-      console.log(proxy);
-      setProxy(formatProxy(proxy));
-    };
-    getProxy().catch(console.error);
-  }, []);
-
   // @ts-ignore
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter") {
@@ -318,17 +302,8 @@ const Profile = (props: Props) => {
     }
   };
 
-  const formatProxy = (proxy: string | null) => {
-    if (!proxy) return "";
-    return proxy;
-  };
-
   const copyText = (text: string) => {
     copyTextToClipboard(text);
-  };
-
-  const showProxyQRCode = () => {
-    setQRCodeModal(true);
   };
 
   const clearAgent = async (password: string) => {
@@ -337,31 +312,6 @@ const Profile = (props: Props) => {
     console.log("clearAgent 1", agentStatus);
     if (!agentStatus?.isUnlocked) {
       await invoke("clear_state");
-    }
-  };
-
-  const setupProxy = async (event: any) => {
-    try {
-      setLoadingProxy(true);
-      const proxy: string = await invoke("setup_proxy", { subdomain: did });
-      console.log("Finish setup proxy, ", proxy);
-      setProxy(formatProxy(proxy));
-      event.target.checked = true;
-    } catch (e) {
-      event.target.checked = false;
-      setProxy("");
-    } finally {
-      setLoadingProxy(false);
-    }
-  };
-
-  const stopProxy = async (event: any) => {
-    try {
-      await invoke("stop_proxy");
-      setProxy("");
-      event.target.checked = false;
-    } catch (e) {
-      event.target.checked = true;
     }
   };
 
@@ -470,33 +420,6 @@ const Profile = (props: Props) => {
 
   return (
     <div>
-      <j-box px="500" my="500">
-        <j-toggle
-          checked={!!proxy}
-          onChange={(e) => {
-            e.target.checked ? setupProxy(e) : stopProxy(e);
-          }}
-        >
-          Enable remote access via proxy
-        </j-toggle>
-
-        {loadingProxy && <j-spinner size="sm"></j-spinner>}
-
-        {proxy && (
-          <j-box pb="500">
-            <j-flex a="center">
-              <ActionButton title="Proxy URL" onClick={() => copyText(proxy)} icon="clipboard" />
-              <ActionButton title="QR Code" onClick={showProxyQRCode} icon="qr-code-scan" />
-              <ActionButton
-                title="Open API"
-                onClick={() => openUrl(proxy)}
-                icon="box-arrow-up-right"
-              />
-            </j-flex>
-          </j-box>
-        )}
-      </j-box>
-
       <j-box px="500" my="500">
         <j-button onClick={openLogs} full variant="primary">
           <j-icon size="sm" slot="start" name="clipboard"></j-icon>
@@ -868,26 +791,6 @@ const Profile = (props: Props) => {
           </j-box>
         </j-modal>
       )}
-      {qrcodeModal && (
-        <j-modal
-          size="fullscreen"
-          open={qrcodeModal}
-          onToggle={(e: any) => setQRCodeModal(e.target.open)}
-          title="Proxy QR Code"
-        >
-          <j-box px="400" py="600">
-            <j-box pb="500">
-              <j-text nomargin size="600" color="black" weight="600">
-                Scan this QR on your phone
-              </j-text>
-            </j-box>
-            <j-box bg="ui-900" px="900" py="600">
-              <QRCode value={proxy} />
-            </j-box>
-          </j-box>
-        </j-modal>
-      )}
-
       {showAgentSelection && (
         <j-modal
           size="fullscreen"

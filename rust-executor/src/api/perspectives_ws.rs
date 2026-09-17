@@ -2023,6 +2023,56 @@ async fn interpretation_overlays_handler(
     Ok(serde_json::to_value(overlays)?)
 }
 
+// ── Flow consensus accept / reject ──
+
+async fn accept_flow_proposal_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let proposal_uri = params.require_str("proposalUri")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let fired = crate::perspectives::flow_instance::accept::accept_flow_proposal(
+        &mut perspective,
+        &proposal_uri,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(fired)?)
+}
+
+async fn reject_flow_proposal_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let proposal_uri = params.require_str("proposalUri")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let retracted = crate::perspectives::flow_instance::accept::reject_flow_proposal(
+        &mut perspective,
+        &proposal_uri,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    // How many of OUR links went, not a bare `true`: withdrawing one vote and
+    // retracting a proposal we opened are different events on the same call.
+    Ok(serde_json::json!({ "retractedLinks": retracted }))
+}
+
 // ── SHACL resolution endpoints ──
 //
 // These handlers move SHACL shape resolution from the TypeScript SDK (which paid
@@ -2435,6 +2485,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register(
         "perspective.interpretationOverlays",
         interpretation_overlays_handler,
+    );
+    map.register(
+        "perspective.acceptFlowProposal",
+        accept_flow_proposal_handler,
+    );
+    map.register(
+        "perspective.rejectFlowProposal",
+        reject_flow_proposal_handler,
     );
     map.register("perspective.getShaclNames", get_shacl_names);
     map.register("perspective.getShaclTargetClass", get_shacl_target_class);
