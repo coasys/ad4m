@@ -16,7 +16,9 @@
 use super::flow_classes::{advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE};
 use super::flow_context::load_shacl_flows;
 use super::flow_evaluator::recompute_evidence_hash;
-use super::flow_evaluator_e2e::{literal, seed_flow, seed_satisfied_fixture, Fixture};
+use super::flow_evaluator_e2e::{
+    literal, second_agent, seed_flow, seed_satisfied_fixture, Fixture,
+};
 use super::flow_instance::accept::{accept_flow_proposal, reject_flow_proposal};
 use super::flow_instance::atom::{
     ACCEPTED_BY_PREDICATE, FIRED_MARK, RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE,
@@ -1788,7 +1790,9 @@ async fn propose_outcome_distinguishes_fired_queued_and_no_op() {
     assert_eq!(queued.derived_state, "identified");
     assert!(!queued.contested);
     assert!(
-        proposals_to(&f, "scoped").await.contains(&queued.proposal_uri),
+        proposals_to(&f, "scoped")
+            .await
+            .contains(&queued.proposal_uri),
         "the URI names the proposal actually written — a co-signer's handle"
     );
 
@@ -1820,7 +1824,10 @@ async fn propose_outcome_distinguishes_fired_queued_and_no_op() {
         "derivedState",
         "contested",
     ] {
-        assert!(obj.contains_key(key), "missing `{key}` on the wire: {obj:?}");
+        assert!(
+            obj.contains_key(key),
+            "missing `{key}` on the wire: {obj:?}"
+        );
     }
 }
 
@@ -1848,4 +1855,89 @@ async fn joining_someone_elses_proposal_reports_minted_false_and_a_recorded_vote
     assert_eq!(joined.outcomes[0].to_state, "scoped");
     assert_eq!(joined.derived_state, "scoped");
     assert!(!joined.contested);
+}
+
+// ---------------------------------------------------------------------------
+// The other side of the proposer-less key: the engine must NOT reach quorum
+// ---------------------------------------------------------------------------
+//
+// `find_live_proposal`'s key carries no proposer, and the two tests above rely
+// on that: it is what lets a second human co-sign instead of minting an
+// unreachable twin. The cost of that choice is that the key is *shared* with
+// `run_engine_proposal_pass`, and this is the test that pins what the engine
+// owes in exchange.
+//
+// Nothing automated co-signs. `accept_flow_proposal` — the only production
+// writer of `acceptedBy` — has exactly two callers, `api/perspectives_ws.rs`
+// and `mcp/tools/flows.rs`, and both are a request arriving from outside. So
+// the engine contributes at most ONE vote to an edge however many replicas run
+// its pass, and `consensusRule {n: 2}` means two agents, not two machines.
+//
+// The failure this guards is silent: make the shared key proposer-aware — a
+// plausible "fix" for some future twin-mint bug — and N replicas mint N
+// proposals carrying N distinct proposer votes. `{n: 2}` is then satisfied by
+// two robots agreeing with themselves, nothing errors, and no other test in
+// this file goes red, because every one of them drives the *manual* path.
+
+/// One GUARDED edge, the engine pass run three times: twice as this replica
+/// and once as a second DID. Exactly one proposal, exactly one vote, and the
+/// `{n: 2}` edge does not move.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_pass_never_reaches_quorum_by_itself_however_many_dids_run_it() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    // `scoped` carries `requires: [ns://Task count.min 1]` and the fixture
+    // seeded the Task, so this edge is guarded AND satisfied — the only shape
+    // the engine ever mints on.
+    let minted = f.run_pass(&[], None).await;
+    assert_eq!(
+        minted.len(),
+        1,
+        "the engine mints the first proposal: {minted:?}"
+    );
+
+    let rerun = f.run_pass(&[], None).await;
+    assert!(
+        rerun.is_empty(),
+        "the same replica re-running its pass must find its own proposal: {rerun:?}"
+    );
+
+    // A second replica's evaluator over the same graph: same guard, same
+    // evidence, same seal, so the whole dedup key matches — and a different
+    // acting DID, which is exactly what the key deliberately ignores.
+    let bob = second_agent("engine-replica-bob@example.com");
+    let bobs_did = crate::agent::did_for_context(&bob).expect("did_for_context(bob)");
+    assert_ne!(
+        bobs_did,
+        acting_did(&f),
+        "the fixture must really be two DIDs"
+    );
+    let bobs = f.run_pass_as(&bob).await;
+    assert!(
+        bobs.is_empty(),
+        "a second DID's engine pass must find the live proposal, not mint its own: {bobs:?}"
+    );
+
+    assert_eq!(
+        proposals_to(&f, "scoped").await,
+        minted,
+        "three passes, one proposal"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &minted[0]).await,
+        0,
+        "nothing automated co-signs — `accept_flow_proposal` is reached only from a client"
+    );
+
+    let derived = f.derived().await;
+    assert_eq!(
+        derived.state, "identified",
+        "one engine vote is 1 of 2; `{{n: 2}}` must mean two agents, not two machines"
+    );
+    assert!(
+        derived.settled.is_empty(),
+        "no edge settled: {:?}",
+        derived.settled
+    );
 }

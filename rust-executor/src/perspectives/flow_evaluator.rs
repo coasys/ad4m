@@ -1496,7 +1496,7 @@ mod tests {
     }
 
     impl StubPerspective {
-        fn with_instances(mut self, class: &str, ids: &[&str]) -> Self {
+        fn with_instances(self, class: &str, ids: &[&str]) -> Self {
             self.with_instance_objects(class, ids.iter().map(|id| json!({ "id": id })).collect())
         }
         fn with_instance_objects(mut self, class: &str, objects: Vec<Value>) -> Self {
