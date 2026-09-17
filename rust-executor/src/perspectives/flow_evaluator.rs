@@ -1571,22 +1571,28 @@ mod tests {
         let same = recompute_evidence_hash(&stub, f, &inst(), "scoped", "did:key:me")
             .await
             .unwrap();
-        assert_eq!(same.as_deref(), Some(minted[0].evidence_hash.as_str()));
+        assert_eq!(
+            same.hash().as_deref(),
+            Some(minted[0].evidence_hash.as_str()),
+            "unchanged graph reproduces the minted hash"
+        );
 
         let edited = StubPerspective::default()
             .with_instance_objects("ns://Vote", vec![json!({"id": "v1", "value": "no"})]);
         let changed = recompute_evidence_hash(&edited, f, &inst(), "scoped", "did:key:me")
             .await
             .unwrap()
-            .expect("guard still satisfied");
+            .hash()
+            .expect("guard still satisfied even after edit — different hash, not Unmet");
         assert_ne!(changed, minted[0].evidence_hash);
     }
 
-    /// The two dispositions a voter must tell apart: "nothing verifiable
-    /// remains" (refuse to co-sign) and "the store failed" (try again later).
-    /// Neither is ever grounds for touching the proposal.
+    /// `Unmet` for an unsatisfied/missing guard, `NoGuard` for a guard-less
+    /// target state, and `Err` for a transient store failure. The voter uses
+    /// `EvidenceSeal::hash()` which returns `None` for `Unmet` and `Some` for
+    /// both `Sealed` and `NoGuard`, so the accept check catches only `Unmet`.
     #[tokio::test]
-    async fn recompute_is_none_when_unverifiable_and_err_on_store_failure() {
+    async fn recompute_returns_unmet_or_noguard_and_err_on_store_failure() {
         let f = flow(
             "Delivery",
             "identified",
@@ -1595,21 +1601,29 @@ mod tests {
         );
         let empty = StubPerspective::default().with_instances("ns://Vote", &[]);
         let unguarded = flow("Delivery", "identified", "scoped", None);
-        #[rustfmt::skip]
-        let unverifiable = [
+
+        // Unmet cases: guard exists but is not satisfied, or state is gone.
+        for (name, store, flow, to_state) in [
             ("guard no longer satisfied", &empty, &f, "scoped"),
             ("target state vanished from the flow definition", &empty, &f, "shipped"),
-            ("guard-less state: nothing to verify", &empty, &unguarded, "scoped"),
-        ];
-        for (name, store, flow, to_state) in unverifiable {
+        ] {
             assert_eq!(
                 recompute_evidence_hash(store, flow, &inst(), to_state, "did:key:me")
                     .await
                     .unwrap(),
-                None,
+                EvidenceSeal::Unmet,
                 "{name}"
             );
         }
+
+        // Guard-less state: commit A's fix — returns NoGuard, not Unmet.
+        assert_eq!(
+            recompute_evidence_hash(&empty, &unguarded, &inst(), "scoped", "did:key:me")
+                .await
+                .unwrap(),
+            EvidenceSeal::NoGuard,
+            "guard-less state must return NoGuard so co-signing can succeed"
+        );
 
         let broken = StubPerspective::default().with_error("ns://Vote", "store down");
         assert!(

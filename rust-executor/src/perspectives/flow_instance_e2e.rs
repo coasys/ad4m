@@ -61,6 +61,7 @@ async fn seal_for(f: &Fixture, to_state: &str) -> String {
     )
     .await
     .expect("recompute_evidence_hash")
+    .hash()
     .expect("guard satisfied")
 }
 

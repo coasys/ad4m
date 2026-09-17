@@ -315,4 +315,47 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     expect(settled).to.have.lengthOf(1);
     expect(settled[0].toState).to.equal("Done");
   });
+
+  // ── Test 4: guard-free state with n:2 requires two distinct co-signers ──
+  // This is the core regression test for the EvidenceSeal::NoGuard path.
+  // Before the fix, `recompute_evidence_hash` returned `None` for guard-free
+  // target states and `accept.rs` refused every co-sign attempt, leaving the
+  // flow deadlocked at {n: 2}. After the fix the seal is NoGuard (canonical
+  // empty-bag hash), and both proposer and voter produce the same hash by
+  // construction, so co-signing succeeds.
+  it("guard-free state with n:2 — two distinct signers advance the flow", async () => {
+    const { aliceP, bobP } = await sharedPerspective("flow-propose-guard-free-n2");
+
+    // Minimal flow: Ready → Archived (guard-free, n:2).
+    const flow = new SHACLFlow("GuardFreeN2Flow", "gf-n2://");
+    flow.inputTypes = ["ProposeTask"];
+    flow.consensusRule = { n: 1 };
+    flow.addState({ name: "Ready", value: 0 });
+    flow.addState({ name: "Archived", value: 99, consensusRule: { n: 2 } });
+    flow.addTransition({ actionName: "Archive", fromState: "Ready", toState: "Archived", actions: [] });
+    await aliceP.addFlow("GuardFreeN2Flow", flow);
+
+    const task = (await (Task as any).create(aliceP, { title: "Guard-free n:2 task" })) as Task;
+    const inst = await FlowInstance.start(aliceP, "GuardFreeN2Flow", task.id);
+    expect(inst.currentStateName).to.equal("Ready");
+
+    // Alice proposes the guard-free transition — first of two votes.
+    const pending = await inst.proposeTransition("Archived", "archive it");
+    expect(pending, "one of two — must not fire yet").to.have.lengthOf(0);
+    expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("Ready");
+
+    // Bob co-signs: his replica must reproduce the same NoGuard seal hash,
+    // not reject with "cannot reproduce evidence".
+    const proposals = await (await instanceOn(aliceP, task.id)).proposals();
+    expect(proposals, "one pending proposal").to.have.lengthOf(1);
+
+    const fired = await (await instanceOn(bobP, task.id)).acceptProposal(proposals[0].id);
+    expect(fired, "second vote settles the guard-free transition").to.have.lengthOf(1);
+    expect(fired[0].fromState).to.equal("Ready");
+    expect(fired[0].toState).to.equal("Archived");
+    expect(fired[0].voters, "both signers recorded").to.have.members([aliceDid, bobDid]);
+
+    const archived = await instanceOn(bobP, task.id);
+    expect(archived.currentStateName).to.equal("Archived");
+  });
 });
