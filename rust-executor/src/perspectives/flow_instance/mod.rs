@@ -39,7 +39,9 @@
 //!   ▼ fold_read_set
 //!      ├─ RoleGrantEvidence::resolve per candidate (roles.rs, pure): links →
 //!      │  RoleGrant windows, applying the authority rule from the definition
-//!      │  passed in. Unresolvable evidence costs that candidate their votes.
+//!      │  passed in. Unresolvable evidence aborts the whole derivation —
+//!      │  dropping the candidate would de-quorate an edge and let the walk
+//!      │  take a survivor contention would have held.
 //!      └─ eligible_votes per atom (roles.rs, pure): each vote is gated
 //!      AS OF ITS OWN TIMESTAMP against the windows (#1027) → VouchedAtom
 //!      with pre-filtered votes. No store. No role queries.
@@ -266,8 +268,8 @@ impl ReadSet {
 /// This is the function an off-perspective verifier re-runs over a minted
 /// token's proof to reach the same verdict independently — after
 /// re-decorating the carried links' signatures, per [`ReadSet`].
-pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> DerivedState {
-    let grants = role_grant_views(flow, read_set);
+pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<DerivedState> {
+    let grants = role_grant_views(flow, read_set)?;
     let vouched: Vec<VouchedAtom> = read_set
         .atoms()
         .into_iter()
@@ -279,41 +281,49 @@ pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> DerivedState {
             }
         })
         .collect();
-    fold(&read_set.genesis, flow, &vouched)
+    Ok(fold(&read_set.genesis, flow, &vouched))
 }
 
 /// Resolve every carried [`RoleGrantEvidence`] into the [`RoleGrant`] view
-/// the gate consumes. Pure, and **fail-closed per candidate**: evidence that
-/// cannot be resolved — an untranslatable role query, an instance no carried
-/// link can place in time — yields no view, and a candidate with no view
-/// contributes no eligible votes (`eligible_votes`: no grant, no vote). The
-/// failure costs that one candidate their votes; it never widens anyone's
-/// window and never spreads to another candidate.
+/// the gate consumes. Pure, and **fail-closed for the whole fold**: evidence
+/// that cannot be resolved — an untranslatable role query, an instance no
+/// carried link can place in time — aborts the derivation. The caller
+/// abandons the read exactly as it does when `read_set` itself fails.
+///
+/// It used to drop the candidate and fold on, reasoning that a candidate with
+/// no view contributes no eligible votes ("no grant, no vote") and so a
+/// dropped candidate can only ever *narrow* eligibility. That is true of
+/// eligibility and false of the **outcome**, because the outcome is decided by
+/// vote counts: [`fold::Contention`](fold) only fires when two edges out of
+/// the same state are both quorate. De-quorate one of them by dropping a
+/// candidate and the walk stops contending and TAKES the survivor — an edge
+/// fires that the same read-set with the same rules would never have derived.
+/// Fail-closed for eligibility, fail-OPEN for the transition. One unresolved
+/// candidate must not be able to pick a winner.
 ///
 /// Evidence for a state whose rule carries no `fromRole` is dropped: an
 /// ungated edge admits every vote regardless, and resolving it would only
 /// invite a reader to think the gate meant something.
-fn role_grant_views(flow: &SHACLFlow, read_set: &ReadSet) -> Vec<RoleGrant> {
+fn role_grant_views(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<RoleGrant>> {
     let record = read_set.as_record(flow);
-    read_set
-        .role_grants
-        .iter()
-        .filter_map(|evidence| {
-            let rule = rule_for(flow, &evidence.to_state);
-            let role = rule.from_role.as_ref()?;
-            requires_query_input(role, &record, &evidence.did)
-                .and_then(|input| evidence.resolve(&input))
-                .map_err(|e| {
-                    log::warn!(
-                        "flow instance {}: role evidence for `{}` on `{}` does not resolve, so none of their votes count — {e:#}",
-                        read_set.instance_uri,
-                        evidence.did,
-                        evidence.to_state
-                    )
-                })
-                .ok()
-        })
-        .collect()
+    let mut grants = Vec::with_capacity(read_set.role_grants.len());
+    for evidence in &read_set.role_grants {
+        let rule = rule_for(flow, &evidence.to_state);
+        let Some(role) = rule.from_role.as_ref() else {
+            continue;
+        };
+        let view = requires_query_input(role, &record, &evidence.did)
+            .and_then(|input| evidence.resolve(&input))
+            .map_err(|e| {
+                e.context(format!(
+                    "flow instance {}: role evidence for `{}` on `{}` does not resolve, so no \
+                     verdict can be derived from this read-set",
+                    read_set.instance_uri, evidence.did, evidence.to_state
+                ))
+            })?;
+        grants.push(view);
+    }
+    Ok(grants)
 }
 
 impl<'a> FlowInstance<'a> {
@@ -410,7 +420,7 @@ impl<'a> FlowInstance<'a> {
         &self,
         perspective: &PerspectiveInstance,
     ) -> anyhow::Result<DerivedState> {
-        Ok(fold_read_set(self.flow, &self.read_set(perspective).await?))
+        fold_read_set(self.flow, &self.read_set(perspective).await?)
     }
 }
 

@@ -890,7 +890,7 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
     let flow = &flows[&f.flow_uri];
     assert_eq!(
-        fold_read_set(flow, &parsed),
+        fold_read_set(flow, &parsed).expect("the carried evidence resolves off-perspective"),
         derived,
         "an off-perspective verifier must reach the same verdict"
     );
@@ -1259,7 +1259,10 @@ async fn a_newcomer_deriving_after_a_revocation_converges_on_the_settled_state()
     let json = serde_json::to_string(&read_set).expect("serialises");
     let parsed: ReadSet = serde_json::from_str(&json).expect("deserialises");
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
-    assert_eq!(fold_read_set(&flows[&f.flow_uri], &parsed), before);
+    assert_eq!(
+        fold_read_set(&flows[&f.flow_uri], &parsed).expect("the carried evidence resolves"),
+        before
+    );
     assert!(
         read_set.role_grants.iter().any(|g| g.did == acting_did(&f)
             && g.instances.iter().any(|i| i
