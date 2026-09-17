@@ -16,6 +16,7 @@
 //! events + telepresence presence — it will still delegate the actual pass
 //! to [`run_one_pass`], so the coordination contract stays in one place.
 
+use crate::agent::capabilities::LAST_SEEN_WRITE_THROTTLE_S;
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
     run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
@@ -433,8 +434,9 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
 
 /// Threshold (seconds) within which a managed user's `last_seen` makes them
 /// eligible to have an auto-processor loop **spawned**. Mirrors the freshness
-/// window used by `capabilities::track_last_seen_from_token` for last-seen
-/// tracking, so a user active by that surface is also considered active here.
+/// window used by [`crate::agent::capabilities::track_last_seen_from_token`]
+/// for last-seen tracking, so a user active by that surface is also considered
+/// active here.
 pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 300;
 
 /// Threshold (seconds) past which an already-running auto-processor loop is
@@ -445,9 +447,10 @@ pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 300;
 /// # Why these two numbers must never be collapsed into one (#1070)
 ///
 /// `last_seen` is not a continuous signal — it is written by
-/// `capabilities::track_last_seen_from_token`, which **throttles writes to at
-/// most one per 300 s** to spare the DB. That throttle's condition and the
-/// spawn window's condition are exact complements:
+/// [`crate::agent::capabilities::track_last_seen_from_token`], which
+/// **throttles writes to at most one per [`LAST_SEEN_WRITE_THROTTLE_S`]** to
+/// spare the DB. That throttle's condition and the spawn window's condition are
+/// exact complements:
 ///
 /// * writer:  write `last_seen` **iff** `last_seen < now - 300`
 /// * reader:  user is online **iff** `last_seen >= now - 300`
@@ -473,11 +476,45 @@ pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 300;
 /// client cadence, so the supervisor wants a hysteresis band regardless of what
 /// the writer does.
 ///
+/// # Why this is derived rather than written as `600`
+///
+/// The band must be **at least one write-throttle period**, because that is the
+/// worst-case age of a live user's row: their `last_seen` sweeps from 0 s to
+/// just past [`LAST_SEEN_WRITE_THROTTLE_S`] and back, forever. Writing `600`
+/// here would be the right number for today's throttle and silently the wrong
+/// number the moment someone raises the throttle to cut `users` writes — which
+/// is the stated purpose of that code path, in its own doc comment. Whoever
+/// does that will be optimising the DB and will have no reason to open this
+/// file. Deriving the window means they cannot get it wrong from either side:
+/// the band tracks the throttle automatically, and the compiler carries the
+/// relationship that a comment could only ask a reader to respect.
+///
+/// The defect this whole PR fixes is *two numbers that must relate, living in
+/// two modules with nothing connecting them*. A literal `600` here would
+/// instantiate that same class again at a different ratio.
+///
+/// # What this window actually bounds
+///
+/// Not maximum staleness — maximum tolerated **gap between authenticated
+/// requests**. A user whose requests are 700 s apart still churns: write at
+/// t=0, reaped at t=601, re-admitted when they next authenticate at t=700. So
+/// hysteresis does not eliminate the flap for every user; it *scopes* it to
+/// users whose request gap exceeds this window, and changes the period from a
+/// fixed 300 s to that user's own request interval. Previously it was every
+/// user, every 300 s, unconditionally. The policy question a future tuner
+/// should be answering is therefore: *how long do we keep a loop alive for a
+/// user who has not authenticated?*
+///
 /// Consequence to keep in mind when tuning: a user who genuinely disconnects
 /// keeps their loops for up to this window rather than the spawn window. That
 /// is the intended trade — an idle loop costs one 500 ms poll per perspective,
 /// whereas a spurious abort discards in-flight interpretation work (#1010).
-pub const MANAGED_USER_REAP_WINDOW_S: i64 = 600;
+/// Measured on the affected executor, that trade is cheap: 34 h produced 1551
+/// aborts but only 68 interpretation passes picked / 67 completed / 0
+/// abandoned, a 1.41 % interpretation duty cycle — the aborts overwhelmingly
+/// fired into idle time. This is a CPU-and-wakeups fix, not a data-loss fix.
+pub const MANAGED_USER_REAP_WINDOW_S: i64 =
+    MANAGED_USER_ONLINE_WINDOW_S + LAST_SEEN_WRITE_THROTTLE_S;
 
 /// Pure filter: from a list of `(user_email, last_seen_seconds)` tuples, return
 /// the emails of users whose `last_seen` is within `threshold_s` of `now_s`.
@@ -1432,9 +1469,12 @@ mod tests {
     /// activity until they are already 300 s stale. They must be **retained**.
     /// `gone@x` at 700 s old is genuinely absent and must be **reaped**.
     ///
-    /// Turns red if: the two windows are collapsed to one value. Verified by
-    /// making exactly that mutation — editing `MANAGED_USER_REAP_WINDOW_S` from
-    /// `600` to `300` — and observing:
+    /// # Killing mutations, all three verified
+    ///
+    /// **1. Collapse the two windows** — edit `MANAGED_USER_REAP_WINDOW_S` to a
+    /// literal `300`. The relationship guard fires first, deliberately: it
+    /// names the defect instead of leaving a reader to infer it from a set
+    /// diff.
     ///
     /// ```text
     /// test ...::user_in_hysteresis_band_is_not_reaped_but_stale_user_is ... FAILED
@@ -1442,9 +1482,32 @@ mod tests {
     /// the spawn window (300s); collapsing them re-introduces #1070, ...
     /// ```
     ///
-    /// The relationship guard below fires first, which is deliberate: it names
-    /// the defect instead of leaving a reader to infer it from a set diff. Past
-    /// that guard, the `retain` assertion is what fails (`band@x` absent).
+    /// **2. Raise `LAST_SEEN_WRITE_THROTTLE_S` to `600` and touch nothing in
+    /// this file.** This is the mutation the test exists to catch and the one
+    /// the old `REAP > ONLINE` assertion could not see: it is what someone
+    /// optimising `users`-table writes will actually do, from another module,
+    /// with no reason to read this one. Because the reap window is *derived*,
+    /// the band assertion below stays green (600 ≥ 600) — what goes red is the
+    /// fixture set, since `gone@x` at 700 s now sits inside a 900 s retain
+    /// window:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: a user in the hysteresis band must
+    /// keep a running loop; reaping them is the #1070 flap
+    ///   left: ["fresh@x", "band@x", "gone@x"]
+    ///  right: ["fresh@x", "band@x"]
+    /// ```
+    ///
+    /// The fixture ages are pinned to absolute seconds on purpose rather than
+    /// expressed in terms of the constants: that is what drags a human into
+    /// this file whenever any of the three numbers moves.
+    ///
+    /// **3. Un-derive the reap window** — put a literal `600` back while
+    /// `LAST_SEEN_WRITE_THROTTLE_S` is `600`. This is the mutation the band
+    /// assertion itself guards, and the only one that reaches it: `600 - 300 =
+    /// 300 < 600`, so the band is narrower than the worst-case staleness of a
+    /// live user's row and #1070 is back for every connected user.
+    ///
     /// Also red if `managed_user_windows` is changed to apply the spawn window
     /// to `retain`.
     #[test]
@@ -1455,6 +1518,23 @@ mod tests {
              spawn window ({MANAGED_USER_ONLINE_WINDOW_S}s); collapsing them re-introduces \
              #1070, where the 300s last_seen write-throttle is the exact complement of a \
              300s online window and every connected user flaps once per 300s"
+        );
+
+        // Strictly-longer is necessary but not sufficient. The band must be at
+        // least one write-throttle period, because that is the worst-case age
+        // of a live user's `last_seen` row: any narrower and an actively
+        // connected user falls out of `retain` between two throttled writes,
+        // which is #1070 exactly. Guards the case `REAP > ONLINE` cannot see —
+        // someone raising the throttle in `capabilities` to cut `users` writes.
+        assert!(
+            MANAGED_USER_REAP_WINDOW_S - MANAGED_USER_ONLINE_WINDOW_S >= LAST_SEEN_WRITE_THROTTLE_S,
+            "hysteresis band is {}s ({MANAGED_USER_REAP_WINDOW_S}s reap - \
+             {MANAGED_USER_ONLINE_WINDOW_S}s spawn) but must be at least the \
+             {LAST_SEEN_WRITE_THROTTLE_S}s last_seen write-throttle, which is the worst-case \
+             age of an actively-connected user's row; a narrower band reaps live users (#1070). \
+             If you just raised LAST_SEEN_WRITE_THROTTLE_S, MANAGED_USER_REAP_WINDOW_S is \
+             derived from it and should have followed — check it was not replaced by a literal",
+            MANAGED_USER_REAP_WINDOW_S - MANAGED_USER_ONLINE_WINDOW_S
         );
 
         let now = 2_000_000_i64;
