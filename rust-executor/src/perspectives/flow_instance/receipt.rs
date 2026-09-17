@@ -412,7 +412,14 @@ mod tests {
 
     /// One proposal, self-proposed and therefore self-voted: under the
     /// default `{ n: 1 }` rule that is a settled edge.
-    fn proposal(uri: &str, proposer: &str, from: &str, to: &str, seal: &str, at: &str) -> ProposalLinks {
+    fn proposal(
+        uri: &str,
+        proposer: &str,
+        from: &str,
+        to: &str,
+        seal: &str,
+        at: &str,
+    ) -> ProposalLinks {
         ProposalLinks {
             uri: uri.to_string(),
             links: honest_proposal(proposer, from, to, seal, at),
@@ -497,7 +504,10 @@ mod tests {
             { "name": "done", "value": 1.0 },
         ]);
 
-        let one = flow_json(states.clone(), serde_json::json!([ship.clone(), cancel.clone()]));
+        let one = flow_json(
+            states.clone(),
+            serde_json::json!([ship.clone(), cancel.clone()]),
+        );
         let other = flow_json(states, serde_json::json!([cancel, ship]));
 
         assert_eq!(
@@ -511,7 +521,9 @@ mod tests {
     /// with it, or the `DnaChanged` signal the verifier owes a reader could
     /// never fire.
     ///
-    /// Red if `flow_dna_hash` returns anything constant.
+    /// Red if `flow_dna_hash` digests only the flow's identity rather than its
+    /// content — e.g. `Sha256::digest(flow.flow_uri())` instead of the
+    /// canonical JSON of the whole (sorted) definition.
     #[test]
     fn dna_hash_changes_when_the_quorum_rule_changes() {
         let with_rule = |n: u32| {
@@ -559,7 +571,10 @@ mod tests {
     /// mint and then fail its own verification.
     #[test]
     fn mint_refuses_a_preimage_that_does_not_hash_to_its_seal() {
-        let mut tampered = preimage(&["coasys://Agreement"], vec![item("a1", "coasys://Agreement", "{\"id\":\"a1\"}")]);
+        let mut tampered = preimage(
+            &["coasys://Agreement"],
+            vec![item("a1", "coasys://Agreement", "{\"id\":\"a1\"}")],
+        );
         tampered.items[0].content = "{\"id\":\"a1\",\"approved\":false}".to_string();
 
         let err = FlowReceipt::mint(
@@ -577,6 +592,12 @@ mod tests {
 
     // ---- mint's refusals -------------------------------------------------
 
+    /// The happy path — and the only test that can catch `mint` *asserting* a
+    /// state instead of folding for one, since every other mint test asserts a
+    /// refusal. "Derived, never asserted" is this module's whole claim.
+    ///
+    /// Red with `terminal_state: read_set.genesis.clone()` in place of
+    /// `derived.state`.
     #[test]
     fn mint_derives_the_terminal_state_from_the_carried_material() {
         let receipt = FlowReceipt::mint(
@@ -730,7 +751,11 @@ mod tests {
     /// the graph has to read back identical — including the carried links and
     /// the evidence preimage.
     ///
-    /// Red if any field drops its `Deserialize` (e.g. `EvidenceItem`).
+    /// Red if `body()` silently drops a field on the way out — e.g. clearing
+    /// `evidence_preimage` before serialising, which compiles fine and leaves
+    /// a receipt that travelled unable to prove its own seals. Also red (as a
+    /// compile error) if any field drops its `Deserialize`, e.g.
+    /// `EvidenceItem`.
     #[test]
     fn a_receipt_round_trips_through_its_stored_body() {
         let receipt = FlowReceipt::mint(
