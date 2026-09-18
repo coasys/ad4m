@@ -89,6 +89,22 @@
 //! compositions this deep are not a shape anybody has asked for; if one ever
 //! is, the fix is memoisation by receipt URI, not a larger constant.
 //!
+//! **Open: which kind of denial that is.** Running out of budget currently
+//! surfaces as a [`Rejected`](super::verify::VerdictKind::Rejected) verdict,
+//! because the gate simply fails and the fold reports an ordinary state
+//! mismatch. It arguably belongs in
+//! [`Undecidable`](super::verify::VerdictKind::Undecidable) instead: the same
+//! bytes verify for a reader handed the sub-receipt directly, so "I could not
+//! reach that far from where I stand" is a finding about the reader, not about
+//! the material — and `Undecidable` is where this module's own three-kind
+//! doctrine puts those. The two buckets differ in what a payout system may
+//! conclude: `Rejected` is evidence against the receipt, `Undecidable` is not.
+//! Nothing is unsafe either way — both refuse the grant — so this is a
+//! taxonomy question, not a hole, and it is left open deliberately rather than
+//! settled in passing. Raised by @lal-bot-coasys reviewing the `grantedByFlow`
+//! PR; `a_chain_one_deeper_than_the_budget_is_refused_not_allowed` therefore
+//! pins the refusal and not the bucket.
+//!
 //! # Revocation: what a receipt freezes and what it does not
 //!
 //! **A verified receipt is permanent, and undoing the flow does not undo the
@@ -310,6 +326,7 @@ mod tests {
     use crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
     use crate::perspectives::flow_instance::fold_read_set;
     use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
+    use crate::perspectives::flow_instance::verify::VerdictKind;
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
     use crate::perspectives::shacl_parser::ModelQueryCount;
     use serde_json::{json, Value};
@@ -626,6 +643,110 @@ mod tests {
             1,
             "and it grants the node it DOES name — otherwise this test would pass against a \
              resolver that refuses every receipt"
+        );
+    }
+
+    /// The same check from the **attacker's** side: hold the node fixed and
+    /// vary what the receipt claims, because the receipt is the half an
+    /// attacker controls.
+    ///
+    /// The test above varies `instance_id` — the defender's side — which shows
+    /// the binding is read but never produces a receipt naming *nothing*. That
+    /// leaves a mutant alive:
+    ///
+    /// ```text
+    /// outputs.is_empty() || outputs.contains(node)   // "binds to nothing = speaks for anything"
+    /// ```
+    ///
+    /// It passes every assertion in the test above. **It does not, however,
+    /// grant anything** — and that is worth writing down, because the review
+    /// that proposed it assumed otherwise and I only found out by running it.
+    /// [`NoOutputs`](super::verify::ReceiptVerdict::NoOutputs) at step 3
+    /// catches an empty binding independently, so with that mutant applied the
+    /// receipt sails through step 0 and is refused three steps later. Both
+    /// paths refuse the grant; the mutant is behaviour-equivalent for the
+    /// *grant* question and survives a windows-only assertion.
+    ///
+    /// What it changes is **which finding the reader is handed**:
+    /// `OutputUnbound` ("this receipt speaks for other nodes") versus
+    /// `NoOutputs` ("this receipt was not made by `mint`"). Those are
+    /// different claims about different parties, so the last assertion pins
+    /// the verdict and not just the absence of a window — which is what
+    /// actually kills the mutant. `speaks_for` is `any(|o| o == node)` and
+    /// already answers `false` for an empty `outputs`; this is what keeps it
+    /// that way.
+    ///
+    /// The empty case is hand-built because `mint` refuses an empty binding,
+    /// which is the mint half of the same guard.
+    ///
+    /// Raised by @lal-bot-coasys reviewing this PR: the earlier pair varied
+    /// the wrong operand for the threat model, which is that the artifact
+    /// arrives carrying whatever its sender chose. The operand was the real
+    /// gap; the exploit that motivated it was not one.
+    #[test]
+    fn the_receipt_must_name_the_node_it_is_reached_from() {
+        let granting = granting_flow("Onboarding");
+        let gated = gated_flow("Delivery", gate(&granting.flow_uri(), "done"));
+        let cat = catalogue(vec![granting.clone(), gated]);
+        let gate_spec = spec(&granting.flow_uri(), "done");
+
+        let claiming = |outputs: Vec<String>| FlowReceipt {
+            flow_uri: granting.flow_uri(),
+            flow_dna_hash: flow_dna_hash(&granting).expect("hash"),
+            terminal_state: "done".into(),
+            outputs,
+            read_set: read_set("done", T1, Vec::new()),
+            evidence_preimage: Vec::new(),
+        };
+
+        // Every case is reached from the SAME node; only the receipt's claim
+        // about what it speaks for differs.
+        for (label, outputs, expected) in [
+            (
+                "names the node it is reached from",
+                vec![ROLE_INSTANCE.to_string()],
+                1,
+            ),
+            (
+                "names a different node",
+                vec!["ad4m://role/reviewer/somebody-else".to_string()],
+                0,
+            ),
+            ("names nothing at all", Vec::new(), 0),
+        ] {
+            let ev = evidence(vec![claiming(outputs)], Vec::new());
+            assert_eq!(
+                ev[0].instances[0].instance_id, ROLE_INSTANCE,
+                "{label}: precondition — the node reached from is held fixed across cases"
+            );
+            assert_eq!(
+                resolve(&ev[0], Some(&gate_spec), &cat)
+                    .expect("resolves")
+                    .windows
+                    .len(),
+                expected,
+                "{label}: a receipt grants exactly the nodes it names — and one that names \
+                 nothing grants nothing, rather than everything"
+            );
+        }
+
+        // And the finding itself, for the empty case, because the absence of a
+        // window does not distinguish which guard produced it: with
+        // `speaks_for` widened to "empty binds to anything", step 0 passes and
+        // `NoOutputs` refuses at step 3 instead. Same refusal, different claim
+        // — so this is the assertion that holds the binding check to its own
+        // job rather than letting a later backstop cover for it.
+        assert!(
+            matches!(
+                verify_receipt_within(
+                    GrantContext::root(&cat),
+                    &claiming(Vec::new()),
+                    Some(ROLE_INSTANCE)
+                ),
+                ReceiptVerdict::OutputUnbound { .. }
+            ),
+            "a receipt naming nothing, reached from a node, is unbound to THAT node — the \
+             binding check answers first and `NoOutputs` is not what should speak here"
         );
     }
 
@@ -980,15 +1101,28 @@ mod tests {
         };
         let verdict =
             verify_receipt_within(GrantContext::root(&cat), &hand_built, Some(ROLE_INSTANCE));
-        assert!(
-            !verdict.is_verified(),
+        // Deliberately NOT asserting which *kind* of denial this is.
+        //
+        // It currently lands in `Rejected`, because the budget running out
+        // makes the gated edge fail to settle and the fold reports an
+        // ordinary state mismatch. @lal-bot-coasys argues on this PR that
+        // this is the wrong bucket and should be `Undecidable`: the same
+        // bytes verify for a reader handed the sub-receipt directly, so
+        // "I could not reach that far from where I stand" is a finding about
+        // the reader, not about the material — the very distinction #1075
+        // put in the type two commits ago.
+        //
+        // I think that argument is right, and fixing it means threading
+        // budget exhaustion out of the fold into a verdict of its own rather
+        // than renaming a bucket, which is more than this PR should carry.
+        // So this test pins the property that must never regress — the
+        // over-cap chain does NOT verify, fail-closed — and leaves the
+        // bucketing to the follow-up, rather than pinning today's answer as
+        // the contract and making the test the reason it can't change.
+        assert_ne!(
+            verdict.outcome(),
+            VerdictKind::Verified,
             "running out of budget must DENY the grant, never allow it — got: {verdict}"
-        );
-        assert!(
-            verdict.is_rejected(),
-            "and deny it as a finding about the material: the depth limit is a constant every \
-             replica shares, so syncing more definitions cannot change this answer — got: \
-             {verdict}"
         );
 
         let inner = verify_receipt_within(GrantContext::root(&cat), &nested, Some(ROLE_INSTANCE));
