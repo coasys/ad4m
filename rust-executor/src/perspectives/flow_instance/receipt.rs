@@ -40,10 +40,13 @@
 //!
 //! # What is NOT here
 //!
-//! - **The verifier.** `verify_receipt` and `ReceiptVerdict` are the next PR.
-//!   This module mints, and mint-time validation is written so that what it
-//!   produces is exactly what that verifier will accept: an asymmetric rule
-//!   would mint receipts that fail their own verification.
+//! - **The verifier.** [`verify_receipt`](super::verify::verify_receipt) and
+//!   [`ReceiptVerdict`](super::verify::ReceiptVerdict) live in
+//!   [`super::verify`]. Mint-time validation is written so that what it
+//!   produces is exactly what that verifier accepts: an asymmetric rule would
+//!   mint receipts that fail their own verification. The two sides share
+//!   [`ReadSet::reverified`](super::ReadSet::reverified) — the ingest seam —
+//!   and both fold [`fold_read_set`](super::fold_read_set) over its result.
 //! - **Revocation.** Completion is a ratchet. Retracting a settling vote
 //!   moves the *flow* back by design, and the receipt freezes the links as
 //!   they stood — receipt and live fold then disagree, deliberately. A
@@ -275,7 +278,10 @@ impl FlowReceipt {
             );
         }
 
-        let derived = fold_read_set(flow, &read_set)?;
+        // Through the ingest seam, exactly as `verify_receipt` does. Minting
+        // on the raw value and verifying on the re-verified one would fold
+        // different inputs by construction — see `ReadSet::reverified`.
+        let derived = fold_read_set(flow, &read_set.reverified())?;
         if let Some(contested) = derived.contested {
             anyhow::bail!(
                 "FlowReceipt::mint: {} is contested in `{}` ({} settled edges out of it), so it \
@@ -364,7 +370,10 @@ impl FlowReceipt {
     /// Such a field needs either the seal widened to cover it or the dedupe
     /// key widened to include it — not a third `CountedAtom` member.
     pub fn counted_seals(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<CountedAtom>> {
-        let derived = fold_read_set(flow, read_set)?;
+        // Same ingest as `mint` and `verify_receipt`: the atoms this walks
+        // must be the atoms that walk counted.
+        let read_set = read_set.reverified();
+        let derived = fold_read_set(flow, &read_set)?;
         let counted: std::collections::BTreeSet<&str> = derived
             .settled
             .iter()
@@ -408,8 +417,15 @@ pub struct CountedAtom {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::flow_instance::atom::fixtures::{honest_proposal, ALICE, BOB, T1, T2};
+    use crate::perspectives::flow_instance::atom::fixtures::{did_of, signed_proposal, T1, T2};
     use crate::perspectives::flow_instance::ProposalLinks;
+
+    /// Persona names rather than DIDs: every proposal below is now signed for
+    /// real, because `mint` folds through
+    /// [`ReadSet::reverified`](crate::perspectives::flow_instance::ReadSet::reverified)
+    /// and a `did:key:alice` placeholder signs nothing.
+    const ALICE: &str = "alice";
+    const BOB: &str = "bob";
 
     const INSTANCE: &str = "ad4m://flow/instance/i1";
     const BASE: &str = "ad4m://task/t1";
@@ -439,7 +455,8 @@ mod tests {
     }
 
     /// One proposal, self-proposed and therefore self-voted: under the
-    /// default `{ n: 1 }` rule that is a settled edge.
+    /// default `{ n: 1 }` rule that is a settled edge. `proposer` is a
+    /// persona *name*; the links are signed with that persona's real key.
     fn proposal(
         uri: &str,
         proposer: &str,
@@ -450,7 +467,7 @@ mod tests {
     ) -> ProposalLinks {
         ProposalLinks {
             uri: uri.to_string(),
-            links: honest_proposal(proposer, from, to, seal, at),
+            links: signed_proposal(uri, proposer, from, to, seal, at),
         }
     }
 
@@ -847,6 +864,6 @@ mod tests {
             "one entry per distinct counted seal, and nothing for an edge the walk never took"
         );
         assert_eq!(counted[0].to_state, "done");
-        assert_eq!(counted[0].proposer, ALICE);
+        assert_eq!(counted[0].proposer, did_of(ALICE));
     }
 }
