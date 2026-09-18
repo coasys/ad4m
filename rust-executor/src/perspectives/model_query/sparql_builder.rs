@@ -13,6 +13,7 @@
 //! [`build_count_sparql`] (lightweight `COUNT`).  Both delegate to
 //! [`build_query_patterns`] for the shared conformance + where logic.
 
+use crate::perspectives::link_visibility::{viewer_author_filter, viewer_triple_filter};
 use serde_json::Value;
 
 use std::collections::BTreeMap;
@@ -103,6 +104,7 @@ pub(super) fn build_instance_sparql(
     query: &ModelQueryInput,
     sparql_pagination: Option<&SparqlPagination>,
     resolver: Option<&dyn ShapeResolver>,
+    viewer_did: Option<&str>,
 ) -> InstanceQueryPlan {
     let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
 
@@ -234,6 +236,12 @@ pub(super) fn build_instance_sparql(
         }
     } else {
         let local_status = local_status_filter(shape);
+        // Two independent restrictions that happen to read the same reified
+        // annotations: `local_status` is about the *shape* (is this link's
+        // status right for a property the class declared local?), `viewer`
+        // is about the *requesting agent* (may it see a Local link at all?).
+        // A row must pass both.
+        let viewer = viewer_author_filter(viewer_did, "_reifier", "author");
         InstanceQueryPlan::Single(format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
@@ -243,7 +251,7 @@ pub(super) fn build_instance_sparql(
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{local_status}}}"#
+{local_status}{viewer}}}"#
         ))
     }
 }
@@ -288,6 +296,7 @@ pub(super) fn build_count_sparql(
     shape: &ModelShape,
     query: &ModelQueryInput,
     resolver: Option<&dyn ShapeResolver>,
+    viewer_did: Option<&str>,
 ) -> Option<String> {
     let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
 
@@ -295,12 +304,31 @@ pub(super) fn build_count_sparql(
         return None;
     }
 
+    let visibility = count_visibility_guard(viewer_did);
+
     Some(format!(
         r#"SELECT (COUNT(DISTINCT ?source) AS ?cnt) WHERE {{
 {conformance}
 {where_extra}
-}}"#
+{visibility}}}"#
     ))
+}
+
+/// Keep `total_count` in step with what the viewer can actually hydrate.
+///
+/// Conformance patterns match raw triples, which carry no author — so without
+/// this, an instance built entirely out of another user's `Local` links would
+/// be counted but never returned, leaking its existence through the count.
+/// The guard requires at least one link on the instance that the viewer may
+/// see, which is the same condition under which hydration emits it.
+///
+/// Empty in executor scope, leaving the generated query byte-identical.
+fn count_visibility_guard(viewer_did: Option<&str>) -> String {
+    let viewer = viewer_triple_filter(viewer_did, "?source ?_cnt_pred ?_cnt_obj");
+    if viewer.is_empty() {
+        return String::new();
+    }
+    format!("    ?source ?_cnt_pred ?_cnt_obj .\n{viewer}")
 }
 
 /// Check whether **all** where-clause conditions can be pushed into SPARQL.
@@ -1189,7 +1217,7 @@ mod tests {
     }
 
     fn pagination_subquery(shape: &ModelShape, pg: &SparqlPagination) -> String {
-        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None) {
+        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None, None) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -1313,7 +1341,7 @@ mod tests {
     #[test]
     fn flag_initial_that_is_not_an_iri_takes_the_str_fallback() {
         let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, None);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
@@ -1328,7 +1356,7 @@ mod tests {
         );
         // And an initial that IS a real IRI keeps the seekable form.
         let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, None);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),

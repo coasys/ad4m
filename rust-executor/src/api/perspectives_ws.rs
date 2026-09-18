@@ -286,6 +286,18 @@ async fn get_perspective_handler(
     Ok(serde_json::to_value(handle)?)
 }
 
+/// Visibility scope for a request on this surface.
+///
+/// Every handler below serves a request on behalf of an agent, so reads go
+/// through the `*_for_viewer` entry points with this DID rather than the
+/// executor-scoped ones. See
+/// [`link_visibility`](crate::perspectives::link_visibility).
+fn viewer_did(ctx: &RequestContext) -> Result<Option<String>, WsRpcError> {
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    crate::perspectives::link_visibility::viewer_did_for_context(&agent_context)
+        .map_err(|e| WsRpcError::internal(e.to_string()))
+}
+
 async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -300,15 +312,19 @@ async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         Err(e) if e.code == 403 || e.code == 404 => return Ok(Value::Null),
         Err(e) => return Err(e),
     };
+    let viewer = viewer_did(&ctx)?;
     let links = perspective
-        .get_links(&LinkQuery {
-            source: None,
-            target: None,
-            predicate: None,
-            from_date: None,
-            until_date: None,
-            limit: None,
-        })
+        .get_links_for_viewer(
+            &LinkQuery {
+                source: None,
+                target: None,
+                predicate: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            },
+            viewer.as_deref(),
+        )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(crate::types::domain::Perspective {
@@ -356,8 +372,9 @@ async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             .map(|v| v as i32),
     };
 
+    let viewer = viewer_did(&ctx)?;
     let links = perspective
-        .get_links(&query)
+        .get_links_for_viewer(&query, viewer.as_deref())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(links)?)
@@ -1149,11 +1166,12 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     let query_json = params.require_str("query_json")?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let viewer = viewer_did(&ctx)?;
 
     // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query(&class_name, &query_json),
+        perspective.model_query_for_viewer(&class_name, &query_json, viewer.as_deref()),
     )
     .await;
 

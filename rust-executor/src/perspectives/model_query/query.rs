@@ -20,6 +20,7 @@ use super::types::{
     ShapeResolver, SortKey, SparqlPagination,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
+use crate::perspectives::link_visibility::viewer_author_filter;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::Error;
 use serde_json::Value;
@@ -37,13 +38,19 @@ use serde_json::Value;
 /// * `resolver` — Used to resolve target-class shapes for recursive
 ///   `include` resolution.  Typically a cache-backed resolver living on
 ///   the `PerspectiveInstance`.
+/// * `viewer_did` — Visibility scope of the read. `None` is executor scope
+///   (every link); `Some(did)` hides `Local` links authored by anyone else.
+///   See [`link_visibility`](crate::perspectives::link_visibility). The scope
+///   is carried through include recursion and projections, so a relation
+///   cannot be used to walk into another user's private links.
 pub async fn execute_model_query(
     store: &SparqlStore,
     shape: &ModelShape,
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
+    viewer_did: Option<&str>,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(store, shape, query_input, resolver, 0).await
+    execute_model_query_inner(store, shape, query_input, resolver, 0, viewer_did).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -57,6 +64,7 @@ pub(super) async fn execute_model_query_inner(
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    viewer_did: Option<&str>,
 ) -> Result<ModelQueryResult, Error> {
     if depth > MAX_INCLUDE_DEPTH {
         log::warn!(
@@ -73,7 +81,7 @@ pub(super) async fn execute_model_query_inner(
     // Fast path: COUNT-only
     let is_count_only = query_input.limit == Some(0);
     if is_count_only && all_where_pushable(query_input, shape, Some(resolver)) {
-        if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
+        if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver), viewer_did) {
             let result_json = store.query(&sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
@@ -236,6 +244,7 @@ pub(super) async fn execute_model_query_inner(
         query_input,
         sparql_pagination.as_ref(),
         Some(resolver),
+        viewer_did,
     );
 
     // Captures the source IRI order returned by the phase-1 pagination subquery
@@ -275,6 +284,12 @@ pub(super) async fn execute_model_query_inner(
                 } else {
                     let source_constraint = values_or_str_filter("source", &source_ids);
                     let local_status = local_status_filter(shape);
+                    // Phase 1 pages over conformance triples, which carry no
+                    // author, so it can hand us sources whose links the viewer
+                    // may not see. Filtering here means those sources hydrate
+                    // to nothing and drop out, rather than surfacing another
+                    // user's private link rows.
+                    let viewer = viewer_author_filter(viewer_did, "_reifier", "author");
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}
@@ -283,7 +298,7 @@ pub(super) async fn execute_model_query_inner(
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{local_status}}}"#
+{local_status}{viewer}}}"#
                     );
                     let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
@@ -326,7 +341,7 @@ pub(super) async fn execute_model_query_inner(
         .map(|p| (p.name.clone(), p.predicate.clone(), p.is_scalar_relation))
         .collect();
     if !reverse_rels.is_empty() && !instances.is_empty() {
-        resolve_reverse_relations(store, &mut instances, &reverse_rels)?;
+        resolve_reverse_relations(store, &mut instances, &reverse_rels, viewer_did)?;
     }
 
     // Apply post-hydration where-clause filters
@@ -338,7 +353,9 @@ pub(super) async fn execute_model_query_inner(
 
     // Calculate total count
     let total_count = if sparql_pagination.is_some() {
-        if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
+        if let Some(count_sparql) =
+            build_count_sparql(shape, query_input, Some(resolver), viewer_did)
+        {
             let result_json = store.query(&count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
@@ -399,8 +416,16 @@ pub(super) async fn execute_model_query_inner(
     // Eager-load included relations
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
-            resolve_includes_recursive(store, &mut paginated, include, shape, resolver, depth)
-                .await?;
+            resolve_includes_recursive(
+                store,
+                &mut paginated,
+                include,
+                shape,
+                resolver,
+                depth,
+                viewer_did,
+            )
+            .await?;
         }
     }
 
@@ -431,6 +456,7 @@ pub(super) async fn execute_model_query_inner(
             shape,
             resolver,
             depth,
+            viewer_did,
         )
         .await?;
     }

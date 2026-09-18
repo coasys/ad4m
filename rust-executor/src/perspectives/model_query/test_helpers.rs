@@ -172,8 +172,20 @@ pub async fn execute_model_query_from_json(
     query_input: &super::types::ModelQueryInput,
     shape_json: &str,
 ) -> Result<super::types::ModelQueryResult, Error> {
+    execute_model_query_from_json_for_viewer(store, class_name, query_input, shape_json, None).await
+}
+
+/// [`execute_model_query_from_json`] in the visibility scope of `viewer_did`.
+pub async fn execute_model_query_from_json_for_viewer(
+    store: &crate::perspectives::sparql_store::SparqlStore,
+    class_name: &str,
+    query_input: &super::types::ModelQueryInput,
+    shape_json: &str,
+    viewer_did: Option<&str>,
+) -> Result<super::types::ModelQueryResult, Error> {
     let (resolver, shape) = StaticShapeResolver::from_json(class_name, shape_json)?;
-    super::query::execute_model_query(store, shape.as_ref(), query_input, &resolver).await
+    super::query::execute_model_query(store, shape.as_ref(), query_input, &resolver, viewer_did)
+        .await
 }
 
 /// Test wrapper for `evaluate_getters_batch` that takes shape JSON.

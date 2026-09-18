@@ -148,7 +148,14 @@ impl Ad4mMcpHandler {
             Ok(uri) => uri,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
+        // Reads made while serving this tool call stay in the calling
+        // agent's visibility scope (issue #1024).
+        let viewer =
+            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
+                Ok(v) => v,
+                Err(e) => return error_json(e.to_string()),
+            };
+        match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {}
             Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
@@ -261,7 +268,7 @@ impl Ad4mMcpHandler {
         params: Parameters<InstanceRemoveFromCollectionParams>,
     ) -> String {
         let p = &params.0;
-        let (mut perspective, _agent_context) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(&p.perspective_id).await {
                 Ok(v) => v,
                 Err(e) => return e,
@@ -281,7 +288,14 @@ impl Ad4mMcpHandler {
             Ok(uri) => uri,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
+        // Reads made while serving this tool call stay in the calling
+        // agent's visibility scope (issue #1024).
+        let viewer =
+            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
+                Ok(v) => v,
+                Err(e) => return error_json(e.to_string()),
+            };
+        match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {}
             Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),

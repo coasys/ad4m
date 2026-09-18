@@ -50,6 +50,24 @@ fn make_link_with_status(
     link
 }
 
+/// `make_link` signed by a named author, with an explicit [`LinkStatus`].
+///
+/// The multi-tenancy tests turn on *who signed a link*, which every other
+/// helper here fixes to one DID.
+fn make_link_by(
+    author: &str,
+    source: &str,
+    predicate: &str,
+    target: &str,
+    ts: &str,
+    status: crate::types::LinkStatus,
+) -> DecoratedLinkExpression {
+    let mut link = make_link(source, predicate, target, ts);
+    link.author = author.to_string();
+    link.status = Some(status);
+    link
+}
+
 const LOCAL_CACHE_SHAPE_JSON: &str = r#"{
     "className": "Cache",
     "properties": {
@@ -157,6 +175,159 @@ async fn local_property_hydrates_only_from_local_links() {
         result2.instances[0]["state"],
         json!("warm"),
         "a Local link on a local predicate must hydrate normally"
+    );
+}
+
+/// Two managed users on ONE executor must not see each other's Local links.
+///
+/// This is the whole of issue #1024. `LinkStatus::Local` means "not replicated
+/// by the link language", which on a single-user executor coincides with
+/// "private to me". On a multi-user executor it does not: managed users who
+/// join the same neighbourhood co-own one `PerspectiveInstance` backed by a
+/// single row set, so before this change a Local link written by Alice was
+/// fully readable by Bob on the same node. It was hidden only from *other*
+/// executors.
+///
+/// The shape's `state` property is declared `local: true`, so both agents write
+/// it as a Local link. The `type` flag is Shared and is what keeps both
+/// instances discoverable to both viewers — the test would be vacuous if the
+/// instances themselves vanished, because then it would be proving that
+/// filtering hides rows rather than that it hides the right field.
+#[tokio::test]
+async fn local_links_are_private_per_user_on_one_executor() {
+    use crate::types::LinkStatus;
+
+    const ALICE: &str = "did:key:z6MkAlice";
+    const BOB: &str = "did:key:z6MkBob";
+
+    let store = SparqlStore::new(None).unwrap();
+
+    // Alice's instance: discoverable by everyone, private state authored by Alice.
+    let alice_base = "literal:string:cache_alice";
+    store
+        .add_link(&make_link_by(
+            ALICE,
+            alice_base,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000000",
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link_by(
+            ALICE,
+            alice_base,
+            "cache://state",
+            "literal:string:alice_secret",
+            "1700000000001",
+            LinkStatus::Local,
+        ))
+        .unwrap();
+
+    // Bob's instance, same perspective, same shape.
+    let bob_base = "literal:string:cache_bob";
+    store
+        .add_link(&make_link_by(
+            BOB,
+            bob_base,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000002",
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link_by(
+            BOB,
+            bob_base,
+            "cache://state",
+            "literal:string:bob_secret",
+            "1700000000003",
+            LinkStatus::Local,
+        ))
+        .unwrap();
+
+    let state_of = |res: &super::types::ModelQueryResult, base: &str| -> Value {
+        res.instances
+            .iter()
+            .find(|i| i["id"].as_str() == Some(base))
+            .unwrap_or_else(|| panic!("instance {base} missing from result"))["state"]
+            .clone()
+    };
+
+    // ── Alice's view ────────────────────────────────────────────────────────
+    let as_alice = super::test_helpers::execute_model_query_from_json_for_viewer(
+        &store,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+        Some(ALICE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        as_alice.instances.len(),
+        2,
+        "both instances stay discoverable: the Shared type flag is not filtered"
+    );
+    assert_eq!(
+        state_of(&as_alice, alice_base),
+        json!("alice_secret"),
+        "Alice must still read her own Local link"
+    );
+    assert!(
+        state_of(&as_alice, bob_base).is_null(),
+        "Alice must NOT read Bob's Local link — this is issue #1024"
+    );
+
+    // ── Bob's view: the mirror image ────────────────────────────────────────
+    let as_bob = super::test_helpers::execute_model_query_from_json_for_viewer(
+        &store,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+        Some(BOB),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(as_bob.instances.len(), 2);
+    assert_eq!(
+        state_of(&as_bob, bob_base),
+        json!("bob_secret"),
+        "Bob must still read his own Local link"
+    );
+    assert!(
+        state_of(&as_bob, alice_base).is_null(),
+        "Bob must NOT read Alice's Local link"
+    );
+
+    // ── Executor scope still sees everything ────────────────────────────────
+    // The flow engine's `currentState` cache and the auto-processor read in
+    // this scope. If filtering leaked into it, those would silently stop
+    // seeing their own derivations.
+    let as_executor = super::test_helpers::execute_model_query_from_json_for_viewer(
+        &store,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(as_executor.instances.len(), 2);
+    assert_eq!(
+        state_of(&as_executor, alice_base),
+        json!("alice_secret"),
+        "executor scope reads every Local link"
+    );
+    assert_eq!(
+        state_of(&as_executor, bob_base),
+        json!("bob_secret"),
+        "executor scope reads every Local link"
     );
 }
 
@@ -842,9 +1013,17 @@ async fn test_resolve_projections_count() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -888,9 +1067,17 @@ async fn test_resolve_projections_list() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let items = instances[0]["$items"]
@@ -933,9 +1120,17 @@ async fn test_resolve_projections_scalar() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let val = &instances[0]["$firstItem"];
@@ -970,9 +1165,17 @@ async fn test_resolve_projections_count_zero_when_no_links() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -1037,9 +1240,17 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
@@ -1101,9 +1312,17 @@ async fn test_resolve_projections_where_filter_by_author() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
@@ -2828,7 +3047,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -2862,7 +3081,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -2896,7 +3115,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -2927,7 +3146,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -2943,7 +3162,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -2963,7 +3182,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -4366,9 +4585,17 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0)
-        .await
-        .unwrap();
+    resolve_projections(
+        &store,
+        &mut instances,
+        &projections,
+        &shape,
+        &resolver,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
 
     let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -4391,9 +4618,17 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0)
-        .await
-        .unwrap();
+    resolve_projections(
+        &store,
+        &mut instances2,
+        &projections2,
+        &shape,
+        &resolver,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
 
     let got = &instances2[0]["$myLikeSignal"];
     assert_eq!(
@@ -4729,6 +4964,7 @@ async fn test_sort_by_relation_property_asc() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -4804,6 +5040,7 @@ async fn test_sort_by_relation_property_desc() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -4897,6 +5134,7 @@ async fn test_sort_by_relation_property_with_signed_envelope_literal() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -5002,6 +5240,7 @@ async fn test_sort_by_relation_property_with_missing_relation() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -5347,7 +5586,7 @@ async fn test_model_query_from_js_wire_format() {
     eprintln!("[wire] parsed query: {:?}", query_input);
 
     let (resolver, shape) = StaticShapeResolver::from_json("TestPost", shape_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
         .await
         .unwrap();
     assert_eq!(
@@ -5362,7 +5601,7 @@ async fn test_model_query_from_js_wire_format() {
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
     eprintln!("[wire] parsed not query: {:?}", query_input);
 
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
         .await
         .unwrap();
     assert_eq!(
@@ -5375,7 +5614,7 @@ async fn test_model_query_from_js_wire_format() {
     // between from JS wire format
     let wire_json = r#"{"where": {"viewCount": {"between": [20, 40]}}, "deepQuery": true}"#;
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
         .await
         .unwrap();
     assert_eq!(
@@ -6252,6 +6491,7 @@ async fn test_relation_quantifiers_filter_by_linked_records() {
         post_shape.as_ref(),
         &quantifier(None, Some(BTreeMap::new())),
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -6263,6 +6503,7 @@ async fn test_relation_quantifiers_filter_by_linked_records() {
         post_shape.as_ref(),
         &quantifier(Some(BTreeMap::new()), None),
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -6284,6 +6525,7 @@ async fn test_relation_quantifiers_filter_by_linked_records() {
             None,
         ),
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -6521,7 +6763,7 @@ async fn test_relation_quantifier_requires_the_target_class() {
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(&store, &post_shape, &query, &resolver)
+    let result = super::query::execute_model_query(&store, &post_shape, &query, &resolver, None)
         .await
         .unwrap();
 
@@ -6657,10 +6899,15 @@ async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
         ..Default::default()
     };
 
-    let result =
-        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
-            .await
-            .unwrap();
+    let result = super::query::execute_model_query(
+        &store,
+        collection_shape.as_ref(),
+        &query,
+        &resolver,
+        None,
+    )
+    .await
+    .unwrap();
 
     let children = result.instances[0]["children"].as_array().unwrap();
     assert_eq!(children.len(), 2, "both children hydrate");
@@ -6783,10 +7030,15 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
         ..Default::default()
     };
 
-    let result =
-        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
-            .await
-            .unwrap();
+    let result = super::query::execute_model_query(
+        &store,
+        collection_shape.as_ref(),
+        &query,
+        &resolver,
+        None,
+    )
+    .await
+    .unwrap();
 
     let children = result.instances[0]["children"].as_array().unwrap();
     assert_eq!(children.len(), 1, "one link, one child");
@@ -6906,10 +7158,15 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
         ..Default::default()
     };
 
-    let result =
-        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
-            .await
-            .unwrap();
+    let result = super::query::execute_model_query(
+        &store,
+        collection_shape.as_ref(),
+        &query,
+        &resolver,
+        None,
+    )
+    .await
+    .unwrap();
 
     let children = result.instances[0]["children"].as_array().unwrap();
     // The point of the test: two readings, one link, one member. Hydrating the
@@ -6998,10 +7255,15 @@ async fn test_limit_on_a_polymorphic_include_is_rejected() {
         ..Default::default()
     };
 
-    let err =
-        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
-            .await
-            .expect_err("a limit that cannot be honoured must not be dropped in silence");
+    let err = super::query::execute_model_query(
+        &store,
+        collection_shape.as_ref(),
+        &query,
+        &resolver,
+        None,
+    )
+    .await
+    .expect_err("a limit that cannot be honoured must not be dropped in silence");
     let msg = err.to_string();
     assert!(msg.contains("children"), "names the relation: {msg}");
     assert!(msg.contains("limit"), "names what was refused: {msg}");
@@ -7105,9 +7367,10 @@ async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
-        .await
-        .unwrap();
+    let result =
+        super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver, None)
+            .await
+            .unwrap();
 
     let entries = result.instances[0]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
@@ -7223,9 +7486,10 @@ async fn test_preferring_classes_does_not_drop_the_ones_not_named() {
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
-        .await
-        .unwrap();
+    let result =
+        super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver, None)
+            .await
+            .unwrap();
 
     let entries = result.instances[0]["entries"].as_array().unwrap();
     assert_eq!(
@@ -7291,9 +7555,10 @@ async fn test_limit_on_a_polymorphic_include_is_rejected_even_with_no_targets() 
             ..Default::default()
         };
 
-        let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
-            .await
-            .expect_err("an empty relation must not make an unanswerable query answerable");
+        let err =
+            super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver, None)
+                .await
+                .expect_err("an empty relation must not make an unanswerable query answerable");
         let msg = err.to_string();
         assert!(msg.contains(relation), "names the relation: {msg}");
         assert!(msg.contains("offset"), "names what was refused: {msg}");
@@ -7331,7 +7596,7 @@ async fn test_untyped_include_without_polymorphic_explains_itself() {
         ..Default::default()
     };
 
-    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver, None)
         .await
         .expect_err("must not silently succeed");
     let msg = err.to_string();
@@ -7451,9 +7716,10 @@ async fn test_polymorphic_reverse_include_hydrates_each_source_as_its_own_class(
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(&store, block_shape.as_ref(), &query, &resolver)
-        .await
-        .unwrap();
+    let result =
+        super::query::execute_model_query(&store, block_shape.as_ref(), &query, &resolver, None)
+            .await
+            .unwrap();
 
     let containers = result.instances[0]["containers"].as_array().unwrap();
     assert_eq!(containers.len(), 2, "both containers hydrate");
@@ -7512,7 +7778,7 @@ async fn test_untyped_reverse_include_without_polymorphic_explains_itself() {
         ..Default::default()
     };
 
-    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver, None)
         .await
         .expect_err("must not silently succeed");
     let msg = err.to_string();
