@@ -149,6 +149,22 @@ use std::collections::HashMap;
 /// material it already holds. See the module header, § *Why there is a depth
 /// cap* — this bounds a tree, not a byte count, and it is a crate constant
 /// every replica shares so that mint and verify reach the same answer.
+///
+/// **The value `4` is a judgement call, and nothing here measured it.** The
+/// 2^N argument in the module header establishes that the tree must be
+/// bounded; it does not select a bound, and no fold-cost benchmark was run to
+/// pick this one. What it rests on is that no flow composition anybody has
+/// asked for nests grants more than a level or two, so `4` leaves room
+/// without being a number a reader has to trust. Stated plainly because the
+/// paragraph above it argues well enough for *a* cap that it could be
+/// mistaken for an argument for *this* cap.
+///
+/// What would change it is evidence, and of two different kinds: a real
+/// composition that legitimately needs more depth, or a measured fold cost
+/// showing `4` is already too expensive. Note that the first would not
+/// justify raising the constant — per the module header, verification is not
+/// compositional past the cap, so the fix for legitimate depth is memoisation
+/// by receipt URI. Raising the number only moves where the same cliff sits.
 pub const MAX_GRANT_DEPTH: usize = 4;
 
 /// What a reader needs to decide a `grantedByFlow` gate: the definitions to
@@ -327,7 +343,9 @@ mod tests {
     };
     use crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
     use crate::perspectives::flow_instance::fold_read_set;
-    use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
+    use crate::perspectives::flow_instance::roles::{
+        RoleGrant, RoleGrantEvidence, RoleGrantWindow, RoleInstanceHistory,
+    };
     use crate::perspectives::flow_instance::verify::VerdictKind;
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
     use crate::perspectives::shacl_parser::ModelQueryCount;
@@ -497,6 +515,52 @@ mod tests {
             &cat,
         );
         (receipt, gated, cat)
+    }
+
+    /// A second role instance for the same DID. One agent, two matched
+    /// instances, is the shape every other fixture here is missing: with a
+    /// single instance the loop in `resolve` has nothing to bind *per*
+    /// instance, so "each instance gets the receipt that names it" and "every
+    /// instance gets whichever receipt resolved first" are the same answer.
+    const ROLE_INSTANCE_2: &str = "ad4m://role/reviewer/r1";
+
+    /// Two matched instances for Alice, each carrying exactly the receipts
+    /// given for it. Per-instance contents are otherwise identical to
+    /// [`evidence`]: a genuine assignment link and a parseable instance
+    /// timestamp, both of which a `grantedByFlow` gate must ignore.
+    fn evidence_two(first: Vec<FlowReceipt>, second: Vec<FlowReceipt>) -> Vec<RoleGrantEvidence> {
+        let instance = |id: &str, receipts: Vec<FlowReceipt>| RoleInstanceHistory {
+            instance_id: id.into(),
+            grant_links: vec![signed_link(
+                id,
+                "agent",
+                did_of(ALICE),
+                "admin",
+                true,
+                None,
+                ASSIGNMENT_LINK_AT,
+            )],
+            revocation_links: Vec::new(),
+            asserted_instance_timestamp: Some(ASSIGNMENT_LINK_AT.into()),
+            granting_receipts: receipts,
+        };
+        vec![RoleGrantEvidence {
+            to_state: "done".into(),
+            role_class: ROLE.into(),
+            did: did_of(ALICE).into(),
+            instances: vec![
+                instance(ROLE_INSTANCE, first),
+                instance(ROLE_INSTANCE_2, second),
+            ],
+        }]
+    }
+
+    /// The window for one instance, looked up by `instance_id` rather than by
+    /// position: `resolve` happens to push in instance order today, and a
+    /// test that silently depended on that would start asserting about the
+    /// wrong instance the day it stopped.
+    fn window_for<'w>(view: &'w RoleGrant, instance_id: &str) -> Option<&'w RoleGrantWindow> {
+        view.windows.iter().find(|w| w.instance_id == instance_id)
     }
 
     // ---- the grant itself --------------------------------------------------
@@ -685,6 +749,27 @@ mod tests {
     /// the wrong operand for the threat model, which is that the artifact
     /// arrives carrying whatever its sender chose. The operand was the real
     /// gap; the exploit that motivated it was not one.
+    ///
+    /// # Arity
+    ///
+    /// The last two cases exist because `outputs` is a `Vec` **by design** —
+    /// one completed run granting several roles at once is the ordinary case
+    /// for this feature, not an exotic one. With only arity 0 and 1 covered,
+    /// every behaviour on a multi-output receipt was unconstrained in both
+    /// directions, and two mutants lived there:
+    ///
+    /// ```text
+    /// outputs.contains(node) || outputs.len() >= 2   // two strangers grant anybody
+    /// outputs.first() == Some(node)                  // named second, silently dropped
+    /// ```
+    ///
+    /// The first is a forgery, the second a false negative, and neither is
+    /// visible to a fixture that never builds a receipt naming two things.
+    /// `names the node among others` therefore names it **second**, which is
+    /// what separates `contains` from `first()`.
+    ///
+    /// Raised by @lal-bot-coasys in the same review as the operand finding
+    /// above, after the first fix landed.
     #[test]
     fn the_receipt_must_name_the_node_it_is_reached_from() {
         let granting = granting_flow("Onboarding");
@@ -715,6 +800,26 @@ mod tests {
                 0,
             ),
             ("names nothing at all", Vec::new(), 0),
+            // Arity ≥ 2. `outputs` is plural by design — one completion
+            // granting several roles at once is the ordinary case for this
+            // feature — and with only arity 0 and 1 above, every behaviour on
+            // a multi-output receipt is unconstrained in BOTH directions.
+            (
+                "names the node among others",
+                vec![
+                    "ad4m://role/reviewer/somebody-else".to_string(),
+                    ROLE_INSTANCE.to_string(),
+                ],
+                1,
+            ),
+            (
+                "names several nodes, none of them this one",
+                vec![
+                    "ad4m://role/reviewer/other-a".to_string(),
+                    "ad4m://role/reviewer/other-b".to_string(),
+                ],
+                0,
+            ),
         ] {
             let ev = evidence(vec![claiming(outputs)], Vec::new());
             assert_eq!(
@@ -727,8 +832,9 @@ mod tests {
                     .windows
                     .len(),
                 expected,
-                "{label}: a receipt grants exactly the nodes it names — and one that names \
-                 nothing grants nothing, rather than everything"
+                "{label}: a receipt grants exactly the nodes it names, however many that is \
+                 — one naming nothing grants nothing rather than everything, and one naming \
+                 several grants each of them and only them"
             );
         }
 
@@ -749,6 +855,142 @@ mod tests {
             ),
             "a receipt naming nothing, reached from a node, is unbound to THAT node — the \
              binding check answers first and `NoOutputs` is not what should speak here"
+        );
+
+        // And for the multi-output case, where `NoOutputs` cannot be standing
+        // in: a receipt naming two nodes, neither of them this one, is
+        // `OutputUnbound` and nothing else.
+        assert!(
+            matches!(
+                verify_receipt_within(
+                    GrantContext::root(&cat),
+                    &claiming(vec![
+                        "ad4m://role/reviewer/other-a".to_string(),
+                        "ad4m://role/reviewer/other-b".to_string(),
+                    ]),
+                    Some(ROLE_INSTANCE)
+                ),
+                ReceiptVerdict::OutputUnbound { .. }
+            ),
+            "a receipt that speaks for two other nodes is unbound to this one"
+        );
+    }
+
+    /// The binding is **per instance**, not per candidate: two matched
+    /// instances of the same role for the same agent, each carrying a receipt
+    /// that names only the *other* one. Neither is granted.
+    ///
+    /// Every other fixture in this module is single-instance, which makes
+    /// them all blind to this. The two tests above prove the binding is read
+    /// and that it is read against the node the receipt was reached from —
+    /// but with one instance in the evidence, "bind each instance to a
+    /// receipt that names it" and "bind every instance to whichever receipt
+    /// resolved first" produce identical answers on every one of them.
+    ///
+    /// The regression this guards reads as an **optimisation**. Receipt
+    /// verification is the expensive part of `resolve` — signatures, DNA
+    /// hash, replay, recursion — and the gate names one flow and one terminal
+    /// state, so hoisting `granted_by_flow_at` out of the per-instance loop in
+    /// `roles.rs`, resolving once over everything the evidence carries and
+    /// reusing the result, looks like free work saved. It keeps every existing
+    /// fixture green. What it actually does is let a receipt naming instance A
+    /// grant instance B — the same defect the binding check exists to prevent,
+    /// one level up, now a property of the agent instead of the instance.
+    ///
+    /// Red with that hoist applied, and run rather than assumed: the pooled
+    /// resolution finds the receipt naming `ROLE_INSTANCE` (carried on
+    /// `ROLE_INSTANCE_2`), binds it to the first instance's id and hands the
+    /// answer to both — `windows` came back
+    /// `[(r0, T2), (r1, T2)]` where it must be empty.
+    ///
+    /// A **narrower** hoist — resolve for `instances[0]` only and reuse,
+    /// without pooling — survives that first half, because r0's own receipt
+    /// names r1 and so resolves to `None` for everybody. It is caught by the
+    /// positive control's per-instance dating instead: it hands `r1` the `T1`
+    /// of its sibling's run. That is why the two runs below settle at
+    /// deliberately different times and why the control asserts `granted_at`
+    /// per instance rather than just counting windows — a window count cannot
+    /// see it.
+    #[test]
+    fn a_receipt_does_not_grant_a_sibling_instance_of_the_same_role() {
+        let granting = granting_flow("Onboarding");
+        let gated = gated_flow("Delivery", gate(&granting.flow_uri(), "done"));
+        let cat = catalogue(vec![granting.clone(), gated]);
+        let gate_spec = spec(&granting.flow_uri(), "done");
+
+        // Each receipt is genuine, verifies, is for the right flow and the
+        // right ending — and names only the sibling instance. Crossed on
+        // purpose: the receipt sitting on r0 speaks for r1, and vice versa.
+        let names_second = receipt_for(
+            &granting,
+            read_set("done", T1, Vec::new()),
+            &[ROLE_INSTANCE_2],
+            &cat,
+        );
+        let names_first = receipt_for(
+            &granting,
+            read_set("done", T2, Vec::new()),
+            &[ROLE_INSTANCE],
+            &cat,
+        );
+
+        let crossed = evidence_two(vec![names_second], vec![names_first]);
+        let view = resolve(&crossed[0], Some(&gate_spec), &cat)
+            .expect("a candidate no receipt grants is not an error — it is not a member");
+        assert!(
+            view.windows.is_empty(),
+            "each instance carries a receipt for the OTHER one, so neither is granted; got \
+             windows {:?} — a receipt that grants a sibling is the binding check evaluated once \
+             for the agent instead of once per instance",
+            view.windows
+                .iter()
+                .map(|w| (&w.instance_id, &w.granted_at))
+                .collect::<Vec<_>>()
+        );
+
+        // The positive control, in the same fixture with the same two
+        // receipts: uncross them, so each instance carries the receipt that
+        // names it. Both are granted. Without this half the assertion above
+        // passes just as well against a resolver that grants nothing at all,
+        // which is the mirror three other tests in this arc turned out to be
+        // on first pass.
+        let uncrossed = evidence_two(
+            vec![receipt_for(
+                &granting,
+                read_set("done", T1, Vec::new()),
+                &[ROLE_INSTANCE],
+                &cat,
+            )],
+            vec![receipt_for(
+                &granting,
+                read_set("done", T2, Vec::new()),
+                &[ROLE_INSTANCE_2],
+                &cat,
+            )],
+        );
+        let view = resolve(&uncrossed[0], Some(&gate_spec), &cat).expect("resolves");
+        assert_eq!(
+            view.windows.len(),
+            2,
+            "both instances carry a receipt naming themselves, so both are granted"
+        );
+
+        // And each from **its own** receipt's quorum. The two runs settle at
+        // deliberately different times, which is what separates a real
+        // per-instance binding from one resolution reused for every instance:
+        // any hoisted variant hands both windows the same `granted_at` — the
+        // pooled one the earlier of the two, a first-instance-only one `T1` —
+        // and the count above cannot see that.
+        assert_eq!(
+            window_for(&view, ROLE_INSTANCE).map(|w| w.granted_at.as_str()),
+            Some(T1),
+            "`{ROLE_INSTANCE}` is dated from the run that granted IT"
+        );
+        assert_eq!(
+            window_for(&view, ROLE_INSTANCE_2).map(|w| w.granted_at.as_str()),
+            Some(T2),
+            "`{ROLE_INSTANCE_2}` is dated from the run that granted IT, not from its sibling's \
+             earlier quorum"
         );
     }
 
