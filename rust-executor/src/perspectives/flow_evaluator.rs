@@ -1447,7 +1447,7 @@ mod tests {
 
     #[test]
     fn to_url_emits_the_single_colon_spelling_target_names_did_expects() {
-        use ad4m_client::literal::{Literal, LiteralValue};
+        use ad4m_client::literal::Literal;
         let url = Literal::from_string("did:key:zAlice".to_string())
             .to_url()
             .expect("literal encode");
@@ -1608,7 +1608,7 @@ mod tests {
     /// make an unverified link count.
     #[test]
     fn grant_and_revocation_predicates_differ_only_on_the_signature_check() {
-        use ad4m_client::literal::{Literal, LiteralValue};
+        use ad4m_client::literal::Literal;
         let did = "did:key:alice";
         let did_literal = did_literal_url(did).unwrap();
         let other = Literal::from_string("did:key:bob".to_string())
