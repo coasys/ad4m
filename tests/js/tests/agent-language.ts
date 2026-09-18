@@ -1,4 +1,4 @@
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import { sleep } from '../utils/utils'
 import { expect } from "chai";
 

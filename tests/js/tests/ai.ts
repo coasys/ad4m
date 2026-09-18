@@ -1,4 +1,4 @@
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import { expect } from "chai";
 import fs from 'fs';
 //@ts-ignore

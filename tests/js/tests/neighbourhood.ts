@@ -1,5 +1,5 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import { sleep } from "../utils/utils";
 import { LinkLangConfig, publishLinkLanguage, pollUntil } from "../utils/linkLangConfig";
 import { expect } from "chai";
