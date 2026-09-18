@@ -607,7 +607,24 @@ describe('PerspectiveProxy.interpretationOverlays cache', () => {
     const first = await proxy.interpretationOverlays();
     const second = await proxy.interpretationOverlays();
     expect(first).toEqual(overlayA);
-    expect(second).toBe(first);
+    expect(second).toEqual(overlayA);
+    expect(second).not.toBe(first);
+    expect(calls).toBe(1);
+  });
+
+  it('a consumer mutating its result does not corrupt the cache',
+    async () => {
+    // Mutation that turns this red: `return this.#overlaysCache.result` (shared ref).
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return overlayA; }),
+    };
+    const proxy = createProxy(mockClient);
+
+    const first = await proxy.interpretationOverlays();
+    first.length = 0;
+    expect(await proxy.interpretationOverlays()).toEqual(overlayA);
     expect(calls).toBe(1);
   });
 
@@ -655,12 +672,33 @@ describe('PerspectiveProxy.interpretationOverlays cache', () => {
     // The caller still gets the result (it was in-flight), but the cache must stay empty
     expect(staleResult).toEqual(overlayA);
 
-    // Next call must hit the RPC again, not return the stale cached value
-    resolveFetch!(overlayB);
+    // Next call must hit the RPC again, not return the stale cached value.
+    // firstPromise has already settled — do not resolve it again.
     const freshPromise = proxy.interpretationOverlays();
     resolveFetch!(overlayB);
     expect(await freshPromise).toEqual(overlayB);
     expect(fetchCount).toBe(2);
+  });
+
+  it('coalesces concurrent cold-cache reads into one RPC', async () => {
+    // Mutation that turns this red: dropping #overlaysInFlight (each caller fires).
+    let resolveFetch: (v: any) => void;
+    let fetchCount = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => {
+        fetchCount++;
+        return new Promise(r => { resolveFetch = r; });
+      }),
+    };
+    const proxy = createProxy(mockClient);
+
+    const a = proxy.interpretationOverlays();
+    const b = proxy.interpretationOverlays();
+    resolveFetch!(overlayA);
+    expect(await a).toEqual(overlayA);
+    expect(await b).toEqual(overlayA);
+    expect(fetchCount).toBe(1);
   });
 
   it('acceptInterpretation clears cache and bumps generation', async () => {
@@ -687,5 +725,72 @@ describe('PerspectiveProxy.interpretationOverlays cache', () => {
     resolvers[1](overlayB);
     expect(await secondPromise).toEqual(overlayB);
     expect(resolvers.length).toBe(2);
+  });
+
+  it('does not keep a fetch that raced an in-flight accept', async () => {
+    // Mutation that turns this red: dropping the post-RPC invalidate in `finally`.
+    let resolveAccept: (v: boolean) => void;
+    const overlayResolvers: Array<(v: any) => void> = [];
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { overlayResolvers.push(r); })),
+      acceptInterpretation: jest.fn(() => new Promise<boolean>(r => { resolveAccept = r; })),
+    };
+    const proxy = createProxy(mockClient);
+
+    const acceptP = proxy.acceptInterpretation('we://task/1');
+    const during = proxy.interpretationOverlays();
+    overlayResolvers[0](overlayA);
+    await during;
+    resolveAccept!(true);
+    await acceptP;
+
+    const after = proxy.interpretationOverlays();
+    overlayResolvers[1](overlayB);
+    expect(await after).toEqual(overlayB);
+    expect(overlayResolvers.length).toBe(2);
+  });
+
+  it('fresh: true skips the TTL', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return calls === 1 ? overlayA : overlayB; }),
+    };
+    const proxy = createProxy(mockClient);
+
+    expect(await proxy.interpretationOverlays()).toEqual(overlayA);
+    expect(await proxy.interpretationOverlays({ fresh: true })).toEqual(overlayB);
+    expect(calls).toBe(2);
+  });
+
+  it('an interp-link addition invalidates the cache', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return calls === 1 ? overlayA : overlayB; }),
+    };
+    const proxy = createProxy(mockClient);
+    await proxy.interpretationOverlays();
+    expect(calls).toBe(1);
+
+    const added: any[] = mockClient.addPerspectiveLinkAddedListener.mock.calls[0][1];
+    added[0]({ data: { predicate: 'ad4m://interp/suggestion' } });
+    expect(await proxy.interpretationOverlays()).toEqual(overlayB);
+    expect(calls).toBe(2);
+  });
+
+  it('a non-interp link does not invalidate the cache', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return overlayA; }),
+    };
+    const proxy = createProxy(mockClient);
+    await proxy.interpretationOverlays();
+    const added: any[] = mockClient.addPerspectiveLinkAddedListener.mock.calls[0][1];
+    added[0]({ data: { predicate: 'ad4m://has_child' } });
+    await proxy.interpretationOverlays();
+    expect(calls).toBe(1);
   });
 });
