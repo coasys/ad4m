@@ -7,12 +7,29 @@
 //!
 //! # What a verified receipt says
 //!
-//! > *n distinct eligible DIDs each recomputed this seal on their own replica
-//! > and refused on mismatch, and here is what they saw.*
+//! > *n distinct eligible DIDs each signed a vote on an atom carrying this
+//! > seal, and here is the material the seal was taken over.*
 //!
-//! Not "the author of that flow instance signed it" — instance authorship is
-//! never checked and never carried. Author-signed guard evidence stays
-//! deferred on the model-query signature gap
+//! Every word of that is cryptographic or re-derivable: n distinct DIDs
+//! signed `acceptedBy` links on an atom carrying seal S ([`atom::signed_by`],
+//! over verdicts this replica recomputed); each was eligible under the
+//! carried role evidence **as of its own vote's timestamp**; and S rehashes
+//! from the carried preimage.
+//!
+//! The protocol *requires* each of those voters to have recomputed the seal
+//! against their own graph and refused to sign on mismatch ([`super::accept`]
+//! is what does it on an honest client). **The receipt records that
+//! requirement; it does not evidence compliance with it.** A voter running
+//! modified code signs without recomputing, and nothing about the
+//! recomputation is itself signed or carried, so no verifier can tell the two
+//! apart. Wording this precisely matters more here than anywhere else: this
+//! is the sentence a downstream payout system quotes. (Caught by
+//! @lal-bot-coasys reviewing this PR; the earlier phrasing asserted the
+//! recomputation as a proven fact.)
+//!
+//! Not "the author of that flow instance signed it" either — instance
+//! authorship is never checked and never carried. Author-signed guard
+//! evidence stays deferred on the model-query signature gap
 //! (<https://github.com/coasys/ad4m/issues/1046>): hydrated `model_query`
 //! results carry no per-link `(author, proof.valid)`, so there is nothing
 //! signed to carry yet. The trust root is the voter quorum.
@@ -25,10 +42,11 @@
 //! | *That signatures were re-verified by the reader* | Settled. [`ReadSet::reverified`](super::ReadSet::reverified) recomputes every carried verdict before the fold, and mint folds through the same call — #1068. |
 //! | *That the run is still settled now* | Unchanged, and deliberately. Nothing here is re-queried against a live graph; see § *Nothing is re-queried* below. |
 //!
-//! One row is added by this module rather than settled:
+//! Two rows are added by this module rather than settled:
 //!
 //! | Not proven | Why |
 //! | --- | --- |
+//! | **That any voter actually recomputed the seal before signing** | Compliance with a protocol obligation, not a property of the artifact — see above. What a signature proves is that the signer signed *that atom, carrying that seal*. |
 //! | **That every counted atom's seal is inspectable** | `mint` accepts an empty `evidence_preimage`, so a receipt may carry none. Verification checks every preimage it *is* given and requires none. Demanding one per counted seal would reject receipts mint produced — the asymmetry that makes receipts fail their own verification. Tightening it belongs on the mint side first. |
 //!
 //! # Order is part of the contract
@@ -164,12 +182,72 @@ pub enum ReceiptVerdict {
     NotTerminal { state: String },
 }
 
+/// A verdict is one of **three** kinds of answer, not two.
+///
+/// The two-way split is the trap. `!is_verified()` reads "I do not hold the
+/// rules" as "the quorum did not settle this" — the reader's own gap reported
+/// as a finding against the receipt. The module header warns about exactly
+/// that, and a boolean predicate is how a caller walks into it anyway.
+///
+/// So the split lives in the type and [`ReceiptVerdict::outcome`] matches
+/// **exhaustively**: a new variant does not silently join a bucket, it stops
+/// compiling until somebody decides which one it belongs to.
+///
+/// (Raised by @lal-bot-coasys reviewing this PR: three of this module's tests
+/// used `is_verified()` as their discriminator, which is the idiom the doc
+/// was warning against — so the doc's own warning was untested.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictKind {
+    /// The carried material re-derives the claim.
+    Verified,
+    /// A finding **about the material**: it was checked and it does not hold
+    /// up. Evidence against the receipt.
+    Rejected,
+    /// A finding **about the reader**: this replica cannot decide, because it
+    /// does not hold the rules ([`ReceiptVerdict::FlowUnknown`]) or holds
+    /// different ones ([`ReceiptVerdict::DnaChanged`]).
+    ///
+    /// A payout system must refuse to pay on this exactly as it refuses on
+    /// [`Rejected`](VerdictKind::Rejected) — and must **not** treat it as
+    /// evidence against the receipt or its minter. Sync the definition and
+    /// ask again; the answer may well be `Verified`.
+    Undecidable,
+}
+
 impl ReceiptVerdict {
-    /// Sugar for the one question most callers have. Deliberately not a
+    /// Which kind of answer this is. The exhaustive match is the point; see
+    /// [`VerdictKind`].
+    pub fn outcome(&self) -> VerdictKind {
+        match self {
+            Self::Verified { .. } => VerdictKind::Verified,
+            Self::FlowUnknown { .. } | Self::DnaChanged { .. } => VerdictKind::Undecidable,
+            Self::NoOutputs
+            | Self::SealMismatch { .. }
+            | Self::Unfoldable { .. }
+            | Self::Contested { .. }
+            | Self::StateMismatch { .. }
+            | Self::NotTerminal { .. } => VerdictKind::Rejected,
+        }
+    }
+
+    /// Did the carried material re-derive the claim? Deliberately not a
     /// `From<ReceiptVerdict> for bool`: a caller that pays out on a receipt
     /// should have to name the verdict it is collapsing.
+    ///
+    /// **`!is_verified()` is not `is_rejected()`** — see [`VerdictKind`].
     pub fn is_verified(&self) -> bool {
-        matches!(self, ReceiptVerdict::Verified { .. })
+        self.outcome() == VerdictKind::Verified
+    }
+
+    /// Was the receipt checked and found wanting? False for a receipt this
+    /// replica could not check at all.
+    pub fn is_rejected(&self) -> bool {
+        self.outcome() == VerdictKind::Rejected
+    }
+
+    /// Does this answer say more about the reader than about the receipt?
+    pub fn is_undecidable(&self) -> bool {
+        self.outcome() == VerdictKind::Undecidable
     }
 }
 
@@ -542,13 +620,18 @@ mod tests {
         let receipt = mint(&minted_under, completed());
         let reader = catalogue(vec![reader_holds]);
 
+        let verdict = verify_receipt(&reader, &receipt);
         assert!(
-            matches!(
-                verify_receipt(&reader, &receipt),
-                ReceiptVerdict::DnaChanged { .. }
-            ),
+            matches!(verdict, ReceiptVerdict::DnaChanged { .. }),
             "a receipt minted under other rules is refused, not folded under the new ones"
         );
+        assert_eq!(
+            verdict.outcome(),
+            VerdictKind::Undecidable,
+            "and refused as a statement about THIS replica's rules, not as a finding \
+             against the receipt — which is merely old"
+        );
+        assert!(!verdict.is_rejected());
 
         // Same receipt, additionally carrying a preimage that does not
         // re-hash. The DNA answer still comes first.
@@ -570,10 +653,25 @@ mod tests {
     /// A reader who has never synced the definition has learned **nothing**
     /// about the receipt. Reporting that as a fold failure would let "I do not
     /// have the rules" be read as "the quorum did not settle this" — the
-    /// receipt would be slandered by the reader's own gap.
+    /// receipt slandered by the reader's own gap.
     ///
-    /// Red if the catalogue miss falls into a generic failure, e.g.
-    /// `else { return ReceiptVerdict::Unfoldable { reason: "no such flow".into() } }`.
+    /// The last assertion is the one that pins that sentence, and it was
+    /// missing until @lal-bot-coasys pointed out that this test was a mirror:
+    /// naming the variant proves the variant exists, but the slander happens
+    /// in the **caller**, and `!is_verified()` was true for `FlowUnknown`
+    /// exactly as it is for `SealMismatch`. A caller writing
+    /// `if !verdict.is_verified() { reject }` committed the slander with this
+    /// test passing — and three tests in this file used that very idiom as
+    /// their discriminator.
+    ///
+    /// Red twice over:
+    /// - if the catalogue miss falls into a generic failure, e.g.
+    ///   `else { return ReceiptVerdict::Unfoldable { reason: … } }` — the
+    ///   `assert_eq` catches it;
+    /// - if `FlowUnknown` is classified as a finding about the material, e.g.
+    ///   `is_rejected` written as `!self.is_verified()` or `FlowUnknown`
+    ///   moved into the `Rejected` arm of `outcome()` — which is the mutation
+    ///   the doc above describes and the variant name alone could not catch.
     #[test]
     fn an_unsynced_flow_definition_is_its_own_verdict_not_a_failure() {
         let receipt = mint(&two_state_flow(), completed());
@@ -596,6 +694,16 @@ mod tests {
                     flow_uri: "coasys://DeliveryFlow".into()
                 },
                 "{label}: got {verdict}"
+            );
+            assert_eq!(
+                verdict.outcome(),
+                VerdictKind::Undecidable,
+                "{label}: an un-synced definition is the reader's gap"
+            );
+            assert!(
+                !verdict.is_verified() && !verdict.is_rejected(),
+                "{label}: neither verified NOR rejected — a caller must not be able to \
+                 reach `reject` through one predicate"
             );
         }
     }
@@ -690,8 +798,9 @@ mod tests {
 
         let verdict = verify_receipt(&reader, &tampered);
         assert!(
-            !verdict.is_verified(),
-            "a forged assignment link must never buy eligibility — got: {verdict}"
+            verdict.is_rejected(),
+            "a forged assignment link must never buy eligibility, and this is a finding \
+             about the MATERIAL rather than about the reader — got: {verdict}"
         );
         let ReceiptVerdict::Unfoldable { reason } = &verdict else {
             panic!(
