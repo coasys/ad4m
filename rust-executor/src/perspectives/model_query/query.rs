@@ -12,12 +12,14 @@ use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
-use super::sparql_builder::{all_where_pushable, build_count_sparql, build_instance_sparql};
+use super::sparql_builder::{
+    all_where_pushable, build_count_sparql, build_instance_sparql, local_status_filter,
+};
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
     ShapeResolver, SortKey, SparqlPagination,
 };
-use super::utils::{validate_iri, MAX_INCLUDE_DEPTH};
+use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::Error;
 use serde_json::Value;
@@ -262,26 +264,26 @@ pub(super) async fn execute_model_query_inner(
             if page_results.is_empty() {
                 vec![]
             } else {
-                let source_values: String = page_results
+                let source_ids: Vec<String> = page_results
                     .iter()
                     .filter_map(|r| r["source"].as_str())
-                    .filter_map(|s| validate_iri(s).ok())
-                    .map(|s| format!("<{s}>"))
-                    .collect::<Vec<_>>()
-                    .join(" ");
+                    .filter_map(|s| validate_iri(s).ok().map(|s| s.to_string()))
+                    .collect();
 
-                if source_values.is_empty() {
+                if source_ids.is_empty() {
                     vec![]
                 } else {
+                    let source_constraint = values_or_str_filter("source", &source_ids);
+                    let local_status = local_status_filter(shape);
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
-    VALUES ?source {{ {source_values} }}
+    {source_constraint}
 {predicate_filter}    ?source ?predicate ?target .
     ?_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?predicate ?target )>> .
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-}}"#
+{local_status}}}"#
                     );
                     let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?

@@ -279,6 +279,17 @@ lazy_static! {
     static ref AGENT_SERVICE: Arc<Mutex<Option<AgentService>>> = Arc::new(Mutex::new(None));
 }
 
+/// Serializes agent publishes. Callers may publish in the background, so two
+/// publishes can overlap; holding this across the read and the write means the
+/// last one to finish always carries the latest stored profile, never an older
+/// snapshot that happened to be slower on the network.
+///
+/// Process-wide rather than per-DID on purpose: every agent publishes through
+/// the one agent-language runtime, which runs requests serially, so a stuck
+/// publish already blocks other users there. A per-DID lock would add
+/// bookkeeping without decoupling them.
+static AGENT_PUBLISH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 impl AgentService {
     pub fn init_global_instance(app_path: String) {
         let mut agent_instance = AGENT_SERVICE.lock().unwrap();
@@ -325,6 +336,7 @@ impl AgentService {
                     smtp_config: None,
                     enable_mcp: None,
                     mcp_port: None,
+                    dynamic_class_tools: None,
                     pid_file: None,
                     wallet_backend: None,
                     wallet_backend_url: None,
@@ -557,6 +569,9 @@ impl AgentService {
             .await
             .map_err(|e| anyhow!("Agent language not available: {}", e))?;
 
+        // Must be taken before the read below, not after: reading the profile
+        // outside the lock would let a stale snapshot be published last.
+        let _publish_guard = AGENT_PUBLISH_LOCK.lock().await;
         let agent = Self::get_agent_for_context(context)?;
         let context_did = did_for_context(context)?;
         if agent.did != context_did {

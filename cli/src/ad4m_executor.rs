@@ -151,7 +151,10 @@ enum Domain {
         hc_relay_url: Option<String>,
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
-        #[arg(long, action)]
+        /// Admin credential granting full capabilities to whoever presents it.
+        /// Prefer the AD4M_ADMIN_CREDENTIAL environment variable: a flag value is
+        /// visible to every user on the host via `ps` and stays in shell history.
+        #[arg(long, action, env = "AD4M_ADMIN_CREDENTIAL", hide_env_values = true)]
         admin_credential: Option<String>,
         #[arg(long, action)]
         localhost: Option<bool>,
@@ -169,6 +172,10 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Expose dynamic per-class SHACL tools ({class}_create, {class}_set_{prop}, …)
+        /// over MCP in addition to the static instance_* tools. Default: false.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        dynamic_class_tools: Option<bool>,
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         /// Useful for test harnesses that need targeted process cleanup.
         #[arg(long)]
@@ -225,6 +232,7 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        dynamic_class_tools,
         pid_file,
     } = args.domain
     {
@@ -266,6 +274,7 @@ async fn main() -> Result<()> {
                 smtp_config: None,
                 enable_mcp,
                 mcp_port,
+                dynamic_class_tools,
                 pid_file,
                 ..Default::default()
             })
@@ -289,4 +298,72 @@ async fn main() -> Result<()> {
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `AD4M_ADMIN_CREDENTIAL` is process-global, so every test that sets it
+    /// must hold this lock — otherwise a parallel test observes the other
+    /// one's value. Poisoning is irrelevant here: the guard protects an
+    /// environment variable, not an invariant, so a panicking test leaves
+    /// nothing inconsistent behind.
+    static ADMIN_CREDENTIAL_ENV: Mutex<()> = Mutex::new(());
+
+    fn lock_admin_credential_env() -> MutexGuard<'static, ()> {
+        ADMIN_CREDENTIAL_ENV
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn run_admin_credential(argv: &[&str]) -> Option<String> {
+        let app = ClapApp::try_parse_from(argv).expect("argv parses");
+        match app.domain {
+            Domain::Run {
+                admin_credential, ..
+            } => admin_credential,
+            other => panic!("expected the run subcommand, got {other:?}"),
+        }
+    }
+
+    /// `--admin-credential` on the command line is visible in `ps` and shell
+    /// history, so the documented way to pass it is the environment. Both
+    /// must land in the same field, the explicit flag winning when both are
+    /// set.
+    #[test]
+    fn run_reads_the_admin_credential_from_the_environment() {
+        let _env = lock_admin_credential_env();
+        std::env::set_var("AD4M_ADMIN_CREDENTIAL", "from-env");
+        assert_eq!(
+            run_admin_credential(&["ad4m-executor", "run"]).as_deref(),
+            Some("from-env")
+        );
+        assert_eq!(
+            run_admin_credential(&["ad4m-executor", "run", "--admin-credential", "from-flag"])
+                .as_deref(),
+            Some("from-flag"),
+            "an explicit flag overrides the environment"
+        );
+        std::env::remove_var("AD4M_ADMIN_CREDENTIAL");
+        assert_eq!(
+            run_admin_credential(&["ad4m-executor", "run"]),
+            None,
+            "no flag and no variable means no credential"
+        );
+    }
+
+    /// The help text must not echo the variable's value.
+    #[test]
+    fn run_help_hides_the_environment_value() {
+        let _env = lock_admin_credential_env();
+        std::env::set_var("AD4M_ADMIN_CREDENTIAL", "s3cret-value");
+        let err = ClapApp::try_parse_from(["ad4m-executor", "run", "--help"])
+            .expect_err("--help exits through an error");
+        let help = err.to_string();
+        std::env::remove_var("AD4M_ADMIN_CREDENTIAL");
+        assert!(help.contains("AD4M_ADMIN_CREDENTIAL"), "{help}");
+        assert!(!help.contains("s3cret-value"), "{help}");
+    }
 }
