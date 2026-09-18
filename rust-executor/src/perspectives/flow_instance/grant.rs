@@ -118,9 +118,13 @@
 //! later. (Tombstoning an output that is not itself the role instance remains
 //! unbuilt — the deferred item in the design doc's §6.)
 
+#[cfg(test)]
+use super::receipt::flow_dna_hash;
 use super::receipt::FlowReceipt;
 use super::verify::{verify_receipt_within, ReceiptVerdict};
 use crate::perspectives::shacl_parser::{GrantedByFlow, SHACLFlow};
+#[cfg(test)]
+use crate::types::DecoratedLinkExpression;
 use std::collections::HashMap;
 
 /// How many `ad4m://flow/granted_by` edges a reader will follow away from
@@ -294,5 +298,754 @@ fn earlier_of(a: String, b: String) -> String {
         b
     } else {
         a
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::perspectives::flow_instance::atom::fixtures::{
+        did_of, signed_link, signed_proposal, T1, T2, T3,
+    };
+    use crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
+    use crate::perspectives::flow_instance::fold_read_set;
+    use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
+    use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
+    use crate::perspectives::shacl_parser::ModelQueryCount;
+    use serde_json::{json, Value};
+
+    const INSTANCE: &str = "ad4m://flow/instance/i1";
+    const BASE: &str = "ad4m://task/t1";
+    /// The node that is both the granting run's output and the role instance
+    /// the gate matches. Using one URI for both is what a grant flow *is*:
+    /// the thing the run produced is the membership.
+    const ROLE_INSTANCE: &str = "ad4m://role/reviewer/r0";
+    const ROLE: &str = "coasys://Reviewer";
+    const ALICE: &str = "alice";
+    const BOB: &str = "bob";
+    /// Earlier than the receipt's quorum time, and earlier than the vote. If
+    /// a grant is ever dated from here rather than from the receipt, the
+    /// window opens too early and the test that looks for it says so.
+    const ASSIGNMENT_LINK_AT: &str = "2025-12-01T00:00:00.000Z";
+
+    // ---- fixtures --------------------------------------------------------
+
+    fn flow_json(name: &str, states: Value, transitions: Value) -> SHACLFlow {
+        serde_json::from_value(json!({
+            "name": name,
+            "namespace": "coasys://",
+            "states": states,
+            "transitions": transitions,
+        }))
+        .expect("fixture flow parses")
+    }
+
+    /// The flow that *grants*: ungated, `open → done`, settles on one vote.
+    fn granting_flow(name: &str) -> SHACLFlow {
+        flow_json(
+            name,
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0 },
+            ]),
+            json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+            ]),
+        )
+    }
+
+    /// A `grantedByFlow` role gate, as a `fromRole` query.
+    fn gate(flow_uri: &str, terminal_state: &str) -> Value {
+        json!({
+            "className": ROLE,
+            "didProperty": "agent",
+            "grantedByFlow": { "flow": flow_uri, "terminalState": terminal_state },
+        })
+    }
+
+    /// The flow that *consumes* a grant: only a member of the gated role may
+    /// settle `done`.
+    fn gated_flow(name: &str, role: Value) -> SHACLFlow {
+        flow_json(
+            name,
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0, "consensusRule": { "n": 1, "fromRole": role } },
+            ]),
+            json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+            ]),
+        )
+    }
+
+    fn catalogue(flows: Vec<SHACLFlow>) -> HashMap<String, SHACLFlow> {
+        flows.into_iter().map(|f| (f.flow_uri(), f)).collect()
+    }
+
+    fn read_set(to: &str, at: &str, role_grants: Vec<RoleGrantEvidence>) -> ReadSet {
+        ReadSet {
+            instance_uri: INSTANCE.to_string(),
+            subject: BASE.to_string(),
+            genesis: "open".to_string(),
+            proposals: vec![ProposalLinks {
+                uri: "ad4m://p/1".to_string(),
+                links: signed_proposal("ad4m://p/1", ALICE, "open", to, "seal-1", at),
+            }],
+            role_grants,
+        }
+    }
+
+    /// A receipt for `flow`, minted from a settled run, bound to
+    /// `ROLE_INSTANCE`. `outputs` is what the binding check reads.
+    fn receipt_for(
+        flow: &SHACLFlow,
+        rs: ReadSet,
+        outputs: &[&str],
+        cat: &HashMap<String, SHACLFlow>,
+    ) -> FlowReceipt {
+        FlowReceipt::mint(
+            flow,
+            rs,
+            outputs.iter().map(|o| o.to_string()).collect(),
+            Vec::new(),
+            GrantContext::root(cat),
+        )
+        .expect("the fixture read-set mints")
+    }
+
+    /// The evidence the gated flow's read-set carries for Alice: one matched
+    /// role instance, an assignment link and instance timestamp that a
+    /// `grantedByFlow` gate must ignore, and whatever receipts were found on
+    /// the instance's `granted_by` edges.
+    fn evidence(
+        receipts: Vec<FlowReceipt>,
+        revocations: Vec<DecoratedLinkExpression>,
+    ) -> Vec<RoleGrantEvidence> {
+        vec![RoleGrantEvidence {
+            to_state: "done".into(),
+            role_class: ROLE.into(),
+            did: did_of(ALICE).into(),
+            instances: vec![RoleInstanceHistory {
+                instance_id: ROLE_INSTANCE.into(),
+                grant_links: vec![signed_link(
+                    ROLE_INSTANCE,
+                    "agent",
+                    did_of(ALICE),
+                    "admin",
+                    true,
+                    None,
+                    ASSIGNMENT_LINK_AT,
+                )],
+                revocation_links: revocations,
+                asserted_instance_timestamp: Some(ASSIGNMENT_LINK_AT.into()),
+                granting_receipts: receipts,
+            }],
+        }]
+    }
+
+    /// The role query as `role_grant_views` translates it before `resolve`
+    /// sees it. No `where.author`, so anyone may revoke — the row the
+    /// module doc's table calls out.
+    fn translated() -> Value {
+        json!({ "className": ROLE, "where": { "agent": did_of(ALICE) } })
+    }
+
+    fn resolve(
+        ev: &RoleGrantEvidence,
+        spec: Option<&GrantedByFlow>,
+        cat: &HashMap<String, SHACLFlow>,
+    ) -> anyhow::Result<crate::perspectives::flow_instance::roles::RoleGrant> {
+        ev.resolve(&translated(), spec, None, GrantContext::root(cat))
+    }
+
+    fn spec(flow_uri: &str, terminal_state: &str) -> GrantedByFlow {
+        GrantedByFlow {
+            flow: flow_uri.into(),
+            terminal_state: terminal_state.into(),
+        }
+    }
+
+    /// A granting run plus the gated flow that consumes it: the receipt, the
+    /// catalogue holding both definitions, and the gated flow itself.
+    fn one_level() -> (FlowReceipt, SHACLFlow, HashMap<String, SHACLFlow>) {
+        let granting = granting_flow("Onboarding");
+        let gated = gated_flow("Delivery", gate(&granting.flow_uri(), "done"));
+        let cat = catalogue(vec![granting.clone(), gated.clone()]);
+        let receipt = receipt_for(
+            &granting,
+            read_set("done", T1, Vec::new()),
+            &[ROLE_INSTANCE],
+            &cat,
+        );
+        (receipt, gated, cat)
+    }
+
+    // ---- the grant itself --------------------------------------------------
+
+    /// **The point of the whole feature.** A completed run grants the role,
+    /// and the grant is dated from the run's *quorum*, not from the
+    /// assignment link sitting on the same instance.
+    ///
+    /// The second assertion is the one that carries it. Asserting only that a
+    /// window exists would also pass on an implementation that ignored the
+    /// receipt entirely and dated the grant from the assignment link — which
+    /// is the pre-existing behaviour, and the thing `grantedByFlow` replaces.
+    /// `ASSIGNMENT_LINK_AT` is deliberately earlier than the quorum, so the
+    /// two answers are distinguishable and the wrong one is the *wider*
+    /// window.
+    ///
+    /// Red if `resolve`'s `granted_by` branch falls through to the grant-link
+    /// dating (`granted_at` becomes `ASSIGNMENT_LINK_AT`), and red if the
+    /// branch does not run at all (no window, so `windows` is empty).
+    #[test]
+    fn a_verified_receipt_grants_the_role_and_dates_it_from_the_quorum() {
+        let (receipt, gated, cat) = one_level();
+        let granting_uri = receipt.flow_uri.clone();
+
+        let ev = evidence(vec![receipt], Vec::new());
+        let view = resolve(&ev[0], Some(&spec(&granting_uri, "done")), &cat)
+            .expect("a granted instance resolves");
+
+        assert_eq!(
+            view.windows.len(),
+            1,
+            "the receipt-backed instance counts as a grant"
+        );
+        assert_eq!(
+            view.windows[0].granted_at, T1,
+            "the grant begins at the granting run's QUORUM time, not at the assignment link \
+             ({ASSIGNMENT_LINK_AT}) that sits on the same instance"
+        );
+
+        // And end to end: the gated flow settles only because that grant
+        // makes Alice's vote eligible.
+        let gated_rs = read_set("done", T3, ev);
+        assert_eq!(
+            fold_read_set(&gated, &gated_rs.reverified(), GrantContext::root(&cat))
+                .expect("folds")
+                .state,
+            "done",
+            "the vote counts, so the gated edge settles"
+        );
+    }
+
+    /// The same receipt, the same everything, with the grant removed: the
+    /// gate must not fall back to the assignment link.
+    ///
+    /// This is the negative control for the test above and the reason
+    /// `evidence()` always carries a genuine, signed, correctly-targeted
+    /// assignment link AND a parseable instance timestamp. Both are exactly
+    /// what an ordinary `didProperty` gate needs to grant — so if
+    /// `grantedByFlow` ever degraded to "use the receipt if there is one",
+    /// writing that one link would grant the role and the whole gate would be
+    /// decorative.
+    ///
+    /// Red if the `granted_by` branch in `resolve` falls through to the
+    /// grant-link dating instead of `continue`-ing.
+    #[test]
+    fn without_a_receipt_the_assignment_link_does_not_grant() {
+        let (receipt, gated, cat) = one_level();
+        let granting_uri = receipt.flow_uri.clone();
+
+        let ev = evidence(Vec::new(), Vec::new());
+        let view = resolve(&ev[0], Some(&spec(&granting_uri, "done")), &cat)
+            .expect("an ungranted instance is not an error — it is not a member");
+        assert!(
+            view.windows.is_empty(),
+            "no receipt, no grant — got a window at {:?}",
+            view.windows.first().map(|w| &w.granted_at)
+        );
+        assert_eq!(
+            fold_read_set(
+                &gated,
+                &read_set("done", T3, ev.clone()).reverified(),
+                GrantContext::root(&cat)
+            )
+            .expect("an ungranted candidate is not a fold error")
+            .state,
+            "open",
+            "and the gated edge does not settle"
+        );
+
+        // The control that makes the assertions above mean something: the
+        // very same evidence, with the SAME role query minus `grantedByFlow`,
+        // does grant — from the assignment link. So what changed the answer
+        // is the gate, not some other defect in the fixture.
+        let ungated = resolve(&ev[0], None, &cat).expect("resolves");
+        assert_eq!(
+            ungated.windows.len(),
+            1,
+            "an ordinary didProperty gate grants on this very evidence"
+        );
+        assert_eq!(ungated.windows[0].granted_at, ASSIGNMENT_LINK_AT);
+    }
+
+    /// The binding check, reached through the resolver rather than through
+    /// `verify_receipt` directly — which is what proves the resolver passes
+    /// `Some(instance)` rather than `None`.
+    ///
+    /// A receipt is a public artifact and minting is permissionless, so the
+    /// attack is just: take a genuine receipt for somebody else's run and
+    /// hang a `granted_by` edge off your own role instance. Nothing about the
+    /// receipt is forged. Only the binding stops it.
+    ///
+    /// Both halves run against the **same receipt**: it grants the instance
+    /// it names and not the one it does not. Without that pair the test
+    /// cannot tell a working binding check from a resolver that never grants.
+    ///
+    /// Red if the resolver passes `None` as `arrived_from`, and red if the
+    /// binding check is dropped from `verify_receipt` — in both cases the
+    /// planted instance is granted.
+    #[test]
+    fn a_receipt_planted_on_a_node_it_does_not_name_grants_nothing() {
+        let granting = granting_flow("Onboarding");
+        let gated = gated_flow("Delivery", gate(&granting.flow_uri(), "done"));
+        let cat = catalogue(vec![granting.clone(), gated]);
+        // Minted for somebody else's node entirely.
+        let receipt = receipt_for(
+            &granting,
+            read_set("done", T1, Vec::new()),
+            &["ad4m://role/reviewer/somebody-else"],
+            &cat,
+        );
+
+        let mut ev = evidence(vec![receipt.clone()], Vec::new());
+        let view =
+            resolve(&ev[0], Some(&spec(&granting.flow_uri(), "done")), &cat).expect("resolves");
+        assert!(
+            view.windows.is_empty(),
+            "a receipt that speaks for another node grants nothing here, however genuine"
+        );
+
+        // The same receipt, reached from the node it does name.
+        ev[0].instances[0].instance_id = "ad4m://role/reviewer/somebody-else".into();
+        let view =
+            resolve(&ev[0], Some(&spec(&granting.flow_uri(), "done")), &cat).expect("resolves");
+        assert_eq!(
+            view.windows.len(),
+            1,
+            "and it grants the node it DOES name — otherwise this test would pass against a \
+             resolver that refuses every receipt"
+        );
+    }
+
+    /// A receipt that verifies perfectly still grants nothing when it is for
+    /// a different flow, or for a different terminal state of the right flow.
+    ///
+    /// Without the flow check, completing *any* flow grants *every*
+    /// `grantedByFlow` role. Without the state check, reaching a flow's
+    /// `rejected` state grants what its `approved` state was meant to — the
+    /// sharper of the two, because the receipt is then for exactly the flow
+    /// the gate names.
+    ///
+    /// Each case is paired with the gate that DOES accept the same receipt,
+    /// in the same fixture, so a refusal cannot be mistaken for a receipt
+    /// that simply fails to verify.
+    ///
+    /// **The two cases are built so that neither check can stand in for the
+    /// other.** The wrong-flow receipt settles into a state spelled exactly
+    /// like the one its gate names (`done`), so only the flow URI separates
+    /// them; the wrong-ending receipt is for exactly the flow its gate names,
+    /// so only the state does. An earlier version of this test used a
+    /// wrong-flow receipt whose terminal state also differed, and deleting
+    /// the `flow_uri` comparison left it green — the state check was catching
+    /// both, and the test could not see it.
+    ///
+    /// Red if either the `flow_uri` or the `terminal_state` comparison is
+    /// dropped from `granted_by_flow_at`.
+    #[test]
+    fn a_verified_receipt_for_another_flow_or_another_ending_grants_nothing() {
+        // Two flows that both end in a state called `done`.
+        let onboarding = granting_flow("Onboarding");
+        let training = granting_flow("Training");
+        // And one that can complete into either of two endings.
+        let forked = flow_json(
+            "Review",
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "approved", "value": 1.0 },
+                { "name": "rejected", "value": 1.0 },
+            ]),
+            json!([
+                { "action_name": "Approve", "from_state": "open", "to_state": "approved", "actions": [] },
+                { "action_name": "Reject", "from_state": "open", "to_state": "rejected", "actions": [] },
+            ]),
+        );
+        let cat = catalogue(vec![onboarding.clone(), training.clone(), forked.clone()]);
+        assert_ne!(
+            onboarding.flow_uri(),
+            training.flow_uri(),
+            "precondition: two different organisms whose runs end in the same-named state"
+        );
+
+        let wrong_flow = receipt_for(
+            &onboarding,
+            read_set("done", T1, Vec::new()),
+            &[ROLE_INSTANCE],
+            &cat,
+        );
+        let wrong_ending = receipt_for(
+            &forked,
+            read_set("rejected", T1, Vec::new()),
+            &[ROLE_INSTANCE],
+            &cat,
+        );
+
+        for (label, receipt, refused_by, accepted_by) in [
+            (
+                "a receipt for another flow that ends in the same-named state",
+                wrong_flow,
+                spec(&training.flow_uri(), "done"),
+                spec(&onboarding.flow_uri(), "done"),
+            ),
+            (
+                "a receipt for the right flow's other ending",
+                wrong_ending,
+                spec(&forked.flow_uri(), "approved"),
+                spec(&forked.flow_uri(), "rejected"),
+            ),
+        ] {
+            let ev = evidence(vec![receipt], Vec::new());
+            assert!(
+                resolve(&ev[0], Some(&refused_by), &cat)
+                    .expect("resolves")
+                    .windows
+                    .is_empty(),
+                "{label} must not grant"
+            );
+            assert_eq!(
+                resolve(&ev[0], Some(&accepted_by), &cat)
+                    .expect("resolves")
+                    .windows
+                    .len(),
+                1,
+                "{label}: but the gate it DOES match grants on the same receipt, so the \
+                 refusal above is the comparison and not a verification failure"
+            );
+        }
+    }
+
+    /// Two runs both granted the same instance: the membership began at the
+    /// **first** of them.
+    ///
+    /// Preferring the earlier — the wider window — is safe here in a way it
+    /// is not for grant links, and the difference is worth keeping straight.
+    /// A grant link widens a window for the price of writing a link, which is
+    /// why `reverified_history` drops unverified ones and suppresses the
+    /// fallback with them. A receipt widens it for the price of producing a
+    /// whole quorum under the reader's own rules. So the cheap widening is
+    /// refused and the expensive one is simply the truth.
+    ///
+    /// Both orderings are asserted, because a comparison that ignored its
+    /// arguments and returned the first (or the last) one it was handed would
+    /// pass whichever single order the fixture happened to use.
+    ///
+    /// Red with `earlier_of` returning the later of the two, and red if it
+    /// compares as strings while the fixture's instants disagree with string
+    /// order — see #1000.
+    #[test]
+    fn two_granting_runs_date_the_membership_from_the_first() {
+        let granting = granting_flow("Onboarding");
+        let cat = catalogue(vec![granting.clone()]);
+        let at = |t: &str| {
+            receipt_for(
+                &granting,
+                read_set("done", t, Vec::new()),
+                &[ROLE_INSTANCE],
+                &cat,
+            )
+        };
+        let (early, late) = (at(T1), at(T2));
+        assert_ne!(
+            early, late,
+            "precondition: two distinct receipts, settling at different times"
+        );
+
+        for (label, receipts) in [
+            ("earlier first", vec![early.clone(), late.clone()]),
+            ("later first", vec![late, early]),
+        ] {
+            let ev = evidence(receipts, Vec::new());
+            let view =
+                resolve(&ev[0], Some(&spec(&granting.flow_uri(), "done")), &cat).expect("resolves");
+            assert_eq!(
+                view.windows.len(),
+                1,
+                "{label}: two receipts for one instance are one membership, not two"
+            );
+            assert_eq!(
+                view.windows[0].granted_at, T1,
+                "{label}: the membership began at the first run that granted it"
+            );
+        }
+    }
+
+    // ---- revocation: what the receipt does NOT freeze -----------------------
+
+    /// The claim the module doc makes to anyone configuring a gate, made
+    /// falsifiable: a receipt is permanent, a *membership* is not.
+    ///
+    /// The tombstone is an ordinary signed role-grant revocation, and this
+    /// role query declares no `where.author`, so anyone may write one — the
+    /// first row of the table in the module doc. The receipt still verifies
+    /// afterwards; what changes is the window it opened.
+    ///
+    /// Red if `resolve`'s `granted_by` branch builds its window without
+    /// calling `revocations_on` — a plausible shape, since the branch has its
+    /// own dating and could easily have grown its own window construction
+    /// too. Then the grant would be genuinely irrevocable and the doc would
+    /// be wrong.
+    #[test]
+    fn a_granted_role_is_still_ended_by_a_signed_tombstone() {
+        let (receipt, gated, cat) = one_level();
+        let granting_uri = receipt.flow_uri.clone();
+        let tombstone = signed_link(
+            ROLE_INSTANCE,
+            ROLE_GRANT_REVOKED_PREDICATE,
+            did_of(ALICE),
+            BOB,
+            true,
+            None,
+            T2,
+        );
+
+        let ev = evidence(vec![receipt], vec![tombstone]);
+        let view = resolve(&ev[0], Some(&spec(&granting_uri, "done")), &cat).expect("resolves");
+        assert_eq!(
+            view.windows.len(),
+            1,
+            "the grant is still there — a tombstone ends a membership, it does not delete one"
+        );
+        assert_eq!(
+            view.windows[0].granted_at, T1,
+            "and it still begins at the quorum"
+        );
+        assert_eq!(
+            view.windows[0].revoked_at(),
+            Some(T2),
+            "the tombstone closes it from its own timestamp"
+        );
+        assert!(
+            !view.windows[0].open_at(T3),
+            "so a vote after the tombstone is not eligible"
+        );
+        assert!(
+            view.windows[0].open_at(T1),
+            "while one cast while the membership held still is — the ratchet is about the \
+             RECEIPT, not about the window it opened"
+        );
+
+        // End to end, against the vote at T3 the other tests rely on.
+        assert_eq!(
+            fold_read_set(
+                &gated,
+                &read_set("done", T3, ev).reverified(),
+                GrantContext::root(&cat)
+            )
+            .expect("folds")
+            .state,
+            "open",
+            "the revoked member cannot settle the gated edge"
+        );
+    }
+
+    // ---- the depth guard ---------------------------------------------------
+
+    /// A chain of grant flows: `Gate1` is ungated, and each `Gate{k}` after it
+    /// can only be settled by somebody the previous gate granted. Returns the
+    /// catalogue, every definition, and — when it can be minted — the receipt
+    /// for the top flow, which is the artifact a reader would be handed.
+    ///
+    /// `Err` is a real outcome here rather than a fixture failure: past the
+    /// cap the top flow cannot settle, so there is no completion to mint.
+    fn chain(
+        levels: usize,
+    ) -> (
+        HashMap<String, SHACLFlow>,
+        Vec<SHACLFlow>,
+        anyhow::Result<FlowReceipt>,
+    ) {
+        let mut flows = vec![granting_flow("Gate1")];
+        for k in 2..=levels {
+            let previous = flows[k - 2].flow_uri();
+            flows.push(gated_flow(&format!("Gate{k}"), gate(&previous, "done")));
+        }
+        let cat = catalogue(flows.clone());
+
+        let mut receipt = Ok(receipt_for(
+            &flows[0],
+            read_set("done", T1, Vec::new()),
+            &[ROLE_INSTANCE],
+            &cat,
+        ));
+        for flow in flows.iter().skip(1) {
+            let Ok(below) = receipt else { break };
+            let rs = read_set("done", T3, evidence(vec![below], Vec::new()));
+            receipt = FlowReceipt::mint(
+                flow,
+                rs,
+                vec![ROLE_INSTANCE.to_string()],
+                Vec::new(),
+                GrantContext::root(&cat),
+            );
+        }
+        (cat, flows, receipt)
+    }
+
+    /// The budget is a countdown that **stops**, and stopping means `None`
+    /// rather than zero-forever. A counter that saturated at zero would let
+    /// the recursion continue indefinitely at the bottom — the very failure
+    /// the cap exists to prevent, wearing the shape of a cap.
+    ///
+    /// Red with `remaining: self.remaining.saturating_sub(1)` in `deeper`.
+    #[test]
+    fn the_budget_runs_out_rather_than_bottoming_out() {
+        let cat = catalogue(vec![granting_flow("Gate1")]);
+        let mut ctx = GrantContext::root(&cat);
+        assert_eq!(ctx.remaining(), MAX_GRANT_DEPTH);
+
+        for step in 1..=MAX_GRANT_DEPTH {
+            ctx = ctx
+                .deeper()
+                .unwrap_or_else(|| panic!("edge {step} of {MAX_GRANT_DEPTH} is within budget"));
+            assert_eq!(ctx.remaining(), MAX_GRANT_DEPTH - step);
+        }
+        assert!(
+            ctx.deeper().is_none(),
+            "edge {} is refused, not followed at zero forever",
+            MAX_GRANT_DEPTH + 1
+        );
+    }
+
+    /// **The boundary, and which way it falls.** A chain of grant flows one
+    /// longer than the budget must be *refused*, never waved through.
+    ///
+    /// Both lengths are written in terms of `MAX_GRANT_DEPTH` rather than
+    /// spelled out, so the test follows the constant instead of pinning a
+    /// number next to it: holding the top of a `MAX_GRANT_DEPTH + 1` chain
+    /// means following exactly `MAX_GRANT_DEPTH` edges, the last length that
+    /// fits.
+    ///
+    /// The final block is what makes the refusal mean anything. The over-long
+    /// chain is refused, and the receipt *carried inside it* — the same
+    /// bytes, read with a full budget — verifies. So the depth is what
+    /// changed the answer: not a broken fixture, not a chain that was never
+    /// valid, not a verifier that refuses everything nested. That is the
+    /// module doc's "verification is not compositional past the cap", made
+    /// falsifiable.
+    ///
+    /// Red with `deeper()` never returning `None` — and red in the opposite,
+    /// much worse direction if running out of budget were ever treated as
+    /// "grant anyway", since the over-long chain would then verify.
+    #[test]
+    fn a_chain_one_deeper_than_the_budget_is_refused_not_allowed() {
+        let (cat, flows, at_the_cap) = chain(MAX_GRANT_DEPTH + 1);
+        let at_the_cap = at_the_cap.expect("a chain exactly as deep as the budget still mints");
+        let verdict =
+            verify_receipt_within(GrantContext::root(&cat), &at_the_cap, Some(ROLE_INSTANCE));
+        assert!(
+            verdict.is_verified(),
+            "{MAX_GRANT_DEPTH} edges is exactly the budget, so this must still verify — got: \
+             {verdict}"
+        );
+
+        // One level deeper. `mint` refuses it first: the top flow's gate
+        // cannot be satisfied, the run never settles, and there is no
+        // completion to claim. That is the mint half of the symmetry.
+        let (cat, flows_over, over) = chain(MAX_GRANT_DEPTH + 2);
+        assert_eq!(
+            flows.len() + 1,
+            flows_over.len(),
+            "precondition: the two chains differ by exactly one grant flow"
+        );
+        let err = over.expect_err("a chain past the budget has nothing to mint");
+        assert!(
+            format!("{err:#}").contains("can still transition out"),
+            "the top flow's gated edge must simply not settle, got: {err:#}"
+        );
+
+        // And the verify half, reached the only way it can be: a receipt that
+        // did not come from `mint`, claiming the completion `mint` refused.
+        let deepest = flows_over.last().expect("a top flow");
+        let nested = chain(MAX_GRANT_DEPTH + 1)
+            .2
+            .expect("the chain below it mints");
+        let hand_built = FlowReceipt {
+            flow_uri: deepest.flow_uri(),
+            flow_dna_hash: flow_dna_hash(deepest).expect("hash"),
+            terminal_state: "done".into(),
+            outputs: vec![ROLE_INSTANCE.to_string()],
+            read_set: read_set("done", T3, evidence(vec![nested.clone()], Vec::new())),
+            evidence_preimage: Vec::new(),
+        };
+        let verdict =
+            verify_receipt_within(GrantContext::root(&cat), &hand_built, Some(ROLE_INSTANCE));
+        assert!(
+            !verdict.is_verified(),
+            "running out of budget must DENY the grant, never allow it — got: {verdict}"
+        );
+        assert!(
+            verdict.is_rejected(),
+            "and deny it as a finding about the material: the depth limit is a constant every \
+             replica shares, so syncing more definitions cannot change this answer — got: \
+             {verdict}"
+        );
+
+        let inner = verify_receipt_within(GrantContext::root(&cat), &nested, Some(ROLE_INSTANCE));
+        assert!(
+            inner.is_verified(),
+            "the nested chain is sound on its own — so the refusal above is the budget, not a \
+             fixture that never verified — got: {inner}"
+        );
+    }
+
+    // ---- the inversion that must never be configurable ---------------------
+
+    /// `grantedByFlow` with a `count` satisfied by zero instances inverts the
+    /// gate: "eligible while no verifiable receipt exists". Every reason a
+    /// receipt might fail — an un-synced definition, a broken signature, a
+    /// chain past the depth cap — would then become a reason to GRANT, which
+    /// is fail-open dressed as a cardinality constraint.
+    ///
+    /// The second half is what makes this a real finding rather than a
+    /// stylistic refusal: with the check removed, `{max: 0}` really does make
+    /// an ungranted candidate eligible. `cardinality_satisfied(Some({max:0}),
+    /// 0)` is `true`, so this is the behaviour being refused, not a
+    /// hypothetical one.
+    ///
+    /// Red if the `cardinality_satisfied(count, 0)` guard is dropped from
+    /// `resolve`.
+    #[test]
+    fn granted_by_flow_with_a_count_satisfied_by_zero_is_refused() {
+        let (receipt, _gated, cat) = one_level();
+        let granting_uri = receipt.flow_uri.clone();
+        let ev = evidence(Vec::new(), Vec::new());
+        let zero_ok = ModelQueryCount {
+            min: None,
+            max: Some(0),
+        };
+
+        let err = ev[0]
+            .resolve(
+                &translated(),
+                Some(&spec(&granting_uri, "done")),
+                Some(&zero_ok),
+                GrantContext::root(&cat),
+            )
+            .expect_err("a gate that grants when verification FAILS is not a gate");
+        assert!(
+            format!("{err:#}").contains("satisfied by zero instances"),
+            "the refusal must name the inversion, got: {err:#}"
+        );
+
+        // The behaviour being refused, demonstrated: with no windows at all,
+        // `{max: 0}` reports the candidate as eligible.
+        let ungranted =
+            resolve(&ev[0], Some(&spec(&granting_uri, "done")), &cat).expect("resolves");
+        assert!(ungranted.windows.is_empty());
+        assert!(
+            ungranted.eligible_at(T3, Some(&zero_ok)),
+            "this is why the combination is refused rather than merely discouraged"
+        );
     }
 }
