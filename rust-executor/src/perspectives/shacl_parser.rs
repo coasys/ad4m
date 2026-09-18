@@ -248,18 +248,36 @@ pub enum ConsensusRuleSlot<'a> {
     Absent,
     /// A rule was authored here and decoded.
     Rule(&'a ConsensusRule),
-    /// A `consensusRule` link is present at this scope and its literal did
-    /// not decode. The author's intent is unknown and unrecoverable.
+    /// A `consensusRule` was authored at this scope and CANNOT BE READ. The
+    /// author's intent is unknown and unrecoverable, either way:
+    ///
+    /// - the literal did not decode (#1078), or
+    /// - two or more *different* literals are present on the one source, so
+    ///   no reader can say which the author meant (#1080 variant 1b) — see
+    ///   [`read_consensus_rule`].
+    ///
+    /// Both reach the same consumer verdict, which is why they share a
+    /// variant: the distinction matters to whoever fixes the data, and the
+    /// warning log carries it, but it does not change what the engine may do.
     Malformed,
 }
 
 /// Build a slot from the two fields the parser writes. Keeping this in one
 /// place is what stops a reader from checking `consensus_rule` and forgetting
 /// `consensus_rule_malformed`.
+///
+/// `(Some(rule), true)` is contradictory and resolves to `Malformed`, not to
+/// the rule. The parser never writes that pair — `read_consensus_rule`
+/// returns a rule or the flag, never both — so this arm is a backstop rather
+/// than a live branch. It is fail-closed on purpose: the pair means one
+/// writer both found a rule and concluded the scope is unreadable, and
+/// reading it as permission is the failure mode #1064 and #1079 both settled
+/// against. Anyone hand-building a `SHACLFlow` (the fold tests do) gets the
+/// refusal, not the rule.
 fn slot_of(rule: Option<&ConsensusRule>, malformed: bool) -> ConsensusRuleSlot<'_> {
     match (rule, malformed) {
-        (Some(r), _) => ConsensusRuleSlot::Rule(r),
-        (None, true) => ConsensusRuleSlot::Malformed,
+        (_, true) => ConsensusRuleSlot::Malformed,
+        (Some(r), false) => ConsensusRuleSlot::Rule(r),
         (None, false) => ConsensusRuleSlot::Absent,
     }
 }
@@ -748,6 +766,112 @@ fn find_links<'a>(links: &'a [Link], source: &str, predicate: &str) -> Vec<&'a L
         .collect()
 }
 
+/// Read the `consensusRule` at ONE scope — a flow URI, or one state URI —
+/// into the `(rule, unreadable)` pair the parser stores. Both scopes go
+/// through here so that one place decides what an unreadable rule is.
+///
+/// # Why this selects with `find_links`, not `find_link`
+///
+/// At this predicate the *selection* can fail, not just the decode. The
+/// parser works over a bag of plain [`Link`]s:
+/// `flow_context::loader::load_shacl_flows` collects
+/// `DecoratedLinkExpression::data`, which drops `author` and `proof`, and
+/// [`LinkQuery`](crate::types::LinkQuery) has no author field to filter on
+/// either. So when two agents have each put an `ad4m://consensusRule` link
+/// on the same source, the bag holds both and carries nothing to tell them
+/// apart.
+///
+/// The singular [`find_link`] is `.iter().find(…)` over a bag in store scan
+/// order (`sparql_store::query_links` iterates RocksDB order, not
+/// timestamp). It therefore broke that tie by whichever link the scan
+/// happened to reach first, and silently: the same link set could gate
+/// correctly on one replica and permissively on another, with no error on
+/// either. That is #1080 variant 1b — the defect is a race, not a
+/// certainty, which is why it cannot be fixed by ordering the bag better.
+///
+/// Two DIFFERENT rules for one scope is not a tie to be broken, it is
+/// unreadable: nobody can say which one the author meant. So it resolves to
+/// the same verdict as a literal that did not decode —
+/// [`ConsensusRuleSlot::Malformed`], which
+/// [`rule_for`](crate::perspectives::flow_instance::fold::rule_for) answers
+/// with `Refused` (#1079). A peer who injects a competing rule now causes a
+/// **refusal, not a downgrade**. Crucially this needs no authorship, which
+/// is the one thing the bag cannot supply.
+///
+/// # Repeats of the SAME literal are accepted, and have to be
+///
+/// Ambiguity is counted over DISTINCT `target`s rather than over link
+/// count, because the bag is a multiset that the loader itself fills with
+/// repeats of one link:
+///
+/// - `load_shacl_flows` iterates once per `rdf://type ad4m://Flow` link,
+///   not once per distinct flow URI, and its per-flow `(source = flow_uri)`
+///   query re-collects links the type query already pushed;
+/// - two flows that share a state URI re-collect that state's links twice.
+///
+/// A count-based check would therefore refuse honest flows — and would hand
+/// an attacker something cheaper than the downgrade it closes, since one
+/// extra `rdf://type` link would wedge every rule on that flow.
+///
+/// Byte-identical targets are also the right answer on their own terms. A
+/// link *is* `(source, predicate, target)`; once authorship is dropped, two
+/// links with equal targets are indistinguishable at this type and identical
+/// in effect, so there is no ambiguity about intent to refuse. Provenance is
+/// still ambiguous — one of them may be a peer's — but an injected copy of
+/// the author's own rule changes no gate, so it is not this function's
+/// decision to make.
+///
+/// Equality is on the raw literal, deliberately: two different literals that
+/// would decode to equal rules are still refused. That keeps the check
+/// fail-closed and needs no `PartialEq` on [`ConsensusRule`] — an equality
+/// wrong in the permissive direction would reopen exactly the downgrade this
+/// exists to close.
+fn read_consensus_rule(links: &[Link], source: &str, scope: &str) -> (Option<ConsensusRule>, bool) {
+    let mut distinct: Vec<&str> = Vec::new();
+    for link in find_links(links, source, "ad4m://consensusRule") {
+        if !distinct.contains(&link.target.as_str()) {
+            distinct.push(&link.target);
+        }
+    }
+
+    match distinct.as_slice() {
+        // No link at this scope. Defer to the next scope out — `Absent`.
+        [] => (None, false),
+
+        // Exactly one authored rule. Unchanged #1079 behaviour: decode it,
+        // and record a decode failure rather than erasing it.
+        [only] => match decode_json_literal::<ConsensusRule>(only) {
+            Ok(rule) => (Some(rule), false),
+            Err(e) => {
+                log::warn!(
+                    "{scope}: `consensusRule` literal `{}` did not decode ({e}); \
+                     transitions governed by it will be REFUSED, not defaulted",
+                    excerpt(only)
+                );
+                (None, true)
+            }
+        },
+
+        // Contested scope. Report `unreadable` and — this is the part that
+        // matters — decode NOTHING into `rule`. Returning a rule here
+        // alongside the flag would still gate on it, because
+        // `slot_of(Some(r), _)` reads a present rule as the verdict.
+        many => {
+            log::warn!(
+                "{scope}: {} DIFFERENT `consensusRule` literals on one source [{}]; \
+                 the authored rule is unreadable, so transitions governed by it will \
+                 be REFUSED rather than settled by store scan order",
+                many.len(),
+                many.iter()
+                    .map(|t| format!("`{}`", excerpt(t)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            (None, true)
+        }
+    }
+}
+
 /// Reader-side validator: a `Vec<ModelQuery>` payload is only accepted
 /// when every entry has a non-empty `className` string. The `#[serde(untagged)]`
 /// on `PropertyCondition` makes it too permissive to reject `[{}]` /
@@ -860,19 +984,11 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     // still leaves `consensus_rule` unset — half-typed data must not reach
     // the consensus engine — but the failure is now RECORDED, because the
     // consumer's answer to "no rule" and to "unreadable rule" differ (#1078).
-    if let Some(link) = find_link(links, flow_uri, "ad4m://consensusRule") {
-        match decode_json_literal::<ConsensusRule>(&link.target) {
-            Ok(rule) => flow.consensus_rule = Some(rule),
-            Err(e) => {
-                log::warn!(
-                    "flow `{flow_uri}`: `consensusRule` literal `{}` did not decode ({e}); \
-                     transitions governed by it will be REFUSED, not defaulted",
-                    excerpt(&link.target)
-                );
-                flow.consensus_rule_malformed = true;
-            }
-        }
-    }
+    // Two different rules on one source are unreadable for the same reason
+    // and get the same answer — see `read_consensus_rule` (#1080).
+    let (rule, unreadable) = read_consensus_rule(links, flow_uri, &format!("flow `{flow_uri}`"));
+    flow.consensus_rule = rule;
+    flow.consensus_rule_malformed = unreadable;
 
     // States — walk every `hasState` edge, gather each state's own
     // properties. Build a state-uri → state-name index so transition
@@ -899,24 +1015,14 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
         let semantic_check = find_link(links, state_uri, "ad4m://semanticCheck")
             .and_then(|l| decode_literal_string(&l.target).filter(|s| !s.is_empty()));
 
-        // Same policy as the flow-level rule above: record the failure
-        // instead of erasing it.
-        let mut consensus_rule = None;
-        let mut consensus_rule_malformed = false;
-        if let Some(l) = find_link(links, state_uri, "ad4m://consensusRule") {
-            match decode_json_literal::<ConsensusRule>(&l.target) {
-                Ok(rule) => consensus_rule = Some(rule),
-                Err(e) => {
-                    log::warn!(
-                        "flow `{flow_uri}` state `{state_name}`: `consensusRule` literal `{}` \
-                         did not decode ({e}); transitions into this state will be REFUSED, \
-                         not defaulted",
-                        excerpt(&l.target)
-                    );
-                    consensus_rule_malformed = true;
-                }
-            }
-        }
+        // Same policy as the flow-level rule above, through the same
+        // reader: record the failure instead of erasing it, and treat a
+        // contested scope as one more way to be unreadable.
+        let (consensus_rule, consensus_rule_malformed) = read_consensus_rule(
+            links,
+            state_uri,
+            &format!("flow `{flow_uri}` state `{state_name}`"),
+        );
 
         flow.states.push(FlowState {
             name: state_name,
