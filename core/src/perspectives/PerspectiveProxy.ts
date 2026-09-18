@@ -588,16 +588,25 @@ export class PerspectiveProxy {
     /** Cached `interpretationOverlays()` result with TTL-based expiry. */
     #overlaysCache: { result: InterpretationOverlayInfo[]; cachedAt: number } | null = null
     #overlaysCacheGen = 0
+    #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
     static readonly #OVERLAYS_TTL_MS = 30_000
+
+    #invalidateIfInterpLink: LinkCallback = (link) => {
+        const predicate = link?.data?.predicate
+        if (typeof predicate === 'string' && predicate.startsWith('ad4m://interp/')) {
+            this.invalidateOverlaysCache()
+        }
+        return null
+    }
 
     /**
      * Creates a new PerspectiveProxy instance.
      * Note: Don't create this directly, use ad4m.perspective.add() instead.
      */
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
-        this.#perspectiveLinkAddedCallbacks = []
-        this.#perspectiveLinkRemovedCallbacks = []
-        this.#perspectiveLinkUpdatedCallbacks = []
+        this.#perspectiveLinkAddedCallbacks = [this.#invalidateIfInterpLink]
+        this.#perspectiveLinkRemovedCallbacks = [this.#invalidateIfInterpLink]
+        this.#perspectiveLinkUpdatedCallbacks = [this.#invalidateIfInterpLink]
         this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
@@ -851,30 +860,47 @@ export class PerspectiveProxy {
      * Pending interpretation overlays on this perspective — LLM suggestions the
      * §4 divergence gate staged rather than applied, awaiting human accept/reject.
      *
-     * Results are cached for 30 seconds. During peer-sync bursts, multiple callers
-     * (e.g. `proposals()`) may read overlays in rapid succession — the cache avoids
-     * repeating a ~3-second RPC when the result has not changed. Call
-     * {@link invalidateOverlaysCache} to force a fresh fetch on the next call.
+     * Results are cached for 30 seconds. Concurrent callers against a cold cache
+     * share one in-flight RPC (the burst this exists for). Callers that mutate
+     * the returned array do not affect other consumers — each call gets a copy.
+     * Pass `{ fresh: true }` to skip the TTL. Overlay-link traffic
+     * (`ad4m://interp/…`) invalidates the cache so remote/auto-processor changes
+     * do not wait out the TTL. Call {@link invalidateOverlaysCache} to drop it
+     * immediately.
      */
-    async interpretationOverlays(): Promise<InterpretationOverlayInfo[]> {
-        if (this.#overlaysCache && Date.now() - this.#overlaysCache.cachedAt < PerspectiveProxy.#OVERLAYS_TTL_MS) {
-            return this.#overlaysCache.result
+    async interpretationOverlays(opts?: { fresh?: boolean }): Promise<InterpretationOverlayInfo[]> {
+        if (opts?.fresh) {
+            this.invalidateOverlaysCache()
+        } else if (this.#overlaysCache && Date.now() - this.#overlaysCache.cachedAt < PerspectiveProxy.#OVERLAYS_TTL_MS) {
+            return [...this.#overlaysCache.result]
+        } else if (this.#overlaysInFlight) {
+            const coalesced = await this.#overlaysInFlight
+            return [...coalesced]
         }
         const gen = this.#overlaysCacheGen
-        const result = await this.#client.interpretationOverlays(this.#handle.uuid)
-        // Only store when no invalidation happened during the RPC — a concurrent
-        // accept/reject/invalidate bumps the generation, and the stale response
-        // must not repopulate the cache.
-        if (gen === this.#overlaysCacheGen) {
-            this.#overlaysCache = { result, cachedAt: Date.now() }
+        const pending = this.#client.interpretationOverlays(this.#handle.uuid)
+        this.#overlaysInFlight = pending
+        try {
+            const result = await pending
+            // Only store when no invalidation happened during the RPC — a concurrent
+            // accept/reject/invalidate bumps the generation, and the stale response
+            // must not repopulate the cache.
+            if (gen === this.#overlaysCacheGen) {
+                this.#overlaysCache = { result, cachedAt: Date.now() }
+            }
+            return [...result]
+        } finally {
+            if (this.#overlaysInFlight === pending) {
+                this.#overlaysInFlight = null
+            }
         }
-        return result
     }
 
     /** Drop the cached overlays so the next call fetches fresh data from the executor. */
     invalidateOverlaysCache(): void {
         this.#overlaysCacheGen++
         this.#overlaysCache = null
+        this.#overlaysInFlight = null
     }
 
     /**
@@ -883,9 +909,13 @@ export class PerspectiveProxy {
      * `property` to accept a single predicate; omit it for the whole base.
      */
     async acceptInterpretation(base: string, property?: string): Promise<boolean> {
-        this.#overlaysCacheGen++
-        this.#overlaysCache = null
-        return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+        this.invalidateOverlaysCache()
+        try {
+            return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+        } finally {
+            // The write has landed; anything read across the RPC is stale.
+            this.invalidateOverlaysCache()
+        }
     }
 
     /**
@@ -894,9 +924,12 @@ export class PerspectiveProxy {
      * rejected `update` drops the overlay and keeps the real value.
      */
     async rejectInterpretation(base: string, property?: string): Promise<boolean> {
-        this.#overlaysCacheGen++
-        this.#overlaysCache = null
-        return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+        this.invalidateOverlaysCache()
+        try {
+            return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+        } finally {
+            this.invalidateOverlaysCache()
+        }
     }
 
     /** Subscribe to this perspective's auto-processor step signals. */
