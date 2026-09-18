@@ -808,6 +808,145 @@ mod tests {
         );
     }
 
+    /// `review_flow(None)` with `approved`'s `consensusRule` marked
+    /// unreadable — what the parser records for a literal that did not
+    /// decode (`shacl_parser::a_state_consensus_rule_that_does_not_parse_is_recorded_as_malformed`).
+    fn review_flow_with_unreadable_approved_rule() -> SHACLFlow {
+        let mut flow = review_flow(None);
+        let approved = flow
+            .states
+            .iter_mut()
+            .find(|s| s.name == "approved")
+            .expect("fixture has an `approved` state");
+        approved.consensus_rule_malformed = true;
+        flow
+    }
+
+    /// **The defect in #1078, as behaviour.** A single unqualified vote must
+    /// not carry a flow into a state whose consensus rule could not be read.
+    /// Before the fix the unreadable rule became `{n: 1, from_role: None}`
+    /// and this exact vote settled the edge.
+    ///
+    /// Paired with `an_absent_rule_still_advances_on_one_vote`, which is the
+    /// same flow and the same vote with the rule merely absent. The pair is
+    /// the assertion: one fixture field differs, and the outcome flips. A
+    /// fold that refused everything, or one that advanced on everything,
+    /// fails one of the two.
+    ///
+    /// Killing mutation: in `settle_edge`, replace the `ResolvedRule::Rule`
+    /// let-else with `let rule = match rule_for(flow, to) { Rule(r) => r,
+    /// Refused => ConsensusRule { n: 1, from_role: None } }` — i.e. restore
+    /// the old default at the point of use.
+    #[test]
+    fn a_malformed_rule_does_not_advance_on_one_vote() {
+        let flow = review_flow_with_unreadable_approved_rule();
+        assert!(
+            matches!(rule_for(&flow, "approved"), ResolvedRule::Refused),
+            "premise: the unreadable rule must resolve to Refused"
+        );
+
+        let derived = fold(
+            "review",
+            &flow,
+            &[vouched("p1", "review", "approved", &[(ALICE, T1)])],
+        );
+
+        assert_eq!(
+            derived.state, "review",
+            "an unreadable rule must not be answered with `one vote from anybody`"
+        );
+        assert!(
+            derived.settled.is_empty(),
+            "no edge may settle under a rule that could not be read"
+        );
+        assert!(
+            derived.contested.is_none(),
+            "a refused edge is not a contested one — refusal is not a race"
+        );
+    }
+
+    /// The positive control. Identical flow and identical vote, except that
+    /// no `consensusRule` was ever written: the `{n: 1}` default still
+    /// applies and the flow still advances.
+    ///
+    /// Killing mutation: make `rule_for` return `ResolvedRule::Refused` for
+    /// `ConsensusRuleSlot::Absent` — the fail-closed-everywhere overshoot,
+    /// which every other test in this group would still pass.
+    #[test]
+    fn an_absent_rule_still_advances_on_one_vote() {
+        let flow = review_flow(None);
+        assert_eq!(
+            n_of(&flow, "approved"),
+            1,
+            "premise: an absent rule still resolves to the {{n: 1}} default"
+        );
+
+        let derived = fold(
+            "review",
+            &flow,
+            &[vouched("p1", "review", "approved", &[(ALICE, T1)])],
+        );
+
+        assert_eq!(derived.state, "approved");
+        assert_eq!(walked(&derived), vec![("review", "approved")]);
+    }
+
+    /// An unreadable rule at state scope does not fall through to a
+    /// readable flow-level one. The flow-level rule here is `{n: 1}` —
+    /// strictly weaker than whatever the author wrote on `approved` — so
+    /// falling back would perform the same silent downgrade the fix exists
+    /// to stop, just one scope further out.
+    ///
+    /// Killing mutation: in `rule_for`, change the scope match to
+    /// `ConsensusRuleSlot::Rule(r) => …, _ => flow.consensus_rule_slot()`,
+    /// i.e. treat `Malformed` at state scope as "nothing said here".
+    #[test]
+    fn a_malformed_state_rule_does_not_fall_back_to_the_flow_rule() {
+        let mut flow = review_flow_with_unreadable_approved_rule();
+        flow.consensus_rule = Some(ConsensusRule {
+            n: 1,
+            from_role: None,
+        });
+        assert_eq!(
+            n_of(&flow, "changes_requested"),
+            1,
+            "premise: the flow-level rule is readable and would admit one vote"
+        );
+
+        assert!(
+            matches!(rule_for(&flow, "approved"), ResolvedRule::Refused),
+            "the unreadable state rule decides; the flow-level one is not consulted"
+        );
+
+        let derived = fold(
+            "review",
+            &flow,
+            &[vouched("p1", "review", "approved", &[(ALICE, T1)])],
+        );
+        assert_eq!(derived.state, "review");
+    }
+
+    /// The refusal is scoped to the state whose rule is unreadable, not to
+    /// the flow. `changes_requested` is governed by its own (absent) scope
+    /// and still fires — so a single bad literal wedges one edge rather
+    /// than bricking every flow that shares the definition.
+    ///
+    /// Killing mutation: in `settle_edge`, `return None` whenever ANY state
+    /// of the flow is malformed rather than the target state.
+    #[test]
+    fn a_malformed_rule_on_one_state_leaves_the_others_alone() {
+        let flow = review_flow_with_unreadable_approved_rule();
+
+        let derived = fold(
+            "review",
+            &flow,
+            &[vouched("p1", "review", "changes_requested", &[(ALICE, T1)])],
+        );
+
+        assert_eq!(derived.state, "changes_requested");
+        assert_eq!(walked(&derived), vec![("review", "changes_requested")]);
+    }
+
     /// `triage → approved | rejected`, both terminal: the shape where a
     /// clock-decided winner cannot be undone.
     fn terminal_branch_flow() -> SHACLFlow {

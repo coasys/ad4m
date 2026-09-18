@@ -2605,6 +2605,162 @@ mod tests {
         assert!(flow.states[0].requires.is_none());
     }
 
+    /// A `Reviewer`-gated 5-of-N rule with ONE wrongly-cased field inside
+    /// the nested `fromRole` — `class_name` for `className`, the realistic
+    /// authoring slip of #1078. `className` has no serde default, so the
+    /// failure propagates out of `ModelQuery` and takes the whole
+    /// `ConsensusRule` with it.
+    ///
+    /// The first assertion is the premise, not decoration: without it a
+    /// green test could mean the literal parsed fine and there was never a
+    /// malformed case to record.
+    ///
+    /// Killing mutation: `consensus_rule_malformed = true` → `= false` in
+    /// the state-scope arm of `parse_flow_from_links`. That restores the
+    /// exact pre-fix representation — rule unset, nothing recorded — and
+    /// `rule_for` answers it with `{n: 1}` again.
+    #[test]
+    fn a_state_consensus_rule_that_does_not_parse_is_recorded_as_malformed() {
+        let bad_rule = r#"{"n":5,"fromRole":{"class_name":"Reviewer","didProperty":"$did"}}"#;
+        assert!(
+            serde_json::from_str::<ConsensusRule>(bad_rule).is_err(),
+            "premise: this literal must actually fail to deserialise"
+        );
+
+        let flow_uri = "test://GatedFlow";
+        let state_uri = "test://Gated.approved";
+        let links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Gated")),
+            mk_link(flow_uri, "ad4m://hasState", state_uri),
+            mk_link(state_uri, "rdf://type", "ad4m://FlowState"),
+            mk_link(state_uri, "ad4m://stateName", &lit_str("approved")),
+            mk_link(state_uri, "ad4m://stateValue", &lit_num(1.0)),
+            mk_link(
+                state_uri,
+                "ad4m://consensusRule",
+                &format!("literal:string:{}", urlencoding::encode(bad_rule)),
+            ),
+        ];
+
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+        let state = &flow.states[0];
+        assert!(
+            state.consensus_rule.is_none(),
+            "half-typed rules must not reach the engine"
+        );
+        assert!(
+            matches!(state.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
+            "the state must report Malformed, not Absent — those get opposite \
+             answers from rule_for"
+        );
+    }
+
+    /// Same slip at flow scope. Separate test because the two scopes are
+    /// parsed by separate blocks, and the state-scope one being right says
+    /// nothing about this one.
+    ///
+    /// Killing mutation: drop `flow.consensus_rule_malformed = true` from
+    /// the flow-scope `Err` arm.
+    #[test]
+    fn a_flow_consensus_rule_that_does_not_parse_is_recorded_as_malformed() {
+        let bad_rule = r#"{"threshold":5}"#; // `n` is required and missing
+        assert!(
+            serde_json::from_str::<ConsensusRule>(bad_rule).is_err(),
+            "premise: this literal must actually fail to deserialise"
+        );
+
+        let flow_uri = "test://LooseFlow";
+        let links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Loose")),
+            mk_link(
+                flow_uri,
+                "ad4m://consensusRule",
+                &format!("literal:string:{}", urlencoding::encode(bad_rule)),
+            ),
+        ];
+
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+        assert!(flow.consensus_rule.is_none());
+        assert!(
+            matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
+            "flow scope must report Malformed"
+        );
+    }
+
+    /// The positive control for both tests above: a flow that declares no
+    /// `consensusRule` at all reads as `Absent`, NOT as `Malformed`.
+    ///
+    /// Without this, a fix that marked every flow malformed — refusing
+    /// every transition in the system — would look identical to a working
+    /// one.
+    ///
+    /// Killing mutation: initialise `consensus_rule_malformed: true` in the
+    /// `SHACLFlow` / `FlowState` constructors in `parse_flow_from_links`.
+    #[test]
+    fn an_absent_consensus_rule_is_absent_not_malformed() {
+        let flow_uri = "test://PlainFlow";
+        let state_uri = "test://Plain.done";
+        let links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Plain")),
+            mk_link(flow_uri, "ad4m://hasState", state_uri),
+            mk_link(state_uri, "rdf://type", "ad4m://FlowState"),
+            mk_link(state_uri, "ad4m://stateName", &lit_str("done")),
+            mk_link(state_uri, "ad4m://stateValue", &lit_num(1.0)),
+        ];
+
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+        assert!(
+            matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Absent),
+            "no link at flow scope ⇒ Absent"
+        );
+        assert!(
+            matches!(
+                flow.states[0].consensus_rule_slot(),
+                ConsensusRuleSlot::Absent
+            ),
+            "no link at state scope ⇒ Absent"
+        );
+    }
+
+    /// A well-formed rule still decodes, with `fromRole` intact. Guards the
+    /// `Result` conversion in `decode_json_literal`: an `Err`-always
+    /// implementation would pass every test above.
+    ///
+    /// Killing mutation: make `decode_json_literal` return
+    /// `Err("…".into())` unconditionally.
+    #[test]
+    fn a_well_formed_consensus_rule_still_decodes() {
+        let good_rule = r#"{"n":5,"fromRole":{"className":"Reviewer","didProperty":"$did"}}"#;
+        let flow_uri = "test://GoodFlow";
+        let links = vec![
+            mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+            mk_link(flow_uri, "ad4m://flowName", &lit_str("Good")),
+            mk_link(
+                flow_uri,
+                "ad4m://consensusRule",
+                &format!("literal:string:{}", urlencoding::encode(good_rule)),
+            ),
+        ];
+
+        let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+        let ConsensusRuleSlot::Rule(rule) = flow.consensus_rule_slot() else {
+            panic!(
+                "a valid rule must read as Rule, got {:?}",
+                flow.consensus_rule_slot()
+            );
+        };
+        assert_eq!(rule.n, 5);
+        assert_eq!(
+            rule.from_role.as_ref().map(|r| r.class_name.as_str()),
+            Some("Reviewer"),
+            "the role gate must survive the round trip"
+        );
+        assert!(!flow.consensus_rule_malformed);
+    }
+
     /// Non-Flow-suffix URI → error. Prevents silent misuse where a
     /// caller passes a state URI expecting flow output.
     #[test]
