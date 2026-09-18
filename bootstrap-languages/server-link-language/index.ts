@@ -55,7 +55,7 @@ import { commitNeedsKeyRetry, type KeyRingStatus } from "./src/key-ring-policy.j
 // Variables and possibleTemplateParams below.
 
 //!@ad4m-template-variable
-const SERVER_URL = "<to-be-filled>";
+const SERVER_URL = "https://link.ad4m.dev";
 
 //!@ad4m-template-variable
 const UID = "<to-be-filled>";

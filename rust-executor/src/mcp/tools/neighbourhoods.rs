@@ -132,13 +132,27 @@ impl Ad4mMcpHandler {
                 .ok_or("Language language not loaded — cannot clone link language template")?
         };
 
-        // Build template data with unique ID and name
+        let meta = controller
+            .get_language_expression(template_address)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to get template meta for '{}': {}. Use `list_link_language_templates` to see available templates.",
+                    template_address, e
+                )
+            })?;
+        let declared_params: Vec<String> = meta.possible_template_params.unwrap_or_default();
+
         let template_map: serde_json::Map<String, serde_json::Value> = {
             let mut m = serde_json::Map::new();
-            m.insert(
-                "uid".to_string(),
-                serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
-            );
+            let uid = uuid::Uuid::new_v4().to_string();
+
+            let uid_key = declared_params
+                .iter()
+                .find(|p| p.eq_ignore_ascii_case("uid"))
+                .cloned()
+                .unwrap_or_else(|| "uid".to_string());
+            m.insert(uid_key, serde_json::Value::String(uid));
             m.insert(
                 "name".to_string(),
                 serde_json::Value::String(name.to_string()),
