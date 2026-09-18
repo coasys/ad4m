@@ -1643,6 +1643,10 @@ fn extract_local_name(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The #1080 contested-rule tests assert the CONSUMER verdict, not just
+    // the parser's representation of it: `Refused` is the behaviour,
+    // `Malformed` is only how the parser spells it.
+    use crate::perspectives::flow_instance::fold::{rule_for, ResolvedRule};
 
     #[test]
     fn test_extract_namespace() {
@@ -2865,6 +2869,362 @@ mod tests {
             "the role gate must survive the round trip"
         );
         assert!(!flow.consensus_rule_malformed);
+    }
+
+    // -------------------------------------------------------------------
+    // #1080 variant 1b — a contested `consensusRule` scope.
+    //
+    // Every fixture below shares one shape: a flow gated at `5 of N, only
+    // from Reviewer`, plus an injected `{"n":1}` — the downgrade an
+    // arbitrary neighbourhood peer can write. The injected literal is
+    // well-formed on purpose, so #1079's malformed path cannot be what
+    // refuses it.
+    // -------------------------------------------------------------------
+
+    const CONTESTED_URI: &str = "test://ContestedFlow";
+    /// A 5-of-N `Reviewer` gate, as the author wrote it.
+    const GENUINE_RULE: &str =
+        r#"{"n":5,"fromRole":{"className":"Reviewer","didProperty":"$did"}}"#;
+    /// What a peer injects to reach one-vote-from-anybody.
+    const INJECTED_RULE: &str = r#"{"n":1}"#;
+
+    /// Flow-scope links for `CONTESTED_URI` with the `consensusRule`
+    /// literals appended in the given order. Order is a parameter because
+    /// order is the defect.
+    fn contested_flow_links(rules: &[&str]) -> Vec<Link> {
+        let mut links = vec![
+            mk_link(CONTESTED_URI, "rdf://type", "ad4m://Flow"),
+            mk_link(CONTESTED_URI, "ad4m://flowName", &lit_str("Contested")),
+        ];
+        for r in rules {
+            links.push(mk_link(
+                CONTESTED_URI,
+                "ad4m://consensusRule",
+                &format!("literal:string:{}", urlencoding::encode(r)),
+            ));
+        }
+        links
+    }
+
+    /// **The premise for every test in this block.** Both literals decode.
+    /// If the injected one did not, `ConsensusRuleSlot::Malformed` would
+    /// already refuse it via #1079 and there would be no 1b left to fix — a
+    /// green suite would then be proving nothing.
+    #[test]
+    fn both_contesting_rules_are_well_formed() {
+        let genuine = serde_json::from_str::<ConsensusRule>(GENUINE_RULE)
+            .expect("premise: the author's rule decodes");
+        assert_eq!(genuine.n, 5);
+        assert_eq!(
+            genuine.from_role.as_ref().map(|r| r.class_name.as_str()),
+            Some("Reviewer")
+        );
+
+        let injected = serde_json::from_str::<ConsensusRule>(INJECTED_RULE)
+            .expect("premise: the injected rule decodes too — that is the point");
+        assert_eq!(injected.n, 1);
+        assert!(
+            injected.from_role.is_none(),
+            "premise: the injected rule is the permissive default, so a \
+             downgrade would be observable as a change in `n`"
+        );
+    }
+
+    /// **The race, killed.** Both orderings of the same two links must reach
+    /// the SAME verdict.
+    ///
+    /// This is the property that matters, and it is why one ordering proves
+    /// nothing: `find_link` was `.iter().find(…)`, so a first-match
+    /// implementation passes whichever ordering puts the author's rule first
+    /// and fails the other. Before this fix the two orderings disagreed —
+    /// one link set, correct gate on one replica and `{n:1}` on another,
+    /// with no error on either.
+    ///
+    /// Asserted through `rule_for`, not only the slot: `Refused` at the
+    /// consumer is the behaviour, `Malformed` is just how the parser spells
+    /// it.
+    ///
+    /// Killing mutation: `read_consensus_rule` takes `distinct.first()`
+    /// instead of matching on arity. That restores first-match, and the two
+    /// halves of this test then disagree.
+    #[test]
+    fn a_contested_consensus_rule_is_refused_in_either_order() {
+        let genuine_first = parse_flow_from_links(
+            &contested_flow_links(&[GENUINE_RULE, INJECTED_RULE]),
+            CONTESTED_URI,
+        )
+        .expect("reader");
+        let injected_first = parse_flow_from_links(
+            &contested_flow_links(&[INJECTED_RULE, GENUINE_RULE]),
+            CONTESTED_URI,
+        )
+        .expect("reader");
+
+        for (label, flow) in [
+            ("author's rule first", &genuine_first),
+            ("injected rule first", &injected_first),
+        ] {
+            assert!(
+                flow.consensus_rule.is_none(),
+                "{label}: neither literal may be decoded into the rule — a rule \
+                 present alongside the flag is what `slot_of` would gate on"
+            );
+            assert!(
+                matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
+                "{label}: a contested scope is unreadable, got {:?}",
+                flow.consensus_rule_slot()
+            );
+            assert!(
+                matches!(rule_for(flow, "any_state"), ResolvedRule::Refused),
+                "{label}: the consumer must REFUSE, not resolve"
+            );
+        }
+    }
+
+    /// **The positive control.** The same fixture carrying only the author's
+    /// rule still parses and still gates at 5-of-N-from-`Reviewer`.
+    ///
+    /// Without this, an implementation that refused every flow — or one that
+    /// dropped `consensusRule` support altogether — passes the test above
+    /// and looks like a working refusal.
+    ///
+    /// Killing mutation: `read_consensus_rule` returns `(None, true)` from
+    /// the `[only]` arm as well as the `many` arm.
+    #[test]
+    fn a_single_consensus_rule_in_the_same_fixture_still_gates() {
+        let flow = parse_flow_from_links(&contested_flow_links(&[GENUINE_RULE]), CONTESTED_URI)
+            .expect("reader");
+
+        assert!(
+            !flow.consensus_rule_malformed,
+            "one link is not contested and must not be flagged"
+        );
+        let ConsensusRuleSlot::Rule(rule) = flow.consensus_rule_slot() else {
+            panic!("one link ⇒ Rule, got {:?}", flow.consensus_rule_slot());
+        };
+        assert_eq!(rule.n, 5, "the authored threshold must survive");
+        assert_eq!(
+            rule.from_role.as_ref().map(|r| r.class_name.as_str()),
+            Some("Reviewer"),
+            "the authored role gate must survive"
+        );
+
+        let ResolvedRule::Rule(resolved) = rule_for(&flow, "any_state") else {
+            panic!("a single readable rule must resolve, not refuse");
+        };
+        assert_eq!(resolved.n, 5);
+    }
+
+    /// Same contest at STATE scope. A separate test because the two scopes
+    /// are separate call sites, and the flow-scope one being right says
+    /// nothing about this one — the lesson of #1079's own paired scope
+    /// tests.
+    ///
+    /// The flow-level assertion earns its place: a contested STATE rule must
+    /// not fall through to the flow's readable one. That substitution — an
+    /// unreadable strict gate silently replaced by a weaker readable gate
+    /// one scope out — is precisely what `rule_for` refuses by design.
+    #[test]
+    fn a_contested_state_consensus_rule_is_refused_in_either_order() {
+        let flow_uri = "test://StateContestedFlow";
+        let state_uri = "test://StateContested.approved";
+
+        let build = |rules: &[&str]| {
+            let mut links = vec![
+                mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+                mk_link(flow_uri, "ad4m://flowName", &lit_str("StateContested")),
+                // A readable, WEAKER flow-level rule to fall back to, so
+                // this test can tell a refusal from a fall-through.
+                mk_link(
+                    flow_uri,
+                    "ad4m://consensusRule",
+                    &format!("literal:string:{}", urlencoding::encode(INJECTED_RULE)),
+                ),
+                mk_link(flow_uri, "ad4m://hasState", state_uri),
+                mk_link(state_uri, "rdf://type", "ad4m://FlowState"),
+                mk_link(state_uri, "ad4m://stateName", &lit_str("approved")),
+                mk_link(state_uri, "ad4m://stateValue", &lit_num(1.0)),
+            ];
+            for r in rules {
+                links.push(mk_link(
+                    state_uri,
+                    "ad4m://consensusRule",
+                    &format!("literal:string:{}", urlencoding::encode(r)),
+                ));
+            }
+            parse_flow_from_links(&links, flow_uri).expect("reader")
+        };
+
+        for (label, flow) in [
+            ("author's rule first", build(&[GENUINE_RULE, INJECTED_RULE])),
+            ("injected rule first", build(&[INJECTED_RULE, GENUINE_RULE])),
+        ] {
+            let state = &flow.states[0];
+            assert!(
+                matches!(state.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
+                "{label}: the contested STATE scope is unreadable, got {:?}",
+                state.consensus_rule_slot()
+            );
+            assert!(
+                matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Rule(_)),
+                "{label}: premise — the flow scope stays readable, so a \
+                 fall-through would be observable"
+            );
+            assert!(
+                matches!(rule_for(&flow, "approved"), ResolvedRule::Refused),
+                "{label}: a contested state rule must refuse, NOT fall through \
+                 to the flow's weaker readable rule"
+            );
+        }
+    }
+
+    /// **The decided edge case: byte-identical repeats are ACCEPTED, as one
+    /// rule.**
+    ///
+    /// The reasoning lives on `read_consensus_rule`; the short version is
+    /// that a link *is* `(source, predicate, target)`, so once the loader
+    /// has dropped authorship, two links with equal targets are
+    /// indistinguishable at this type and identical in effect. There is no
+    /// ambiguity about intent to refuse.
+    ///
+    /// This is not merely defensible, it is required. The loader builds a
+    /// multiset and fills it with repeats itself: `load_shacl_flows`
+    /// iterates once per `rdf://type ad4m://Flow` link rather than once per
+    /// distinct flow URI, and its per-flow `(source = flow_uri)` query
+    /// re-collects links the type query already pushed. Counting links
+    /// rather than distinct targets would refuse honest flows — and would
+    /// hand an attacker something cheaper than the downgrade this closes,
+    /// since one extra `rdf://type` link would then wedge every rule on the
+    /// flow.
+    ///
+    /// Killing mutation: drop the `distinct` de-duplication in
+    /// `read_consensus_rule` and match on the raw `find_links` length.
+    #[test]
+    fn byte_identical_consensus_rule_repeats_are_one_rule_not_a_contest() {
+        let flow = parse_flow_from_links(
+            &contested_flow_links(&[GENUINE_RULE, GENUINE_RULE, GENUINE_RULE]),
+            CONTESTED_URI,
+        )
+        .expect("reader");
+
+        assert!(
+            !flow.consensus_rule_malformed,
+            "three copies of ONE literal are one authored rule, not a contest"
+        );
+        let ConsensusRuleSlot::Rule(rule) = flow.consensus_rule_slot() else {
+            panic!(
+                "identical repeats ⇒ Rule, got {:?}",
+                flow.consensus_rule_slot()
+            );
+        };
+        assert_eq!(rule.n, 5, "and it is still the author's rule");
+    }
+
+    /// The other half of that decision, written as a test so it cannot be
+    /// softened by accident: equality is on the RAW LITERAL, not on the
+    /// decoded value. These two literals decode to equal rules — same `n`,
+    /// neither with a role gate — and are still refused.
+    ///
+    /// Deliberately fail-closed. Accepting them would mean defining equality
+    /// on `ConsensusRule` (which derives no `PartialEq`) and on every type
+    /// it nests, and an equality wrong in the permissive direction reopens
+    /// exactly the downgrade this PR closes. Refusing needs no equality at
+    /// all. The cost is a loud, local wedge on data no canonical writer
+    /// produces — `parse_flow_to_links` emits exactly one `consensusRule`
+    /// link per scope.
+    #[test]
+    fn semantically_equal_but_textually_different_rules_are_still_refused() {
+        let a = r#"{"n":3}"#;
+        let b = r#"{"n": 3}"#; // one space — same decoded rule
+        assert_eq!(
+            serde_json::from_str::<ConsensusRule>(a).expect("decodes").n,
+            serde_json::from_str::<ConsensusRule>(b).expect("decodes").n,
+            "premise: these two literals decode to the same threshold"
+        );
+        assert_ne!(a, b, "premise: and they are textually different");
+
+        let flow =
+            parse_flow_from_links(&contested_flow_links(&[a, b]), CONTESTED_URI).expect("reader");
+        assert!(
+            matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
+            "raw-literal equality is the contract: two different literals are a \
+             contest even when they would decode alike"
+        );
+    }
+
+    /// A contested scope must not become readable just because one of the
+    /// competing literals is garbage. Two links, one decodable and one not:
+    /// still a contest, because the author's intent is still unknown.
+    ///
+    /// Without this, an implementation that filtered to the decodable
+    /// candidates before counting would quietly reintroduce first-match
+    /// whenever the attacker's link happened to be malformed — and an
+    /// attacker choosing between "downgrade the gate" and "be ignored"
+    /// picks downgrade every time.
+    ///
+    /// Killing mutation: in `read_consensus_rule`, retain only candidates
+    /// that decode before matching on arity.
+    #[test]
+    fn a_contest_between_a_readable_and_an_unreadable_rule_is_still_refused() {
+        let garbage = r#"{"threshold":5}"#; // `n` missing — does not decode
+        assert!(
+            serde_json::from_str::<ConsensusRule>(garbage).is_err(),
+            "premise: this literal must fail to deserialise"
+        );
+
+        for (label, order) in [
+            ("readable first", [GENUINE_RULE, garbage]),
+            ("unreadable first", [garbage, GENUINE_RULE]),
+        ] {
+            let flow = parse_flow_from_links(&contested_flow_links(&order), CONTESTED_URI)
+                .expect("reader");
+            assert!(
+                flow.consensus_rule.is_none(),
+                "{label}: the decodable candidate must NOT be adopted"
+            );
+            assert!(
+                matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
+                "{label}: still a contest"
+            );
+        }
+    }
+
+    /// `slot_of`'s backstop, pinned directly. The parser never writes
+    /// `(Some(rule), malformed = true)` — `read_consensus_rule` returns a
+    /// rule or the flag, never both — but anything hand-building a
+    /// `SHACLFlow` can, and that pair must read as a refusal rather than as
+    /// the rule.
+    ///
+    /// This is here to pin WHICH guard answered. Without it, the contested
+    /// tests above would still pass on an implementation that decoded the
+    /// first candidate into `consensus_rule` and merely set the flag
+    /// alongside it, because `slot_of` would then be the thing refusing. The
+    /// `consensus_rule.is_none()` assertions there pin the parser's half;
+    /// this pins `slot_of`'s half.
+    ///
+    /// Killing mutation: restore `(Some(r), _) => Rule(r)` as the first arm
+    /// of `slot_of`.
+    #[test]
+    fn a_rule_present_alongside_the_unreadable_flag_reads_as_unreadable() {
+        let mut flow = parse_flow_from_links(&contested_flow_links(&[GENUINE_RULE]), CONTESTED_URI)
+            .expect("reader");
+        assert!(
+            matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Rule(_)),
+            "premise: this flow starts out readable"
+        );
+
+        // The contradictory pair: a decoded rule AND the unreadable flag.
+        flow.consensus_rule_malformed = true;
+
+        assert!(
+            flow.consensus_rule.is_some(),
+            "premise: the rule is still present — the flag alone is the change"
+        );
+        assert!(
+            matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
+            "a present rule must not outrank the unreadable flag; \
+             `could not be determined` is never a verdict (#1064)"
+        );
     }
 
     /// Non-Flow-suffix URI → error. Prevents silent misuse where a
