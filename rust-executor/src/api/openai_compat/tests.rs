@@ -1246,3 +1246,203 @@ fn a_saved_model_is_held_to_the_same_exemptions_as_discovery() {
     // A local model has no endpoint at all.
     assert!(refuse(&crate::types::ModelInput::default()).is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// native_tools — /v1 chat for a provider that carries tools as data
+// ---------------------------------------------------------------------------
+
+use super::native_tools;
+use crate::ai_service::providers::{ChatReply, ChatRole, ChatUsage};
+
+fn messages(value: serde_json::Value) -> Vec<ChatMessage> {
+    serde_json::from_value(value).expect("valid OpenAI messages")
+}
+
+fn reply_calling(text: &str) -> ChatReply {
+    ChatReply {
+        text: text.to_string(),
+        tool_calls: vec![crate::ai_service::providers::ToolCall {
+            id: "toolu_1".to_string(),
+            name: "update_schema".to_string(),
+            arguments: serde_json::json!({ "patches": [] }),
+        }],
+        usage: ChatUsage::default(),
+    }
+}
+
+#[test]
+fn parallel_tool_results_each_answer_their_own_call() {
+    // A client that loads two things at once sends two `role:"tool"` messages
+    // after one assistant turn. Both have to arrive as results, each naming its
+    // call: a provider refuses the request if either call goes unanswered.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "system", "content": "be terse" },
+        { "role": "user", "content": "add a button" },
+        {
+            "role": "assistant", "content": null,
+            "tool_calls": [
+                { "id": "call_a", "type": "function", "function": { "name": "load_a", "arguments": "{}" } },
+                { "id": "call_b", "type": "function", "function": { "name": "load_b", "arguments": "{}" } },
+            ],
+        },
+        { "role": "tool", "tool_call_id": "call_a", "content": "section a" },
+        { "role": "tool", "tool_call_id": "call_b", "content": "section b" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns.len(), 5);
+    assert_eq!(turns[0].role, ChatRole::System);
+    assert_eq!(turns[2].tool_calls.len(), 2);
+    assert_eq!(turns[3].tool_result_for.as_deref(), Some("call_a"));
+    assert_eq!(turns[3].content, "section a");
+    assert_eq!(turns[4].tool_result_for.as_deref(), Some("call_b"));
+    assert_eq!(turns[4].content, "section b");
+}
+
+#[test]
+fn tool_call_arguments_reach_the_provider_as_an_object() {
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [
+                { "id": "call_a", "type": "function", "function": { "name": "update_schema", "arguments": "{\"patches\":[1]}" } },
+            ],
+        },
+        { "role": "tool", "tool_call_id": "call_a", "content": "Patches applied." },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns[0].tool_calls[0].arguments["patches"][0], 1);
+}
+
+#[test]
+fn a_developer_message_is_a_system_turn() {
+    // OpenAI's newer name for the system role; read as the user speaking it
+    // would lose its authority.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "developer", "content": "be terse" },
+        { "role": "user", "content": "hi" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns[0].role, ChatRole::System);
+}
+
+#[test]
+fn a_function_without_parameters_still_sends_an_object_schema() {
+    let tools: Vec<ToolDef> = serde_json::from_value(serde_json::json!([
+        { "type": "function", "function": { "name": "load_stores" } },
+        { "type": "function", "function": {
+            "name": "update_schema", "description": "Apply patches",
+            "parameters": { "type": "object", "properties": { "patches": { "type": "array" } } },
+        } },
+    ]))
+    .unwrap();
+
+    let specs = native_tools::to_specs(&tools);
+
+    assert_eq!(specs[0].name, "load_stores");
+    assert_eq!(specs[0].description, "");
+    assert_eq!(specs[0].parameters["type"], "object");
+    assert_eq!(specs[1].description, "Apply patches");
+    assert_eq!(
+        specs[1].parameters["properties"]["patches"]["type"],
+        "array"
+    );
+}
+
+#[test]
+fn a_reply_with_calls_finishes_with_tool_calls_and_keeps_its_text() {
+    let (message, finish_reason) = native_tools::response_message(reply_calling("Adding it now."));
+    let body = serde_json::to_value(&message).unwrap();
+
+    assert_eq!(finish_reason, "tool_calls");
+    assert_eq!(body["content"], "Adding it now.");
+    assert_eq!(body["tool_calls"][0]["id"], "toolu_1");
+    assert_eq!(body["tool_calls"][0]["type"], "function");
+    assert_eq!(body["tool_calls"][0]["function"]["name"], "update_schema");
+    // A JSON string on the wire, as the OpenAI spec has it.
+    assert_eq!(
+        body["tool_calls"][0]["function"]["arguments"],
+        r#"{"patches":[]}"#
+    );
+}
+
+#[test]
+fn a_reply_that_only_calls_omits_content() {
+    let (message, _) = native_tools::response_message(reply_calling(""));
+    let body = serde_json::to_value(&message).unwrap();
+
+    assert!(body.get("content").is_none(), "{body}");
+}
+
+#[test]
+fn a_reply_without_calls_is_a_plain_stop() {
+    let (message, finish_reason) = native_tools::response_message(ChatReply {
+        text: "Done.".to_string(),
+        ..Default::default()
+    });
+    let body = serde_json::to_value(&message).unwrap();
+
+    assert_eq!(finish_reason, "stop");
+    assert_eq!(body["content"], "Done.");
+    assert!(body.get("tool_calls").is_none(), "{body}");
+}
+
+#[test]
+fn a_streamed_reply_is_framed_as_role_text_calls_then_finish() {
+    let chunks =
+        native_tools::reply_chunks(&reply_calling("Adding it now."), "chatcmpl-1", "default", 7);
+    let chunks: Vec<serde_json::Value> = chunks
+        .iter()
+        .map(|c| serde_json::to_value(c).unwrap())
+        .collect();
+
+    assert_eq!(chunks.len(), 4);
+    assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+    assert_eq!(
+        chunks[1]["choices"][0]["delta"]["content"],
+        "Adding it now."
+    );
+    let call = &chunks[2]["choices"][0]["delta"]["tool_calls"][0];
+    assert_eq!(call["index"], 0);
+    assert_eq!(call["id"], "toolu_1");
+    assert_eq!(call["function"]["name"], "update_schema");
+    assert_eq!(call["function"]["arguments"], r#"{"patches":[]}"#);
+    assert_eq!(chunks[3]["choices"][0]["finish_reason"], "tool_calls");
+    for chunk in &chunks {
+        assert_eq!(chunk["object"], "chat.completion.chunk");
+        assert_eq!(chunk["id"], "chatcmpl-1");
+    }
+}
+
+#[test]
+fn a_streamed_reply_without_text_or_calls_is_role_then_stop() {
+    let chunks = native_tools::reply_chunks(&ChatReply::default(), "chatcmpl-1", "default", 7);
+    let last = serde_json::to_value(chunks.last().unwrap()).unwrap();
+
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+}
+
+#[test]
+fn usage_counts_cached_input_as_prompt_tokens() {
+    // Anthropic reports cache reads and writes apart from input_tokens; an
+    // OpenAI client reads prompt_tokens as everything that went in.
+    let usage = native_tools::usage_of(&ChatUsage {
+        input_tokens: Some(100),
+        output_tokens: Some(20),
+        cache_read_tokens: Some(7000),
+        cache_write_tokens: Some(5),
+    });
+
+    assert_eq!(usage.prompt_tokens, 7105);
+    assert_eq!(usage.completion_tokens, 20);
+    assert_eq!(usage.total_tokens, 7125);
+}
+
+#[test]
+fn usage_a_provider_did_not_report_reads_as_zero() {
+    let usage = native_tools::usage_of(&ChatUsage::default());
+    assert_eq!(usage.total_tokens, 0);
+}
