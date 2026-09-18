@@ -120,7 +120,7 @@
 
 use super::atom::{TransitionAtom, Vote};
 use super::time::parse_link_timestamp;
-use crate::perspectives::shacl_parser::{ConsensusRule, SHACLFlow};
+use crate::perspectives::shacl_parser::{ConsensusRule, ConsensusRuleSlot, SHACLFlow};
 use chrono::{DateTime, Utc};
 
 /// An atom whose votes have already been filtered by its rule's `fromRole`,
@@ -193,19 +193,73 @@ enum Settlement {
     Contested(Contention),
 }
 
+/// What governs entry INTO a state, once the scopes have been resolved.
+#[derive(Debug, Clone)]
+pub enum ResolvedRule {
+    /// Apply this rule. Either one the author wrote, or — when no scope
+    /// wrote one — the `{ n: 1 }` default.
+    Rule(ConsensusRule),
+    /// The governing scope wrote a `consensusRule` that did not parse. The
+    /// transition is refused: no number of votes admits the edge, and no
+    /// voter is eligible for it.
+    Refused,
+}
+
 /// The rule governing entry INTO `to_state`: the target state's own
 /// `consensusRule`, else the flow-level one, else `{ n: 1 }`.
-pub fn rule_for(flow: &SHACLFlow, to_state: &str) -> ConsensusRule {
-    flow.states
+///
+/// # Why a malformed rule refuses instead of defaulting
+///
+/// `{ n: 1, from_role: None }` means *"one signature, from anybody"* — the
+/// most permissive rule the engine can express. That is the right answer for
+/// a flow that declares no rule at all: like-button-shaped actions (§4.1.1)
+/// are the common case and must stay frictionless.
+///
+/// It is the wrong answer for a rule that failed to parse. There the author
+/// did write a gate, and all that is known is that it could not be read.
+/// Defaulting turns *"5 of N, and only from `Reviewer`"* into *"1 vote from
+/// any agent"* with no error and no observable difference at configuration
+/// time — and the substitution always runs toward less consensus, never more
+/// (#1078). So the two cases get separate answers:
+///
+/// - **absent** → `{ n: 1 }`, exactly as before this was split;
+/// - **malformed** → [`ResolvedRule::Refused`].
+///
+/// Refusing wedges the flow at that state, which is loud, local, and fixed by
+/// correcting the literal. Defaulting fails silently and is discoverable only
+/// by auditing what already advanced. This is the policy
+/// [`resolve_role_grants`](super::roles::resolve_role_grants) already applies
+/// when it cannot date a grant, and the one #1064 settled for `proof.valid`:
+/// a value meaning *"could not be determined"* must never be read as a
+/// verdict.
+///
+/// Scope precedence is unchanged, and a malformed scope does NOT fall through
+/// to the next one out: falling back would let an unreadable state-level gate
+/// be silently replaced by a weaker flow-level one, which is the very
+/// substitution this function exists to prevent.
+pub fn rule_for(flow: &SHACLFlow, to_state: &str) -> ResolvedRule {
+    let state_slot = flow
+        .states
         .iter()
         .find(|s| s.name == to_state)
-        .and_then(|s| s.consensus_rule.as_ref())
-        .or(flow.consensus_rule.as_ref())
-        .cloned()
-        .unwrap_or(ConsensusRule {
+        .map(|s| s.consensus_rule_slot())
+        .unwrap_or(ConsensusRuleSlot::Absent);
+
+    // First scope that says anything wins — including when what it says is
+    // "unreadable".
+    let governing = match state_slot {
+        ConsensusRuleSlot::Absent => flow.consensus_rule_slot(),
+        decided => decided,
+    };
+
+    match governing {
+        ConsensusRuleSlot::Rule(rule) => ResolvedRule::Rule(rule.clone()),
+        ConsensusRuleSlot::Malformed => ResolvedRule::Refused,
+        ConsensusRuleSlot::Absent => ResolvedRule::Rule(ConsensusRule {
             n: 1,
             from_role: None,
-        })
+        }),
+    }
 }
 
 /// Whether enough distinct eligible voters signed. `{n: 0}` is a
@@ -419,7 +473,16 @@ fn settle_edge(
     atoms: &[VouchedAtom],
     consumed: &[SettledEdge],
 ) -> Option<SettledEdge> {
-    let rule = rule_for(flow, to);
+    // A rule that could not be read admits no edge: return before any vote is
+    // counted, so there is no path on which an unreadable gate settles (#1078).
+    let ResolvedRule::Rule(rule) = rule_for(flow, to) else {
+        log::warn!(
+            "flow `{}`: refusing edge `{from}` → `{to}` — the `consensusRule` governing `{to}` \
+             did not parse, so the threshold it declared is unknown",
+            flow.flow_uri()
+        );
+        return None;
+    };
     // Pool with each vote's parsed instant and sort by it — string order is
     // client-library order inside a sub-second collision (#1000). Atom
     // construction already dropped unparseable timestamps, so the
@@ -496,6 +559,16 @@ mod tests {
     const T1: &str = "2026-01-01T00:00:00.000Z";
     const T2: &str = "2026-01-02T00:00:00.000Z";
     const T3: &str = "2026-01-03T00:00:00.000Z";
+
+    /// The threshold `rule_for` resolved, for the cases that expect a rule
+    /// at all. Panics on [`ResolvedRule::Refused`] so a test asserting `n`
+    /// can never pass by way of a refusal.
+    fn n_of(flow: &SHACLFlow, to_state: &str) -> u32 {
+        match rule_for(flow, to_state) {
+            ResolvedRule::Rule(r) => r.n,
+            ResolvedRule::Refused => panic!("expected a rule for `{to_state}`, got Refused"),
+        }
+    }
 
     /// `review ⇄ changes_requested`, plus `review → approved` whose `{n}` is
     /// configurable, so every quorum case fits one fixture.
@@ -727,13 +800,9 @@ mod tests {
             n: 1,
             from_role: None,
         });
+        assert_eq!(n_of(&flow, "approved"), 2, "the state's own rule wins");
         assert_eq!(
-            rule_for(&flow, "approved").n,
-            2,
-            "the state's own rule wins"
-        );
-        assert_eq!(
-            rule_for(&flow, "changes_requested").n,
+            n_of(&flow, "changes_requested"),
             1,
             "a state without one inherits the flow's"
         );

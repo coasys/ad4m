@@ -234,6 +234,36 @@ pub struct ConsensusRule {
     pub from_role: Option<ModelQuery>,
 }
 
+/// What the `consensusRule` predicate at ONE scope (the flow, or one state)
+/// amounts to after parsing.
+///
+/// `Option<ConsensusRule>` cannot express this: it collapses *"the author
+/// wrote no rule"* and *"the author wrote a rule and it did not decode"* into
+/// the same `None`, and the consumer then applies the permissive default to
+/// both (#1078). Those two must stay separable all the way to the consumer,
+/// because they warrant opposite answers — see [`crate::perspectives::flow_instance::fold::rule_for`].
+#[derive(Debug, Clone)]
+pub enum ConsensusRuleSlot<'a> {
+    /// No `consensusRule` link at this scope. Defer to the next scope out.
+    Absent,
+    /// A rule was authored here and decoded.
+    Rule(&'a ConsensusRule),
+    /// A `consensusRule` link is present at this scope and its literal did
+    /// not decode. The author's intent is unknown and unrecoverable.
+    Malformed,
+}
+
+/// Build a slot from the two fields the parser writes. Keeping this in one
+/// place is what stops a reader from checking `consensus_rule` and forgetting
+/// `consensus_rule_malformed`.
+fn slot_of(rule: Option<&ConsensusRule>, malformed: bool) -> ConsensusRuleSlot<'_> {
+    match (rule, malformed) {
+        (Some(r), _) => ConsensusRuleSlot::Rule(r),
+        (None, true) => ConsensusRuleSlot::Malformed,
+        (None, false) => ConsensusRuleSlot::Absent,
+    }
+}
+
 /// Flow State definition
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlowState {
@@ -272,6 +302,23 @@ pub struct FlowState {
         skip_serializing_if = "Option::is_none"
     )]
     pub consensus_rule: Option<ConsensusRule>,
+    /// Set when this state carried a `consensusRule` link whose literal did
+    /// not decode. Never read directly — go through
+    /// [`FlowState::consensus_rule_slot`], which is the only place the pair
+    /// is interpreted.
+    #[serde(
+        rename = "consensusRuleMalformed",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub consensus_rule_malformed: bool,
+}
+
+impl FlowState {
+    /// This state's `consensusRule` scope. See [`ConsensusRuleSlot`].
+    pub fn consensus_rule_slot(&self) -> ConsensusRuleSlot<'_> {
+        slot_of(self.consensus_rule.as_ref(), self.consensus_rule_malformed)
+    }
 }
 
 /// Flow Transition definition
@@ -342,9 +389,23 @@ pub struct SHACLFlow {
         skip_serializing_if = "Option::is_none"
     )]
     pub consensus_rule: Option<ConsensusRule>,
+    /// Set when the flow carried a top-level `consensusRule` link whose
+    /// literal did not decode. Never read directly — go through
+    /// [`SHACLFlow::consensus_rule_slot`].
+    #[serde(
+        rename = "consensusRuleMalformed",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub consensus_rule_malformed: bool,
 }
 
 impl SHACLFlow {
+    /// The flow-level `consensusRule` scope. See [`ConsensusRuleSlot`].
+    pub fn consensus_rule_slot(&self) -> ConsensusRuleSlot<'_> {
+        slot_of(self.consensus_rule.as_ref(), self.consensus_rule_malformed)
+    }
+
     /// Canonical URI of this flow (`${namespace}${name}Flow`, e.g.
     /// `coasys://DeliveryFlow`). This is the identity used for
     /// cross-community joins — `FlowInstanceRecord.flow_uri` stores it,
@@ -627,13 +688,51 @@ fn decode_literal_number(target: &str) -> Option<f64> {
     payload.parse().ok()
 }
 
+/// How much of an offending literal a warning quotes. Flow literals are
+/// author-written JSON; enough to spot the typo, bounded so a pathological
+/// target can't dominate the log.
+const LITERAL_EXCERPT_LEN: usize = 200;
+
+fn excerpt(target: &str) -> String {
+    match target.char_indices().nth(LITERAL_EXCERPT_LEN) {
+        Some((cut, _)) => format!("{}…", &target[..cut]),
+        None => target.to_string(),
+    }
+}
+
 /// Decode a JSON payload stored inside a `literal:string:<urlencoded json>`
-/// target. Silently returns `None` on any decode / parse / shape failure —
-/// callers that see `None` leave the corresponding field unset rather than
-/// failing the whole flow read (mirrors the TS side's try/catch policy).
-fn decode_json_literal<T: for<'de> Deserialize<'de>>(target: &str) -> Option<T> {
-    let s = decode_literal_string(target)?;
-    serde_json::from_str(&s).ok()
+/// target.
+///
+/// Returns `Err` — carrying a human-readable reason — rather than `None`, so
+/// callers can tell *"the author wrote something and it did not decode"* from
+/// *"the author wrote nothing"*. The link's presence is what says a value was
+/// intended; the two cases are only distinguishable here, at the decode, and
+/// a caller that collapses them can no longer recover the difference
+/// (this is the defect in #1078).
+///
+/// Callers for whom the distinction genuinely does not matter should use
+/// [`decode_json_literal_lossy`], which logs and discards.
+fn decode_json_literal<T: for<'de> Deserialize<'de>>(target: &str) -> Result<T, String> {
+    let s = decode_literal_string(target)
+        .ok_or_else(|| "target is not a url-decodable `literal:string:`".to_string())?;
+    serde_json::from_str(&s).map_err(|e| e.to_string())
+}
+
+/// [`decode_json_literal`] for fields where a malformed value and an absent
+/// one lead to the same behaviour: warn, then leave the field unset. The
+/// warning is the whole point — before it, a dropped literal was invisible.
+fn decode_json_literal_lossy<T: for<'de> Deserialize<'de>>(
+    target: &str,
+    predicate: &str,
+) -> Option<T> {
+    decode_json_literal(target)
+        .map_err(|e| {
+            log::warn!(
+                "flow: ignoring malformed `{predicate}` literal `{}`: {e}",
+                excerpt(target)
+            );
+        })
+        .ok()
 }
 
 fn find_link<'a>(links: &'a [Link], source: &str, predicate: &str) -> Option<&'a Link> {
@@ -659,18 +758,26 @@ fn model_query_array_ok(qs: &[ModelQuery]) -> bool {
     qs.iter().all(|q| !q.class_name.is_empty())
 }
 
-fn decode_model_query_array(target: &str) -> Option<Vec<ModelQuery>> {
-    let qs: Vec<ModelQuery> = decode_json_literal(target)?;
+fn decode_model_query_array(target: &str, predicate: &str) -> Option<Vec<ModelQuery>> {
+    let qs: Vec<ModelQuery> = decode_json_literal_lossy(target, predicate)?;
     if model_query_array_ok(&qs) {
         Some(qs)
     } else {
+        log::warn!(
+            "flow: ignoring `{predicate}` literal `{}`: every ModelQuery needs a non-empty `className`",
+            excerpt(target)
+        );
         None
     }
 }
 
-fn decode_string_array(target: &str) -> Option<Vec<String>> {
-    let arr: Vec<String> = decode_json_literal(target)?;
+fn decode_string_array(target: &str, predicate: &str) -> Option<Vec<String>> {
+    let arr: Vec<String> = decode_json_literal_lossy(target, predicate)?;
     if arr.iter().any(|s| s.is_empty()) {
+        log::warn!(
+            "flow: ignoring `{predicate}` literal `{}`: entries must be non-empty strings",
+            excerpt(target)
+        );
         return None;
     }
     Some(arr)
@@ -710,6 +817,7 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
         creation_hint: None,
         context: None,
         consensus_rule: None,
+        consensus_rule_malformed: false,
     };
 
     // Flow-level `interpretationHint` — non-empty-string only.
@@ -723,12 +831,12 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
 
     // Flow-level `inputTypes` / `outputTypes` — non-empty string arrays.
     if let Some(link) = find_link(links, flow_uri, "ad4m://inputTypes") {
-        if let Some(arr) = decode_string_array(&link.target) {
+        if let Some(arr) = decode_string_array(&link.target, "inputTypes") {
             flow.input_types = arr;
         }
     }
     if let Some(link) = find_link(links, flow_uri, "ad4m://outputTypes") {
-        if let Some(arr) = decode_string_array(&link.target) {
+        if let Some(arr) = decode_string_array(&link.target, "outputTypes") {
             flow.output_types = arr;
         }
     }
@@ -745,15 +853,24 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     // Flow-level `context` — ModelQuery[] with the same className guard
     // as `requires`.
     if let Some(link) = find_link(links, flow_uri, "ad4m://context") {
-        flow.context = decode_model_query_array(&link.target);
+        flow.context = decode_model_query_array(&link.target, "context");
     }
 
-    // Flow-level `consensusRule` — untagged; a missing `n` or invalid
-    // `fromRole` leaves the field unset rather than shipping half-typed
-    // data to the consensus engine.
+    // Flow-level `consensusRule`. A missing `n` or an invalid `fromRole`
+    // still leaves `consensus_rule` unset — half-typed data must not reach
+    // the consensus engine — but the failure is now RECORDED, because the
+    // consumer's answer to "no rule" and to "unreadable rule" differ (#1078).
     if let Some(link) = find_link(links, flow_uri, "ad4m://consensusRule") {
-        if let Some(rule) = decode_json_literal::<ConsensusRule>(&link.target) {
-            flow.consensus_rule = Some(rule);
+        match decode_json_literal::<ConsensusRule>(&link.target) {
+            Ok(rule) => flow.consensus_rule = Some(rule),
+            Err(e) => {
+                log::warn!(
+                    "flow `{flow_uri}`: `consensusRule` literal `{}` did not decode ({e}); \
+                     transitions governed by it will be REFUSED, not defaulted",
+                    excerpt(&link.target)
+                );
+                flow.consensus_rule_malformed = true;
+            }
         }
     }
 
@@ -777,13 +894,29 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
             .and_then(|l| decode_literal_string(&l.target).filter(|s| !s.is_empty()));
 
         let requires = find_link(links, state_uri, "ad4m://requires")
-            .and_then(|l| decode_model_query_array(&l.target));
+            .and_then(|l| decode_model_query_array(&l.target, "requires"));
 
         let semantic_check = find_link(links, state_uri, "ad4m://semanticCheck")
             .and_then(|l| decode_literal_string(&l.target).filter(|s| !s.is_empty()));
 
-        let consensus_rule = find_link(links, state_uri, "ad4m://consensusRule")
-            .and_then(|l| decode_json_literal::<ConsensusRule>(&l.target));
+        // Same policy as the flow-level rule above: record the failure
+        // instead of erasing it.
+        let mut consensus_rule = None;
+        let mut consensus_rule_malformed = false;
+        if let Some(l) = find_link(links, state_uri, "ad4m://consensusRule") {
+            match decode_json_literal::<ConsensusRule>(&l.target) {
+                Ok(rule) => consensus_rule = Some(rule),
+                Err(e) => {
+                    log::warn!(
+                        "flow `{flow_uri}` state `{state_name}`: `consensusRule` literal `{}` \
+                         did not decode ({e}); transitions into this state will be REFUSED, \
+                         not defaulted",
+                        excerpt(&l.target)
+                    );
+                    consensus_rule_malformed = true;
+                }
+            }
+        }
 
         flow.states.push(FlowState {
             name: state_name,
@@ -792,6 +925,7 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
             requires,
             semantic_check,
             consensus_rule,
+            consensus_rule_malformed,
         });
     }
 
@@ -841,7 +975,9 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
             .and_then(|l| state_uri_to_name.get(&l.target).cloned())
             .unwrap_or_default();
         let actions = find_link(links, transition_uri, "ad4m://transitionActions")
-            .and_then(|l| decode_json_literal::<Vec<AD4MAction>>(&l.target))
+            .and_then(|l| {
+                decode_json_literal_lossy::<Vec<AD4MAction>>(&l.target, "transitionActions")
+            })
             .unwrap_or_default();
         flow.transitions.push(FlowTransition {
             action_name,
