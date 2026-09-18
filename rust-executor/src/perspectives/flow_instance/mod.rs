@@ -264,15 +264,23 @@ impl ReadSet {
             .collect()
     }
 
-    /// The same read-set with **every carried link's signature verdict
-    /// recomputed locally** — the ingest seam of #1068.
+    /// The same read-set with **every carried link's per-replica read view
+    /// replaced by this replica's own** — the ingest seam of #1068.
     ///
-    /// `proof.valid` is a per-replica read view over a signature, not a
-    /// property of the link. On a read-set that arrived from elsewhere it is
-    /// therefore the *sender's* claim, and a sender who writes `"valid": true`
-    /// onto an unsigned vote gets it counted toward quorum by any reader that
-    /// folds the value as handed over. This function is the one place that
-    /// claim is replaced by an answer this replica computed.
+    /// Two fields on a carried link are read views rather than properties of
+    /// the link, so on a read-set that arrived from elsewhere both are the
+    /// *sender's* claim:
+    ///
+    /// - `proof.valid` — **recomputed**. A sender who writes `"valid": true`
+    ///   onto an unsigned vote gets it counted toward quorum by any reader
+    ///   that folds the value as handed over. The claim is replaced by an
+    ///   answer this replica computed from the signature.
+    /// - `status` — **cleared**, because locality is not a signable property
+    ///   and so cannot be recomputed at all. See [`reverified_link`] for why
+    ///   `None` is the honest answer and what invariant that places on
+    ///   locality gates.
+    ///
+    /// This function is the one place either claim is answered.
     ///
     /// Pure — [`DecoratedLinkExpression::verify_signature`] is SHA256 plus an
     /// Ed25519 check against the author's own `did:key`: no store, no clock,
@@ -287,8 +295,18 @@ impl ReadSet {
     /// the happy path, and surfacing only as a receipt that minted cleanly on
     /// one replica and fails on another — after the artifact is durable and
     /// the minter is gone. On the minting replica the links came from the
-    /// local store and already carry a locally computed verdict, so this is a
-    /// no-op there; it costs one signature check per carried link.
+    /// local store and already carry a locally computed verdict, so the
+    /// signature half is a no-op there; it costs one signature check per
+    /// carried link.
+    ///
+    /// The `status` half is **not** a no-op on the minting replica — it
+    /// discards real local marks. That is intended and is what keeps the two
+    /// sides folding the same input: a fold that read `status` would give the
+    /// minter an answer no verifier could ever reproduce, since the verifier
+    /// has no locality to read. Nothing in [`fold_read_set`] reads `status`;
+    /// the one gate that does, [`atom::marked_fired`], is bookkeeping for
+    /// [`pass`] and is deliberately reached through the **raw** read-set, not
+    /// through this one.
     ///
     /// # The three halves are treated differently, and each for a reason
     ///
@@ -335,11 +353,42 @@ impl ReadSet {
     }
 }
 
-/// One carried link with its signature verdict recomputed from the signature.
+/// One carried link with its signature verdict recomputed from the signature
+/// and its locality claim discarded.
+///
 /// Never reads the carried `proof.valid`; see [`ReadSet::reverified`].
+///
+/// # Why `status` is cleared rather than recomputed
+///
+/// `proof.valid` and `status` are both per-replica read views rather than
+/// properties of the link, so a carried value of either is the *sender's*
+/// claim. They part company on what can be done about it. A signature is a
+/// property of the link's own bytes, so the claim can be **replaced** with an
+/// answer computed here. Locality cannot: `Local` means "this link is in my
+/// store and was never published", a fact about storage that nothing in the
+/// link is or could be signed over. There is no computation that recovers it
+/// from a value in flight.
+///
+/// So the only truthful carried locality is *unknown*, and `None` is how this
+/// type says that. Keeping the sender's `Some(Local)` would let a peer assert
+/// "this is your own local mark" about a link this replica has never stored —
+/// the same shape of forgery as `"valid": true` on an unsigned vote, and the
+/// reason this seam has to answer both.
+///
+/// **Invariant this depends on: every locality gate tests `== Some(Local)`,
+/// never `!= Some(Shared)`.** The two agree on `Some(Local)` and `Some(Shared)`
+/// and differ exactly on `None`, where the second form reads *unknown* as
+/// *local* — a fail-open wearing the shape of a fail-closed, the same trap
+/// [`link_counts`] documents one field over. Today's gates
+/// ([`atom::marked_fired`], [`pass::local_cached_state`](pass)) both use the
+/// safe form.
+///
+/// This is only reachable because this PR made [`ReadSet`] travel; before
+/// that, every link in one had come off the local store.
 fn reverified_link(link: &DecoratedLinkExpression) -> DecoratedLinkExpression {
     let mut link = link.clone();
     link.verify_signature();
+    link.status = None;
     link
 }
 

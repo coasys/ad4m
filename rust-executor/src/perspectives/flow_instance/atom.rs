@@ -278,10 +278,28 @@ pub fn valid_votes(
 }
 
 /// Whether **this replica** marked this proposal fired: a `Local`
-/// `resolved_as → "fired"` link. Marks are per-replica bookkeeping (#987),
-/// so a peer's mark — which can only ever arrive `Shared` — is not a mark
-/// here: a forged one cannot mute this replica's once-only
-/// [`FireOutcome`](super::pass::FireOutcome).
+/// `resolved_as → "fired"` link. Marks are per-replica bookkeeping (#987), so
+/// a peer's mark is not a mark here — a forged one cannot mute this replica's
+/// once-only [`FireOutcome`](super::pass::FireOutcome).
+///
+/// # "This replica's" is only true of links this replica read
+///
+/// That guarantee used to rest on a peer's mark arriving `Shared`, which held
+/// while every [`ReadSet`](super::ReadSet) was built from the local store. A
+/// read-set now travels, and `status` is not signed, so on a *carried*
+/// read-set `Some(Local)` means only "whoever sent this claimed `Local`" —
+/// not an answer about this replica at all.
+///
+/// The gap is closed one layer up rather than here:
+/// [`reverified_link`](super::reverified_link) clears `status` on every
+/// carried link, so a re-verified read-set answers `false` for every
+/// proposal. That is the truthful answer — this replica has marked nothing it
+/// never read — and it is why this function must keep testing
+/// `== Some(Local)` rather than `!= Some(Shared)`, which would read the
+/// cleared value as a mark and hand the sender the forgery back.
+///
+/// Callers therefore get a meaningful answer only from a locally read
+/// read-set, which is the only place [`pass`](super::pass) uses it.
 ///
 /// **Bookkeeping only.** The fold never reads it: it exists so a UI can list
 /// history and so the consensus pass knows which edges it has already
@@ -871,6 +889,63 @@ mod tests {
         assert!(
             !marked_fired(&[other_value]),
             "only the `fired` value marks a proposal fired"
+        );
+    }
+
+    /// `only_a_local_fired_mark_is_a_mark` rests on a sentence that stopped
+    /// being true when this PR made `ReadSet` travel: "a peer's mark arrives
+    /// `Shared`". It arrives however the sender wrote it. `status` is not
+    /// signed and locality is not recomputable — it is a fact about *whose
+    /// store a link sits in* — so on a carried read-set `Some(Local)` says
+    /// only "the sender claimed `Local`".
+    ///
+    /// The seam answers it the one way it can: `reverified_link` clears
+    /// `status`, so a carried mark is not this replica's mark no matter what
+    /// it asserts. Note the fixture forges nothing else — the mark is validly
+    /// signed by Mallory and survives the signature half of `reverified`
+    /// untouched. Only the locality claim is dropped.
+    ///
+    /// Killing mutation: delete `link.status = None;` from `reverified_link`.
+    /// Every other test in the crate stays green — `marked_proposals` has one
+    /// production caller (`pass`, on this replica's own store), so this is
+    /// latent rather than live, and latent is exactly what an assertion is
+    /// for. Also red if `marked_fired` is rewritten to `!= Some(Shared)`,
+    /// which reads the cleared value as a mark and hands the claim back.
+    #[test]
+    fn a_carried_local_mark_is_not_this_replicas_mark() {
+        use super::super::{ProposalLinks, ReadSet};
+
+        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        let mut forged_mark = link(
+            RESOLVED_AS_PREDICATE,
+            &literal(FIRED_MARK),
+            MALLORY,
+            true,
+            T3,
+        );
+        forged_mark.status = Some(LinkStatus::Local);
+        links.push(forged_mark);
+
+        let arrived = ReadSet {
+            instance_uri: "flow://instance".into(),
+            subject: "subject://base".into(),
+            genesis: "review".into(),
+            proposals: vec![ProposalLinks {
+                uri: "proposal://p1".into(),
+                links,
+            }],
+            role_grants: vec![],
+        };
+
+        assert!(
+            arrived.marked_proposals().contains("proposal://p1"),
+            "precondition: read as handed over, the sender's claim IS taken as \
+             our mark — this is the forgery the seam exists to answer"
+        );
+        assert!(
+            arrived.reverified().marked_proposals().is_empty(),
+            "a carried `Local` mark must not count as this replica's: we have \
+             marked nothing we never read"
         );
     }
 }
