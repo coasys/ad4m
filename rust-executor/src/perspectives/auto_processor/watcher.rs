@@ -16,6 +16,7 @@
 //! events + telepresence presence — it will still delegate the actual pass
 //! to [`run_one_pass`], so the coordination contract stays in one place.
 
+use crate::agent::capabilities::LAST_SEEN_WRITE_THROTTLE_S;
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
     run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
@@ -431,11 +432,99 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
     AuthorElection::NoneOnline
 }
 
-/// Threshold (seconds) after which a managed user is treated as offline for
-/// auto-processor loop supervision purposes. Mirrors the freshness window used
-/// by `capabilities::track_last_seen_from_token` for last-seen tracking, so a
-/// user active by that surface is also considered active here.
+/// Threshold (seconds) within which a managed user's `last_seen` makes them
+/// eligible to have an auto-processor loop **spawned**. Mirrors the freshness
+/// window used by [`crate::agent::capabilities::track_last_seen_from_token`]
+/// for last-seen tracking, so a user active by that surface is also considered
+/// active here.
 pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 300;
+
+/// Threshold (seconds) past which an already-running auto-processor loop is
+/// **reaped**. Deliberately *strictly longer* than
+/// [`MANAGED_USER_ONLINE_WINDOW_S`]; the gap between the two is the
+/// supervisor's hysteresis band.
+///
+/// # Why these two numbers must never be collapsed into one (#1070)
+///
+/// `last_seen` is not a continuous signal — it is written by
+/// [`crate::agent::capabilities::track_last_seen_from_token`], which
+/// **throttles writes to at most one per [`LAST_SEEN_WRITE_THROTTLE_S`]** to
+/// spare the DB. That throttle's condition and the spawn window's condition are
+/// exact complements:
+///
+/// * writer:  write `last_seen` **iff** `last_seen < now - 300`
+/// * reader:  user is online **iff** `last_seen >= now - 300`
+///
+/// So the writer refuses to record a user's activity until the very instant the
+/// reader has *already* reclassified them as offline. A continuously-connected,
+/// continuously-authenticating user therefore has a `last_seen` that sweeps
+/// deterministically from 0 s to just past 300 s old, forever. If one single
+/// window drove both spawning and reaping, every such user would be reaped and
+/// re-admitted exactly once per 300 s, per perspective supervisor — measured on
+/// a production executor as ~1550 aborts / ~1570 starts in 34 h across 16
+/// supervisors and 3 users, none of whom had gone away.
+///
+/// Two distinct windows break the complement: a `last_seen` sitting anywhere in
+/// the 300–600 s band is stale enough that we would not *start* a loop for that
+/// user, but not stale enough to *tear down* one that is already running and
+/// holding live [`WatcherState`] (debounce timers, deferrals, stall clocks) that
+/// an abort would silently discard.
+///
+/// The fix is reader-side on purpose. Shortening the write-throttle would also
+/// break the complement, but it multiplies `users.last_seen` DB writes by the
+/// same factor — and any reap-on-threshold with no hysteresis flaps for *some*
+/// client cadence, so the supervisor wants a hysteresis band regardless of what
+/// the writer does.
+///
+/// # Why this is derived rather than written as `600`
+///
+/// The band must be **at least one write-throttle period**, because that is the
+/// worst-case age of a live user's row: their `last_seen` sweeps from 0 s to
+/// just past [`LAST_SEEN_WRITE_THROTTLE_S`] and back, forever. Writing `600`
+/// here would be the right number for today's throttle and silently the wrong
+/// number the moment someone raises the throttle to cut `users` writes — which
+/// is the stated purpose of that code path, in its own doc comment. Whoever
+/// does that will be optimising the DB and will have no reason to open this
+/// file. Deriving the window means they cannot get it wrong from either side:
+/// the band tracks the throttle automatically, and the compiler carries the
+/// relationship that a comment could only ask a reader to respect.
+///
+/// The defect this whole PR fixes is *two numbers that must relate, living in
+/// two modules with nothing connecting them*. A literal `600` here would
+/// instantiate that same class again at a different ratio.
+///
+/// **The coupling runs both ways: raising [`LAST_SEEN_WRITE_THROTTLE_S`] also
+/// raises reap latency by the same amount.** At a 600 s throttle this window
+/// becomes 900 s, so a genuinely dead loop lingers 15 minutes instead of 10.
+/// That direction is correct and is the entire point — the band *must* grow
+/// with the throttle — but it is a consequence the person making that change
+/// will not be looking for, because they will be thinking about write volume,
+/// not loop lifetimes. If that latency ever becomes the binding constraint, the
+/// fix is to shorten the throttle (which shortens both), not to pin this
+/// window back to a literal.
+///
+/// # What this window actually bounds
+///
+/// Not maximum staleness — maximum tolerated **gap between authenticated
+/// requests**. A user whose requests are 700 s apart still churns: write at
+/// t=0, reaped at t=601, re-admitted when they next authenticate at t=700. So
+/// hysteresis does not eliminate the flap for every user; it *scopes* it to
+/// users whose request gap exceeds this window, and changes the period from a
+/// fixed 300 s to that user's own request interval. Previously it was every
+/// user, every 300 s, unconditionally. The policy question a future tuner
+/// should be answering is therefore: *how long do we keep a loop alive for a
+/// user who has not authenticated?*
+///
+/// Consequence to keep in mind when tuning: a user who genuinely disconnects
+/// keeps their loops for up to this window rather than the spawn window. That
+/// is the intended trade — an idle loop costs one 500 ms poll per perspective,
+/// whereas a spurious abort discards in-flight interpretation work (#1010).
+/// Measured on the affected executor, that trade is cheap: 34 h produced 1551
+/// aborts but only 68 interpretation passes picked / 67 completed / 0
+/// abandoned, a 1.41 % interpretation duty cycle — the aborts overwhelmingly
+/// fired into idle time. This is a CPU-and-wakeups fix, not a data-loss fix.
+pub const MANAGED_USER_REAP_WINDOW_S: i64 =
+    MANAGED_USER_ONLINE_WINDOW_S + LAST_SEEN_WRITE_THROTTLE_S;
 
 /// Pure filter: from a list of `(user_email, last_seen_seconds)` tuples, return
 /// the emails of users whose `last_seen` is within `threshold_s` of `now_s`.
@@ -460,6 +549,37 @@ where
             (effective >= cutoff).then_some(email)
         })
         .collect()
+}
+
+/// The two user sets one supervisor tick needs, derived from a single `users`
+/// snapshot. Kept as one return value so the two windows are always applied to
+/// the same snapshot and the same `now_s` — sampling the DB twice could admit a
+/// user to `spawn` who is absent from `retain`, which is incoherent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedUserWindows {
+    /// Users fresh enough to have a loop **spawned**
+    /// ([`MANAGED_USER_ONLINE_WINDOW_S`]).
+    pub spawn: Vec<String>,
+    /// Users whose already-running loop must be **kept**
+    /// ([`MANAGED_USER_REAP_WINDOW_S`]). A superset of `spawn`.
+    pub retain: Vec<String>,
+}
+
+/// Apply both supervision windows to one snapshot of `(user_email, last_seen)`.
+///
+/// This is the supervisor's whole freshness policy, pulled out of the live loop
+/// so it is testable without a DB, a wall clock, or task spawning. The
+/// hysteresis that stops #1070's 300 s flap is the fact that `retain` uses a
+/// strictly longer window than `spawn`; see [`MANAGED_USER_REAP_WINDOW_S`].
+pub fn managed_user_windows<I>(users: I, now_s: i64) -> ManagedUserWindows
+where
+    I: IntoIterator<Item = (String, Option<i64>)>,
+{
+    let users: Vec<(String, Option<i64>)> = users.into_iter().collect();
+    ManagedUserWindows {
+        spawn: select_online_managed_users(users.clone(), now_s, MANAGED_USER_ONLINE_WINDOW_S),
+        retain: select_online_managed_users(users, now_s, MANAGED_USER_REAP_WINDOW_S),
+    }
 }
 
 /// Turn an [`AutoProcessorConfig::dedup_strategy_json`] blob into a live
@@ -1323,6 +1443,179 @@ mod tests {
         assert!(selected.is_empty());
     }
 
+    // ---- supervisor hysteresis: spawn window vs reap window (#1070) --------
+
+    /// The reap window is just the same pure filter at a longer threshold, so
+    /// its edge behaviour must match: inclusive at exactly the window,
+    /// exclusive one second past it, and `None` still means offline.
+    ///
+    /// Turns red if: `MANAGED_USER_REAP_WINDOW_S` changes value (the `600`/
+    /// `601` boundary cases are written against it), or if
+    /// `select_online_managed_users` flips its `>=` cutoff to `>`.
+    #[test]
+    fn reap_window_filter_has_inclusive_edge() {
+        let now = 1_000_000_i64;
+        let w = MANAGED_USER_REAP_WINDOW_S;
+        let selected = select_online_managed_users(
+            vec![
+                ("edge@x".into(), Some(now - w)),     // exactly on the window — in
+                ("past@x".into(), Some(now - w - 1)), // one second past — out
+                ("fresh@x".into(), Some(now - 1)),    // trivially in
+                ("never@x".into(), None),             // never authenticated — out
+            ],
+            now,
+            w,
+        );
+        assert_eq!(selected, vec!["edge@x", "fresh@x"]);
+    }
+
+    /// The actual invariant that fixes #1070: the supervisor's reap decision
+    /// must be strictly more permissive than its spawn decision, so a
+    /// `last_seen` sitting in the hysteresis band cannot tear down a live loop.
+    ///
+    /// `band@x` at 400 s old is the user the bug killed: past the 300 s spawn
+    /// window, but only because the `last_seen` write-throttle in
+    /// `capabilities::track_last_seen_from_token` refuses to record their
+    /// activity until they are already 300 s stale. They must be **retained**.
+    /// `gone@x` at 700 s old is genuinely absent and must be **reaped**.
+    ///
+    /// # Killing mutations, all three verified
+    ///
+    /// **1. Collapse the two windows** — edit `MANAGED_USER_REAP_WINDOW_S` to a
+    /// literal `300`. The relationship guard fires first, deliberately: it
+    /// names the defect instead of leaving a reader to infer it from a set
+    /// diff.
+    ///
+    /// ```text
+    /// test ...::user_in_hysteresis_band_is_not_reaped_but_stale_user_is ... FAILED
+    /// panicked at watcher.rs: reap window (300s) must be strictly longer than
+    /// the spawn window (300s); collapsing them re-introduces #1070, ...
+    /// ```
+    ///
+    /// **2. Raise `LAST_SEEN_WRITE_THROTTLE_S` to `600` and touch nothing in
+    /// this file.** This is the mutation the test exists to catch and the one
+    /// the old `REAP > ONLINE` assertion could not see: it is what someone
+    /// optimising `users`-table writes will actually do, from another module,
+    /// with no reason to read this one. Because the reap window is *derived*,
+    /// the band assertion below stays green (600 ≥ 600) — what goes red is the
+    /// fixture set, since `gone@x` at 700 s now sits inside a 900 s retain
+    /// window:
+    ///
+    /// ```text
+    /// assertion `left == right` failed: a user in the hysteresis band must
+    /// keep a running loop; reaping them is the #1070 flap
+    ///   left: ["fresh@x", "band@x", "gone@x"]
+    ///  right: ["fresh@x", "band@x"]
+    /// ```
+    ///
+    /// The fixture ages are pinned to absolute seconds on purpose rather than
+    /// expressed in terms of the constants: that is what drags a human into
+    /// this file whenever any of the three numbers moves.
+    ///
+    /// **3. Un-derive the reap window** — put a literal `600` back while
+    /// `LAST_SEEN_WRITE_THROTTLE_S` is `600`. This is the mutation the band
+    /// assertion itself guards, and the only one that reaches it: `600 - 300 =
+    /// 300 < 600`, so the band is narrower than the worst-case staleness of a
+    /// live user's row and #1070 is back for every connected user.
+    ///
+    /// Also red if `managed_user_windows` is changed to apply the spawn window
+    /// to `retain`.
+    #[test]
+    fn user_in_hysteresis_band_is_not_reaped_but_stale_user_is() {
+        assert!(
+            MANAGED_USER_REAP_WINDOW_S > MANAGED_USER_ONLINE_WINDOW_S,
+            "reap window ({MANAGED_USER_REAP_WINDOW_S}s) must be strictly longer than the \
+             spawn window ({MANAGED_USER_ONLINE_WINDOW_S}s); collapsing them re-introduces \
+             #1070, where the 300s last_seen write-throttle is the exact complement of a \
+             300s online window and every connected user flaps once per 300s"
+        );
+
+        // Strictly-longer is necessary but not sufficient. The band must be at
+        // least one write-throttle period, because that is the worst-case age
+        // of a live user's `last_seen` row: any narrower and an actively
+        // connected user falls out of `retain` between two throttled writes,
+        // which is #1070 exactly. Guards the case `REAP > ONLINE` cannot see —
+        // someone raising the throttle in `capabilities` to cut `users` writes.
+        assert!(
+            MANAGED_USER_REAP_WINDOW_S - MANAGED_USER_ONLINE_WINDOW_S >= LAST_SEEN_WRITE_THROTTLE_S,
+            "hysteresis band is {}s ({MANAGED_USER_REAP_WINDOW_S}s reap - \
+             {MANAGED_USER_ONLINE_WINDOW_S}s spawn) but must be at least the \
+             {LAST_SEEN_WRITE_THROTTLE_S}s last_seen write-throttle, which is the worst-case \
+             age of an actively-connected user's row; a narrower band reaps live users (#1070). \
+             If you just raised LAST_SEEN_WRITE_THROTTLE_S, MANAGED_USER_REAP_WINDOW_S is \
+             derived from it and should have followed — check it was not replaced by a literal",
+            MANAGED_USER_REAP_WINDOW_S - MANAGED_USER_ONLINE_WINDOW_S
+        );
+
+        let now = 2_000_000_i64;
+        let windows = managed_user_windows(
+            vec![
+                ("fresh@x".into(), Some(now - 10)), // inside both windows
+                ("band@x".into(), Some(now - 400)), // 300 < age < 600
+                ("gone@x".into(), Some(now - 700)), // past both windows
+            ],
+            now,
+        );
+
+        assert_eq!(
+            windows.spawn,
+            vec!["fresh@x"],
+            "only users inside the {MANAGED_USER_ONLINE_WINDOW_S}s spawn window get a new loop"
+        );
+        assert_eq!(
+            windows.retain,
+            vec!["fresh@x", "band@x"],
+            "a user in the hysteresis band must keep a running loop; reaping them is the \
+             #1070 flap"
+        );
+        assert!(
+            !windows.retain.contains(&"gone@x".to_string()),
+            "a user past the {MANAGED_USER_REAP_WINDOW_S}s reap window must still be reaped — \
+             hysteresis must not become 'never reap'"
+        );
+        // The band user is exactly the asymmetry: not spawnable, not reapable.
+        assert!(!windows.spawn.contains(&"band@x".to_string()));
+    }
+
+    /// `retain` is always a superset of `spawn`, for every user regardless of
+    /// age. This is what makes the supervisor's two decisions coherent: a user
+    /// it would start a loop for is never simultaneously one it would abort.
+    ///
+    /// Turns red if: `MANAGED_USER_REAP_WINDOW_S` is made shorter than
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (e.g. swapping the two values), which
+    /// would produce the pathological case of spawning a loop on one tick and
+    /// aborting it on the next. Also red on *equal* windows — verified by
+    /// editing the constant from `600` to `300`, which fails the final
+    /// `hysteresis band is non-empty` assertion:
+    ///
+    /// ```text
+    /// test ...::retain_set_is_always_a_superset_of_spawn_set ... FAILED
+    /// panicked at watcher.rs: hysteresis band is non-empty
+    /// ```
+    #[test]
+    fn retain_set_is_always_a_superset_of_spawn_set() {
+        let now = 3_000_000_i64;
+        // Ages spanning both windows and well past them, plus the never-seen case.
+        let users: Vec<(String, Option<i64>)> = [0, 1, 299, 300, 301, 599, 600, 601, 5_000]
+            .iter()
+            .map(|age| (format!("u{age}@x"), Some(now - age)))
+            .chain(std::iter::once(("never@x".to_string(), None)))
+            .collect();
+
+        let windows = managed_user_windows(users, now);
+        for email in &windows.spawn {
+            assert!(
+                windows.retain.contains(email),
+                "`{email}` is in the spawn set but not the retain set — the supervisor would \
+                 spawn a loop and immediately abort it"
+            );
+        }
+        assert!(
+            windows.retain.len() > windows.spawn.len(),
+            "hysteresis band is non-empty"
+        );
+    }
+
     // ---- WatcherState -------------------------------------------------------
 
     /// Nothing recorded → `drain_ready_batch` returns None regardless of the
@@ -1778,10 +2071,17 @@ mod tests {
 
     /// The LeaseGuard heartbeat refreshes `last_seen` during a long pass, which
     /// keeps the user in the online window. Simulated here via
-    /// `select_online_managed_users`: a user freshly touched at `now - 10s` is
-    /// still online, while one untouched at `now - 400s` is reaped. This
-    /// documents the invariant that idle-loop reaping is NOT disabled — only
-    /// passes that actually refresh `last_seen` stay alive (#1010).
+    /// `select_online_managed_users` at the spawn window: a user freshly
+    /// touched at `now - 10s` is inside it, while one untouched at `now - 400s`
+    /// is outside. This documents the invariant that idle-loop reaping is NOT
+    /// disabled — only passes that actually refresh `last_seen` stay alive
+    /// (#1010).
+    ///
+    /// Note this asserts the *spawn* window only (the threshold is passed in
+    /// explicitly). The supervisor reaps on the longer
+    /// `MANAGED_USER_REAP_WINDOW_S`, so the `now - 400s` user here is not
+    /// spawnable but is also not yet reaped — see
+    /// `user_in_hysteresis_band_is_not_reaped_but_stale_user_is` (#1070).
     #[test]
     fn liveness_touch_keeps_active_user_and_reaps_idle_user() {
         let now = 2_000_000_i64;
