@@ -419,7 +419,9 @@ fn reachable(flow: &SHACLFlow, from: &str, to: &str) -> bool {
 /// contention suppression needs.
 ///
 /// Failing closed here means an unconfirmed-cycle path does not silently
-/// suppress contention detection in [`settle`].
+/// suppress contention detection in [`settle`]. A hop whose target's rule
+/// is [`ResolvedRule::Refused`] is skipped for the same reason: an edge that
+/// cannot fire is not an escape route (#1078).
 ///
 /// A state is reachable from itself regardless of atoms (the two-transitions-
 /// to-the-same-target case never contends).
@@ -431,6 +433,14 @@ fn feasibly_reachable(flow: &SHACLFlow, from: &str, to: &str, atoms: &[VouchedAt
     let mut frontier = vec![from.to_string()];
     while let Some(state) = frontier.pop() {
         for t in flow.transitions.iter().filter(|t| t.from_state == state) {
+            // A hop into a state whose `consensusRule` could not be read can
+            // never fire, however many votes it has collected, so it cannot
+            // carry the loser anywhere. Same argument as the phantom
+            // back-edge of #999, one step stronger: there the votes were
+            // missing, here it is the rule that would admit them (#1078).
+            if matches!(rule_for(flow, &t.to_state), ResolvedRule::Refused) {
+                continue;
+            }
             // Only traverse this hop if some atom on it carries an admitted
             // vote. A phantom hop (no atoms), a vote-less proposal, or an
             // atom voted only by excluded DIDs cannot be relied on to carry
@@ -1161,6 +1171,52 @@ mod tests {
             derived.state, "rejected",
             "cycle completes: approved consumed, rejected fires on revisit"
         );
+    }
+
+    /// The differential partner of `confirmed_back_edge_with_atoms_is_not_contention`:
+    /// identical flow, identical atoms, identical votes — and `triage`'s
+    /// `consensusRule` unreadable, so the back-edge into it can never fire.
+    ///
+    /// An edge that cannot fire is not an escape route. Extending #999: a
+    /// phantom back-edge had no votes, this one has a fully admitted vote
+    /// and no rule to admit it under. Suppressing contention on it would let
+    /// the earliest clock win an irreversible branch silently — the outcome
+    /// `settle` refuses by design.
+    ///
+    /// Killing mutation: drop the `ResolvedRule::Refused => continue` guard
+    /// at the top of `feasibly_reachable`'s transition loop. Note this is the
+    /// only unit-level test that reaches that guard: the parallel guard in
+    /// `fold_read_set` (which empties `eligible_votes` for a refused target)
+    /// is exercised only by the e2e suite, and a mutation of it survives —
+    /// see the PR body.
+    #[test]
+    fn a_refused_back_edge_does_not_suppress_contention() {
+        let mut flow = phantom_back_edge_flow();
+        flow.states
+            .iter_mut()
+            .find(|s| s.name == "triage")
+            .expect("fixture has a `triage` state")
+            .consensus_rule_malformed = true;
+        assert!(
+            matches!(rule_for(&flow, "triage"), ResolvedRule::Refused),
+            "premise: the back-edge's target rule must be Refused"
+        );
+
+        let atoms = vec![
+            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
+            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
+            // Same admitted vote as the confirmed-cycle test above.
+            vouched("a://reset", "approved", "triage", &[(ALICE, T3)]),
+        ];
+
+        let derived = fold("triage", &flow, &atoms);
+
+        let contention = derived
+            .contested
+            .expect("a back-edge that cannot fire must not suppress contention");
+        assert_eq!(contention.from_state, "triage");
+        assert_eq!(derived.state, "triage", "the walk stops without choosing");
+        assert!(derived.settled.is_empty());
     }
 
     /// The separating case between "someone proposed" and "the cycle is
