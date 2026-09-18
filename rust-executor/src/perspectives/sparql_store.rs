@@ -346,7 +346,6 @@ fn make_reifier_iri(link: &DecoratedLinkExpression) -> NamedNode {
     // through `target_to_storage_term` unchanged).
     let normalized_target =
         storage_term_to_target_string(&target_to_storage_term(&link.data.target));
-
     let mut hasher = Sha256::new();
     hasher.update(link.author.as_bytes());
     hasher.update(link.data.source.as_bytes());
@@ -358,10 +357,6 @@ fn make_reifier_iri(link: &DecoratedLinkExpression) -> NamedNode {
 }
 
 /// Build the direct triple `(source, predicate, target)` for a link.
-///
-/// The target is rendered through [`target_to_storage_term`] so `literal:*`
-/// wire-form targets become typed RDF literals in storage while plain IRIs
-/// stay as [`NamedNode`]s.
 fn make_direct_triple(link: &DecoratedLinkExpression) -> (NamedNode, NamedNode, Term) {
     let source_iri = NamedNode::new_unchecked(&link.data.source);
     let predicate_val = link.data.predicate.as_deref().unwrap_or("");
@@ -3828,6 +3823,53 @@ mod tests {
             Some("literal:number:5"),
             "query() must keep wire-encoding ?t for internal callers: {}",
             internal_result
+        );
+    }
+
+    // ── Source literal round-trip (no normalization) ─────────────────────
+
+    #[test]
+    fn test_literal_string_source_round_trips_without_normalization() {
+        let store = SparqlStore::new(None).expect("store");
+        let link = make_link("literal:string:hello", "test://pred", "test://obj");
+        store.add_link(&link).expect("add");
+
+        // Query by source filter — should find the link
+        let mut found = Vec::new();
+        store
+            .for_each_matched_link(Some("literal:string:hello"), None, None, None, None, |l| {
+                found.push(l.clone());
+                std::ops::ControlFlow::Continue(())
+            })
+            .expect("query");
+        assert_eq!(found.len(), 1, "should find link by literal:string: source");
+        assert_eq!(found[0].data.source, "literal:string:hello");
+        assert_eq!(found[0].data.target, "test://obj");
+    }
+
+    #[test]
+    fn test_literal_string_source_remove_round_trip() {
+        let store = SparqlStore::new(None).expect("store");
+        let link = make_link("literal:string:hello", "test://pred", "test://obj");
+        store.add_link(&link).expect("add");
+
+        // Verify it was added
+        let all = store.get_all_links().expect("get_all");
+        assert!(
+            all.iter().any(|l| l.data.source == "literal:string:hello"),
+            "link should appear in get_all_links"
+        );
+
+        // Remove it
+        store.remove_link(&link).expect("remove");
+
+        // Verify removal
+        let all_after = store.get_all_links().expect("get_all_after");
+        assert!(
+            !all_after
+                .iter()
+                .any(|l| l.data.source == "literal:string:hello"),
+            "link should no longer appear after removal"
         );
     }
 }
