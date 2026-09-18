@@ -254,8 +254,21 @@ impl FlowReceipt {
     ///   refuse a contested derivation;
     /// - `outputs` is empty — a receipt with no binding speaks for nothing,
     ///   and the `granted_by` check a verifier runs could never pass;
+    /// - the fold took **no edge at all** — see below;
     /// - a preimage does not re-hash to the seal it claims;
     /// - the serialised receipt exceeds [`MAX_RECEIPT_BYTES`].
+    ///
+    /// # A walk that took no edge is not a completion
+    ///
+    /// A flow whose genesis state has no transitions out of it is terminal
+    /// the moment an instance exists, so the fold "reaches" that state without
+    /// anybody having voted on anything. A receipt for it would carry an empty
+    /// voter list and no settle time, and anything that paid out on it would
+    /// be paying out on a run in which nothing was decided. `verify_receipt`
+    /// answers [`NoQuorum`](super::verify::ReceiptVerdict::NoQuorum) for the
+    /// same shape; refusing it here too is what keeps mint and verify from
+    /// disagreeing about material that would otherwise mint cleanly and fail
+    /// everywhere it was presented.
     pub fn mint(
         flow: &SHACLFlow,
         read_set: ReadSet,
@@ -298,6 +311,14 @@ impl FlowReceipt {
                 read_set.instance_uri,
                 derived.state,
                 flow.flow_uri()
+            );
+        }
+        if derived.settled.is_empty() {
+            anyhow::bail!(
+                "FlowReceipt::mint: {} folds to `{}` without taking a single edge, so no quorum \
+                 ever formed and there is no completion to claim; refusing to mint it",
+                read_set.instance_uri,
+                derived.state
             );
         }
 
