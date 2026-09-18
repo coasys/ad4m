@@ -256,7 +256,14 @@ pub enum ConsensusRuleSlot<'a> {
     ///   no reader can say which the author meant (#1080 variant 1b) — see
     ///   [`read_consensus_rule`].
     ///
-    /// Both reach the same consumer verdict, which is why they share a
+    /// At STATE scope there is a third way in, and it is about the scope
+    /// rather than the literal: two different states answer to this state's
+    /// `name`, so the name does not identify a scope to read a rule from at
+    /// all (#1082) — see [`refuse_shadowed_state_names`]. The state may well
+    /// carry a perfectly readable rule; what is unreadable is which state the
+    /// consumer is asking about.
+    ///
+    /// All of them reach the same consumer verdict, which is why they share a
     /// variant: the distinction matters to whoever fixes the data, and the
     /// warning log carries it, but it does not change what the engine may do.
     Malformed,
@@ -320,8 +327,11 @@ pub struct FlowState {
         skip_serializing_if = "Option::is_none"
     )]
     pub consensus_rule: Option<ConsensusRule>,
-    /// Set when this state carried a `consensusRule` link whose literal did
-    /// not decode. Never read directly — go through
+    /// Set when the rule governing entry into this state cannot be read:
+    /// its `consensusRule` literal did not decode, or the state's source
+    /// carried two different ones (#1078/#1080), or another state claims this
+    /// state's `name` so the name identifies no single rule at all (#1082 —
+    /// [`refuse_shadowed_state_names`]). Never read directly — go through
     /// [`FlowState::consensus_rule_slot`], which is the only place the pair
     /// is interpreted.
     #[serde(
@@ -872,6 +882,139 @@ fn read_consensus_rule(links: &[Link], source: &str, scope: &str) -> (Option<Con
     }
 }
 
+/// Mark every state whose `name` is claimed by more than one state as
+/// unreadable, so that transitions into that name are REFUSED rather than
+/// governed by whichever state the scan happened to reach first (#1082).
+///
+/// `states[i]` must correspond to `state_uris[i]`; call this before the sort.
+///
+/// # What it closes
+///
+/// Nothing dedupes `flow.states` by name, the only ordering applied is by
+/// `stateValue`, and all three consumers that resolve a state by name take
+/// the first match — [`super::flow_instance::fold::rule_for`],
+/// [`super::flow_context::render::reachable_next_states`], and
+/// `flow_evaluator::recompute_evidence_hash`. Every one of those inputs is
+/// writable by any neighbourhood peer, because `load_shacl_flows` drops
+/// `DecoratedLinkExpression::author` before parsing. So a peer could publish
+/// a second state carrying the author's `stateName`, a lower `stateValue`,
+/// and a weaker `consensusRule`; the sort put it first and its rule governed
+/// — **deterministically on every replica**, since the attacker supplies the
+/// sort key. #1080's ambiguity refusal cannot see this: the injected rule
+/// sits on the attacker's own state URI, so each source still carries exactly
+/// one rule.
+///
+/// # Why "unreadable" is the right verdict
+///
+/// This is the [`unique_field`](super::flow_instance::atom::unique_field)
+/// rule, applied one level up. That reader refuses an atom outright when the
+/// proposer published two different values for one field, because no reader
+/// can say which was meant, and "pick the first" is an answer chosen by
+/// whoever wrote last rather than by the author. Two states answering to one
+/// `name` is the same shape of unreadable: the name does not identify a
+/// state, and every tie-break over an unauthored bag picks a winner between
+/// an author and an attacker.
+///
+/// # The equivalence: a state's identity is its URI
+///
+/// - **Byte-identical repeats are ACCEPTED, as one state.** Two `hasState`
+///   links with equal `(source, predicate, target)` name the same URI, and
+///   every property is re-read from that URI, so the second link cannot
+///   change anything. Deduped by the caller before this runs — same decision,
+///   and for the same reason, as `read_consensus_rule`'s `distinct` list
+///   (#1080). It is also required, not merely defensible: `load_shacl_flows`
+///   builds a multiset and re-collects links its type query already pushed,
+///   so counting links rather than distinct URIs would refuse honest flows.
+/// - **Same `name` on two different URIs is REFUSED — including when their
+///   `stateValue`, `consensusRule` and everything else agree.** Equality is
+///   on the URI, never on the derived [`FlowState`]. Defining it on the
+///   derived record instead would make the refusal conditional on the
+///   attacker's fields *currently* matching the author's — a condition the
+///   attacker controls and can flip with one more link, at which point the
+///   downgrade is back. Refusing needs no equality on `FlowState`,
+///   `ConsensusRule` or `ModelQuery` at all (none of which derives
+///   `PartialEq`), and an equality wrong in the permissive direction reopens
+///   exactly what this closes. The cost is a loud, local wedge on data no
+///   canonical writer produces: `parse_flow_to_links` emits one state URI per
+///   state.
+/// - **Empty names participate.** Two states that both lack a `stateName`
+///   link both decode to `""` and are just as unresolvable as two named
+///   `approved`. `initial_state_of` already treats a nameless state as
+///   half-synced (`flow_spawn.rs`); this treats two of them as unreadable.
+///
+/// # Why per-name, and not a whole-flow parse failure
+///
+/// The blast radius is matched to the damage. A collision makes ONE name
+/// unresolvable; the flow's other states are still exactly what their author
+/// wrote, and refusing them too would hand an attacker a cheaper wedge than
+/// the downgrade this closes — one injected link to disable a whole flow.
+/// Returning `Err` would also drop the flow out of `load_shacl_flows`
+/// entirely, which strands existing instances of it (their definition simply
+/// disappears) — quieter and worse than a refusal at the gate, which names
+/// the state in a warning and is fixed by deleting the shadow.
+///
+/// # What it does NOT close
+///
+/// The `states[0]` initial-state convention (`flow_spawn::initial_state_of`)
+/// is positional, not name-based: a peer can capture it with a state carrying
+/// a *fresh* name and a low `stateValue`, with no collision for this function
+/// to see. That is the unauthored-bag problem (#1080/#1081) and needs the
+/// loader to be author-scoped; it is out of reach from here.
+fn refuse_shadowed_state_names(states: &mut [FlowState], state_uris: &[&str], flow_uri: &str) {
+    debug_assert_eq!(
+        states.len(),
+        state_uris.len(),
+        "call before the sort: state_uris[i] must still describe states[i]"
+    );
+
+    // Indices whose name another state also claims. O(n²) on a per-flow state
+    // list, which is the same shape as `read_consensus_rule`'s `distinct`
+    // scan and for the same reason: n is a handful.
+    let shadowed: Vec<usize> = (0..states.len())
+        .filter(|&i| {
+            states
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && other.name == states[i].name)
+        })
+        .collect();
+
+    if shadowed.is_empty() {
+        return;
+    }
+
+    let mut reported: Vec<&str> = Vec::new();
+    for &i in &shadowed {
+        let name = states[i].name.as_str();
+        if reported.contains(&name) {
+            continue;
+        }
+        reported.push(name);
+        let claimants: Vec<String> = shadowed
+            .iter()
+            .filter(|&&j| states[j].name == states[i].name)
+            .map(|&j| format!("`{}`", state_uris[j]))
+            .collect();
+        log::warn!(
+            "flow `{flow_uri}`: state name `{}` is claimed by {} different states [{}]; \
+             the name identifies none of them, so transitions into it will be REFUSED \
+             rather than settled by whichever state sorts first",
+            excerpt(name),
+            claimants.len(),
+            claimants.join(", ")
+        );
+    }
+
+    for i in shadowed {
+        // Both halves, deliberately. `slot_of` reads `(Some(rule), true)` as
+        // `Malformed` anyway, but the parser's invariant is that it never
+        // writes that pair — a decoded rule left sitting beside the flag is
+        // the thing a later refactor gates on by mistake.
+        states[i].consensus_rule = None;
+        states[i].consensus_rule_malformed = true;
+    }
+}
+
 /// Reader-side validator: a `Vec<ModelQuery>` payload is only accepted
 /// when every entry has a non-empty `className` string. The `#[serde(untagged)]`
 /// on `PropertyCondition` makes it too permissive to reject `[{}]` /
@@ -995,12 +1138,29 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     // parsing can resolve endpoints.
     let mut state_uri_to_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+
+    // Distinct `hasState` targets, in discovery order. A repeated edge to the
+    // SAME URI is one state, not two: every property below is re-read from
+    // that one URI, so a second pass over it can only build a byte-identical
+    // `FlowState`. This is #1080's equivalence — a link *is*
+    // `(source, predicate, target)`, so once the loader has dropped
+    // authorship, equal triples are indistinguishable AND identical in
+    // effect, and a copy must not refuse. Collapsing them here is also what
+    // keeps the name check below from firing on one: see
+    // [`refuse_shadowed_state_names`].
+    let mut state_uris: Vec<&str> = Vec::new();
     for state_link in find_links(links, flow_uri, "ad4m://hasState") {
-        let state_uri = &state_link.target;
+        if !state_uris.contains(&state_link.target.as_str()) {
+            state_uris.push(&state_link.target);
+        }
+    }
+
+    for state_uri in &state_uris {
+        let state_uri = *state_uri;
         let state_name = find_link(links, state_uri, "ad4m://stateName")
             .and_then(|l| decode_literal_string(&l.target))
             .unwrap_or_default();
-        state_uri_to_name.insert(state_uri.clone(), state_name.clone());
+        state_uri_to_name.insert(state_uri.to_string(), state_name.clone());
 
         let value = find_link(links, state_uri, "ad4m://stateValue")
             .and_then(|l| decode_literal_number(&l.target))
@@ -1034,6 +1194,11 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
             consensus_rule_malformed,
         });
     }
+
+    // #1082 — a name claimed by two states names neither of them. Runs
+    // BEFORE the sort, while `flow.states[i]` still corresponds to
+    // `state_uris[i]`, and before any consumer can resolve a name.
+    refuse_shadowed_state_names(&mut flow.states, &state_uris, flow_uri);
 
     // Sort states by `value`, matching TS `SHACLFlow.fromLinks`
     // (`core/src/shacl/SHACLFlow.ts`) and for the same reason: link order is
