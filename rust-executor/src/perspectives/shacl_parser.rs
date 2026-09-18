@@ -256,7 +256,14 @@ pub enum ConsensusRuleSlot<'a> {
     ///   no reader can say which the author meant (#1080 variant 1b) — see
     ///   [`read_consensus_rule`].
     ///
-    /// Both reach the same consumer verdict, which is why they share a
+    /// At STATE scope there is a third way in, and it is about the scope
+    /// rather than the literal: two different states answer to this state's
+    /// `name`, so the name does not identify a scope to read a rule from at
+    /// all (#1082) — see [`refuse_shadowed_state_names`]. The state may well
+    /// carry a perfectly readable rule; what is unreadable is which state the
+    /// consumer is asking about.
+    ///
+    /// All of them reach the same consumer verdict, which is why they share a
     /// variant: the distinction matters to whoever fixes the data, and the
     /// warning log carries it, but it does not change what the engine may do.
     Malformed,
@@ -320,8 +327,11 @@ pub struct FlowState {
         skip_serializing_if = "Option::is_none"
     )]
     pub consensus_rule: Option<ConsensusRule>,
-    /// Set when this state carried a `consensusRule` link whose literal did
-    /// not decode. Never read directly — go through
+    /// Set when the rule governing entry into this state cannot be read:
+    /// its `consensusRule` literal did not decode, or the state's source
+    /// carried two different ones (#1078/#1080), or another state claims this
+    /// state's `name` so the name identifies no single rule at all (#1082 —
+    /// [`refuse_shadowed_state_names`]). Never read directly — go through
     /// [`FlowState::consensus_rule_slot`], which is the only place the pair
     /// is interpreted.
     #[serde(
@@ -872,6 +882,139 @@ fn read_consensus_rule(links: &[Link], source: &str, scope: &str) -> (Option<Con
     }
 }
 
+/// Mark every state whose `name` is claimed by more than one state as
+/// unreadable, so that transitions into that name are REFUSED rather than
+/// governed by whichever state the scan happened to reach first (#1082).
+///
+/// `states[i]` must correspond to `state_uris[i]`; call this before the sort.
+///
+/// # What it closes
+///
+/// Nothing dedupes `flow.states` by name, the only ordering applied is by
+/// `stateValue`, and all three consumers that resolve a state by name take
+/// the first match — [`super::flow_instance::fold::rule_for`],
+/// [`super::flow_context::render::reachable_next_states`], and
+/// `flow_evaluator::recompute_evidence_hash`. Every one of those inputs is
+/// writable by any neighbourhood peer, because `load_shacl_flows` drops
+/// `DecoratedLinkExpression::author` before parsing. So a peer could publish
+/// a second state carrying the author's `stateName`, a lower `stateValue`,
+/// and a weaker `consensusRule`; the sort put it first and its rule governed
+/// — **deterministically on every replica**, since the attacker supplies the
+/// sort key. #1080's ambiguity refusal cannot see this: the injected rule
+/// sits on the attacker's own state URI, so each source still carries exactly
+/// one rule.
+///
+/// # Why "unreadable" is the right verdict
+///
+/// This is the [`unique_field`](super::flow_instance::atom::unique_field)
+/// rule, applied one level up. That reader refuses an atom outright when the
+/// proposer published two different values for one field, because no reader
+/// can say which was meant, and "pick the first" is an answer chosen by
+/// whoever wrote last rather than by the author. Two states answering to one
+/// `name` is the same shape of unreadable: the name does not identify a
+/// state, and every tie-break over an unauthored bag picks a winner between
+/// an author and an attacker.
+///
+/// # The equivalence: a state's identity is its URI
+///
+/// - **Byte-identical repeats are ACCEPTED, as one state.** Two `hasState`
+///   links with equal `(source, predicate, target)` name the same URI, and
+///   every property is re-read from that URI, so the second link cannot
+///   change anything. Deduped by the caller before this runs — same decision,
+///   and for the same reason, as `read_consensus_rule`'s `distinct` list
+///   (#1080). It is also required, not merely defensible: `load_shacl_flows`
+///   builds a multiset and re-collects links its type query already pushed,
+///   so counting links rather than distinct URIs would refuse honest flows.
+/// - **Same `name` on two different URIs is REFUSED — including when their
+///   `stateValue`, `consensusRule` and everything else agree.** Equality is
+///   on the URI, never on the derived [`FlowState`]. Defining it on the
+///   derived record instead would make the refusal conditional on the
+///   attacker's fields *currently* matching the author's — a condition the
+///   attacker controls and can flip with one more link, at which point the
+///   downgrade is back. Refusing needs no equality on `FlowState`,
+///   `ConsensusRule` or `ModelQuery` at all (none of which derives
+///   `PartialEq`), and an equality wrong in the permissive direction reopens
+///   exactly what this closes. The cost is a loud, local wedge on data no
+///   canonical writer produces: `parse_flow_to_links` emits one state URI per
+///   state.
+/// - **Empty names participate.** Two states that both lack a `stateName`
+///   link both decode to `""` and are just as unresolvable as two named
+///   `approved`. `initial_state_of` already treats a nameless state as
+///   half-synced (`flow_spawn.rs`); this treats two of them as unreadable.
+///
+/// # Why per-name, and not a whole-flow parse failure
+///
+/// The blast radius is matched to the damage. A collision makes ONE name
+/// unresolvable; the flow's other states are still exactly what their author
+/// wrote, and refusing them too would hand an attacker a cheaper wedge than
+/// the downgrade this closes — one injected link to disable a whole flow.
+/// Returning `Err` would also drop the flow out of `load_shacl_flows`
+/// entirely, which strands existing instances of it (their definition simply
+/// disappears) — quieter and worse than a refusal at the gate, which names
+/// the state in a warning and is fixed by deleting the shadow.
+///
+/// # What it does NOT close
+///
+/// The `states[0]` initial-state convention (`flow_spawn::initial_state_of`)
+/// is positional, not name-based: a peer can capture it with a state carrying
+/// a *fresh* name and a low `stateValue`, with no collision for this function
+/// to see. That is the unauthored-bag problem (#1080/#1081) and needs the
+/// loader to be author-scoped; it is out of reach from here.
+fn refuse_shadowed_state_names(states: &mut [FlowState], state_uris: &[&str], flow_uri: &str) {
+    debug_assert_eq!(
+        states.len(),
+        state_uris.len(),
+        "call before the sort: state_uris[i] must still describe states[i]"
+    );
+
+    // Indices whose name another state also claims. O(n²) on a per-flow state
+    // list, which is the same shape as `read_consensus_rule`'s `distinct`
+    // scan and for the same reason: n is a handful.
+    let shadowed: Vec<usize> = (0..states.len())
+        .filter(|&i| {
+            states
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && other.name == states[i].name)
+        })
+        .collect();
+
+    if shadowed.is_empty() {
+        return;
+    }
+
+    let mut reported: Vec<&str> = Vec::new();
+    for &i in &shadowed {
+        let name = states[i].name.as_str();
+        if reported.contains(&name) {
+            continue;
+        }
+        reported.push(name);
+        let claimants: Vec<String> = shadowed
+            .iter()
+            .filter(|&&j| states[j].name == states[i].name)
+            .map(|&j| format!("`{}`", state_uris[j]))
+            .collect();
+        log::warn!(
+            "flow `{flow_uri}`: state name `{}` is claimed by {} different states [{}]; \
+             the name identifies none of them, so transitions into it will be REFUSED \
+             rather than settled by whichever state sorts first",
+            excerpt(name),
+            claimants.len(),
+            claimants.join(", ")
+        );
+    }
+
+    for i in shadowed {
+        // Both halves, deliberately. `slot_of` reads `(Some(rule), true)` as
+        // `Malformed` anyway, but the parser's invariant is that it never
+        // writes that pair — a decoded rule left sitting beside the flag is
+        // the thing a later refactor gates on by mistake.
+        states[i].consensus_rule = None;
+        states[i].consensus_rule_malformed = true;
+    }
+}
+
 /// Reader-side validator: a `Vec<ModelQuery>` payload is only accepted
 /// when every entry has a non-empty `className` string. The `#[serde(untagged)]`
 /// on `PropertyCondition` makes it too permissive to reject `[{}]` /
@@ -995,12 +1138,29 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     // parsing can resolve endpoints.
     let mut state_uri_to_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+
+    // Distinct `hasState` targets, in discovery order. A repeated edge to the
+    // SAME URI is one state, not two: every property below is re-read from
+    // that one URI, so a second pass over it can only build a byte-identical
+    // `FlowState`. This is #1080's equivalence — a link *is*
+    // `(source, predicate, target)`, so once the loader has dropped
+    // authorship, equal triples are indistinguishable AND identical in
+    // effect, and a copy must not refuse. Collapsing them here is also what
+    // keeps the name check below from firing on one: see
+    // [`refuse_shadowed_state_names`].
+    let mut state_uris: Vec<&str> = Vec::new();
     for state_link in find_links(links, flow_uri, "ad4m://hasState") {
-        let state_uri = &state_link.target;
+        if !state_uris.contains(&state_link.target.as_str()) {
+            state_uris.push(&state_link.target);
+        }
+    }
+
+    for state_uri in &state_uris {
+        let state_uri = *state_uri;
         let state_name = find_link(links, state_uri, "ad4m://stateName")
             .and_then(|l| decode_literal_string(&l.target))
             .unwrap_or_default();
-        state_uri_to_name.insert(state_uri.clone(), state_name.clone());
+        state_uri_to_name.insert(state_uri.to_string(), state_name.clone());
 
         let value = find_link(links, state_uri, "ad4m://stateValue")
             .and_then(|l| decode_literal_number(&l.target))
@@ -1034,6 +1194,11 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
             consensus_rule_malformed,
         });
     }
+
+    // #1082 — a name claimed by two states names neither of them. Runs
+    // BEFORE the sort, while `flow.states[i]` still corresponds to
+    // `state_uris[i]`, and before any consumer can resolve a name.
+    refuse_shadowed_state_names(&mut flow.states, &state_uris, flow_uri);
 
     // Sort states by `value`, matching TS `SHACLFlow.fromLinks`
     // (`core/src/shacl/SHACLFlow.ts`) and for the same reason: link order is
@@ -3224,6 +3389,448 @@ mod tests {
             matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
             "a present rule must not outrank the unreadable flag; \
              `could not be determined` is never a verdict (#1064)"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // #1082 — a shadowed state name.
+    //
+    // The author gates `approved` at 5-of-N-from-`Reviewer`. A peer
+    // publishes a SECOND state on the same flow, carrying the same
+    // `stateName`, a lower `stateValue`, and a weaker rule of their own.
+    // Nothing is malformed and no single source carries two rules, so
+    // neither #1078's decode check nor #1080's contested-scope check has
+    // anything to fire on: the parser saw two well-formed states and the
+    // consumers took the first match by name.
+    //
+    // Every fixture below also carries an UNSHADOWED state with its own
+    // readable rule, so a refusal that is merely "refuse everything" is
+    // visible as a failure of the positive control rather than as a pass.
+    // -------------------------------------------------------------------
+
+    const SHADOW_FLOW_URI: &str = "test://ShadowedFlow";
+    /// The state the author declared and gated.
+    const AUTHOR_STATE_URI: &str = "test://Shadowed.approved";
+    /// The state a peer publishes to answer to the same name.
+    const SHADOW_STATE_URI: &str = "test://Shadowed.approved-EVIL";
+    /// A state nobody shadows — the positive control, in-fixture.
+    const UNSHADOWED_STATE_URI: &str = "test://Shadowed.done";
+    const SHADOWED_NAME: &str = "approved";
+
+    /// One state's links, as a test writes them. `rule: None` = the state
+    /// carries no `consensusRule` link at all, which is the *absent* half
+    /// of the attack (see
+    /// `a_shadow_carrying_no_rule_does_not_reopen_the_permissive_default`).
+    struct StateSpec<'a> {
+        uri: &'a str,
+        name: &'a str,
+        value: f64,
+        rule: Option<&'a str>,
+    }
+
+    /// Build a flow whose `hasState` edges appear in exactly the given
+    /// order. Discovery order is a parameter because discovery order is
+    /// half the defect — the other half is `stateValue`, which each spec
+    /// supplies.
+    fn shadowed_flow_links(states: &[StateSpec]) -> Vec<Link> {
+        let mut links = vec![
+            mk_link(SHADOW_FLOW_URI, "rdf://type", "ad4m://Flow"),
+            mk_link(SHADOW_FLOW_URI, "ad4m://flowName", &lit_str("Shadowed")),
+        ];
+        for s in states {
+            links.push(mk_link(SHADOW_FLOW_URI, "ad4m://hasState", s.uri));
+            links.push(mk_link(s.uri, "rdf://type", "ad4m://FlowState"));
+            // An empty name models a state whose `stateName` link is absent
+            // — no link at all, not a link carrying `""`.
+            if !s.name.is_empty() {
+                links.push(mk_link(s.uri, "ad4m://stateName", &lit_str(s.name)));
+            }
+            links.push(mk_link(s.uri, "ad4m://stateValue", &lit_num(s.value)));
+            if let Some(r) = s.rule {
+                links.push(mk_link(
+                    s.uri,
+                    "ad4m://consensusRule",
+                    &format!("literal:string:{}", urlencoding::encode(r)),
+                ));
+            }
+        }
+        links
+    }
+
+    fn author_state() -> StateSpec<'static> {
+        StateSpec {
+            uri: AUTHOR_STATE_URI,
+            name: SHADOWED_NAME,
+            value: 1.0,
+            rule: Some(GENUINE_RULE),
+        }
+    }
+
+    /// Lower `stateValue` than the author's, so the sort puts it first
+    /// whatever the discovery order — that is what makes the downgrade
+    /// deterministic rather than a race.
+    fn shadow_state() -> StateSpec<'static> {
+        StateSpec {
+            uri: SHADOW_STATE_URI,
+            name: SHADOWED_NAME,
+            value: 0.5,
+            rule: Some(INJECTED_RULE),
+        }
+    }
+
+    fn unshadowed_state() -> StateSpec<'static> {
+        StateSpec {
+            uri: UNSHADOWED_STATE_URI,
+            name: "done",
+            value: 2.0,
+            rule: Some(GENUINE_RULE),
+        }
+    }
+
+    fn parse_shadowed(states: &[StateSpec]) -> SHACLFlow {
+        parse_flow_from_links(&shadowed_flow_links(states), SHADOW_FLOW_URI).expect("reader")
+    }
+
+    /// **The premise.** Both states are well-formed and both rules decode,
+    /// so nothing already in the parser can be what refuses them. Without
+    /// this, a green suite below could be #1078's decode check firing on a
+    /// fixture typo rather than the shadow check firing on the shadow.
+    #[test]
+    fn the_shadow_state_and_its_rule_are_both_well_formed() {
+        let flow = parse_shadowed(&[author_state(), unshadowed_state()]);
+        let state = flow
+            .states
+            .iter()
+            .find(|s| s.name == SHADOWED_NAME)
+            .expect("premise: the author's state parses");
+        assert!(
+            !state.consensus_rule_malformed,
+            "premise: the author's state on its own is readable"
+        );
+        assert_eq!(
+            state.consensus_rule.as_ref().map(|r| r.n),
+            Some(5),
+            "premise: and it carries the 5-of-N gate"
+        );
+
+        let injected = serde_json::from_str::<ConsensusRule>(INJECTED_RULE)
+            .expect("premise: the injected rule decodes too — that is the point");
+        assert_eq!(injected.n, 1);
+        assert!(
+            injected.from_role.is_none(),
+            "premise: the injected rule is the permissive default, so a \
+             downgrade is observable as a change in `n`"
+        );
+    }
+
+    /// **The attack, killed — and killed in BOTH discovery orders.**
+    ///
+    /// A peer's state carrying the author's `stateName` and a lower
+    /// `stateValue` sorted ahead of the author's, and `rule_for` took the
+    /// first match, so `{n:1}` governed a 5-of-N-`Reviewer` gate on every
+    /// replica.
+    ///
+    /// Both orderings are asserted because a fix that flagged only the
+    /// duplicates it met *after* the first would still leave the peer's
+    /// rule governing whenever the peer's `hasState` link was discovered
+    /// first — and a test pinning one arrangement would pass on it. The
+    /// verdict is asserted too, not just agreement between the orderings:
+    /// the unfixed parser also *agrees* across discovery orders here, and
+    /// agrees on the wrong answer.
+    ///
+    /// Asserted through `rule_for`, so the test pins the consumer verdict
+    /// rather than the parser's spelling of it.
+    ///
+    /// Killing mutation: `return` at the top of
+    /// `refuse_shadowed_state_names`.
+    #[test]
+    fn a_shadowed_state_name_is_refused_in_either_discovery_order() {
+        for (label, flow) in [
+            (
+                "author's state first",
+                parse_shadowed(&[author_state(), shadow_state(), unshadowed_state()]),
+            ),
+            (
+                "shadow discovered first",
+                parse_shadowed(&[shadow_state(), author_state(), unshadowed_state()]),
+            ),
+        ] {
+            assert_eq!(
+                flow.states
+                    .iter()
+                    .filter(|s| s.name == SHADOWED_NAME)
+                    .count(),
+                2,
+                "{label}: premise — two DIFFERENT state URIs claim the name, so \
+                 this is a shadow and not a deduped repeat"
+            );
+            for s in flow.states.iter().filter(|s| s.name == SHADOWED_NAME) {
+                assert!(
+                    s.consensus_rule.is_none(),
+                    "{label}: neither rule may be decoded into the slot — a rule \
+                     left beside the flag is what a later refactor gates on"
+                );
+                assert!(
+                    matches!(s.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
+                    "{label}: every claimant of a shadowed name is unreadable, got {:?}",
+                    s.consensus_rule_slot()
+                );
+            }
+            assert!(
+                matches!(rule_for(&flow, SHADOWED_NAME), ResolvedRule::Refused),
+                "{label}: the consumer must REFUSE, not resolve to whichever \
+                 state sorted first"
+            );
+
+            // In-fixture positive control: the shadow wedges its own name
+            // and nothing else.
+            let ResolvedRule::Rule(done) = rule_for(&flow, "done") else {
+                panic!("{label}: an unshadowed state must still gate normally");
+            };
+            assert_eq!(
+                done.n, 5,
+                "{label}: and it must still gate at the author's threshold"
+            );
+        }
+    }
+
+    /// **The positive control, standalone.** The same fixture without the
+    /// shadow parses and gates exactly as before.
+    ///
+    /// Without it, an implementation that flagged every state passes the
+    /// test above and looks like a working refusal.
+    ///
+    /// Killing mutation: in `refuse_shadowed_state_names`, collect
+    /// `(0..states.len())` unconditionally instead of filtering on a
+    /// competing claimant.
+    #[test]
+    fn unique_state_names_in_the_same_fixture_still_gate() {
+        let flow = parse_shadowed(&[author_state(), unshadowed_state()]);
+
+        assert!(
+            flow.states.iter().all(|s| !s.consensus_rule_malformed),
+            "no name is claimed twice, so nothing may be flagged"
+        );
+        for (name, expected_n) in [(SHADOWED_NAME, 5), ("done", 5)] {
+            let ResolvedRule::Rule(rule) = rule_for(&flow, name) else {
+                panic!("`{name}` has a unique name and must resolve, not refuse");
+            };
+            assert_eq!(rule.n, expected_n, "the authored threshold must survive");
+            assert_eq!(
+                rule.from_role.as_ref().map(|r| r.class_name.as_str()),
+                Some("Reviewer"),
+                "and so must the authored role gate"
+            );
+        }
+    }
+
+    /// **The decided edge case: byte-identical `hasState` repeats are
+    /// ACCEPTED, as one state.**
+    ///
+    /// Two links with equal `(source, predicate, target)` name the same
+    /// state URI, and every property is re-read from that URI, so the
+    /// second link cannot change anything — the same equivalence, for the
+    /// same reason, that `read_consensus_rule` applies to repeated
+    /// `consensusRule` literals (#1080). It is also required rather than
+    /// merely defensible: `load_shacl_flows` builds a multiset and
+    /// re-collects links its own type query already pushed, so refusing on
+    /// repeats would wedge honest flows — and would hand an attacker
+    /// something cheaper than the downgrade this closes.
+    ///
+    /// Killing mutation: in `parse_flow_from_links`, drop the `state_uris`
+    /// de-duplication and iterate `find_links(…, "ad4m://hasState")`
+    /// directly.
+    #[test]
+    fn byte_identical_has_state_repeats_are_one_state_not_a_shadow() {
+        let mut links = shadowed_flow_links(&[author_state(), unshadowed_state()]);
+        // The repeat: the same edge to the same URI, twice more.
+        links.push(mk_link(
+            SHADOW_FLOW_URI,
+            "ad4m://hasState",
+            AUTHOR_STATE_URI,
+        ));
+        links.push(mk_link(
+            SHADOW_FLOW_URI,
+            "ad4m://hasState",
+            AUTHOR_STATE_URI,
+        ));
+
+        let flow = parse_flow_from_links(&links, SHADOW_FLOW_URI).expect("reader");
+
+        assert_eq!(
+            flow.states.len(),
+            2,
+            "three edges to two URIs are two states: {:?}",
+            flow.states.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        assert!(
+            flow.states.iter().all(|s| !s.consensus_rule_malformed),
+            "a repeated edge is a copy, and a copy changes nothing"
+        );
+        let ResolvedRule::Rule(rule) = rule_for(&flow, SHADOWED_NAME) else {
+            panic!("identical repeats must not refuse");
+        };
+        assert_eq!(rule.n, 5, "and it is still the author's rule");
+    }
+
+    /// **The other half of that decision, so it cannot be softened by
+    /// accident: equality is on the state URI, NOT on the derived
+    /// `FlowState`.** Two different URIs agreeing on `stateName`,
+    /// `stateValue` and `consensusRule` are still refused.
+    ///
+    /// Deliberately fail-closed. Accepting them would mean defining
+    /// equality on `FlowState` and every type it nests (`ConsensusRule`,
+    /// `ModelQuery`, `PropertyCondition` — none of which derives
+    /// `PartialEq`), and it would make the refusal conditional on the
+    /// attacker's fields *currently* matching the author's: a condition the
+    /// attacker controls, and can flip with one more link once the flow is
+    /// live. An equality wrong in the permissive direction reopens exactly
+    /// the downgrade this closes.
+    ///
+    /// Equal values also make the `stateValue` sort a TIE, which is
+    /// resolved by discovery order (`sort_by` is stable) — so this is the
+    /// sharper both-orderings case: pre-fix, these two arrangements
+    /// disagreed with each other.
+    ///
+    /// Killing mutation: skip an index in `refuse_shadowed_state_names`
+    /// when the competing claimant's `value` and `consensus_rule`-shaped
+    /// fields agree — i.e. compare derived records instead of URIs.
+    #[test]
+    fn a_shadow_agreeing_on_name_and_value_is_still_refused() {
+        let twin = |uri: &'static str| StateSpec {
+            uri,
+            name: SHADOWED_NAME,
+            value: 1.0,
+            rule: Some(GENUINE_RULE),
+        };
+
+        for (label, flow) in [
+            (
+                "author's URI first",
+                parse_shadowed(&[
+                    twin(AUTHOR_STATE_URI),
+                    twin(SHADOW_STATE_URI),
+                    unshadowed_state(),
+                ]),
+            ),
+            (
+                "shadow URI first",
+                parse_shadowed(&[
+                    twin(SHADOW_STATE_URI),
+                    twin(AUTHOR_STATE_URI),
+                    unshadowed_state(),
+                ]),
+            ),
+        ] {
+            assert!(
+                matches!(rule_for(&flow, SHADOWED_NAME), ResolvedRule::Refused),
+                "{label}: two URIs are two states even when today's properties \
+                 agree; a state's identity is its URI"
+            );
+            assert!(
+                matches!(rule_for(&flow, "done"), ResolvedRule::Rule(_)),
+                "{label}: and the refusal is still local to the shadowed name"
+            );
+        }
+    }
+
+    /// The *absent*-rule half of the attack. The peer's shadow carries no
+    /// `consensusRule` at all, and there is no flow-level rule to fall back
+    /// to — so pre-fix the first match's `Absent` slot resolved to the
+    /// `{n: 1}` default, downgrading the author's state-level 5-of-N gate
+    /// just as effectively as an injected weak rule, and without the
+    /// attacker writing a rule at all.
+    ///
+    /// This is the case a fix keyed on *rules* rather than on *names* would
+    /// miss entirely: there is no second rule anywhere to compare.
+    ///
+    /// Killing mutation: in `refuse_shadowed_state_names`, flag only states
+    /// that carry a `consensus_rule` of their own.
+    #[test]
+    fn a_shadow_carrying_no_rule_does_not_reopen_the_permissive_default() {
+        let ruleless_shadow = StateSpec {
+            uri: SHADOW_STATE_URI,
+            name: SHADOWED_NAME,
+            value: 0.5,
+            rule: None,
+        };
+        let flow = parse_shadowed(&[author_state(), ruleless_shadow, unshadowed_state()]);
+
+        assert!(
+            matches!(flow.consensus_rule_slot(), ConsensusRuleSlot::Absent),
+            "premise: no flow-level rule, so an unrefused fall-through lands on \
+             the permissive `{{n:1}}` default rather than on another gate"
+        );
+        assert!(
+            matches!(rule_for(&flow, SHADOWED_NAME), ResolvedRule::Refused),
+            "a shadow with no rule of its own must refuse, not default to \
+             one-vote-from-anybody"
+        );
+    }
+
+    /// Two states that both lack a `stateName` link both decode to `""`,
+    /// and `""` identifies neither of them — the same unreadable shape,
+    /// reached without anyone writing a colliding name on purpose.
+    ///
+    /// Included because the empty name is the one a half-synced definition
+    /// produces (`flow_spawn::initial_state_of` already treats a single
+    /// nameless state as half-synced), so leaving it out of the check would
+    /// be an untested carve-out in the permissive direction.
+    ///
+    /// Killing mutation: in `refuse_shadowed_state_names`, skip indices
+    /// whose `name` is empty.
+    #[test]
+    fn two_nameless_states_shadow_each_other() {
+        let nameless = |uri: &'static str, value: f64, rule: Option<&'static str>| StateSpec {
+            uri,
+            name: "",
+            value,
+            rule,
+        };
+        let flow = parse_shadowed(&[
+            nameless(AUTHOR_STATE_URI, 1.0, Some(GENUINE_RULE)),
+            nameless(SHADOW_STATE_URI, 0.5, Some(INJECTED_RULE)),
+            unshadowed_state(),
+        ]);
+
+        assert!(
+            matches!(rule_for(&flow, ""), ResolvedRule::Refused),
+            "two nameless states are as unresolvable as two named ones"
+        );
+        assert!(
+            matches!(rule_for(&flow, "done"), ResolvedRule::Rule(_)),
+            "and the named state in the same flow is untouched"
+        );
+    }
+
+    /// A single nameless state is NOT a shadow — one claimant is one
+    /// claimant, whatever its name. Pins that the empty-name handling above
+    /// is about collision and not about emptiness, so a half-synced
+    /// definition still parses (the spawn path has its own guard for it,
+    /// `flow_spawn::initial_state_of`, and that guard stays the one that
+    /// decides).
+    ///
+    /// Killing mutation: in `refuse_shadowed_state_names`, flag any index
+    /// whose `name` is empty regardless of a competing claimant.
+    #[test]
+    fn one_nameless_state_is_not_a_shadow() {
+        let flow = parse_shadowed(&[
+            StateSpec {
+                uri: AUTHOR_STATE_URI,
+                name: "",
+                value: 0.0,
+                rule: Some(GENUINE_RULE),
+            },
+            unshadowed_state(),
+        ]);
+
+        assert!(
+            flow.states.iter().all(|s| !s.consensus_rule_malformed),
+            "one nameless state collides with nothing"
+        );
+        assert!(
+            matches!(rule_for(&flow, ""), ResolvedRule::Rule(_)),
+            "and it still resolves"
         );
     }
 
