@@ -445,6 +445,9 @@ mod tests {
     const BASE: &str = "ad4m://task/t1";
     const ALICE: &str = "alice";
     const BOB: &str = "bob";
+    /// A third genuine signer, for the fixtures that have to show a forged
+    /// link being dropped *without* taking the honest links beside it.
+    const CAROL: &str = "carol";
     const REVIEWER: &str = "coasys://Reviewer";
     /// Earlier than any grant link a test writes — the fallback dating a
     /// dropped grant link must *not* be allowed to fall back to.
@@ -737,13 +740,17 @@ mod tests {
     }
 
     fn reviewer_evidence(grant: DecoratedLinkExpression) -> RoleGrantEvidence {
+        reviewer_evidence_from(vec![grant])
+    }
+
+    fn reviewer_evidence_from(grant_links: Vec<DecoratedLinkExpression>) -> RoleGrantEvidence {
         RoleGrantEvidence {
             to_state: "done".into(),
             role_class: REVIEWER.into(),
             did: did_of(ALICE).into(),
             instances: vec![RoleInstanceHistory {
                 instance_id: "r0".into(),
-                grant_links: vec![grant],
+                grant_links,
                 revocation_links: Vec::new(),
                 // Earlier than the assignment link — the widening the
                 // suppression rule exists to prevent.
@@ -775,6 +782,10 @@ mod tests {
     ///   over the *carried* links instead of `reverified_link` + `link_counts`
     ///   — the forgery's own `"valid": true` is inherited, the link survives,
     ///   and the tampered receipt reports `Verified`.
+    ///
+    /// And red in the third scenario if the collapse is not the *filter's*
+    /// doing — see the comment there for why a verdict assertion alone cannot
+    /// tell those apart.
     #[test]
     fn a_forged_grant_link_collapses_the_eligibility_window_instead_of_widening_it() {
         let flow = role_gated_flow();
@@ -811,6 +822,37 @@ mod tests {
         assert!(
             reason.contains("cannot be placed in time"),
             "the refusal must name the fail-closed grant dating, got: {reason}"
+        );
+
+        // The separating case, and the reason the two above are not enough.
+        //
+        // `Unfoldable`/"cannot be placed in time" is also what a `resolve`
+        // that failed closed on an ABSENT field would say — code that
+        // collapses the window whenever anything is dropped, or that drops
+        // every grant link once one is bad, passes both assertions above
+        // while being wrong. The verdict is right there for a reason the test
+        // never inspects.
+        //
+        // So: one fixture carrying both links. The forgery is dropped, the
+        // genuine link SURVIVES and still dates the grant at `T2`, and the
+        // vote at `T3` is eligible against it — the receipt verifies with the
+        // forgery sitting right beside the link that carried it.
+        //
+        // That is the assertion that separates "the signature filter dropped
+        // one link" from "the collapse happens for some other reason": the
+        // two differ only here, because only here is there surviving material
+        // for `resolve` to date a window from.
+        let mut half_forged = tampered;
+        half_forged.read_set.role_grants = vec![reviewer_evidence_from(vec![
+            grant_link(ALICE, false, Some(true)),
+            grant_link(ALICE, true, None),
+        ])];
+        let verdict = verify_receipt(&reader, &half_forged);
+        assert!(
+            verdict.is_verified(),
+            "the forgery must be dropped WITHOUT poisoning the genuine link beside \
+             it — a filter that collapses the window on any bad link, or a `resolve` \
+             failing closed on absence, is red here and green above — got: {verdict}"
         );
     }
 
@@ -927,6 +969,28 @@ mod tests {
             },
             "a forged co-signature counts for nobody, so the edge never settles"
         );
+
+        // `derived: "open"` is the right answer for TWO different reasons, and
+        // the assertion above cannot tell them apart: the forged vote was
+        // dropped and Alice's alone is short of `{n: 2}` — or every vote in a
+        // read-set containing a bad signature was dropped, which is also short
+        // of two. The honest precondition does not separate them either; it
+        // runs on a fixture with no forgery in it at all.
+        //
+        // So: the forgery, and beside it enough genuine material to settle
+        // anyway. Alice and Carol make quorum while Bob's forged link sits in
+        // the same proposal. Only the first reading survives this.
+        let mut with_a_genuine_third = tampered;
+        with_a_genuine_third.read_set.proposals[0]
+            .links
+            .push(signed_vote("ad4m://p/1", CAROL, T2));
+        let verdict = verify_receipt(&reader, &with_a_genuine_third);
+        assert!(
+            verdict.is_verified(),
+            "one forged co-signature must not disqualify the genuine votes beside \
+             it — the ingest rules on links one at a time, not on read-sets — got: \
+             {verdict}"
+        );
     }
 
     /// **Marvin's constraint, made falsifiable.** Mint and verify must fold
@@ -946,6 +1010,10 @@ mod tests {
     /// forged verdict is inherited, quorum is reached, and `mint` produces a
     /// receipt that `a_forged_co_signature_that_claims_to_be_valid_does_not_
     /// reach_quorum` shows a verifier rejects.
+    ///
+    /// The closing positive control is the half that makes the refusal mean
+    /// anything: a `mint` that refused this *shape* rather than this forgery
+    /// would satisfy the `expect_err` and be caught only there.
     #[test]
     fn mint_refuses_material_a_verifier_would_refuse() {
         let flow = flow_json(
@@ -981,6 +1049,23 @@ mod tests {
             format!("{err:#}").contains("can still transition out"),
             "the fold must stay in `open` rather than counting the forgery, got: {err:#}"
         );
+
+        // Without this, the test is satisfied by a `mint` that refuses the
+        // *shape* — two links, `{n: 2}`, this flow — rather than the forgery,
+        // and it has no positive control of its own to say otherwise. The
+        // same material with Bob's link genuinely signed must mint, so what
+        // the refusal above turns on is the signature and nothing else.
+        let mut links = signed_proposal("ad4m://p/1", ALICE, "open", "done", "seal-1", T1);
+        links.push(signed_vote("ad4m://p/1", BOB, T2));
+        let honest = read_set(
+            vec![ProposalLinks {
+                uri: "ad4m://p/1".into(),
+                links,
+            }],
+            Vec::new(),
+        );
+        FlowReceipt::mint(&flow, honest, vec![BASE.to_string()], Vec::new())
+            .expect("the same material, honestly signed, must mint");
     }
 
     // ---- the remaining refusals --------------------------------------------
