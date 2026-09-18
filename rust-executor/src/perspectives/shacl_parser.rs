@@ -3644,8 +3644,16 @@ mod tests {
     fn byte_identical_has_state_repeats_are_one_state_not_a_shadow() {
         let mut links = shadowed_flow_links(&[author_state(), unshadowed_state()]);
         // The repeat: the same edge to the same URI, twice more.
-        links.push(mk_link(SHADOW_FLOW_URI, "ad4m://hasState", AUTHOR_STATE_URI));
-        links.push(mk_link(SHADOW_FLOW_URI, "ad4m://hasState", AUTHOR_STATE_URI));
+        links.push(mk_link(
+            SHADOW_FLOW_URI,
+            "ad4m://hasState",
+            AUTHOR_STATE_URI,
+        ));
+        links.push(mk_link(
+            SHADOW_FLOW_URI,
+            "ad4m://hasState",
+            AUTHOR_STATE_URI,
+        ));
 
         let flow = parse_flow_from_links(&links, SHADOW_FLOW_URI).expect("reader");
 
