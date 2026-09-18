@@ -102,8 +102,10 @@
 //! Nothing is unsafe either way — both refuse the grant — so this is a
 //! taxonomy question, not a hole, and it is left open deliberately rather than
 //! settled in passing. Raised by @lal-bot-coasys reviewing the `grantedByFlow`
-//! PR; `a_chain_one_deeper_than_the_budget_is_refused_not_allowed` therefore
-//! pins the refusal and not the bucket.
+//! PR and tracked as #1077, which also covers why `OutputUnbound` reaches the
+//! opposite answer from the same argument;
+//! `a_chain_one_deeper_than_the_budget_is_refused_not_allowed` therefore pins
+//! the refusal and not the bucket.
 //!
 //! # Revocation: what a receipt freezes and what it does not
 //!
@@ -1117,8 +1119,8 @@ mod tests {
         // than renaming a bucket, which is more than this PR should carry.
         // So this test pins the property that must never regress — the
         // over-cap chain does NOT verify, fail-closed — and leaves the
-        // bucketing to the follow-up, rather than pinning today's answer as
-        // the contract and making the test the reason it can't change.
+        // bucketing to #1077, rather than pinning today's answer as the
+        // contract and making the test the reason it can't change.
         assert_ne!(
             verdict.outcome(),
             VerdictKind::Verified,
