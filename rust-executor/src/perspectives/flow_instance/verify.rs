@@ -152,6 +152,7 @@
 
 use super::fold::Contention;
 use super::fold_read_set;
+use super::grant::GrantContext;
 use super::receipt::{flow_dna_hash, is_terminal_state, FlowReceipt};
 use crate::perspectives::shacl_parser::SHACLFlow;
 use std::collections::{BTreeSet, HashMap};
@@ -423,6 +424,24 @@ pub fn verify_receipt(
     receipt: &FlowReceipt,
     arrived_from: Option<&str>,
 ) -> ReceiptVerdict {
+    verify_receipt_within(GrantContext::root(catalogue), receipt, arrived_from)
+}
+
+/// [`verify_receipt`] with an explicit depth budget — the entry point for a
+/// receipt reached by following a `granted_by` edge out of material already
+/// being verified.
+///
+/// Same checks in the same order; the only difference is that the grant gates
+/// inside its fold get whatever budget is left rather than a fresh one. See
+/// [`grant`](super::grant) § *What the cap counts* for why that makes
+/// verification non-compositional past the cap, and why the direction of that
+/// is fail-closed.
+pub(crate) fn verify_receipt_within(
+    ctx: GrantContext<'_>,
+    receipt: &FlowReceipt,
+    arrived_from: Option<&str>,
+) -> ReceiptVerdict {
+    let catalogue = ctx.catalogue();
     // 0. Does it speak for the node I came from? Before everything, because
     //    a receipt that binds elsewhere is not evidence about this node no
     //    matter how well it verifies — and because answering any other
@@ -483,8 +502,10 @@ pub fn verify_receipt(
         };
     }
 
-    // 5. The same fold, over the same ingest, that `mint` ran.
-    let derived = match fold_read_set(flow, &receipt.read_set.reverified()) {
+    // 5. The same fold, over the same ingest, that `mint` ran — and with the
+    //    same remaining grant budget, so a nested receipt gets the same answer
+    //    on both sides.
+    let derived = match fold_read_set(flow, &receipt.read_set.reverified(), ctx) {
         Ok(derived) => derived,
         Err(e) => {
             return ReceiptVerdict::Unfoldable {
@@ -560,6 +581,7 @@ mod tests {
         did_of, signed_link, signed_proposal, signed_vote, T1, T2, T3,
     };
     use crate::perspectives::flow_instance::atom::ACCEPTED_BY_PREDICATE;
+    use crate::perspectives::flow_instance::grant::GrantContext;
     use crate::perspectives::flow_instance::receipt::EvidencePreimage;
     use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
@@ -636,8 +658,17 @@ mod tests {
     }
 
     fn mint(flow: &SHACLFlow, rs: ReadSet) -> FlowReceipt {
-        FlowReceipt::mint(flow, rs, vec![BASE.to_string()], Vec::new())
-            .expect("the fixture read-set mints")
+        // Minted against the same catalogue a reader would verify against, so
+        // the two sides of every fixture agree by construction.
+        let reader = catalogue(vec![flow.clone()]);
+        FlowReceipt::mint(
+            flow,
+            rs,
+            vec![BASE.to_string()],
+            Vec::new(),
+            GrantContext::root(&reader),
+        )
+        .expect("the fixture read-set mints")
     }
 
     // ---- the happy path, as the control for everything below --------------
@@ -821,7 +852,7 @@ mod tests {
         let standing_still = flow_json(json!([{ "name": "done", "value": 1.0 }]), json!([]));
         let empty = read_set(Vec::new(), Vec::new());
         assert_eq!(
-            fold_read_set(&standing_still, &empty.reverified())
+            fold_read_set(&standing_still, &empty.reverified(), GrantContext::empty())
                 .expect("a stateless walk folds")
                 .settled
                 .len(),
@@ -837,6 +868,7 @@ mod tests {
             },
             vec![BASE.to_string()],
             Vec::new(),
+            GrantContext::empty(),
         )
         .expect_err("a completion nobody voted on is not a completion");
         assert!(
@@ -889,7 +921,7 @@ mod tests {
 
         let after_retraction = read_set(Vec::new(), Vec::new());
         assert_eq!(
-            fold_read_set(&flow, &after_retraction.reverified())
+            fold_read_set(&flow, &after_retraction.reverified(), GrantContext::empty())
                 .expect("an empty read-set folds")
                 .state,
             "open",
@@ -1076,6 +1108,7 @@ mod tests {
                 // Earlier than the assignment link — the widening the
                 // suppression rule exists to prevent.
                 asserted_instance_timestamp: Some(INSTANCE_CREATED.into()),
+                granting_receipts: Vec::new(),
             }],
         }
     }
@@ -1364,8 +1397,14 @@ mod tests {
             Vec::new(),
         );
 
-        let err = FlowReceipt::mint(&flow, forged, vec![BASE.to_string()], Vec::new())
-            .expect_err("a quorum resting on a forged signature is not a quorum");
+        let err = FlowReceipt::mint(
+            &flow,
+            forged,
+            vec![BASE.to_string()],
+            Vec::new(),
+            GrantContext::empty(),
+        )
+        .expect_err("a quorum resting on a forged signature is not a quorum");
         assert!(
             format!("{err:#}").contains("can still transition out"),
             "the fold must stay in `open` rather than counting the forgery, got: {err:#}"
@@ -1385,8 +1424,14 @@ mod tests {
             }],
             Vec::new(),
         );
-        FlowReceipt::mint(&flow, honest, vec![BASE.to_string()], Vec::new())
-            .expect("the same material, honestly signed, must mint");
+        FlowReceipt::mint(
+            &flow,
+            honest,
+            vec![BASE.to_string()],
+            Vec::new(),
+            GrantContext::empty(),
+        )
+        .expect("the same material, honestly signed, must mint");
     }
 
     // ---- the remaining refusals --------------------------------------------

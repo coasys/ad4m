@@ -25,6 +25,7 @@ use super::flow_instance::atom::{
     TO_STATE_PREDICATE,
 };
 use super::flow_instance::fold::DerivedState;
+use super::flow_instance::grant::GrantContext;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::propose::propose_flow_transition;
 use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
@@ -890,7 +891,8 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
     let flow = &flows[&f.flow_uri];
     assert_eq!(
-        fold_read_set(flow, &parsed).expect("the carried evidence resolves off-perspective"),
+        fold_read_set(flow, &parsed, GrantContext::root(&flows))
+            .expect("the carried evidence resolves off-perspective"),
         derived,
         "an off-perspective verifier must reach the same verdict"
     );
@@ -1260,7 +1262,8 @@ async fn a_newcomer_deriving_after_a_revocation_converges_on_the_settled_state()
     let parsed: ReadSet = serde_json::from_str(&json).expect("deserialises");
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
     assert_eq!(
-        fold_read_set(&flows[&f.flow_uri], &parsed).expect("the carried evidence resolves"),
+        fold_read_set(&flows[&f.flow_uri], &parsed, GrantContext::root(&flows))
+            .expect("the carried evidence resolves"),
         before
     );
     assert!(
@@ -2131,7 +2134,9 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
     );
 
     let translated = requires_query_input(&role, &record, &me).expect("role query translates");
-    let grant = evidence[0].resolve(&translated).expect("resolve");
+    let grant = evidence[0]
+        .resolve(&translated, None, None, GrantContext::empty())
+        .expect("resolve");
     let window = grant
         .windows
         .iter()
