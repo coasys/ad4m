@@ -63,7 +63,11 @@
 //!   (`flow_evaluator::PerspectiveInstance::did_property_predicate`); the
 //!   sentence above is true from that commit forward and from no earlier one.
 //!   Receipts minted before it date their grants from the instance.
-//! - `revoked_at` is the tombstone's link timestamp.
+//! - `granted_at` is **the granting run's quorum time** when the role query
+//!   declares `grantedByFlow`, and then nothing else may date it — not the
+//!   assignment link, not the instance timestamp, not even as a fallback. See
+//!   [`grant`](super::grant).
+//! - `revoked_at` is the tombstone's link timestamp, for both kinds.
 //!
 //! Timestamps are compared as **parsed instants** ([`super::time`]), never
 //! as strings: they are client-asserted RFC 3339 and clients disagree on
@@ -95,10 +99,15 @@
 //! escalation of *timing* only, within an authority the social DNA already
 //! grants: the admin controls membership, and a back-dated revocation
 //! achieves nothing a genuinely earlier one would not have. Documented, not
-//! engineered around, in v1 (#1027). Roles granted as flow outputs — the
-//! planned recursive composition — will carry a quorum-fixed time no single
-//! party can back-date, shrinking the residual to the admin-authored base
-//! case.
+//! engineered around, in v1 (#1027).
+//!
+//! The half of this that *is* engineered around is the **grant** side, for
+//! roles granted as flow outputs: a `grantedByFlow` grant is dated from
+//! [`SettledEdge::settled_at`](super::fold::SettledEdge) — the moment the
+//! n-th distinct eligible voter signed — which no single party picks and
+//! nobody can back-date without producing a different quorum. That shrinks
+//! the author-asserted residual to revocation timestamps and to the
+//! admin-authored base case. See [`grant`](super::grant).
 //!
 //! ## History
 //!
@@ -132,6 +141,8 @@
 //! also waits on the `proof.valid` tri-state (#1046).
 
 use super::atom::{TransitionAtom, Vote};
+use super::grant::{granted_by_flow_at, GrantContext};
+use super::receipt::FlowReceipt;
 use super::time::parse_link_timestamp;
 use crate::perspectives::flow_context::FlowInstanceRecord;
 pub use crate::perspectives::flow_evaluator::RoleRevocation;
@@ -140,7 +151,9 @@ use crate::perspectives::flow_evaluator::{
     revocation_link_counts_for_did, run_query, EvidenceItem, RequiresQueryable,
 };
 use crate::perspectives::model_query::{matches_condition, WhereCondition};
-use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery, ModelQueryCount};
+use crate::perspectives::shacl_parser::{
+    ConsensusRule, GrantedByFlow, ModelQuery, ModelQueryCount,
+};
 use crate::types::DecoratedLinkExpression;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -289,6 +302,19 @@ pub struct RoleInstanceHistory {
     /// audit-grade until `model_query` results carry per-link signatures.
     /// Flows whose role queries use `didProperty` never need it.
     pub asserted_instance_timestamp: Option<String>,
+    /// The receipts found on this instance's `ad4m://flow/granted_by` edges,
+    /// carried whole so a reader can verify them itself. Only collected for a
+    /// role query that declares `grantedByFlow`; empty for every other role,
+    /// and omitted from the serialised form when empty.
+    ///
+    /// Carried **unfiltered**, exactly like `revocation_links`: the edges are
+    /// unsigned multi-edges anyone may write, so collecting them decides
+    /// nothing, and every check that matters — the signatures inside, the DNA
+    /// hash, the replay, and the binding back to `instance_id` — happens in
+    /// [`grant::granted_by_flow_at`](super::grant::granted_by_flow_at) on the
+    /// reading side.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granting_receipts: Vec<FlowReceipt>,
 }
 
 /// The evidence behind one `(target state, candidate DID)` pair: same keying
@@ -352,20 +378,84 @@ impl RoleGrantEvidence {
     ///
     /// Grant links get no such treatment because they are not
     /// signature-filtered on either side; see above and #1063.
-    pub fn resolve(&self, translated_role_query: &Value) -> anyhow::Result<RoleGrant> {
+    ///
+    /// # `grantedByFlow`
+    ///
+    /// When `granted_by` is set, the instance must additionally be an output
+    /// of a completed run of the named flow, and **that run's quorum time
+    /// replaces every other dating**: the assignment links and
+    /// `asserted_instance_timestamp` are not consulted, not even as a
+    /// fallback. Were they, writing a plain assignment link would grant the
+    /// role with no receipt at all and the gate would be decorative.
+    ///
+    /// An instance no carried receipt grants contributes no window, exactly as
+    /// if the role query had not matched it. That is an ordinary "not a
+    /// member", distinct from the `Err` above — which exists for a grant that
+    /// *is* claimed and cannot be placed in time. Tombstones still apply, and
+    /// are the only way such a grant ever ends; see
+    /// [`grant`](super::grant) § *Revocation*.
+    ///
+    /// `count` is here only to refuse one shape outright: a `count` that is
+    /// satisfied by **zero** matching instances, such as `{ max: 0 }`. Paired
+    /// with `grantedByFlow` that inverts the gate into "eligible while no
+    /// verifiable receipt exists", so every reason a receipt might fail to
+    /// verify — an un-synced flow definition, a broken signature, a chain past
+    /// the depth cap — becomes a reason to *grant*. Fail-closed has to mean
+    /// the same thing at both ends of the rule, so this combination is an
+    /// error rather than a subtlety.
+    pub fn resolve(
+        &self,
+        translated_role_query: &Value,
+        granted_by: Option<&GrantedByFlow>,
+        count: Option<&ModelQueryCount>,
+        grants: GrantContext<'_>,
+    ) -> anyhow::Result<RoleGrant> {
+        if granted_by.is_some() && cardinality_satisfied(count, 0) {
+            anyhow::bail!(
+                "RoleGrantEvidence::resolve: the `{}` role gate combines `grantedByFlow` with a `count` satisfied by zero instances, so a receipt that FAILS to verify would make `{}` eligible rather than ineligible; refusing to gate (fail-closed)",
+                self.role_class,
+                self.did
+            );
+        }
         let did_literal = did_literal_url(&self.did)?;
         let grant_counts =
             |l: &&DecoratedLinkExpression| grant_link_names_did(l, &self.did, &did_literal);
-        // Never the carried verdict: recompute it from the signature. See
-        // § Signatures above.
-        let reverified = |l: &DecoratedLinkExpression| {
-            let mut l = l.clone();
-            l.verify_signature();
-            l
-        };
 
         let mut windows = Vec::with_capacity(self.instances.len());
         for instance in &self.instances {
+            // A `grantedByFlow` gate dates the grant from the granting run's
+            // quorum and from nothing else — see § grantedByFlow above. An
+            // instance no receipt grants is simply not a member, so it is
+            // skipped rather than raised.
+            if let Some(spec) = granted_by {
+                match granted_by_flow_at(
+                    grants,
+                    &instance.instance_id,
+                    spec,
+                    &instance.granting_receipts,
+                ) {
+                    Some(granted_at) => {
+                        windows.push(RoleGrantWindow {
+                            instance_id: instance.instance_id.clone(),
+                            granted_at,
+                            revocations: self.revocations_on(
+                                instance,
+                                translated_role_query,
+                                &did_literal,
+                            ),
+                        });
+                    }
+                    None => log::debug!(
+                        "grantedByFlow: `{}` does not count toward `{}` for `{}`: no carried \
+                         receipt grants it",
+                        instance.instance_id,
+                        self.role_class,
+                        self.did
+                    ),
+                }
+                continue;
+            }
+
             // Earliest by parsed instant, never by string: timestamps are
             // client-asserted and clients disagree on RFC 3339 flavour, so
             // string order diverges from instant order inside a second (#1000).
@@ -388,32 +478,10 @@ impl RoleGrantEvidence {
                 );
             };
 
-            // Sorted here, not by the store: the view must not depend on the
-            // order a store happens to return links in.
-            let mut revocations: Vec<RoleRevocation> = instance
-                .revocation_links
-                .iter()
-                .map(reverified)
-                .filter(|l| revocation_link_counts_for_did(l, &self.did, &did_literal))
-                .filter(|l| revocation_authorised(translated_role_query, &l.author))
-                .map(|l| RoleRevocation {
-                    by: l.author.clone(),
-                    at: l.timestamp.clone(),
-                })
-                .collect();
-            revocations.sort_by(|a, b| {
-                (parse_link_timestamp(&a.at), &a.at, &a.by).cmp(&(
-                    parse_link_timestamp(&b.at),
-                    &b.at,
-                    &b.by,
-                ))
-            });
-            revocations.dedup();
-
             windows.push(RoleGrantWindow {
                 instance_id: instance.instance_id.clone(),
                 granted_at,
-                revocations,
+                revocations: self.revocations_on(instance, translated_role_query, &did_literal),
             });
         }
         windows.sort_by(|a, b| {
@@ -436,6 +504,54 @@ impl RoleGrantEvidence {
             instances: windows.iter().map(|w| w.instance_id.clone()).collect(),
             windows,
         })
+    }
+
+    /// The authorised, signed tombstones on one instance naming this DID,
+    /// earliest first — the `revocations` half of a [`RoleGrantWindow`].
+    ///
+    /// Shared by both dating branches on purpose. A `grantedByFlow` grant is
+    /// dated by a quorum instead of by a link, but it ends exactly the way
+    /// every other role grant ends: a new signed tombstone from an author
+    /// [`revocation_authorised`] accepts. That sameness is what makes the one
+    /// revocation story in [`grant`](super::grant) § *Revocation* true of both
+    /// kinds, and splitting the two branches' revocation handling is how it
+    /// would quietly stop being true.
+    ///
+    /// Every carried link's signature is **recomputed** here rather than read;
+    /// see § *Signatures* on [`Self::resolve`].
+    fn revocations_on(
+        &self,
+        instance: &RoleInstanceHistory,
+        translated_role_query: &Value,
+        did_literal: &str,
+    ) -> Vec<RoleRevocation> {
+        let reverified = |l: &DecoratedLinkExpression| {
+            let mut l = l.clone();
+            l.verify_signature();
+            l
+        };
+        // Sorted here, not by the store: the view must not depend on the
+        // order a store happens to return links in.
+        let mut revocations: Vec<RoleRevocation> = instance
+            .revocation_links
+            .iter()
+            .map(reverified)
+            .filter(|l| revocation_link_counts_for_did(l, &self.did, did_literal))
+            .filter(|l| revocation_authorised(translated_role_query, &l.author))
+            .map(|l| RoleRevocation {
+                by: l.author.clone(),
+                at: l.timestamp.clone(),
+            })
+            .collect();
+        revocations.sort_by(|a, b| {
+            (parse_link_timestamp(&a.at), &a.at, &a.by).cmp(&(
+                parse_link_timestamp(&b.at),
+                &b.at,
+                &b.by,
+            ))
+        });
+        revocations.dedup();
+        revocations
     }
 }
 
@@ -551,11 +667,18 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
             let links = perspective
                 .role_grant_links(&role.class_name, &item.id, did_property, did)
                 .await?;
+            // Only for a gate that asks for them. Every other role pays
+            // nothing: no query, no bytes in the read-set.
+            let granting_receipts = match role.granted_by_flow.is_some() {
+                true => perspective.granting_receipts(&item.id).await?,
+                false => Vec::new(),
+            };
             instances.push(RoleInstanceHistory {
                 instance_id: item.id.clone(),
                 grant_links: links.grant_links,
                 revocation_links: links.revocation_links,
                 asserted_instance_timestamp: instance_timestamp(item),
+                granting_receipts,
             });
         }
         // Stable by instance URI: the read-set must not depend on the order a
@@ -601,6 +724,7 @@ pub fn eligible_votes(
 
 #[cfg(test)]
 mod tests {
+    use super::super::grant::GrantContext;
     use super::*;
     use crate::agent::signatures::TestSigner;
     use crate::perspectives::flow_evaluator::RoleGrantLinks;
@@ -781,7 +905,7 @@ mod tests {
         evidence
             .iter()
             .map(|e| {
-                e.resolve(&translated(role, &e.did))
+                e.resolve(&translated(role, &e.did), None, None, GrantContext::empty())
                     .unwrap_or_else(|err| panic!("evidence for {} resolves: {err:#}", e.did))
             })
             .collect()
@@ -944,7 +1068,7 @@ mod tests {
         let evidence = resolve_role_grants(&stub, "approved", &undated, &record(), &dids(&[ALICE()]))
             .await
             .expect("collecting the links themselves cannot fail on timing");
-        let err = evidence[0].resolve(&translated(&undated, ALICE())).expect_err("undated instance");
+        let err = evidence[0].resolve(&translated(&undated, ALICE()), None, None, GrantContext::empty()).expect_err("undated instance");
         assert!(err.to_string().contains("cannot be placed in time"), "got {err:#}");
 
         // And the undeterminable rule never even runs a query.
@@ -1235,9 +1359,10 @@ mod tests {
                     grant_links: vec![grant_link(ALICE(), T1)],
                     revocation_links: vec![revocation],
                     asserted_instance_timestamp: None,
+                    granting_receipts: Vec::new(),
                 }],
             }
-            .resolve(&query)
+            .resolve(&query, None, None, GrantContext::empty())
             .expect("resolves")
         };
 
@@ -1286,9 +1411,15 @@ mod tests {
                 grant_links: vec![grant_link(BOB(), T0), grant_link(ALICE(), T3)],
                 revocation_links: vec![tombstone(BOB(), ADMIN(), T4)],
                 asserted_instance_timestamp: None,
+                granting_receipts: Vec::new(),
             }],
         }
-        .resolve(&translated(&role, ALICE()))
+        .resolve(
+            &translated(&role, ALICE()),
+            None,
+            None,
+            GrantContext::empty(),
+        )
         .expect("resolves");
         assert_eq!(
             grant.windows[0].granted_at, T3,

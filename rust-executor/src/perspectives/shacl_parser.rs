@@ -209,6 +209,38 @@ pub struct ModelQuery {
     /// TS `or?: ModelQuery[]` field (§7.3 multi-role composition).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub or: Option<Vec<ModelQuery>>,
+    /// Role membership granted by another flow completing. Only meaningful on
+    /// a `fromRole` query; see
+    /// [`grant`](crate::perspectives::flow_instance::grant) for the semantics,
+    /// the failure directions, and — importantly for anyone configuring one —
+    /// what it takes to un-grant.
+    #[serde(
+        rename = "grantedByFlow",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub granted_by_flow: Option<GrantedByFlow>,
+}
+
+/// A `fromRole` gate that additionally requires each matched instance to be an
+/// output of a completed run of a named flow, and dates the grant from that
+/// run's quorum rather than from an assignment link.
+///
+/// Both fields are required and both are checked: without `flow`, completing
+/// any flow would grant every such role; without `terminal_state`, a run that
+/// settled into a flow's `rejected` state would grant what its `approved`
+/// state was meant to.
+///
+/// Mirrors `GrantedByFlow` in `core/src/shacl/SHACLFlow.ts`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GrantedByFlow {
+    /// The granting flow's `flow_uri()` — `{namespace}{name}Flow`. Compared
+    /// with the receipt's own `flow_uri`.
+    pub flow: String,
+    /// The state that run must have settled into, compared with the state the
+    /// verifier's **own** fold re-derived, never the one the receipt asserts.
+    #[serde(rename = "terminalState")]
+    pub terminal_state: String,
 }
 
 /// `count` shape on a `ModelQuery`. Default `{ min: 1 }` — at least one
@@ -288,7 +320,10 @@ pub struct FlowTransition {
 }
 
 /// SHACL Flow structure - state machine definition
-#[derive(Debug, Deserialize, Serialize)]
+///
+/// `Clone` so a caller can put a definition into its own catalogue without
+/// re-parsing the graph; every field was already `Clone`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SHACLFlow {
     /// Flow name (e.g., "TODO"). Human-readable label; NOT the identity
     /// used in cross-module joins (see [`SHACLFlow::flow_uri`]).

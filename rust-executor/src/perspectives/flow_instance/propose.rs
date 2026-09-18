@@ -124,7 +124,7 @@ pub async fn propose_flow_transition(
         .ok_or_else(|| anyhow::anyhow!("flow `{}` is not in the catalogue", record.flow_uri))?;
 
     let instance = FlowInstance::from_record(record, flow);
-    let derived = instance.derive_state(perspective).await?;
+    let derived = instance.derive_state(perspective, &flows).await?;
     if let Some(contention) = &derived.contested {
         return Err(anyhow::anyhow!(
             "{instance_uri} is contested in `{}` — two edges out of it already carry quorum, \
@@ -265,12 +265,15 @@ pub async fn propose_flow_transition(
     // answer to "did my click move it?". An error here does NOT unwind the
     // vote — it is written and durable, and retrying this call is a no-op by
     // invariant 4 — it only means the state after it could not be read.
-    let after = instance.derive_state(perspective).await.map_err(|e| {
-        anyhow::anyhow!(
-            "{instance_uri}: the vote is recorded, but the state after it could not be \
+    let after = instance
+        .derive_state(perspective, &flows)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "{instance_uri}: the vote is recorded, but the state after it could not be \
              derived ({e:#}); retrying this call is a no-op"
-        )
-    })?;
+            )
+        })?;
 
     Ok(ProposeOutcome {
         proposal_uri,

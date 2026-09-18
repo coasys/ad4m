@@ -56,6 +56,7 @@
 //! mint, so its own first pass is not a catch-up and its first settle is
 //! reported. See `first_pass_here` in [`run_flow_consensus_pass`].
 
+use super::grant::GrantContext;
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::{
@@ -155,7 +156,7 @@ pub async fn run_flow_consensus_pass(
         // near it would say so. Anything that arrived from elsewhere must be
         // folded through `ReadSet::reverified` instead — see `verify.rs`
         // and <https://github.com/coasys/ad4m/issues/1068>.
-        let derived = match fold_read_set(flow, &read_set) {
+        let derived = match fold_read_set(flow, &read_set, GrantContext::root(&flows_by_uri)) {
             Ok(d) => d,
             Err(e) => {
                 log::warn!(

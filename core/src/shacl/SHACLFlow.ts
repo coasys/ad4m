@@ -112,6 +112,48 @@ export interface ModelQuery {
    * §7.4). Ignored when the query is used as a state guard or context.
    */
   or?: ModelQuery[];
+  /**
+   * When this query is used as a `ConsensusRule.fromRole`, require each
+   * matched instance to be an output of a completed run of another flow,
+   * and date the grant from that run's quorum instead of from an
+   * assignment link.
+   *
+   * The engine follows the instance's `ad4m://flow/granted_by` edges,
+   * verifies each receipt against its own flow catalogue, and counts the
+   * instance only if some receipt verifies AND names this instance among
+   * its outputs AND is for `flow` AND settled into `terminalState`.
+   *
+   * Two things to know before configuring one:
+   * - An instance with no verifying receipt is simply not a member. There
+   *   is no fallback to the assignment link — if there were, writing that
+   *   link would grant the role and this gate would be decorative.
+   * - **A granted role is not un-granted by undoing the flow.** Retracting
+   *   a settling vote moves the live flow back; the receipt keeps
+   *   verifying. The only un-grant is a new signed
+   *   `ad4m://flow/role_grant_revoked` tombstone on the instance, from an
+   *   author this query's own `where.author` accepts — so a query with no
+   *   author condition can be revoked by anyone, and one naming an author
+   *   who is not around cannot be revoked at all.
+   *
+   * Ignored when the query is used as a state guard (`requires`) or
+   * background `context`.
+   */
+  grantedByFlow?: GrantedByFlow;
+}
+
+/**
+ * The granting-flow reference on a `fromRole` query's `grantedByFlow`.
+ *
+ * Both fields are required and both are checked: without `flow`, completing
+ * any flow would grant every such role; without `terminalState`, a run that
+ * settled into a flow's `rejected` state would grant what its `approved`
+ * state was meant to.
+ */
+export interface GrantedByFlow {
+  /** The granting flow's URI — `{namespace}{name}Flow`. */
+  flow: string;
+  /** The state that run must have settled into. */
+  terminalState: string;
 }
 
 /**

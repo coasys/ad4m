@@ -90,6 +90,7 @@
 pub mod accept;
 pub mod atom;
 pub mod fold;
+pub mod grant;
 #[cfg(test)]
 mod ordering_tests;
 pub mod pass;
@@ -110,6 +111,7 @@ use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::DecoratedLinkExpression;
 use atom::{marked_fired, TransitionAtom};
 use fold::{fold, rule_for, Contention, DerivedState, VouchedAtom};
+use grant::GrantContext;
 use roles::{eligible_votes, resolve_role_grants, RoleGrant, RoleGrantEvidence};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -425,6 +427,13 @@ fn link_counts(link: &DecoratedLinkExpression) -> bool {
 ///
 /// Tombstones are never dropped here, only re-decorated: dropping one could
 /// only widen a window, and `resolve` re-verifies them anyway.
+///
+/// Carried **receipts** pass through untouched. There is nothing to
+/// re-decorate: a receipt is not a link and carries no per-replica read view,
+/// and every claim inside it —  including each of its own links' signatures —
+/// is recomputed by [`verify_receipt_within`](verify) when the grant gate
+/// reaches it. Filtering here would be a second, weaker gate in front of the
+/// real one.
 fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstanceHistory {
     let grant_links: Vec<DecoratedLinkExpression> = history
         .grant_links
@@ -446,6 +455,7 @@ fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstan
         } else {
             history.asserted_instance_timestamp.clone()
         },
+        granting_receipts: history.granting_receipts.clone(),
     }
 }
 
@@ -466,8 +476,21 @@ fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstan
 /// This is the function an off-perspective verifier re-runs over a minted
 /// token's proof to reach the same verdict independently — after
 /// re-decorating the carried links' signatures, per [`ReadSet`].
-pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<DerivedState> {
-    let grants = role_grant_views(flow, read_set)?;
+///
+/// `grants` carries the flow catalogue and the remaining depth budget that a
+/// `grantedByFlow` gate needs ([`grant`]). It is a parameter rather than
+/// something this function builds because a receipt reached by following a
+/// `granted_by` edge must fold with what is *left* of the budget, not with a
+/// fresh one — and because a reader folding against the wrong catalogue would
+/// otherwise silently grant nothing. Callers with no grant gates in play still
+/// pass [`GrantContext::root`] over their own catalogue; there is no
+/// catalogue-free shortcut on purpose.
+pub fn fold_read_set(
+    flow: &SHACLFlow,
+    read_set: &ReadSet,
+    grants: GrantContext<'_>,
+) -> anyhow::Result<DerivedState> {
+    let grants = role_grant_views(flow, read_set, grants)?;
     let vouched: Vec<VouchedAtom> = read_set
         .atoms()
         .into_iter()
@@ -502,7 +525,16 @@ pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Der
 /// Evidence for a state whose rule carries no `fromRole` is dropped: an
 /// ungated edge admits every vote regardless, and resolving it would only
 /// invite a reader to think the gate meant something.
-fn role_grant_views(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<RoleGrant>> {
+///
+/// The `grantedByFlow` spec, like the authority rule, is read from **the flow
+/// definition passed in here** and never from the carried evidence: a minter
+/// who could name the granting flow would be naming the rule its own receipt
+/// is judged by.
+fn role_grant_views(
+    flow: &SHACLFlow,
+    read_set: &ReadSet,
+    ctx: GrantContext<'_>,
+) -> anyhow::Result<Vec<RoleGrant>> {
     let record = read_set.as_record(flow);
     let mut grants = Vec::with_capacity(read_set.role_grants.len());
     for evidence in &read_set.role_grants {
@@ -511,7 +543,14 @@ fn role_grant_views(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<
             continue;
         };
         let view = requires_query_input(role, &record, &evidence.did)
-            .and_then(|input| evidence.resolve(&input))
+            .and_then(|input| {
+                evidence.resolve(
+                    &input,
+                    role.granted_by_flow.as_ref(),
+                    role.count.as_ref(),
+                    ctx,
+                )
+            })
             .map_err(|e| {
                 e.context(format!(
                     "flow instance {}: role evidence for `{}` on `{}` does not resolve, so no \
@@ -614,11 +653,21 @@ impl<'a> FlowInstance<'a> {
     /// The authoritative state of this flow: calls `read_set` (all I/O), then
     /// `fold_read_set` (pure). The single entry point the rest of the engine
     /// uses for "what state is this flow in" — nothing else is authoritative.
+    ///
+    /// `catalogue` is the caller's whole flow catalogue, not just this flow:
+    /// a `grantedByFlow` gate verifies receipts for *other* flows, and it
+    /// verifies them against the reader's own definitions. Every caller
+    /// already holds one — they had to look `self.flow` up in it.
     pub async fn derive_state(
         &self,
         perspective: &PerspectiveInstance,
+        catalogue: &HashMap<String, SHACLFlow>,
     ) -> anyhow::Result<DerivedState> {
-        fold_read_set(self.flow, &self.read_set(perspective).await?)
+        fold_read_set(
+            self.flow,
+            &self.read_set(perspective).await?,
+            GrantContext::root(catalogue),
+        )
     }
 }
 
@@ -657,7 +706,7 @@ pub async fn derive_states(
             continue;
         };
         match FlowInstance::from_record(record, flow)
-            .derive_state(perspective)
+            .derive_state(perspective, flows_by_uri)
             .await
         {
             Ok(derived) => out.push(DerivedFlow {
