@@ -20,6 +20,9 @@ export * from "./perspectives/AutoProcessor";
 export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/FlowModels";
 export * from "./perspectives/FlowInstance";
+// The result shapes of the flow write API. Named exports rather than
+// `export *`: PerspectiveClient's class surface is internal.
+export type { FlowFireOutcome, FlowProposeResult } from "./perspectives/PerspectiveClient";
 export * from "./perspectives/SparqlBindings";
 export * from "./perspectives/WakerSubscriptionManager";
 export * from "./perspectives/PerspectiveDiff";

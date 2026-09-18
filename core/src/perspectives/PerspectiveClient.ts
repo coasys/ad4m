@@ -23,6 +23,33 @@ export interface FlowFireOutcome {
     contributingProposalUris: string[];
 }
 
+/** What one `perspective.proposeFlowTransition` call did, and where the flow
+ *  stands after it.
+ *
+ *  A bare `FlowFireOutcome[]` could not distinguish "queued, waiting for other
+ *  voters" from "you had already voted on this" from "the instance is stalled":
+ *  all three are the empty array, and all three want different UI. */
+export interface FlowProposeResult {
+    /** The live proposal this call minted or joined. Hand it to another
+     *  agent's `acceptProposal`, or render it as "pending — withdraw?". */
+    proposalUri: string;
+    /** `true` when this call wrote the proposal; `false` when an equivalent
+     *  one was already open and this call joined it. */
+    minted: boolean;
+    /** `true` when this call recorded a vote for the calling agent — its own
+     *  vote on a mint, an `acceptedBy` on a join. `false` means the agent had
+     *  already voted and nothing was written. */
+    recordedVote: boolean;
+    /** Consensus events this call recorded for the first time. Empty while
+     *  the edge is short of quorum. */
+    outcomes: FlowFireOutcome[];
+    /** The instance's derived state after the call. */
+    derivedState: string;
+    /** `true` when two edges out of `derivedState` both carry quorum: the flow
+     *  is irreversibly stalled and must not be shown as "awaiting votes". */
+    contested: boolean;
+}
+
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
@@ -402,6 +429,17 @@ export class PerspectiveClient {
     async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
             'perspective.rejectInterpretation', { uuid, base, property },
+        )
+    }
+
+    async proposeFlowTransition(
+        uuid: string,
+        instanceUri: string,
+        toState: string,
+        rationale?: string,
+    ): Promise<FlowProposeResult> {
+        return this.#apiClient.call<FlowProposeResult>(
+            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale },
         )
     }
 
