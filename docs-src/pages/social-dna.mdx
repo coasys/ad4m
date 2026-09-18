@@ -366,6 +366,8 @@ While these methods are available, we recommend using the `Ad4mModel` system for
 
 Flows describe how a group advances an expression through a state machine, with each transition backed by an on-graph `FlowTransitionProposal` and (optionally) a `ConsensusRule` gating when a proposal fires. Each `FlowState` carries an `interpretationHint` — a short English sentence the interpretation engine surfaces to the LLM so agent-authored proposals stay coherent with the flow's intent.
 
+This section introduces flows as social DNA. The [Flows](/flows) page covers the engine: the on-graph objects, how state is derived rather than stored, the accept/reject write surface, and a worked end-to-end example.
+
 <Callout type="info" emoji="ℹ️">
   Flow state is tracked on-graph via `FlowInstance` (per-subject state) and
   `FlowTransitionProposal` (per-vote), not by the ad-hoc `todo://state`-style
@@ -439,10 +441,14 @@ const proposals = await instance.proposals();
 ```
 
 <Callout type="info" emoji="ℹ️">
-  This is the read surface. Writing transitions — proposing one, voting on
-  it, and firing it once a `ConsensusRule` is met — lands with the consensus
-  engine and is not part of this API yet. Until then `FlowTransitionProposal`
-  records only exist where a client wrote one directly.
+  The above is the read surface. The consensus engine has since landed, so
+  voting on a proposal and firing it once a `ConsensusRule` is met are now
+  supported: `instance.acceptProposal(p)` adds the caller's signature and
+  returns whatever fired, and `instance.rejectProposal(p)` withdraws the links
+  that caller signed. Proposals are minted by the engine's evaluator pass after
+  an extraction run. A client-side `proposeTransition` and flow subscriptions
+  are not yet implemented. See [Flows](/flows) for the on-graph objects, the
+  accept/reject semantics, and a worked end-to-end example.
 </Callout>
 
 ### Adding Flows to a Perspective
