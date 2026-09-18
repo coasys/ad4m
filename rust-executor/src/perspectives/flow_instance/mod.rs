@@ -98,7 +98,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::DecoratedLinkExpression;
 use atom::{marked_fired, TransitionAtom};
-use fold::{fold, rule_for, Contention, DerivedState, VouchedAtom};
+use fold::{fold, rule_for, Contention, DerivedState, ResolvedRule, VouchedAtom};
 use roles::{eligible_votes, resolve_role_grants, RoleGrant};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -216,9 +216,16 @@ pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> DerivedState {
         .atoms()
         .into_iter()
         .map(|atom| {
-            let rule = rule_for(flow, &atom.to_state);
+            // An unreadable rule leaves no vote eligible. `settle_edge`
+            // refuses the edge anyway; emptying the set here means the
+            // refusal also holds for anything reading `eligible_votes`
+            // directly, rather than resting on one call site (#1078).
+            let eligible_votes = match rule_for(flow, &atom.to_state) {
+                ResolvedRule::Rule(rule) => eligible_votes(&atom, &rule, &read_set.role_grants),
+                ResolvedRule::Refused => Vec::new(),
+            };
             VouchedAtom {
-                eligible_votes: eligible_votes(&atom, &rule, &read_set.role_grants),
+                eligible_votes,
                 atom,
             }
         })
@@ -295,7 +302,13 @@ impl<'a> FlowInstance<'a> {
         let atoms = read_set.atoms();
         let targets: BTreeSet<&str> = atoms.iter().map(|a| a.to_state.as_str()).collect();
         for to_state in targets {
-            let rule = rule_for(self.flow, to_state);
+            // No role resolution for a refused target: the edge cannot settle
+            // whoever voted, so resolving grants for it would be I/O whose
+            // result nothing reads. Not a fail-open — the refusal is
+            // `settle_edge`'s, and `fold_read_set` empties the eligible set.
+            let ResolvedRule::Rule(rule) = rule_for(self.flow, to_state) else {
+                continue;
+            };
             let Some(role) = rule.from_role.as_ref() else {
                 continue;
             };
