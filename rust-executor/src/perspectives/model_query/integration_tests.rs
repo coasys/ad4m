@@ -10,7 +10,7 @@ use super::sparql_builder::build_instance_sparql;
 use super::test_helpers::{
     evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
 };
-use super::types::{ModelQueryInput, ModelShape, ShapeProperty};
+use super::types::{ModelQueryInput, ModelShape, Scope, ScopeDirection, ShapeProperty};
 use super::utils::literal_percent_encode;
 use super::*;
 use crate::perspectives::sparql_store::SparqlStore;
@@ -7762,3 +7762,324 @@ async fn test_ordered_collection_without_entries_falls_back_to_timestamps() {
         .collect();
     assert_eq!(children, vec!["we://x/a", "we://x/b"]);
 }
+
+// ---------------------------------------------------------------------------
+// Bounded traversal (Scope::Traverse)
+// ---------------------------------------------------------------------------
+
+const COMMENT_SHAPE_JSON: &str = r#"{
+    "className": "Comment",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "we://Comment"
+        },
+        "text": {
+            "predicate": "we://text",
+            "required": false
+        }
+    },
+    "relations": {}
+}"#;
+
+/// A thread three levels deep:
+///
+/// ```text
+/// root ── c1 ── r1 ── rr1
+///   │      └─── r2
+///   ├──── c2
+///   └──── c3
+/// ```
+///
+/// Timestamps ascend in declaration order so a `createdAt` sort is deterministic.
+fn comment_tree_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let edges = [
+        ("we://root", "we://c1"),
+        ("we://root", "we://c2"),
+        ("we://root", "we://c3"),
+        ("we://c1", "we://r1"),
+        ("we://c1", "we://r2"),
+        ("we://r1", "we://rr1"),
+    ];
+    let mut t = 1000;
+    for (parent, child) in edges {
+        t += 1;
+        store
+            .add_link(&make_link(
+                parent,
+                "we://comment",
+                child,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                child,
+                "ad4m://type",
+                "we://Comment",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                child,
+                "we://text",
+                &format!("literal:string:{}", child.trim_start_matches("we://")),
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    store
+}
+
+fn traverse_scope(
+    ids: &[&str],
+    transitive: bool,
+    direction: ScopeDirection,
+    limit_per_anchor: Option<usize>,
+) -> Scope {
+    Scope::Traverse {
+        ids: ids.iter().map(|s| s.to_string()).collect(),
+        predicate: "we://comment".to_string(),
+        transitive,
+        direction,
+        limit_per_anchor,
+    }
+}
+
+async fn traverse_ids(store: &SparqlStore, scope: Scope, order: bool) -> Vec<String> {
+    let query = ModelQueryInput {
+        parent: Some(scope),
+        order: if order {
+            Some(vec![("createdAt".to_string(), OrderDirection::ASC)])
+        } else {
+            None
+        },
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let mut ids: Vec<String> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    if !order {
+        ids.sort();
+    }
+    ids
+}
+
+/// The claim the whole feature rests on: Oxigraph walks a `+` path, so one
+/// query answers for a whole subtree. Until this ran, only the emitted SPARQL
+/// text had been checked, not what the store does with it.
+#[tokio::test]
+async fn transitive_scope_returns_every_descendant() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://root"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://c1".to_string(),
+            "we://c2".to_string(),
+            "we://c3".to_string(),
+            "we://r1".to_string(),
+            "we://r2".to_string(),
+            "we://rr1".to_string(),
+        ],
+        "a transitive read should reach every level, and exclude the anchor itself"
+    );
+}
+
+#[tokio::test]
+async fn non_transitive_scope_stays_one_step() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://root"], false, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://c1".to_string(),
+            "we://c2".to_string(),
+            "we://c3".to_string()
+        ],
+        "one step should be the direct replies only"
+    );
+}
+
+/// One query for a whole level, which is what takes a paginated tree from a
+/// round trip per parent to a round trip per level.
+#[tokio::test]
+async fn multi_anchor_scope_answers_for_every_anchor_at_once() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://c1", "we://r1"], false, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://r1".to_string(),
+            "we://r2".to_string(),
+            "we://rr1".to_string()
+        ],
+        "both anchors' children should come back from the single query"
+    );
+}
+
+/// Per-anchor, not overall: two anchors with a limit of one must yield one
+/// each, where a global limit of two could have taken both from one anchor.
+#[tokio::test]
+async fn per_anchor_limit_keeps_the_top_n_under_each_anchor() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(
+            &["we://root", "we://c1"],
+            false,
+            ScopeDirection::Out,
+            Some(1),
+        ),
+        true,
+    )
+    .await;
+
+    assert_eq!(ids.len(), 2, "one per anchor, not one overall: {ids:?}");
+    assert!(
+        ids.contains(&"we://c1".to_string()),
+        "root's earliest reply should survive: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"we://r1".to_string()),
+        "c1's earliest reply should survive: {ids:?}"
+    );
+}
+
+/// Searching among what points *at* a node, which a reverse `include` cannot
+/// do because it can only hydrate for rows already in hand.
+#[tokio::test]
+async fn inbound_direction_finds_the_parent() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://rr1"], false, ScopeDirection::In, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec!["we://r1".to_string()],
+        "the inbound read should find exactly the parent"
+    );
+}
+
+/// An anchor nobody has written under is a legitimate answer of nothing. The
+/// failure guarded against is the opposite: an unconstrained anchor variable
+/// matching every comment in the store.
+#[tokio::test]
+async fn traverse_scope_with_an_unknown_anchor_returns_nothing() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://nobody"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert!(ids.is_empty(), "expected no results, got {ids:?}");
+}
+
+/// What a collapsed branch's "N replies" label reads from: the conversation
+/// below each row, not its direct children. `c1` has two direct replies and
+/// three descendants, so the two numbers are distinguishable.
+#[tokio::test]
+async fn transitive_projection_counts_descendants_not_children() {
+    let store = comment_tree_store();
+
+    let counts = |transitive: bool| {
+        let store = &store;
+        async move {
+            let mut projections = HashMap::new();
+            projections.insert(
+                "$replyCount".to_string(),
+                ProjectionInput {
+                    transitive,
+                    from: "comments".to_string(),
+                    count: true,
+                    target_class_name: None,
+                    where_clause: None,
+                    limit: None,
+                    order: None,
+                },
+            );
+            let query = ModelQueryInput {
+                parent: Some(traverse_scope(
+                    &["we://root"],
+                    false,
+                    ScopeDirection::Out,
+                    None,
+                )),
+                projections: Some(projections),
+                ..Default::default()
+            };
+            let result =
+                execute_model_query_from_json(store, "Comment", &query, COMMENT_SHAPE_WITH_REPLIES)
+                    .await
+                    .expect("query should execute");
+            result
+                .instances
+                .iter()
+                .find(|i| i["id"] == "we://c1")
+                .and_then(|i| i["$replyCount"].as_u64())
+                .unwrap_or(0)
+        }
+    };
+
+    assert_eq!(counts(false).await, 2, "c1 has two direct replies");
+    assert_eq!(
+        counts(true).await,
+        3,
+        "c1 has three descendants — r1, r2 and rr1"
+    );
+}
+
+const COMMENT_SHAPE_WITH_REPLIES: &str = r#"{
+    "className": "Comment",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "we://Comment"
+        },
+        "text": {
+            "predicate": "we://text",
+            "required": false
+        },
+        "comments": {
+            "predicate": "we://comment",
+            "required": false,
+            "collection": true
+        }
+    },
+    "relations": {}
+}"#;
