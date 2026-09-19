@@ -661,6 +661,7 @@ async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
 #[tokio::test]
 async fn test_build_projection_where_patterns_empty_when_no_clause() {
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: true,
         target_class_name: None,
@@ -680,6 +681,7 @@ async fn test_build_projection_where_patterns_id_filter() {
         WhereCondition::String("signal://abc".to_string()),
     );
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: false,
         target_class_name: None,
@@ -713,6 +715,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
         WhereCondition::String("like".to_string()),
     );
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: true,
         target_class_name: Some("Signal".to_string()),
@@ -739,6 +742,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
 #[tokio::test]
 async fn test_build_projection_order_clause_empty_when_no_order() {
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: false,
         target_class_name: None,
@@ -752,6 +756,7 @@ async fn test_build_projection_order_clause_empty_when_no_order() {
 #[tokio::test]
 async fn test_build_projection_order_clause_by_id() {
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: false,
         target_class_name: None,
@@ -831,6 +836,7 @@ async fn test_resolve_projections_count() {
     projections.insert(
         "$itemCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "items".to_string(),
             count: true,
             target_class_name: None,
@@ -877,6 +883,7 @@ async fn test_resolve_projections_list() {
     projections.insert(
         "$items".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "items".to_string(),
             count: false,
             target_class_name: None,
@@ -922,6 +929,7 @@ async fn test_resolve_projections_scalar() {
     projections.insert(
         "$firstItem".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "items".to_string(),
             count: false,
             target_class_name: None,
@@ -959,6 +967,7 @@ async fn test_resolve_projections_count_zero_when_no_links() {
     projections.insert(
         "$itemCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "items".to_string(),
             count: true,
             target_class_name: None,
@@ -1026,6 +1035,7 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
     projections.insert(
         "$likeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "reactions".to_string(),
             count: true,
             target_class_name: None,
@@ -1090,6 +1100,7 @@ async fn test_resolve_projections_where_filter_by_author() {
     projections.insert(
         "$mySignalCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "signals".to_string(),
             count: true,
             target_class_name: None,
@@ -4357,6 +4368,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     projections.insert(
         "$totalLikeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "signals".to_string(),
             count: true,
             target_class_name: Some("Signal".to_string()),
@@ -4382,6 +4394,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     projections2.insert(
         "$myLikeSignal".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "signals".to_string(),
             count: false,
             target_class_name: Some("Signal".to_string()),
@@ -4463,6 +4476,7 @@ async fn test_sort_by_projection_count_desc() {
     projections.insert(
         "$likeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "likes".to_string(),
             count: true,
             target_class_name: None,
@@ -4530,6 +4544,7 @@ async fn test_sort_by_projection_count_asc() {
     projections.insert(
         "$likeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "likes".to_string(),
             count: true,
             target_class_name: None,
@@ -4602,6 +4617,7 @@ async fn test_sort_by_projection_count_with_pagination() {
     projections.insert(
         "$likeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "likes".to_string(),
             count: true,
             target_class_name: None,

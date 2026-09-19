@@ -207,6 +207,87 @@ pub enum Scope {
         id: String,
         predicate: String,
     },
+    /// Bounded traversal from one or more anchors — see [`Traverse`](Scope::Traverse).
+    ///
+    /// A third variant rather than options on the two above, because those are
+    /// constructed as struct literals throughout `auto_processor`,
+    /// `interpretation` and `flow_context`, none of which traverse anything.
+    /// Adding fields there would have meant editing every write-scope call site
+    /// to say "and don't traverse", which is noise at each one and a much wider
+    /// blast radius than the feature deserves. The split is also honest: the
+    /// variants above identify *an* anchor, this one says how to walk from
+    /// *several*.
+    Traverse {
+        /// The anchors to walk from. One query answers for all of them, which
+        /// is what keeps a level of a tree to a single round trip (and a single
+        /// subscription) rather than one per parent.
+        #[serde(deserialize_with = "deserialize_ids_flex")]
+        ids: Vec<String>,
+        predicate: String,
+        /// Follow the predicate as far as it goes, rather than one step.
+        ///
+        /// Note the path reports only its endpoints: SPARQL property paths bind
+        /// no intermediate variables, so a transitive read says *that* a node is
+        /// under the anchor and never *where*. Reconstructing the shape needs
+        /// the inverse relation read separately (`@BelongsTo`).
+        #[serde(default)]
+        transitive: bool,
+        #[serde(default)]
+        direction: ScopeDirection,
+        /// Keep at most this many results *per anchor*, applied after ordering
+        /// and before hydration.
+        ///
+        /// SPARQL cannot express a per-group limit — it has no window functions,
+        /// and its sub-SELECTs are uncorrelated — so this is applied in the
+        /// executor between the two phases of the query. That placement is the
+        /// whole point: the id phase over-fetches rows of one string, and the
+        /// hydration phase, which is the expensive half, sees only the survivors.
+        #[serde(default)]
+        limit_per_anchor: Option<usize>,
+    },
+}
+
+/// Which way a traversal follows its predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopeDirection {
+    /// `anchor --predicate--> result`: the anchor owns the link. The default,
+    /// and the only direction the other `Scope` variants have ever had.
+    #[default]
+    Out,
+    /// `result --predicate--> anchor`: the result owns the link and points back.
+    ///
+    /// Answers "what points at this" for a *search* — ordered, filtered,
+    /// limited. Distinct from a reverse `include`, which answers the same
+    /// question for rows already in hand and cannot narrow them.
+    In,
+}
+
+/// Accept `ids` as either a bare string or a list of them.
+///
+/// The single-anchor spelling is the common one (one branch of a thread, one
+/// node of a graph) and requiring `["x"]` for it would be a papercut at every
+/// call site.
+fn deserialize_ids_flex<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::String(s) => Ok(vec![s]),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                Value::String(s) => Ok(s),
+                other => Err(serde::de::Error::custom(format!(
+                    "scope ids must be strings, got {other}"
+                ))),
+            })
+            .collect(),
+        other => Err(serde::de::Error::custom(format!(
+            "scope ids must be a string or a list of strings, got {other}"
+        ))),
+    }
 }
 
 /// Value in the `include` map for eager-loading relations.
@@ -234,6 +315,19 @@ pub struct ProjectionInput {
     /// When true, attach a count (integer) instead of a list.
     #[serde(default)]
     pub count: bool,
+    /// Count (or list) everything reachable through `from`, not just one step.
+    ///
+    /// What "42 replies" on a collapsed branch means: people read that as the
+    /// whole conversation below it, and a direct-child count says 3. The
+    /// projection query is already grouped per parent and already asked of
+    /// every row at once, so this costs one token in the emitted path and no
+    /// extra round trip.
+    ///
+    /// Refused alongside a link-author or link-timestamp filter: those read the
+    /// reification of *one* link, and a path is a reachability test with no
+    /// single link to point at.
+    #[serde(default)]
+    pub transitive: bool,
     /// Bare class name of the projection target.  The executor resolves the
     /// target shape from this through its in-memory cache when projection
     /// where-clauses reference target properties by name.

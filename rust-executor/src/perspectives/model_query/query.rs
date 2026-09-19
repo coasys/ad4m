@@ -14,6 +14,7 @@ use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
     all_where_pushable, build_count_sparql, build_instance_sparql, local_status_filter,
+    per_anchor_limit, ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
@@ -23,6 +24,7 @@ use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::Error;
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// Execute a model query against the Oxigraph store.
 ///
@@ -154,82 +156,90 @@ pub(super) async fn execute_model_query_inner(
         }
     };
 
-    let sparql_pagination =
-        if can_push_pagination && (query_input.limit.is_some() || query_input.offset.is_some()) {
-            let direction = query_input
-                .order
-                .as_ref()
-                .and_then(|o| o.first())
-                .map(|(_, d)| *d)
-                .unwrap_or(OrderDirection::ASC);
-            let sort_key = match &query_input.order {
-                None => SortKey::Timestamp,
-                Some(order) => {
-                    let key = &order[0].0;
-                    if key == "timestamp" || key == "createdAt" || key == "updatedAt" {
-                        SortKey::Timestamp
-                    } else if let Some(prop) = shape
-                        .properties
+    // A per-anchor limit forces the two-phase shape even with no global limit.
+    // The whole value of slicing per anchor is that it happens on the id phase,
+    // before hydration; the single-phase query hydrates as it matches, so
+    // slicing its output would mean having already paid for everything thrown
+    // away. No global LIMIT is emitted in that case — the ordering is what
+    // matters, and the truncation is per anchor.
+    let anchor_limit = per_anchor_limit(query_input);
+    let sparql_pagination = if can_push_pagination
+        && (query_input.limit.is_some() || query_input.offset.is_some() || anchor_limit.is_some())
+    {
+        let direction = query_input
+            .order
+            .as_ref()
+            .and_then(|o| o.first())
+            .map(|(_, d)| *d)
+            .unwrap_or(OrderDirection::ASC);
+        let sort_key = match &query_input.order {
+            None => SortKey::Timestamp,
+            Some(order) => {
+                let key = &order[0].0;
+                if key == "timestamp" || key == "createdAt" || key == "updatedAt" {
+                    SortKey::Timestamp
+                } else if let Some(prop) = shape
+                    .properties
+                    .iter()
+                    .find(|p| p.name == *key && !p.is_collection && !p.predicate.is_empty())
+                {
+                    SortKey::Property(prop.predicate.clone())
+                } else if key.starts_with('$') {
+                    // Projection count sort — find the from-relation's predicate.
+                    query_input
+                        .projections
+                        .as_ref()
+                        .and_then(|projs| projs.get(key.as_str()))
+                        .and_then(|proj| {
+                            shape
+                                .properties
+                                .iter()
+                                .find(|p| p.name == proj.from && !p.predicate.is_empty())
+                                .map(|p| p.predicate.clone())
+                        })
+                        .map(SortKey::Projection)
+                        .unwrap_or(SortKey::Timestamp)
+                } else if let Some(dot_pos) = key.find('.') {
+                    // Dotted relation-property path: "relName.propName"
+                    let rel_name = &key[..dot_pos];
+                    let prop_name = &key[dot_pos + 1..];
+                    shape
+                        .include_relations
                         .iter()
-                        .find(|p| p.name == *key && !p.is_collection && !p.predicate.is_empty())
-                    {
-                        SortKey::Property(prop.predicate.clone())
-                    } else if key.starts_with('$') {
-                        // Projection count sort — find the from-relation's predicate.
-                        query_input
-                            .projections
-                            .as_ref()
-                            .and_then(|projs| projs.get(key.as_str()))
-                            .and_then(|proj| {
-                                shape
-                                    .properties
-                                    .iter()
-                                    .find(|p| p.name == proj.from && !p.predicate.is_empty())
-                                    .map(|p| p.predicate.clone())
-                            })
-                            .map(SortKey::Projection)
-                            .unwrap_or(SortKey::Timestamp)
-                    } else if let Some(dot_pos) = key.find('.') {
-                        // Dotted relation-property path: "relName.propName"
-                        let rel_name = &key[..dot_pos];
-                        let prop_name = &key[dot_pos + 1..];
-                        shape
-                            .include_relations
-                            .iter()
-                            .find(|r| r.name == rel_name && !r.predicate.is_empty())
-                            .and_then(|rel| {
-                                resolver
-                                    .get_shape(&rel.target_class_name)
-                                    .ok()
-                                    .and_then(|ts| {
-                                        ts.properties
-                                            .iter()
-                                            .find(|p| {
-                                                p.name == prop_name
-                                                    && !p.is_collection
-                                                    && !p.predicate.is_empty()
-                                            })
-                                            .map(|p| SortKey::RelationProperty {
-                                                rel_pred: rel.predicate.clone(),
-                                                prop_pred: p.predicate.clone(),
-                                            })
-                                    })
-                            })
-                            .unwrap_or(SortKey::Timestamp)
-                    } else {
-                        SortKey::Timestamp
-                    }
+                        .find(|r| r.name == rel_name && !r.predicate.is_empty())
+                        .and_then(|rel| {
+                            resolver
+                                .get_shape(&rel.target_class_name)
+                                .ok()
+                                .and_then(|ts| {
+                                    ts.properties
+                                        .iter()
+                                        .find(|p| {
+                                            p.name == prop_name
+                                                && !p.is_collection
+                                                && !p.predicate.is_empty()
+                                        })
+                                        .map(|p| SortKey::RelationProperty {
+                                            rel_pred: rel.predicate.clone(),
+                                            prop_pred: p.predicate.clone(),
+                                        })
+                                })
+                        })
+                        .unwrap_or(SortKey::Timestamp)
+                } else {
+                    SortKey::Timestamp
                 }
-            };
-            Some(SparqlPagination {
-                sort_key,
-                direction,
-                offset: query_input.offset,
-                limit: query_input.limit,
-            })
-        } else {
-            None
+            }
         };
+        Some(SparqlPagination {
+            sort_key,
+            direction,
+            offset: query_input.offset,
+            limit: query_input.limit,
+        })
+    } else {
+        None
+    };
 
     let query_plan = build_instance_sparql(
         shape,
@@ -252,7 +262,43 @@ pub(super) async fn execute_model_query_inner(
             predicate_filter,
         } => {
             let page_json = store.query_async(&pagination_subquery).await?;
-            let page_results: Vec<Value> = serde_json::from_str(&page_json)?;
+            let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
+
+            // Top-N per anchor, applied here because SPARQL cannot say it:
+            // there are no window functions, and a sub-SELECT is uncorrelated,
+            // so "5 replies under each of these 20 comments" has no expression
+            // in the query language. Doing it between the phases keeps the cost
+            // proportional to rows of one string rather than to records: the
+            // widest branch is over-fetched as ids and never hydrated.
+            //
+            // The rows arrive in the order the ORDER BY put them, so keeping
+            // the first N of each anchor keeps the *right* N.
+            if let Some(n) = anchor_limit {
+                let before = page_results.len();
+                let mut kept_per_anchor: HashMap<String, usize> = HashMap::new();
+                page_results.retain(|row| {
+                    // A row with no anchor cannot be attributed to one, so it is
+                    // kept rather than dropped — losing rows silently is worse
+                    // than a slice that is occasionally too generous.
+                    let Some(anchor) = row[ANCHOR_VAR].as_str() else {
+                        return true;
+                    };
+                    let seen = kept_per_anchor.entry(anchor.to_string()).or_insert(0);
+                    if *seen < n {
+                        *seen += 1;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                log::debug!(
+                    "Per-anchor limit {}: kept {} of {} ids across {} anchors",
+                    n,
+                    page_results.len(),
+                    before,
+                    kept_per_anchor.len()
+                );
+            }
 
             pagination_source_order = Some(
                 page_results

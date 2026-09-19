@@ -18,13 +18,35 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, ShapeResolver, SortKey,
-    SparqlPagination, WhereCondition,
+    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, ScopeDirection,
+    ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{
     emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
-    validate_iri,
+    validate_iri, values_or_str_filter,
 };
+
+/// The variable a [`Scope::Traverse`] binds its anchor to.
+///
+/// Projected out of the id phase whenever a per-anchor limit is asked for, so
+/// the executor can group the ids it got back by the anchor each came from.
+pub(super) const ANCHOR_VAR: &str = "_anchor";
+
+/// The per-anchor limit this query asks for, if any.
+///
+/// Read off the scope rather than passed separately because three layers need
+/// the same answer — the builder (project the anchor), the planner (force the
+/// two-phase shape so the slice lands before hydration) and the executor (do
+/// the slicing) — and a parameter threaded through all of them is a parameter
+/// one of them will eventually be called without.
+pub(super) fn per_anchor_limit(query: &ModelQueryInput) -> Option<usize> {
+    match &query.parent {
+        Some(Scope::Traverse {
+            limit_per_anchor, ..
+        }) => *limit_per_anchor,
+        _ => None,
+    }
+}
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
@@ -175,12 +197,23 @@ pub(super) fn build_instance_sparql(
         String::new()
     };
 
+    // Carry the anchor out of the id phase when the executor will slice by it.
+    // Grouping by (source, anchor) rather than source alone is deliberate: a
+    // node reachable from two anchors is two rows here, because it occupies a
+    // place in each of their top-N. Collapsing it would silently cost one
+    // anchor a result.
+    let (anchor_select, anchor_group) = if per_anchor_limit(query).is_some() {
+        (format!(" ?{ANCHOR_VAR}"), format!(" ?{ANCHOR_VAR}"))
+    } else {
+        (String::new(), String::new())
+    };
+
     if let Some(pg) = sparql_pagination {
         let subquery_body = match &pg.sort_key {
             SortKey::Timestamp => {
                 let ts_probe = build_timestamp_probe(shape);
                 format!(
-                    r#"SELECT DISTINCT ?source ?_first_ts WHERE {{
+                    r#"SELECT DISTINCT ?source{anchor_select} ?_first_ts WHERE {{
 {conformance}
 {where_extra}
             {ts_probe}
@@ -199,20 +232,20 @@ pub(super) fn build_instance_sparql(
                 // The xsd:double cast yields the numeric sort key when the
                 // value parses as a number.
                 format!(
-                    r#"SELECT DISTINCT ?source (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
+                    r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
 {conformance}
 {where_extra}
             OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
-        }} GROUP BY ?source{pagination_suffix}"#
+        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
             SortKey::Projection(predicate) => {
                 format!(
-                    r#"SELECT DISTINCT ?source (COUNT(DISTINCT ?_proj_t) AS ?_proj_sort) WHERE {{
+                    r#"SELECT DISTINCT ?source{anchor_select} (COUNT(DISTINCT ?_proj_t) AS ?_proj_sort) WHERE {{
 {conformance}
 {where_extra}
             OPTIONAL {{ ?source <{predicate}> ?_proj_t . }}
-        }} GROUP BY ?source{pagination_suffix}"#
+        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
             SortKey::RelationProperty {
@@ -220,11 +253,11 @@ pub(super) fn build_instance_sparql(
                 prop_pred,
             } => {
                 format!(
-                    r#"SELECT DISTINCT ?source (SAMPLE(?_rp_num_v) AS ?_rp_num) (SAMPLE(?_rp_str_v) AS ?_rp_str) WHERE {{
+                    r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_rp_num_v) AS ?_rp_num) (SAMPLE(?_rp_str_v) AS ?_rp_str) WHERE {{
 {conformance}
 {where_extra}
             OPTIONAL {{ ?source <{rel_pred}> ?_rp_rel . OPTIONAL {{ ?_rp_rel <{prop_pred}> ?_rp_raw . BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
-        }} GROUP BY ?source{pagination_suffix}"#
+        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
         };
@@ -410,6 +443,60 @@ pub(super) fn build_query_patterns(
                         "    FILTER(STRENDS(STR(?_parentPred), \"/{safe_model}\") || STRENDS(STR(?_parentPred), \"{hash_model}\"))",
                     ));
                 }
+            }
+            Scope::Traverse {
+                ids,
+                predicate,
+                transitive,
+                direction,
+                limit_per_anchor: _,
+            } => {
+                let safe_pred = match validate_iri(predicate) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        log::warn!(
+                            "Skipping traverse scope: invalid IRI in predicate='{}'",
+                            predicate
+                        );
+                        return (String::new(), String::new());
+                    }
+                };
+
+                // An anchor that cannot be written as a term contributes no
+                // results; it must not widen the query to everything else.
+                let safe_ids: Vec<String> = ids
+                    .iter()
+                    .filter(|id| validate_iri(id).is_ok())
+                    .cloned()
+                    .collect();
+                if safe_ids.len() != ids.len() {
+                    log::warn!(
+                        "Traverse scope: {} of {} anchor ids are not valid IRIs and were dropped",
+                        ids.len() - safe_ids.len(),
+                        ids.len()
+                    );
+                }
+
+                // `+` is one-or-more, so a transitive read excludes the anchor
+                // itself — a thread's descendants, never the thread's root.
+                let path = if *transitive { "+" } else { "" };
+                let pattern = match direction {
+                    ScopeDirection::Out => {
+                        format!("    ?{ANCHOR_VAR} <{safe_pred}>{path} ?source .")
+                    }
+                    ScopeDirection::In => {
+                        format!("    ?source <{safe_pred}>{path} ?{ANCHOR_VAR} .")
+                    }
+                };
+                conformance_patterns.push(pattern);
+                // An empty anchor list yields an empty VALUES, which is legal
+                // and answers with nothing — the right answer for "the replies
+                // to none of these", and much better than an unbound `?_anchor`
+                // walking the whole store.
+                conformance_patterns.push(format!(
+                    "    {}",
+                    values_or_str_filter(ANCHOR_VAR, &safe_ids)
+                ));
             }
         }
     }
@@ -2369,5 +2456,211 @@ mod ops_completeness_tests {
         let compiled = compile_where_clause(&c, &s(), None);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
+    }
+}
+
+/// Bounded traversal: multi-anchor scopes, transitive paths, inbound direction
+/// and the per-anchor limit the executor applies between the two phases.
+#[cfg(test)]
+mod traverse_scope_tests {
+    use super::*;
+    use crate::perspectives::model_query::test_helpers::{flag, prop, shape};
+
+    fn make_pg(sort_key: SortKey, direction: OrderDirection) -> SparqlPagination {
+        SparqlPagination {
+            sort_key,
+            direction,
+            offset: None,
+            limit: Some(10),
+        }
+    }
+    // --- Scope::Traverse ----------------------------------------------------
+    fn traverse_shape() -> ModelShape {
+        shape(
+            "Comment",
+            vec![
+                flag("type", "test://type", "test://comment"),
+                prop("text", "test://text"),
+            ],
+        )
+    }
+
+    fn traverse_query(scope: Scope) -> ModelQueryInput {
+        ModelQueryInput {
+            parent: Some(scope),
+            ..Default::default()
+        }
+    }
+
+    fn traverse(
+        ids: Vec<&str>,
+        transitive: bool,
+        direction: ScopeDirection,
+        limit_per_anchor: Option<usize>,
+    ) -> Scope {
+        Scope::Traverse {
+            ids: ids.into_iter().map(String::from).collect(),
+            predicate: "test://comment".to_string(),
+            transitive,
+            direction,
+            limit_per_anchor,
+        }
+    }
+
+    #[test]
+    fn traverse_scope_walks_outward_from_every_anchor() {
+        let q = traverse_query(traverse(
+            vec!["test://a", "test://b"],
+            false,
+            ScopeDirection::Out,
+            None,
+        ));
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+
+        assert!(
+            conformance.contains("?_anchor <test://comment> ?source ."),
+            "anchor should be the subject when walking out: {conformance}"
+        );
+        assert!(
+            conformance.contains("VALUES ?_anchor { <test://a> <test://b> }"),
+            "both anchors should be bound in one query: {conformance}"
+        );
+        assert!(
+            !conformance.contains("<test://comment>+"),
+            "a non-transitive scope must stay one step: {conformance}"
+        );
+    }
+
+    #[test]
+    fn traverse_scope_transitive_emits_a_one_or_more_path() {
+        let q = traverse_query(traverse(vec!["test://a"], true, ScopeDirection::Out, None));
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+
+        assert!(
+            conformance.contains("?_anchor <test://comment>+ ?source ."),
+            "transitive should emit a `+` path: {conformance}"
+        );
+    }
+
+    #[test]
+    fn traverse_scope_inward_swaps_the_terms() {
+        let q = traverse_query(traverse(vec!["test://a"], false, ScopeDirection::In, None));
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+
+        assert!(
+            conformance.contains("?source <test://comment> ?_anchor ."),
+            "direction `in` should put the result in subject position: {conformance}"
+        );
+    }
+
+    /// An anchor list that has been filtered down to nothing must answer with
+    /// nothing. The dangerous failure here is the opposite: an unconstrained
+    /// `?_anchor` walks every link in the store.
+    #[test]
+    fn traverse_scope_with_no_valid_anchors_matches_nothing() {
+        let q = traverse_query(traverse(vec![], false, ScopeDirection::Out, None));
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+
+        assert!(
+            conformance.contains("VALUES ?_anchor {  }"),
+            "an empty anchor list should bind an empty VALUES: {conformance}"
+        );
+    }
+
+    #[test]
+    fn per_anchor_limit_projects_and_groups_by_the_anchor() {
+        let q = traverse_query(traverse(
+            vec!["test://a"],
+            false,
+            ScopeDirection::Out,
+            Some(5),
+        ));
+        let pg = make_pg(
+            SortKey::Projection("test://has-like".to_string()),
+            OrderDirection::DESC,
+        );
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+            InstanceQueryPlan::TwoPhase {
+                pagination_subquery,
+                ..
+            } => pagination_subquery,
+            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
+        };
+
+        assert!(
+            sparql.contains("SELECT DISTINCT ?source ?_anchor"),
+            "the anchor must reach the executor to be sliced by: {sparql}"
+        );
+        assert!(
+            sparql.contains("GROUP BY ?source ?_anchor"),
+            "a projected variable must be grouped by: {sparql}"
+        );
+    }
+
+    /// The anchor is a cost on every row, so it is carried only when something
+    /// will read it. This also pins that existing queries are byte-identical.
+    #[test]
+    fn without_a_per_anchor_limit_the_anchor_is_not_projected() {
+        let q = traverse_query(traverse(vec!["test://a"], false, ScopeDirection::Out, None));
+        let pg = make_pg(
+            SortKey::Projection("test://has-like".to_string()),
+            OrderDirection::DESC,
+        );
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+            InstanceQueryPlan::TwoPhase {
+                pagination_subquery,
+                ..
+            } => pagination_subquery,
+            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
+        };
+
+        assert!(
+            sparql.contains("SELECT DISTINCT ?source (COUNT"),
+            "the anchor should not be projected when nothing reads it: {sparql}"
+        );
+        assert!(
+            sparql.contains("GROUP BY ?source\n") || sparql.contains("GROUP BY ?source "),
+            "the GROUP BY should be unchanged: {sparql}"
+        );
+    }
+
+    #[test]
+    fn traverse_scope_ids_accept_a_bare_string() {
+        let scope: Scope = serde_json::from_value(serde_json::json!({
+            "ids": "test://a",
+            "predicate": "test://comment",
+            "transitive": true,
+        }))
+        .expect("a single anchor should deserialize without a wrapping list");
+
+        match scope {
+            Scope::Traverse {
+                ids, transitive, ..
+            } => {
+                assert_eq!(ids, vec!["test://a".to_string()]);
+                assert!(transitive);
+            }
+            other => panic!("expected a Traverse scope, got {other:?}"),
+        }
+    }
+
+    /// The untagged enum picks a variant by the fields present, so the existing
+    /// two spellings must keep winning for payloads that have always meant them.
+    #[test]
+    fn existing_scope_spellings_still_deserialize_to_their_variants() {
+        let raw: Scope = serde_json::from_value(serde_json::json!({
+            "id": "test://a",
+            "predicate": "test://comment",
+        }))
+        .expect("raw scope");
+        assert!(matches!(raw, Scope::Raw { .. }), "got {raw:?}");
+
+        let model: Scope = serde_json::from_value(serde_json::json!({
+            "model": "Comment",
+            "id": "test://a",
+            "field": "comments",
+        }))
+        .expect("model scope");
+        assert!(matches!(model, Scope::Model { .. }), "got {model:?}");
     }
 }

@@ -64,10 +64,62 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
  * predicate to write.
  *
  * **Raw form** — explicit predicate string, no metadata lookup.
+ *
+ * **Traverse form** — bounded traversal from one or more anchors, for reading
+ * a tree rather than one node's children. Read-only: AutoProcessor's write
+ * scopes reject it, because it names no single parent to write under.
  */
 export type Scope =
   | { model: typeof Ad4mModel; id: string; field?: string }
-  | { id: string; predicate: string };
+  | { id: string; predicate: string }
+  | TraverseScope;
+
+/**
+ * Walk a predicate from several anchors at once, and optionally all the way
+ * down.
+ *
+ * This exists because a tree read one level at a time costs a round trip per
+ * level and — under a subscription — one subscription per *parent*. Asking for
+ * every anchor in one query makes both proportional to depth instead.
+ */
+export interface TraverseScope {
+  /** The anchors to walk from. A bare string is the single-anchor spelling. */
+  ids: string | string[];
+  predicate: string;
+  /**
+   * Follow the predicate as far as it goes rather than one step.
+   *
+   * The result is a flat set of everything reachable, and it does **not**
+   * describe the shape it came from: SPARQL property paths bind no intermediate
+   * variables, so a row says that it is under the anchor and never where. To
+   * rebuild a tree, read the inverse relation (`@BelongsToOne`) alongside it and
+   * assemble from the parent each row reports.
+   *
+   * Excludes the anchor itself.
+   */
+  transitive?: boolean;
+  /**
+   * `'out'` (default) matches `anchor --predicate--> result`; `'in'` matches
+   * `result --predicate--> anchor`, which is how to *search* among the things
+   * pointing at a node — ordered, filtered, limited. A reverse `include`
+   * answers the same question for rows already in hand, but cannot narrow them.
+   */
+  direction?: 'out' | 'in';
+  /**
+   * Keep at most this many results per anchor — "the top 5 replies under each
+   * of these 20 comments" in one query.
+   *
+   * Applied by the executor between selecting ids and hydrating them, because
+   * SPARQL has no per-group limit (no window functions, and sub-SELECTs are
+   * uncorrelated). The practical consequence is that the over-fetch is paid in
+   * ids, not records: a branch with 3,000 replies costs 3,000 strings and
+   * hydrates 5.
+   *
+   * Pair it with `order` — without one the "top" N is whatever the store
+   * happened to return first.
+   */
+  limitPerAnchor?: number;
+}
 
 /**
  * Describes which relations to eager-load when querying.
@@ -117,6 +169,20 @@ export interface IncludeProjection {
   from: string;
   /** When true, attaches an integer count instead of a list. */
   count?: true;
+  /**
+   * Project over everything reachable through `from`, not just one step.
+   *
+   * `{ from: 'comments', count: true, transitive: true }` is the whole
+   * conversation under each row rather than its direct replies — which is what
+   * a reader takes "42 replies" on a collapsed branch to mean. The projection
+   * query is already grouped per parent and already asked of every row at once,
+   * so this adds no round trip.
+   *
+   * Cannot be combined with a filter on the link's author or timestamp: those
+   * read the reification of one link, and a path has none. Such a projection is
+   * skipped with a warning rather than silently answering a different question.
+   */
+  transitive?: boolean;
   /**
    * Bare class name of the projection target.  Set automatically by
    * `prepareModelQueryParams`; the executor resolves the target's shape
