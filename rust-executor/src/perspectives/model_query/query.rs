@@ -13,18 +13,149 @@ use super::hydration::{filter_properties, group_results_by_source, hydrate_insta
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
-    all_where_pushable, build_count_sparql, build_instance_sparql, local_status_filter,
-    per_anchor_limit, ANCHOR_VAR,
+    all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
+    local_status_filter, per_anchor_limit, ANCHOR_VAR,
 };
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection,
-    ShapeResolver, SortKey, SparqlPagination,
+    InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
+    ScopeDirection, ShapeResolver, SortKey, SparqlPagination,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::Error;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+/// The anchors, predicate and direction a walk starts from.
+///
+/// `None` for any scope that is not a traversal — the walk is meaningless without a relation to
+/// follow, and the caller falls back to asking once.
+fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDirection)> {
+    match &query.parent {
+        Some(Scope::Traverse {
+            ids,
+            predicate,
+            direction,
+            ..
+        }) => Some((ids.clone(), predicate.clone(), *direction)),
+        _ => None,
+    }
+}
+
+/// Keep the first `n` rows of each anchor, discarding the rest.
+///
+/// SPARQL cannot say this: it has no window functions and its sub-SELECTs are uncorrelated, so
+/// "five replies under each of these twenty comments" has no expression in the query language.
+/// Applied between the phases, the cost stays proportional to rows of one string rather than to
+/// records — the widest branch is over-fetched as ids and never hydrated.
+///
+/// The rows arrive in the order the `ORDER BY` put them, so keeping the first N of each anchor
+/// keeps the *right* N.
+fn slice_per_anchor(rows: &mut Vec<Value>, n: usize) {
+    let before = rows.len();
+    let mut kept: HashMap<String, usize> = HashMap::new();
+    rows.retain(|row| {
+        // A row with no anchor cannot be attributed to one, so it is kept rather than dropped:
+        // losing rows silently is worse than a slice that is occasionally too generous.
+        let Some(anchor) = row[ANCHOR_VAR].as_str() else {
+            return true;
+        };
+        let seen = kept.entry(anchor.to_string()).or_insert(0);
+        if *seen < n {
+            *seen += 1;
+            true
+        } else {
+            false
+        }
+    });
+    log::debug!(
+        "Per-anchor limit {}: kept {} of {} ids across {} anchors",
+        n,
+        rows.len(),
+        before,
+        kept.len()
+    );
+}
+
+/// Walk a relation level by level, keeping `levels[depth]` results per anchor at each depth.
+///
+/// This is the whole reason the walk belongs in the executor. A caller can drive it — ask for one
+/// level, use the ids as the next level's anchors — but each step is then a network round trip, and
+/// a client that draws as each answer lands shows the tree assembling itself a level at a time.
+/// Here the steps are sequential SPARQL against a store in the same process, with no serialisation
+/// between them, and the records are hydrated once for the union of every level. Three levels cost
+/// one request and one hydration instead of three of each.
+///
+/// Returns the ids in breadth-first order, which is also the order the caller's rows come back in.
+/// A node already seen is not walked again, so a cycle terminates rather than looping.
+#[allow(clippy::too_many_arguments)]
+async fn walk_levels(
+    store: &SparqlStore,
+    shape: &ModelShape,
+    query_input: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+    pagination: &SparqlPagination,
+    roots: Vec<String>,
+    predicate: &str,
+    direction: ScopeDirection,
+    levels: &[usize],
+) -> Result<Vec<String>, Error> {
+    let mut ordered: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut frontier = roots;
+
+    for (depth, limit) in levels.iter().enumerate() {
+        if frontier.is_empty() {
+            break;
+        }
+        // One level, expressed as an ordinary scoped query over every anchor on it. The builder
+        // then needs no notion of a walk at all — it keeps emitting one level, and this drives it.
+        let mut level_input = query_input.clone();
+        level_input.parent = Some(Scope::Traverse {
+            ids: frontier.clone(),
+            predicate: predicate.to_string(),
+            transitive: false,
+            direction,
+            limit_per_anchor: Some(*limit),
+            levels: None,
+        });
+        // Paging belongs to the caller's whole result, not to a level of the walk.
+        level_input.limit = None;
+        level_input.offset = None;
+
+        let plan = build_instance_sparql(shape, &level_input, Some(pagination), Some(resolver));
+        let InstanceQueryPlan::TwoPhase {
+            pagination_subquery,
+            ..
+        } = plan
+        else {
+            log::warn!(
+                "walk_levels: expected a two-phase plan at depth {depth}, stopping the walk"
+            );
+            break;
+        };
+
+        let json = store.query_async(&pagination_subquery).await?;
+        let mut rows: Vec<Value> = serde_json::from_str(&json)?;
+        slice_per_anchor(&mut rows, *limit);
+
+        let mut next = Vec::new();
+        for row in &rows {
+            let Some(id) = row["source"].as_str() else {
+                continue;
+            };
+            // A node reachable by two routes is one node. Walking it twice would duplicate its
+            // subtree and, in a cycle, never finish.
+            if seen.insert(id.to_string()) {
+                ordered.push(id.to_string());
+                next.push(id.to_string());
+            }
+        }
+        frontier = next;
+    }
+
+    Ok(ordered)
+}
 
 /// Execute a model query against the Oxigraph store.
 ///
@@ -163,8 +294,12 @@ pub(super) async fn execute_model_query_inner(
     // away. No global LIMIT is emitted in that case — the ordering is what
     // matters, and the truncation is per anchor.
     let anchor_limit = per_anchor_limit(query_input);
+    let walk = level_limits(query_input).cloned();
     let sparql_pagination = if can_push_pagination
-        && (query_input.limit.is_some() || query_input.offset.is_some() || anchor_limit.is_some())
+        && (query_input.limit.is_some()
+            || query_input.offset.is_some()
+            || anchor_limit.is_some()
+            || walk.is_some())
     {
         let direction = query_input
             .order
@@ -261,58 +396,46 @@ pub(super) async fn execute_model_query_inner(
             pagination_subquery,
             predicate_filter,
         } => {
-            let page_json = store.query_async(&pagination_subquery).await?;
-            let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
-
-            // Top-N per anchor, applied here because SPARQL cannot say it:
-            // there are no window functions, and a sub-SELECT is uncorrelated,
-            // so "5 replies under each of these 20 comments" has no expression
-            // in the query language. Doing it between the phases keeps the cost
-            // proportional to rows of one string rather than to records: the
-            // widest branch is over-fetched as ids and never hydrated.
-            //
-            // The rows arrive in the order the ORDER BY put them, so keeping
-            // the first N of each anchor keeps the *right* N.
-            if let Some(n) = anchor_limit {
-                let before = page_results.len();
-                let mut kept_per_anchor: HashMap<String, usize> = HashMap::new();
-                page_results.retain(|row| {
-                    // A row with no anchor cannot be attributed to one, so it is
-                    // kept rather than dropped — losing rows silently is worse
-                    // than a slice that is occasionally too generous.
-                    let Some(anchor) = row[ANCHOR_VAR].as_str() else {
-                        return true;
-                    };
-                    let seen = kept_per_anchor.entry(anchor.to_string()).or_insert(0);
-                    if *seen < n {
-                        *seen += 1;
-                        true
-                    } else {
-                        false
+            // Phase one either asks once, or walks a level at a time — the difference being where
+            // the ids come from. Phase two is the same either way: one hydration for whatever it
+            // settled on, which is what keeps a three-level walk to a single pass over records.
+            let ordered_ids: Vec<String> = match (&walk, walk_roots(query_input)) {
+                (Some(levels), Some((roots, predicate, direction))) => {
+                    walk_levels(
+                        store,
+                        shape,
+                        query_input,
+                        resolver,
+                        sparql_pagination
+                            .as_ref()
+                            .expect("a walk forces the two-phase plan, which needs pagination"),
+                        roots,
+                        &predicate,
+                        direction,
+                        levels,
+                    )
+                    .await?
+                }
+                _ => {
+                    let page_json = store.query_async(&pagination_subquery).await?;
+                    let mut page_results: Vec<Value> = serde_json::from_str(&page_json)?;
+                    if let Some(n) = anchor_limit {
+                        slice_per_anchor(&mut page_results, n);
                     }
-                });
-                log::debug!(
-                    "Per-anchor limit {}: kept {} of {} ids across {} anchors",
-                    n,
-                    page_results.len(),
-                    before,
-                    kept_per_anchor.len()
-                );
-            }
+                    page_results
+                        .iter()
+                        .filter_map(|r| r["source"].as_str().map(|s| s.to_string()))
+                        .collect()
+                }
+            };
 
-            pagination_source_order = Some(
-                page_results
-                    .iter()
-                    .filter_map(|r| r["source"].as_str().map(|s| s.to_string()))
-                    .collect(),
-            );
+            pagination_source_order = Some(ordered_ids.clone());
 
-            if page_results.is_empty() {
+            if ordered_ids.is_empty() {
                 vec![]
             } else {
-                let source_ids: Vec<String> = page_results
+                let source_ids: Vec<String> = ordered_ids
                     .iter()
-                    .filter_map(|r| r["source"].as_str())
                     .filter_map(|s| validate_iri(s).ok().map(|s| s.to_string()))
                     .collect();
 

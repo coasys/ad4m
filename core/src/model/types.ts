@@ -119,6 +119,25 @@ export interface TraverseScope {
    * happened to return first.
    */
   limitPerAnchor?: number;
+  /**
+   * Walk the relation level by level, keeping this many results per anchor at each depth —
+   * `[10, 5, 3]` is "ten replies, five under each of those, three under each of *those*".
+   *
+   * The walk happens in the executor, which is the point of it. A caller can drive the same walk by
+   * asking for one level and using the ids as the next level's anchors, but each step is then a
+   * network round trip, and a UI that draws as each answer lands shows the tree assembling itself a
+   * level at a time. Inside the executor the levels are sequential queries against a local store
+   * with nothing serialised between them, and the records are hydrated once for the union — so
+   * three levels cost one request and one hydration rather than three of each.
+   *
+   * Results come back flat and breadth-first; read the inverse relation alongside to rebuild the
+   * tree, exactly as with `transitive`.
+   *
+   * Not combinable with `transitive`, which is the unbounded form of the same walk. Nor is
+   * `limitPerAnchor` a substitute: with a single anchor at the top there is one group, so it caps
+   * the total rather than the breadth at each level.
+   */
+  levels?: number[];
 }
 
 /**

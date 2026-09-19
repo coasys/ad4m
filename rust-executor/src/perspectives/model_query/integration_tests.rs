@@ -7847,6 +7847,7 @@ fn traverse_scope(
         transitive,
         direction,
         limit_per_anchor,
+        levels: None,
     }
 }
 
@@ -8083,3 +8084,115 @@ const COMMENT_SHAPE_WITH_REPLIES: &str = r#"{
     },
     "relations": {}
 }"#;
+
+/// A wide, deep thread: 4 top-level replies, 4 under each of those, 4 under each of *those*.
+/// 4 + 16 + 64 = 84 comments, which is enough for a per-level walk to differ visibly from both a
+/// one-level read and an unbounded transitive one.
+fn wide_comment_tree_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    let mut link = |parent: &str, child: &str, t: &mut i32| {
+        *t += 1;
+        let ts = format!("2026-01-01T00:00:{:04}Z", t);
+        store
+            .add_link(&make_link(parent, "we://comment", child, &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", &ts))
+            .unwrap();
+    };
+    for a in 0..4 {
+        let l1 = format!("we://a{a}");
+        link("we://root", &l1, &mut t);
+        for b in 0..4 {
+            let l2 = format!("we://b{a}{b}");
+            link(&l1, &l2, &mut t);
+            for c in 0..4 {
+                let l3 = format!("we://c{a}{b}{c}");
+                link(&l2, &l3, &mut t);
+            }
+        }
+    }
+    store
+}
+
+async fn walk(store: &SparqlStore, levels: Vec<usize>) -> Vec<String> {
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(levels),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    execute_model_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute")
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect()
+}
+
+/// The shape the whole feature exists for: "three replies, then two under each of those, then one
+/// under each of *those*" — 3 + 6 + 6 = 15 rows out of 84, in one request.
+#[tokio::test]
+async fn a_level_walk_bounds_the_breadth_of_each_depth() {
+    let store = wide_comment_tree_store();
+    let ids = walk(&store, vec![3, 2, 1]).await;
+
+    assert_eq!(ids.len(), 15, "expected 3 + 6 + 6, got {ids:?}");
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://a")).count(), 3);
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://b")).count(), 6);
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://c")).count(), 6);
+}
+
+/// Per anchor, not per level: the second level's six rows must be two under EACH of the three
+/// parents, not the first six the store happened to return.
+#[tokio::test]
+async fn a_level_walk_spreads_its_limit_across_every_parent() {
+    let store = wide_comment_tree_store();
+    let ids = walk(&store, vec![3, 2]).await;
+
+    for a in 0..3 {
+        let under = ids
+            .iter()
+            .filter(|id| id.starts_with(&format!("we://b{a}")))
+            .count();
+        assert_eq!(
+            under, 2,
+            "parent a{a} should contribute two replies: {ids:?}"
+        );
+    }
+}
+
+/// A shorter list of levels is a shallower read — the walk stops where the caller stopped asking,
+/// rather than running to the bottom of the tree.
+#[tokio::test]
+async fn a_level_walk_stops_at_the_depth_it_was_given() {
+    let store = wide_comment_tree_store();
+    let ids = walk(&store, vec![2]).await;
+
+    assert_eq!(ids.len(), 2);
+    assert!(ids.iter().all(|id| id.starts_with("we://a")), "{ids:?}");
+}
+
+/// The walk asks each level about every anchor on it at once. A level that turns up nothing ends
+/// it, so asking for more levels than the tree has is not an error and costs nothing extra.
+#[tokio::test]
+async fn a_level_walk_ends_when_the_tree_does() {
+    let store = comment_tree_store();
+    let ids = walk(&store, vec![10, 10, 10, 10, 10]).await;
+
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec!["we://c1", "we://c2", "we://c3", "we://r1", "we://r2", "we://rr1"],
+        "the whole tree, and nothing repeated: {ids:?}"
+    );
+}

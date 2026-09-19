@@ -244,6 +244,22 @@ pub enum Scope {
         /// hydration phase, which is the expensive half, sees only the survivors.
         #[serde(default)]
         limit_per_anchor: Option<usize>,
+        /// Walk the relation level by level, keeping this many results per anchor at each depth —
+        /// `[10, 5, 3]` is "ten replies, five under each of those, three under each of *those*".
+        ///
+        /// The walk happens here rather than in the caller, and that is the whole point. A caller
+        /// driving it pays a network round trip per level, and a client that renders as each answer
+        /// arrives shows the tree assembling itself a level at a time. In here the levels are
+        /// sequential SPARQL against a local store with no serialisation between them, and the
+        /// records are hydrated once for the union — so three levels cost one request and one
+        /// hydration instead of three of each.
+        ///
+        /// Mutually exclusive with `transitive`, which is the unbounded form of the same walk: a
+        /// path expression reaches everything below the anchor and can be told nothing about depth.
+        /// It is also why `limit_per_anchor` alone cannot express this — with one anchor at the top
+        /// there is one group, so it caps the total rather than the breadth at each level.
+        #[serde(default)]
+        levels: Option<Vec<usize>>,
     },
 }
 

@@ -48,6 +48,17 @@ pub(super) fn per_anchor_limit(query: &ModelQueryInput) -> Option<usize> {
     }
 }
 
+/// The per-level breadth limits this query asks to walk, if any.
+///
+/// Read off the scope for the same reason `per_anchor_limit` is: the planner needs it to choose the
+/// two-phase shape, and the executor needs it to drive the walk.
+pub(super) fn level_limits(query: &ModelQueryInput) -> Option<&Vec<usize>> {
+    match &query.parent {
+        Some(Scope::Traverse { levels, .. }) => levels.as_ref(),
+        _ => None,
+    }
+}
+
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
@@ -202,11 +213,12 @@ pub(super) fn build_instance_sparql(
     // node reachable from two anchors is two rows here, because it occupies a
     // place in each of their top-N. Collapsing it would silently cost one
     // anchor a result.
-    let (anchor_select, anchor_group) = if per_anchor_limit(query).is_some() {
-        (format!(" ?{ANCHOR_VAR}"), format!(" ?{ANCHOR_VAR}"))
-    } else {
-        (String::new(), String::new())
-    };
+    let (anchor_select, anchor_group) =
+        if per_anchor_limit(query).is_some() || level_limits(query).is_some() {
+            (format!(" ?{ANCHOR_VAR}"), format!(" ?{ANCHOR_VAR}"))
+        } else {
+            (String::new(), String::new())
+        };
 
     if let Some(pg) = sparql_pagination {
         let subquery_body = match &pg.sort_key {
@@ -450,6 +462,7 @@ pub(super) fn build_query_patterns(
                 transitive,
                 direction,
                 limit_per_anchor: _,
+                levels: _,
             } => {
                 let safe_pred = match validate_iri(predicate) {
                     Ok(p) => p,
@@ -2504,6 +2517,7 @@ mod traverse_scope_tests {
             transitive,
             direction,
             limit_per_anchor,
+            levels: None,
         }
     }
 
