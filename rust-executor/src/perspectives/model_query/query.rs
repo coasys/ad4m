@@ -295,11 +295,23 @@ pub(super) async fn execute_model_query_inner(
     // matters, and the truncation is per anchor.
     let anchor_limit = per_anchor_limit(query_input);
     let walk = level_limits(query_input).cloned();
-    let sparql_pagination = if can_push_pagination
-        && (query_input.limit.is_some()
-            || query_input.offset.is_some()
-            || anchor_limit.is_some()
-            || walk.is_some())
+
+    // A walk and a per-anchor limit are properties of the SCOPE, not of paging, so they need the
+    // two-phase shape whether or not the filter can be pushed down — the first phase is where the
+    // ids to slice come from. Tying them to `can_push_pagination` meant that any filter evaluated
+    // after hydration silently took the single-phase plan and with it the whole walk. `author` is
+    // always such a filter, being link metadata rather than a property of the shape, so a thread
+    // hiding muted authors — every thread WE draws — came back one level deep.
+    //
+    // What stays tied to it is the global LIMIT/OFFSET below: truncating in the store before a
+    // post-hydration filter runs would discard rows that filter would have kept.
+    //
+    // The per-level slice is applied before such a filter, so a row it later removes has still
+    // taken one of its parent's places. That is the same trade `limit_per_anchor` has always made,
+    // and the alternative — fetching a level whole to filter it — is what the limit exists to avoid.
+    let scope_needs_phases = anchor_limit.is_some() || walk.is_some();
+    let sparql_pagination = if scope_needs_phases
+        || (can_push_pagination && (query_input.limit.is_some() || query_input.offset.is_some()))
     {
         let direction = query_input
             .order
@@ -369,8 +381,16 @@ pub(super) async fn execute_model_query_inner(
         Some(SparqlPagination {
             sort_key,
             direction,
-            offset: query_input.offset,
-            limit: query_input.limit,
+            offset: if can_push_pagination {
+                query_input.offset
+            } else {
+                None
+            },
+            limit: if can_push_pagination {
+                query_input.limit
+            } else {
+                None
+            },
         })
     } else {
         None

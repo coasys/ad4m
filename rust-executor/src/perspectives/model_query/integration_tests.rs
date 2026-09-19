@@ -8196,3 +8196,53 @@ async fn a_level_walk_ends_when_the_tree_does() {
         "the whole tree, and nothing repeated: {ids:?}"
     );
 }
+
+/// A walk must survive a where-clause the store cannot evaluate.
+///
+/// The plan shape used to be chosen by `can_push_pagination`, which is false whenever any part of
+/// the filter has to be applied after hydration — and `author` always does, being link metadata
+/// rather than a property of the shape. So a thread filtering out muted authors, which is every
+/// thread WE draws, silently got the single-phase plan: the walk never ran and only the first level
+/// came back. The tests all passed because none of them filtered.
+#[tokio::test]
+async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {
+    let store = wide_comment_tree_store();
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "author".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::json!(["did:key:muted"])),
+            ..Default::default()
+        }),
+    );
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![3, 2, 1]),
+        }),
+        where_clause: Some(where_clause),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+
+    let ids: Vec<String> =
+        execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+            .await
+            .expect("walk should execute")
+            .instances
+            .iter()
+            .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+            .collect();
+
+    assert_eq!(
+        ids.len(),
+        15,
+        "every level should still be walked, got {ids:?}"
+    );
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://c")).count(), 6);
+}
