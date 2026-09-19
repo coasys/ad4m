@@ -122,6 +122,16 @@ export interface TraverseScope {
 }
 
 /**
+ * Whether this scope is a traversal rather than a single named parent.
+ *
+ * The other two forms carry `id`; this one carries `ids` and may name several,
+ * so anything reaching for one parent — every write path — has to ask first.
+ */
+export function isTraverseScope(scope: Scope): scope is TraverseScope {
+  return 'ids' in scope;
+}
+
+/**
  * Describes which relations to eager-load when querying.
  *
  * Each value is either:

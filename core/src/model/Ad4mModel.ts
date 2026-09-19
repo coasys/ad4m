@@ -7,7 +7,7 @@ import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
-import { resolveParentPredicate } from "./query-common";
+import { requireSingleParent, resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
@@ -24,6 +24,7 @@ import type {
   IncludeProjection,
   TypedQuery, IncludeExtras, IncludeOf,
 } from "./types";
+import { isTraverseScope } from "./types";
 
 
 
@@ -990,7 +991,12 @@ export class Ad4mModel {
     const queryInput: any = {};
     if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
-      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+      // A traversal is forwarded as it was written: the executor reads `ids`,
+      // and flattening it to one `id` here is how a request for a whole level
+      // would quietly become a request for one parent's children.
+      queryInput.parent = isTraverseScope(query.parent)
+        ? { ...query.parent, predicate: parentPredicate }
+        : { id: query.parent.id, predicate: parentPredicate };
     }
     if (query.properties) queryInput.properties = query.properties;
     if (query.include) {
@@ -1880,9 +1886,10 @@ export class Ad4mModel {
     if (options?.parent && !options?.batchId) {
       const batchId = await perspective.createBatch();
       await instance.save(batchId);
-      const predicate = resolveParentPredicate(options.parent, this);
+      const parent = requireSingleParent(options.parent);
+      const predicate = resolveParentPredicate(parent, this);
       const link = new Link({
-        source: options.parent.id,
+        source: parent.id,
         predicate,
         target: instance.id,
       });
@@ -1898,9 +1905,10 @@ export class Ad4mModel {
 
     // Create parent → child link if a parent scope was provided
     if (options?.parent) {
-      const predicate = resolveParentPredicate(options.parent, this);
+      const parent = requireSingleParent(options.parent);
+      const predicate = resolveParentPredicate(parent, this);
       const link = new Link({
-        source: options.parent.id,
+        source: parent.id,
         predicate,
         target: instance.id,
       });
