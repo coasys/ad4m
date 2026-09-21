@@ -23,6 +23,7 @@ use super::model_query::types::{ModelShape, Scope};
 use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
 use super::shacl_parser::parse_shacl_to_links;
 use super::sparql_store::SparqlStore;
+use crate::agent::signatures::TestSigner;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
@@ -183,17 +184,19 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
         },
     ];
     links.extend(parse_shacl_to_links(sdna, class).unwrap());
+    let signer = TestSigner::generate();
     for l in links {
+        let signed = signer.sign(l);
         store
             .add_link(&DecoratedLinkExpression {
-                author: "did:key:test".into(),
-                timestamp: "1700000000000".into(),
-                data: l,
+                author: signed.author,
+                timestamp: signed.timestamp,
+                data: signed.data,
                 proof: DecoratedExpressionProof {
-                    key: "k".into(),
-                    signature: "s".into(),
-                    valid: Some(true),
-                    invalid: Some(false),
+                    key: signed.proof.key,
+                    signature: signed.proof.signature,
+                    valid: None,
+                    invalid: None,
                 },
                 status: None,
             })

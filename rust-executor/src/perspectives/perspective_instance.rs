@@ -6618,6 +6618,7 @@ pub fn prolog_result(result: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::signatures::TestSigner;
     use crate::agent::AgentService;
     use crate::db::Ad4mDb;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
@@ -8404,20 +8405,24 @@ mod tests {
             (board, "board://has_task", active2),
             (board, "board://has_task", done1),
         ];
+        let signer = TestSigner::generate();
         for (i, (s, p, t)) in triples.iter().enumerate() {
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let data = Link {
+                source: s.to_string(),
+                predicate: Some(p.to_string()),
+                target: t.to_string(),
+            };
+            let signed = signer.sign_at(data, &ts);
             let link = DecoratedLinkExpression {
-                author: "did:key:test".into(),
-                timestamp: format!("17000000000{:02}", i),
-                data: Link {
-                    source: s.to_string(),
-                    predicate: Some(p.to_string()),
-                    target: t.to_string(),
-                },
+                author: signed.author,
+                timestamp: signed.timestamp,
+                data: signed.data,
                 proof: DecoratedExpressionProof {
-                    key: "k".into(),
-                    signature: "s".into(),
-                    valid: Some(true),
-                    invalid: Some(false),
+                    key: signed.proof.key,
+                    signature: signed.proof.signature,
+                    valid: None,
+                    invalid: None,
                 },
                 status: None,
             };
@@ -8499,24 +8504,31 @@ mod tests {
         let parent_root = "literal:string:test_parent_root";
 
         // Title link makes the post a BlogPost instance (structural conformance)
-        for (src, pred, tgt) in &[
+        let signer = TestSigner::generate();
+        for (i, (src, pred, tgt)) in [
             (post_root, "blog://title", "literal:string:my_post"),
             (parent_root, "blog://title", "literal:string:my_parent"),
             (post_root, "blog://reply_to", parent_root),
-        ] {
+        ]
+        .iter()
+        .enumerate()
+        {
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let data = Link {
+                source: src.to_string(),
+                predicate: Some(pred.to_string()),
+                target: tgt.to_string(),
+            };
+            let signed = signer.sign_at(data, &ts);
             let link = DecoratedLinkExpression {
-                author: "did:key:test".into(),
-                timestamp: "1700000000000".into(),
-                data: Link {
-                    source: src.to_string(),
-                    predicate: Some(pred.to_string()),
-                    target: tgt.to_string(),
-                },
+                author: signed.author,
+                timestamp: signed.timestamp,
+                data: signed.data,
                 proof: DecoratedExpressionProof {
-                    key: "k".into(),
-                    signature: "s".into(),
-                    valid: Some(true),
-                    invalid: Some(false),
+                    key: signed.proof.key,
+                    signature: signed.proof.signature,
+                    valid: None,
+                    invalid: None,
                 },
                 status: None,
             };
