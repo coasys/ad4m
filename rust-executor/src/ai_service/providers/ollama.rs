@@ -186,7 +186,10 @@ pub async fn list_models(_api_key: &str, base_url: Url) -> Result<Vec<String>> {
     let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
     let endpoint = format!("{root}/api/tags");
 
-    let response = reqwest::Client::new()
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
         .get(&endpoint)
         .send()
         .await
@@ -294,6 +297,10 @@ struct ChatResponse {
     prompt_eval_count: Option<u64>,
     #[serde(default)]
     eval_count: Option<u64>,
+    /// Set when Ollama reports an error (e.g. model not found, out of memory).
+    /// May appear with HTTP 200 on some Ollama versions.
+    #[serde(default)]
+    error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -415,6 +422,11 @@ impl RemoteChat for OllamaChat {
             .await
             .map_err(|e| anyhow!("Could not read Ollama response: {e}"))?;
 
+        // Surface provider errors before attempting to read the message.
+        if let Some(err) = parsed.error {
+            return Err(anyhow!("Ollama error: {err}"));
+        }
+
         let message = parsed
             .message
             .ok_or_else(|| anyhow!("Ollama response contained no message"))?;
@@ -486,6 +498,11 @@ impl RemoteChat for OllamaChat {
                     Ok(p) => p,
                     Err(_) => continue,
                 };
+
+                // Surface provider errors before reading the message.
+                if let Some(err) = parsed.error {
+                    return Err(anyhow!("Ollama error: {err}"));
+                }
 
                 if let Some(ref message) = parsed.message {
                     if !message.content.is_empty() {
@@ -1081,5 +1098,62 @@ mod wire_tests {
             .expect_err("nothing listens there");
 
         assert!(error.to_string().contains("127.0.0.1:1"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn a_provider_error_in_the_body_surfaces_the_message() {
+        // Ollama may return HTTP 200 with {"error": "..."} in some error cases.
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 32768).await;
+        server
+            .mock("POST", "/api/chat")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"model 'qwen3:70b' not found, try pulling it first"}"#)
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let error = client
+            .chat(ChatRequest::new("qwen3:70b", turns()))
+            .await
+            .expect_err("an error body is an error");
+
+        let msg = error.to_string();
+        assert!(
+            msg.contains("model 'qwen3:70b' not found"),
+            "expected model error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_error_line_in_the_stream_surfaces_the_message() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 32768).await;
+        // A stream that starts with an error line.
+        let ndjson = format!(
+            "{}\n",
+            json!({"error": "out of memory, context length exceeded"})
+        );
+        server
+            .mock("POST", "/api/chat")
+            .with_status(200)
+            .with_header("content-type", "application/x-ndjson")
+            .with_body(ndjson)
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let error = client
+            .chat_stream(ChatRequest::new("qwen3:70b", turns()), tx)
+            .await
+            .expect_err("an error line is an error");
+
+        let msg = error.to_string();
+        assert!(
+            msg.contains("out of memory"),
+            "expected oom error, got: {msg}"
+        );
     }
 }
