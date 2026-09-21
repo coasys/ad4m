@@ -32,6 +32,38 @@ pub fn verify<T: Serialize>(expr: &Expression<T>) -> Result<bool, AnyError> {
     Ok(result)
 }
 
+/// Verify `expr`, collapsing a verification *error* to "not verified".
+///
+/// `proof.valid` answers exactly one question — does this signature verify? —
+/// so every way of failing to establish a signature has to answer it `false`.
+/// [`verify`] only returns `Err` for a malformed proof envelope: a signature
+/// that is not hex, or a timestamp that does not parse. Neither of those is a
+/// signature that verifies. A wrong signature or an unparseable DID does not
+/// even reach here — [`inner_verify`] already answers those `Ok(false)`.
+///
+/// This exists because the three call sites used to spell it
+/// `verify(&expr).unwrap_or(false)`, which reaches the same verdict but throws
+/// the error away, leaving a malformed envelope indistinguishable from a forged
+/// one in the logs. The verdict is unchanged; it is now observable. Making the
+/// error a *third* verdict instead would push the "unevaluated" ambiguity that
+/// #1046 removed from storage back up into the producer.
+///
+/// `context` names the caller in the log line.
+pub fn verify_or_false<T: Serialize>(expr: &Expression<T>, context: &str) -> bool {
+    match verify(expr) {
+        Ok(valid) => valid,
+        Err(e) => {
+            log::warn!(
+                "{}: malformed proof on expression by {} ({}) — treating as not verified",
+                context,
+                expr.author,
+                e
+            );
+            false
+        }
+    }
+}
+
 pub(super) fn hash_data_and_timestamp<T: Serialize>(
     data: &T,
     timestamp: &DateTime<Utc>,

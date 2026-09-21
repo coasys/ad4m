@@ -132,19 +132,18 @@ impl Ad4mMcpHandler {
                 .ok_or("Language language not loaded — cannot clone link language template")?
         };
 
-        // Build template data with unique ID and name
-        let template_map: serde_json::Map<String, serde_json::Value> = {
-            let mut m = serde_json::Map::new();
-            m.insert(
-                "uid".to_string(),
-                serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
-            );
-            m.insert(
-                "name".to_string(),
-                serde_json::Value::String(name.to_string()),
-            );
-            m
-        };
+        let meta = controller
+            .get_language_expression(template_address)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to get template meta for '{}': {}. Use `list_link_language_templates` to see available templates.",
+                    template_address, e
+                )
+            })?;
+        let declared_params: Vec<String> = meta.possible_template_params.unwrap_or_default();
+
+        let template_map = build_clone_template_map(&declared_params, name);
 
         // Apply template to generate unique language source
         let input = controller
@@ -341,9 +340,194 @@ impl Ad4mMcpHandler {
     }
 }
 
-// Note: Integration tests for neighbourhood tools are in tests/js/tests/mcp-neighbourhood.test.ts
-// These test the actual MCP endpoints with a running executor, including:
-// - Tool availability and parameter validation
-// - Error handling for missing perspectives
-// - Error handling for invalid URLs
-// - Backward compatibility with 'link_language' parameter name
+fn build_clone_template_map(
+    declared_params: &[String],
+    name: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    let uid = uuid::Uuid::new_v4().to_string();
+
+    let uid_key = declared_params
+        .iter()
+        .find(|p| p.eq_ignore_ascii_case("uid"))
+        .cloned()
+        .unwrap_or_else(|| "uid".to_string());
+    m.insert(uid_key, serde_json::Value::String(uid));
+    m.insert(
+        "name".to_string(),
+        serde_json::Value::String(name.to_string()),
+    );
+    m
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uid_detection_matches_uppercase() {
+        let params = vec!["SERVER_URL".into(), "UID".into()];
+        let map = build_clone_template_map(&params, "test");
+        assert!(map.contains_key("UID"), "should use declared uppercase UID");
+        assert!(!map.contains_key("uid"), "should not insert lowercase uid");
+    }
+
+    #[test]
+    fn uid_detection_matches_lowercase() {
+        let params = vec!["uid".into(), "name".into(), "description".into()];
+        let map = build_clone_template_map(&params, "test");
+        assert!(map.contains_key("uid"));
+    }
+
+    #[test]
+    fn uid_detection_matches_mixed_case() {
+        let params = vec!["Uid".into()];
+        let map = build_clone_template_map(&params, "test");
+        assert!(map.contains_key("Uid"));
+    }
+
+    #[test]
+    fn uid_detection_falls_back_when_absent() {
+        let params = vec!["SERVER_URL".into()];
+        let map = build_clone_template_map(&params, "test");
+        assert!(
+            map.contains_key("uid"),
+            "should fall back to lowercase uid when none declared"
+        );
+    }
+
+    #[test]
+    fn uid_detection_falls_back_on_empty_params() {
+        let map = build_clone_template_map(&[], "test");
+        assert!(map.contains_key("uid"));
+    }
+
+    #[test]
+    fn template_map_contains_only_uid_and_name() {
+        let params = vec![
+            "SERVER_URL".into(),
+            "UID".into(),
+            "description".into(),
+            "extra_param".into(),
+        ];
+        let map = build_clone_template_map(&params, "my neighbourhood");
+        assert_eq!(map.len(), 2, "map should contain exactly uid + name");
+        assert!(map.contains_key("UID"));
+        assert_eq!(map.get("name").unwrap(), "my neighbourhood");
+        assert!(
+            !map.contains_key("SERVER_URL"),
+            "SERVER_URL must not appear — it keeps its bundle default"
+        );
+        assert!(!map.contains_key("description"));
+        assert!(!map.contains_key("extra_param"));
+    }
+
+    #[test]
+    fn uid_value_parses_as_uuid() {
+        let map = build_clone_template_map(&["UID".into()], "test");
+        let uid_str = map.get("UID").unwrap().as_str().unwrap();
+        uuid::Uuid::parse_str(uid_str).expect("uid should parse as a valid UUID");
+    }
+
+    #[test]
+    fn name_value_preserved_verbatim() {
+        let map = build_clone_template_map(&[], "My Cool Neighbourhood 🌎");
+        assert_eq!(map.get("name").unwrap(), "My Cool Neighbourhood 🌎");
+    }
+
+    const SLL_SOURCE: &str =
+        include_str!("../../../../bootstrap-languages/server-link-language/index.ts");
+
+    #[test]
+    fn sll_declares_server_url_with_default() {
+        let lines: Vec<&str> = SLL_SOURCE.lines().collect();
+        let marker_positions: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("//!@ad4m-template-variable"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            marker_positions.len() >= 2,
+            "SLL must declare at least two template variables"
+        );
+        let server_url_line = lines[marker_positions[0] + 1];
+        assert!(
+            server_url_line.contains("SERVER_URL"),
+            "first template variable should declare SERVER_URL"
+        );
+        assert!(
+            server_url_line.contains("https://link.ad4m.dev"),
+            "SERVER_URL default must point to https://link.ad4m.dev"
+        );
+    }
+
+    #[test]
+    fn sll_declares_uid_template_variable() {
+        let lines: Vec<&str> = SLL_SOURCE.lines().collect();
+        let marker_positions: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("//!@ad4m-template-variable"))
+            .map(|(i, _)| i)
+            .collect();
+        let uid_line = lines[marker_positions[1] + 1];
+        assert!(
+            uid_line.contains("UID"),
+            "second template variable should declare UID"
+        );
+    }
+
+    #[test]
+    fn sll_possible_template_params_matches_variables() {
+        assert!(
+            SLL_SOURCE.contains(r#"possibleTemplateParams: string[] = ["SERVER_URL", "UID"]"#),
+            "possibleTemplateParams export must declare exactly SERVER_URL and UID"
+        );
+    }
+
+    #[test]
+    fn sll_clone_with_default_server_url() {
+        let sll_params = vec!["SERVER_URL".into(), "UID".into()];
+        let map = build_clone_template_map(&sll_params, "Test Neighbourhood");
+
+        assert!(
+            map.contains_key("UID"),
+            "clone map must contain UID (case-matched from declared params)"
+        );
+        assert!(
+            !map.contains_key("SERVER_URL"),
+            "clone map must NOT contain SERVER_URL — the bundle default applies"
+        );
+        assert_eq!(map.get("name").unwrap(), "Test Neighbourhood");
+
+        let mut lines: Vec<String> = SLL_SOURCE.lines().map(String::from).collect();
+        crate::languages::LanguageController::apply_template_data(&mut lines, &map);
+
+        let marker_positions: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("//!@ad4m-template-variable"))
+            .map(|(i, _)| i)
+            .collect();
+
+        let server_url_line = &lines[marker_positions[0] + 1];
+        assert!(
+            server_url_line.contains("https://link.ad4m.dev"),
+            "SERVER_URL must remain at bundle default after clone: got {}",
+            server_url_line
+        );
+
+        let uid_line = &lines[marker_positions[1] + 1];
+        assert!(
+            !uid_line.contains("<to-be-filled>"),
+            "UID must get replaced by the clone: got {}",
+            uid_line
+        );
+        let uid_val = map.get("UID").unwrap().as_str().unwrap();
+        assert!(
+            uid_line.contains(uid_val),
+            "UID line must contain the generated UUID"
+        );
+    }
+}
