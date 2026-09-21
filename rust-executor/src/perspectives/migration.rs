@@ -12,7 +12,7 @@
 /// 3. Remove migration calls from perspective initialization
 /// 4. Optionally remove migration-tracking methods from db.rs
 use crate::db::Ad4mDb;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression};
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, LinkExpression};
 
 /// Result of a migration operation.
 #[derive(Debug, Clone)]
@@ -154,8 +154,8 @@ pub fn migrate_links_from_rusqlite_to_sparql(
         // every insert — `verify_signature()` here was a redundant pre-computation
         // that is no longer needed (and could no longer be "trusted" by the store
         // anyway).
-
-        match sparql_store.add_link(&decorated_link) {
+        let link_expr = LinkExpression::from(decorated_link);
+        match sparql_store.add_link(&link_expr) {
             Ok(_) => {
                 migrated_count += 1;
             }

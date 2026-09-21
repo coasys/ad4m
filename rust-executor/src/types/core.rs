@@ -175,6 +175,17 @@ impl TryFrom<LinkExpressionInput> for LinkExpression {
 }
 
 impl LinkExpression {
+    /// Derive the signature verdict for this link without trusting any stored field.
+    pub fn compute_proof_valid(&self) -> bool {
+        let expr = Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        };
+        verify_or_false(&expr, "LinkExpression::compute_proof_valid")
+    }
+
     pub fn from_input_without_proof(input: LinkExpressionInput) -> Self {
         let data = Link {
             predicate: input.data.predicate,

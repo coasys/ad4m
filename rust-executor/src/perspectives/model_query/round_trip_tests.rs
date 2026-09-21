@@ -14,22 +14,10 @@ use super::types::ModelShape;
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::shacl_parser::parse_shacl_to_links;
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{Link, LinkExpression};
 
-fn make_link_for_round_trip(signer: &TestSigner, link: Link) -> DecoratedLinkExpression {
-    let signed = signer.sign(link);
-    DecoratedLinkExpression {
-        author: signed.author,
-        timestamp: signed.timestamp,
-        data: signed.data,
-        proof: DecoratedExpressionProof {
-            key: signed.proof.key,
-            signature: signed.proof.signature,
-            valid: None,
-            invalid: None,
-        },
-        status: None,
-    }
+fn make_link_for_round_trip(signer: &TestSigner, link: Link) -> LinkExpression {
+    LinkExpression::from(signer.sign(link))
 }
 
 /// Helper: parse the SHACL JSON, fan it out into links, ingest those links

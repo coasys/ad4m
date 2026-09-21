@@ -26,7 +26,7 @@ use super::sparql_store::SparqlStore;
 use crate::agent::signatures::TestSigner;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{Link, LinkExpression};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Once;
 
@@ -187,20 +187,7 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
     let signer = TestSigner::generate();
     for l in links {
         let signed = signer.sign(l);
-        store
-            .add_link(&DecoratedLinkExpression {
-                author: signed.author,
-                timestamp: signed.timestamp,
-                data: signed.data,
-                proof: DecoratedExpressionProof {
-                    key: signed.proof.key,
-                    signature: signed.proof.signature,
-                    valid: None,
-                    invalid: None,
-                },
-                status: None,
-            })
-            .unwrap();
+        store.add_link(&LinkExpression::from(signed)).unwrap();
     }
     load_shape(&store, class).unwrap()
 }

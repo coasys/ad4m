@@ -906,7 +906,11 @@ impl PerspectiveInstance {
         &self,
         links: &[DecoratedLinkExpression],
     ) -> Result<(), deno_core::anyhow::Error> {
-        self.sparql_store.reload(links.to_vec())?;
+        let link_exprs: Vec<LinkExpression> = links
+            .iter()
+            .map(|l| LinkExpression::from(l.clone()))
+            .collect();
+        self.sparql_store.reload(link_exprs)?;
         self.shape_cache.write().unwrap().clear();
         Ok(())
     }
@@ -3837,13 +3841,19 @@ impl PerspectiveInstance {
 
         // Removals first
         for removal in &diff.removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
+            if let Err(e) = self
+                .sparql_store
+                .remove_link(&LinkExpression::from(removal.clone()))
+            {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
         for addition in &diff.additions {
-            if let Err(e) = self.sparql_store.add_link(addition) {
+            if let Err(e) = self
+                .sparql_store
+                .add_link(&LinkExpression::from(addition.clone()))
+            {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
         }
@@ -8414,18 +8424,7 @@ mod tests {
                 target: t.to_string(),
             };
             let signed = signer.sign_at(data, &ts);
-            let link = DecoratedLinkExpression {
-                author: signed.author,
-                timestamp: signed.timestamp,
-                data: signed.data,
-                proof: DecoratedExpressionProof {
-                    key: signed.proof.key,
-                    signature: signed.proof.signature,
-                    valid: None,
-                    invalid: None,
-                },
-                status: None,
-            };
+            let link = LinkExpression::from(signed);
             perspective.sparql_store.add_link(&link).expect("add link");
         }
 
@@ -8520,18 +8519,7 @@ mod tests {
                 target: tgt.to_string(),
             };
             let signed = signer.sign_at(data, &ts);
-            let link = DecoratedLinkExpression {
-                author: signed.author,
-                timestamp: signed.timestamp,
-                data: signed.data,
-                proof: DecoratedExpressionProof {
-                    key: signed.proof.key,
-                    signature: signed.proof.signature,
-                    valid: None,
-                    invalid: None,
-                },
-                status: None,
-            };
+            let link = LinkExpression::from(signed);
             perspective.sparql_store.add_link(&link).expect("add_link");
         }
 

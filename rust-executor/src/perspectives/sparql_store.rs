@@ -1,5 +1,5 @@
 use crate::types::LinkStatus;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
 use chrono::DateTime as ChronoDateTime;
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
@@ -350,7 +350,7 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
 }
 
 /// Generate a deterministic reifier IRI from link data + timestamp.
-fn make_reifier_iri(link: &DecoratedLinkExpression) -> NamedNode {
+fn make_reifier_iri(link: &LinkExpression) -> NamedNode {
     // Hash the *normalized* storage-term form of the target, not the raw
     // wire string. `literal:json:` targets are canonicalized before storage
     // (see `target_to_storage_term`), so two callers describing the same
@@ -382,7 +382,7 @@ fn make_reifier_iri(link: &DecoratedLinkExpression) -> NamedNode {
 /// The target is rendered through [`target_to_storage_term`] so `literal:*`
 /// wire-form targets become typed RDF literals in storage while plain IRIs
 /// stay as [`NamedNode`]s.
-fn make_direct_triple(link: &DecoratedLinkExpression) -> (NamedNode, NamedNode, Term) {
+fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
     let source_iri = NamedNode::new_unchecked(&link.data.source);
     let predicate_val = link.data.predicate.as_deref().unwrap_or("");
     let predicate_iri = NamedNode::new_unchecked(predicate_val);
@@ -456,7 +456,7 @@ impl SparqlStore {
             })
     }
 
-    fn insert_link_triples(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
+    fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
         let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
         let reifier_iri = make_reifier_iri(link);
 
@@ -550,12 +550,12 @@ impl SparqlStore {
     }
 
     /// Insert triples for a link into the store.
-    pub fn add_link(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
+    pub fn add_link(&self, link: &LinkExpression) -> Result<(), Error> {
         self.insert_link_triples(link)
     }
 
     /// Remove all triples for a link from the store.
-    pub fn remove_link(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
+    pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
         let reifier_iri = make_reifier_iri(link);
 
         // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
@@ -1279,7 +1279,7 @@ impl SparqlStore {
     }
 
     /// Clear the store and bulk-insert all provided links.
-    pub fn reload(&self, links: Vec<DecoratedLinkExpression>) -> Result<(), Error> {
+    pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
         self.clear()?;
         for link in &links {
             self.insert_link_triples(link)?;
@@ -1299,7 +1299,7 @@ mod tests {
         source: &str,
         predicate: &str,
         target: &str,
-    ) -> DecoratedLinkExpression {
+    ) -> LinkExpression {
         let data = Link {
             source: source.to_string(),
             predicate: if predicate.is_empty() {
@@ -1310,16 +1310,11 @@ mod tests {
             target: target.to_string(),
         };
         let signed = signer.sign(data.normalize());
-        DecoratedLinkExpression {
+        LinkExpression {
             author: signed.author,
             timestamp: signed.timestamp,
             data: signed.data,
-            proof: DecoratedExpressionProof {
-                key: signed.proof.key,
-                signature: signed.proof.signature,
-                valid: None,
-                invalid: None,
-            },
+            proof: signed.proof,
             status: Some(LinkStatus::Shared),
         }
     }
@@ -1330,7 +1325,7 @@ mod tests {
         predicate: &str,
         target: &str,
         ts: &str,
-    ) -> DecoratedLinkExpression {
+    ) -> LinkExpression {
         let data = Link {
             source: source.to_string(),
             predicate: if predicate.is_empty() {
@@ -1341,16 +1336,11 @@ mod tests {
             target: target.to_string(),
         };
         let signed = signer.sign_at(data.normalize(), ts);
-        DecoratedLinkExpression {
+        LinkExpression {
             author: signed.author,
             timestamp: signed.timestamp,
             data: signed.data,
-            proof: DecoratedExpressionProof {
-                key: signed.proof.key,
-                signature: signed.proof.signature,
-                valid: None,
-                invalid: None,
-            },
+            proof: signed.proof,
             status: Some(LinkStatus::Shared),
         }
     }
@@ -2095,7 +2085,7 @@ mod tests {
         let signer = TestSigner::generate();
         // Pre-generate all links so the same author+timestamp is used for both
         // add and remove (the reifier IRI hashes author + s/p/o + timestamp).
-        let mut remove_links: Vec<DecoratedLinkExpression> = Vec::new();
+        let mut remove_links: Vec<LinkExpression> = Vec::new();
         for i in 0..100 {
             svc.add_link(&make_link_with_ts(
                 &signer,
@@ -2789,7 +2779,7 @@ mod tests {
     /// Build a link whose signature genuinely verifies, with the verdict left
     /// uncomputed — the shape `migrate_links_from_rusqlite_to_sparql` used to
     /// hand the store.
-    fn signed_link_without_verdict(signer: &TestSigner, source: &str) -> DecoratedLinkExpression {
+    fn signed_link_without_verdict(signer: &TestSigner, source: &str) -> LinkExpression {
         let signed = signer.sign(
             Link {
                 source: source.to_string(),
@@ -2798,23 +2788,18 @@ mod tests {
             }
             .normalize(),
         );
-        DecoratedLinkExpression {
+        LinkExpression {
             author: signed.author,
             timestamp: signed.timestamp,
             data: signed.data,
-            proof: DecoratedExpressionProof {
-                key: signed.proof.key,
-                signature: signed.proof.signature,
-                valid: None,
-                invalid: None,
-            },
+            proof: signed.proof,
             status: Some(LinkStatus::Shared),
         }
     }
 
     /// Count the `proofValid` quads on a link's reifier. A stale verdict left
     /// behind by a re-insert shows up here as a second quad.
-    fn proof_valid_quads(svc: &SparqlStore, link: &DecoratedLinkExpression) -> Vec<String> {
+    fn proof_valid_quads(svc: &SparqlStore, link: &LinkExpression) -> Vec<String> {
         let reifier = make_reifier_iri(link);
         svc.store
             .quads_for_pattern(
@@ -3125,7 +3110,7 @@ mod tests {
         let signer = TestSigner::generate();
         let svc = new_service();
 
-        let links: Vec<DecoratedLinkExpression> = (0..5)
+        let links: Vec<LinkExpression> = (0..5)
             .map(|i| {
                 make_link_with_ts(
                     &signer,
