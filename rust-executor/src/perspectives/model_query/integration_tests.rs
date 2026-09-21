@@ -8201,8 +8201,9 @@ async fn a_level_walk_ends_when_the_tree_does() {
 ///
 /// The plan shape used to be chosen by `can_push_pagination`, which is false whenever any part of
 /// the filter has to be applied after hydration — and `author` always does, being link metadata
-/// rather than a property of the shape. So a thread filtering out muted authors, which is every
-/// thread WE draws, silently got the single-phase plan: the walk never ran and only the first level
+/// rather than a property of the shape. So a thread filtering out muted authors — which is any
+/// thread with a mute list behind it — silently got the single-phase plan: the walk never ran and
+/// only the first level
 /// came back. The tests all passed because none of them filtered.
 #[tokio::test]
 async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {

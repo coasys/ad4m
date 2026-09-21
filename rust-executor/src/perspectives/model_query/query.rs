@@ -301,7 +301,8 @@ pub(super) async fn execute_model_query_inner(
     // ids to slice come from. Tying them to `can_push_pagination` meant that any filter evaluated
     // after hydration silently took the single-phase plan and with it the whole walk. `author` is
     // always such a filter, being link metadata rather than a property of the shape, so a thread
-    // hiding muted authors — every thread WE draws — came back one level deep.
+    // hiding muted authors — which is any thread with a mute list behind it — came back one level
+    // deep.
     //
     // What stays tied to it is the global LIMIT/OFFSET below: truncating in the store before a
     // post-hydration filter runs would discard rows that filter would have kept.
