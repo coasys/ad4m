@@ -14,6 +14,11 @@
 //! inside `get_holochain_service()`, as before. That's why the conductor must be started
 //! before those languages load, not after: their constructors would otherwise wait for a
 //! conductor that starts only once they finish.
+//!
+//! The link and installed languages are split the same way, but per bundle instead of per
+//! role: once the core load succeeds, `conductor_languages.rs` inspects each bundle and
+//! loads the ones that don't use Holochain while the conductor is still booting; only the
+//! detected Holochain-users wait for the init outcome (and are skipped when init fails).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -198,47 +203,73 @@ pub fn spawn_conductor_startup(passphrase: String) -> ConductorStartup {
     let starting = ConductorStarting::begin();
 
     tokio::spawn(async move {
-        if maybe_get_holochain_service().await.is_none() {
-            info!("Holochain service not initialized. Initializing...");
-            let config = crate::config::get_global_config();
-            let hc_config = LocalConductorConfig::from_ad4m_config(&config, passphrase);
-            let result = HolochainService::init(hc_config).await;
-            drop(starting);
-            if let Err(e) = result {
-                error!("Error initializing Holochain: {:?}", e);
-                // Skip the link and installed languages: without a conductor each would wait
-                // 120s for it and panic, one after another, while this task kept the in-flight
-                // flag and so refused a retried unlock. They load on first use instead, and
-                // a successful retry loads the rest. Released before announcing, so a client
-                // that retries on the event isn't refused.
-                //
-                // Releasing early lets a retry become a second leader while this startup's
-                // core load may still be running. That is safe only because this path returns
-                // without loading languages: the two core loads are serialized by
-                // `CORE_LANGUAGE_LOAD`, but nothing else keeps an installed-language load here
-                // from overlapping the other leader's core load (see `ConductorStartup`). Keep
-                // this path free of language loads, including "try the languages anyway".
-                drop(in_flight);
-                announce_startup_failure(format!("Holochain init failed: {}", e)).await;
-                return;
+        // Conductor init and the conductor-independent language loads run
+        // concurrently: while cells are still starting, the languages whose
+        // bundles don't use Holochain (see `conductor_languages.rs`) already
+        // load. Only the detected Holochain-users wait for the init outcome.
+        let init = async {
+            if maybe_get_holochain_service().await.is_none() {
+                info!("Holochain service not initialized. Initializing...");
+                let config = crate::config::get_global_config();
+                let hc_config = LocalConductorConfig::from_ad4m_config(&config, passphrase);
+                let result = HolochainService::init(hc_config).await;
+                drop(starting);
+                if let Err(e) = result {
+                    error!("Error initializing Holochain: {:?}", e);
+                    return Err(format!("Holochain init failed: {}", e));
+                }
+                info!("Holochain init complete");
+            } else {
+                drop(starting);
             }
-            info!("Holochain init complete");
-        } else {
-            drop(starting);
-        }
+            Ok(())
+        };
 
-        // `Some(false)` is a failed core load; `None` is the handle dropped before it finished.
-        if wait_for_outcome(Some(core_loaded_rx)).await != Some(true) {
-            warn!("Core system languages did not load; skipping link and installed languages");
+        let load_non_holochain_languages = async {
+            // `Some(false)` is a failed core load; `None` is the handle dropped
+            // before it finished.
+            if wait_for_outcome(Some(core_loaded_rx)).await != Some(true) {
+                warn!("Core system languages did not load; skipping link and installed languages");
+                return None;
+            }
+            let language_language_only = crate::config::get_global_config()
+                .language_language_only
+                .unwrap_or(false);
+            if language_language_only {
+                return Some(Vec::new());
+            }
+            Some(
+                LanguageController::global_instance()
+                    .load_link_and_installed_languages()
+                    .await,
+            )
+        };
+
+        let (init_result, deferred) = tokio::join!(init, load_non_holochain_languages);
+
+        if let Err(message) = init_result {
+            // Skip the deferred Holochain-using languages: without a conductor each
+            // would wait 120s for it and panic, one after another, while this task
+            // kept the in-flight flag and so refused a retried unlock. They load on
+            // first use instead, and a successful retry loads the rest. Released
+            // before announcing, so a client that retries on the event isn't refused.
+            //
+            // Releasing early lets a retry become a second leader while this startup's
+            // core load may still be running. That is safe only because this path
+            // returns without loading languages (the non-Holochain loads above have
+            // already finished by the time the join resolves): the two core loads are
+            // serialized by `CORE_LANGUAGE_LOAD`, but nothing else keeps a language
+            // load here from overlapping the other leader's core load (see
+            // `ConductorStartup`). Keep this path free of language loads, including
+            // "try the deferred languages anyway".
+            drop(in_flight);
+            announce_startup_failure(message).await;
             return;
         }
 
-        let language_language_only = crate::config::get_global_config()
-            .language_language_only
-            .unwrap_or(false);
-        if !language_language_only {
+        if let Some(deferred) = deferred {
             LanguageController::global_instance()
-                .load_link_and_installed_languages()
+                .load_deferred_holochain_languages(deferred)
                 .await;
         }
 

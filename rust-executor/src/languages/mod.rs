@@ -2,6 +2,7 @@ mod byte_array;
 pub mod capability;
 mod conductor_languages;
 pub mod error;
+mod holochain_usage;
 pub mod language;
 pub mod language_context;
 pub mod language_runtime;
@@ -540,19 +541,34 @@ impl LanguageController {
         address: &str,
         is_system_language: bool,
     ) -> Result<(), LanguageError> {
+        let bundle_path = self.ensure_language_bundle_on_disk(address).await?;
+        if !self.is_language_loaded(address).await {
+            self.load_language(bundle_path, is_system_language).await?;
+            info!(
+                "Loaded language runtime for: {}",
+                self.language_label(address).await
+            );
+        }
+        Ok(())
+    }
+
+    /// Ensure a language's bundle is saved on disk, fetching it from the language
+    /// language if it isn't, and return the bundle path. Does not load the language
+    /// into a runtime — `conductor_languages.rs` uses this to inspect a bundle
+    /// (Holochain-usage classification) before deciding when to load it.
+    async fn ensure_language_bundle_on_disk(
+        &self,
+        address: &str,
+    ) -> Result<PathBuf, LanguageError> {
         let bundle_path = languages_directory().join(address).join("bundle.js");
 
         if bundle_path.exists() {
             log::debug!("Language bundle already on disk: {}", address);
-            // Still need to load into runtime if not already loaded
-            if !self.is_language_loaded(address).await {
-                self.load_language(bundle_path, is_system_language).await?;
-            }
-            return Ok(());
+            return Ok(bundle_path);
         }
 
         log::debug!(
-            "install_language_from_address: fetching {} from language-language",
+            "ensure_language_bundle_on_disk: fetching {} from language-language",
             address
         );
 
@@ -625,7 +641,7 @@ impl LanguageController {
 
         if hash != address {
             error!(
-                "install_language_from_address: hash mismatch for {}! Computed: {}",
+                "ensure_language_bundle_on_disk: hash mismatch for {}! Computed: {}",
                 address, hash
             );
             return Err(LanguageError::LoadError {
@@ -639,23 +655,16 @@ impl LanguageController {
 
         info!("Saved language bundle for: {}", address);
 
-        // Load into a per-language runtime
-        self.load_language(saved_bundle_path, is_system_language)
-            .await?;
-        info!(
-            "Loaded language runtime for: {}",
-            self.language_label(address).await
-        );
-
-        Ok(())
+        Ok(saved_bundle_path)
     }
 
     /// Load the language language and, unless `language_language_only`, the agent,
     /// neighbourhood and perspective languages. With the default seed none of these touch
     /// Holochain, so this returns without waiting for the conductor; a seed whose system
     /// languages do (the integration-test agent language) waits for it, so start the
-    /// conductor before calling this. The link and installed languages, which always need
-    /// it, are `load_link_and_installed_languages` (`conductor_languages.rs`).
+    /// conductor before calling this. The link and installed languages load through
+    /// `load_link_and_installed_languages` (`conductor_languages.rs`), which inspects
+    /// each bundle and defers only the Holochain-using ones until the conductor is up.
     pub async fn load_core_system_languages(
         &self,
         language_language_only: bool,
@@ -743,19 +752,23 @@ impl LanguageController {
         Ok(())
     }
 
-    /// Scan previously installed languages from the languages directory and load them into runtimes.
-    async fn load_installed_languages(&self) -> Result<(), LanguageError> {
+    /// Scan the languages directory for previously installed languages that are not
+    /// yet loaded, returning `(address, bundle_path)` for each. Loading them is
+    /// `conductor_languages.rs`'s job, which first classifies each bundle by
+    /// Holochain usage to decide whether the load must wait for the conductor.
+    async fn installed_language_bundles(&self) -> Vec<(String, PathBuf)> {
         let langs_dir = languages_directory();
         let system_set = {
             let sys = self.system_addresses.lock().await;
             sys.system_language_set.clone()
         };
 
+        let mut bundles = Vec::new();
         let entries = match fs::read_dir(&langs_dir) {
             Ok(entries) => entries,
             Err(e) => {
                 warn!("Could not read languages directory: {}", e);
-                return Ok(());
+                return bundles;
             }
         };
 
@@ -790,22 +803,11 @@ impl LanguageController {
                 if self.is_language_loaded(&dir_name).await {
                     continue;
                 }
-                info!("Loading installed language from disk: {}", dir_name);
-                match self.load_language(bundle_path, false).await {
-                    Ok(_) => {
-                        info!(
-                            "Successfully loaded installed language: {}",
-                            self.language_label(&dir_name).await
-                        );
-                    }
-                    Err(e) => {
-                        warn!("Failed to load language {}: {}", dir_name, e);
-                    }
-                }
+                bundles.push((dir_name, bundle_path));
             }
         }
 
-        Ok(())
+        bundles
     }
 
     pub async fn install_language(language: Address) -> Result<(), AnyError> {
