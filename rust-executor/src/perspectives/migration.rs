@@ -150,14 +150,10 @@ pub fn migrate_links_from_rusqlite_to_sparql(
         // Convert literal:// → literal: in all URI fields
         total_literal_conversions += convert_link_literal_uris(&mut decorated_link);
 
-        // Derive the signature verdict instead of shipping the placeholder
-        // above. This was the one production site that handed the store a link
-        // with no verdict at all, and the store wrote it out as "false" — every
-        // migrated link recorded as "checked, and wrong", which was true of none
-        // of them (#1046). The URI conversion runs first: it rewrites `source`,
-        // `predicate` and `target`, which are the bytes the signature covers, so
-        // verifying beforehand would verify a link that is not the one stored.
-        decorated_link.verify_signature();
+        // The SPARQL store now derives the proof verdict from the signature on
+        // every insert — `verify_signature()` here was a redundant pre-computation
+        // that is no longer needed (and could no longer be "trusted" by the store
+        // anyway).
 
         match sparql_store.add_link(&decorated_link) {
             Ok(_) => {

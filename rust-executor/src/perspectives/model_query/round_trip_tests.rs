@@ -11,20 +11,22 @@
 
 use super::shape::load_shape;
 use super::types::ModelShape;
+use crate::agent::signatures::TestSigner;
 use crate::perspectives::shacl_parser::parse_shacl_to_links;
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
 
-fn make_link_for_round_trip(link: Link) -> DecoratedLinkExpression {
+fn make_link_for_round_trip(signer: &TestSigner, link: Link) -> DecoratedLinkExpression {
+    let signed = signer.sign(link);
     DecoratedLinkExpression {
-        author: "did:key:test_writer".to_string(),
-        timestamp: "1700000000000".to_string(),
-        data: link,
+        author: signed.author,
+        timestamp: signed.timestamp,
+        data: signed.data,
         proof: DecoratedExpressionProof {
-            key: "k".to_string(),
-            signature: "s".to_string(),
-            valid: Some(true),
-            invalid: Some(false),
+            key: signed.proof.key,
+            signature: signed.proof.signature,
+            valid: None,
+            invalid: None,
         },
         status: None,
     }
@@ -34,6 +36,7 @@ fn make_link_for_round_trip(link: Link) -> DecoratedLinkExpression {
 /// into a fresh in-memory store, then ask the loader to rebuild a shape.
 fn round_trip(class_name: &str, shacl_json: &str) -> ModelShape {
     let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
     let links = parse_shacl_to_links(shacl_json, class_name).expect("parse SHACL");
     // The shape <ad4m://shape> URI link is normally emitted by add_sdna_inner;
     // synthesize the SubjectClass-pointing-at-shape pair load_shape relies on.
@@ -53,7 +56,9 @@ fn round_trip(class_name: &str, shacl_json: &str) -> ModelShape {
     ];
     all_links.extend(links);
     for link in all_links {
-        store.add_link(&make_link_for_round_trip(link)).unwrap();
+        store
+            .add_link(&make_link_for_round_trip(&signer, link))
+            .unwrap();
     }
     load_shape(&store, class_name).expect("load shape")
 }
@@ -615,6 +620,7 @@ async fn e2e_shacl_shape_with_where_ops() {
     let class_name = "TestPost";
     let target_class_uri = "ns://TestPost";
     let shape_uri = "ns://TestPostShape";
+    let signer = TestSigner::generate();
 
     let shacl_links = parse_shacl_to_links(shacl_json, class_name).expect("parse SHACL");
     let mut all_links = vec![
@@ -631,7 +637,9 @@ async fn e2e_shacl_shape_with_where_ops() {
     ];
     all_links.extend(shacl_links);
     for link in all_links {
-        store.add_link(&make_link_for_round_trip(link)).unwrap();
+        store
+            .add_link(&make_link_for_round_trip(&signer, link))
+            .unwrap();
     }
 
     let shape = load_shape(&store, class_name).expect("load shape");
@@ -656,24 +664,30 @@ async fn e2e_shacl_shape_with_where_ops() {
 
     for (i, item) in items.iter().enumerate() {
         store
-            .add_link(&make_link_for_round_trip(Link {
-                source: item.to_string(),
-                predicate: Some("test://post_type".to_string()),
-                target: "test://post".to_string(),
-            }))
+            .add_link(&make_link_for_round_trip(
+                &signer,
+                Link {
+                    source: item.to_string(),
+                    predicate: Some("test://post_type".to_string()),
+                    target: "test://post".to_string(),
+                },
+            ))
             .unwrap();
         store
-            .add_link(&make_link_for_round_trip(Link {
-                source: item.to_string(),
-                predicate: Some("test://title".to_string()),
-                target: format!(
-                    "literal:string:{}",
-                    percent_encoding::utf8_percent_encode(
-                        titles[i],
-                        percent_encoding::NON_ALPHANUMERIC
-                    )
-                ),
-            }))
+            .add_link(&make_link_for_round_trip(
+                &signer,
+                Link {
+                    source: item.to_string(),
+                    predicate: Some("test://title".to_string()),
+                    target: format!(
+                        "literal:string:{}",
+                        percent_encoding::utf8_percent_encode(
+                            titles[i],
+                            percent_encoding::NON_ALPHANUMERIC
+                        )
+                    ),
+                },
+            ))
             .unwrap();
         let count_target = if counts[i].fract() == 0.0 {
             format!("literal:number:{}", counts[i] as i64)
@@ -681,11 +695,14 @@ async fn e2e_shacl_shape_with_where_ops() {
             format!("literal:number:{}", counts[i])
         };
         store
-            .add_link(&make_link_for_round_trip(Link {
-                source: item.to_string(),
-                predicate: Some("test://view_count".to_string()),
-                target: count_target,
-            }))
+            .add_link(&make_link_for_round_trip(
+                &signer,
+                Link {
+                    source: item.to_string(),
+                    predicate: Some("test://view_count".to_string()),
+                    target: count_target,
+                },
+            ))
             .unwrap();
     }
 
