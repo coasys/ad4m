@@ -197,8 +197,10 @@ fn resolve_host(requested: Option<&str>, has_credential: bool) -> String {
 /// an operator: nobody chose it, so nobody checked what else is on it.
 ///
 /// What no boolean here can prove is that the HTTPS listener ever carried an
-/// MCP message — that needs an end-to-end test with a certificate fixture,
-/// which #986 names and this PR does not add.
+/// MCP message. That is proven end-to-end — generated certificate fixture,
+/// real [`start_mcp_server`], an MCP initialize + tools/list over HTTPS — by
+/// `https_listener_carries_mcp_and_narrows_plain_to_loopback` in this
+/// module's tests: the fixture test #986 named, added in #1050.
 fn resolve_plain_host(
     requested: Option<&str>,
     has_credential: bool,
