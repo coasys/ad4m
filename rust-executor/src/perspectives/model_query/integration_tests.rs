@@ -8091,7 +8091,7 @@ const COMMENT_SHAPE_WITH_REPLIES: &str = r#"{
 fn wide_comment_tree_store() -> SparqlStore {
     let store = SparqlStore::new(None).unwrap();
     let mut t = 1000;
-    let mut link = |parent: &str, child: &str, t: &mut i32| {
+    let link = |parent: &str, child: &str, t: &mut i32| {
         *t += 1;
         let ts = format!("2026-01-01T00:00:{:04}Z", t);
         store
