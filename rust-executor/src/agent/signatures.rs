@@ -152,4 +152,22 @@ impl TestSigner {
             },
         }
     }
+
+    /// Like [`sign`] but with a caller-supplied ISO-8601 timestamp.
+    ///
+    /// Use when the test needs a specific timestamp that the signature covers —
+    /// so that `compute_proof_valid` still returns `true` after the override.
+    pub fn sign_at<T: Serialize>(&self, data: T, timestamp: &str) -> Expression<T> {
+        let ts = DateTime::<Utc>::from_str(timestamp).unwrap_or_else(|_| Utc::now());
+        let signature = hex::encode(self.keypair.sign(&hash_data_and_timestamp(&data, &ts)));
+        Expression {
+            author: self.did.clone(),
+            timestamp: timestamp.to_string(),
+            data,
+            proof: crate::types::ExpressionProof {
+                key: self.key_id.clone(),
+                signature,
+            },
+        }
+    }
 }
