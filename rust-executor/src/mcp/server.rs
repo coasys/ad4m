@@ -547,4 +547,249 @@ mod tests {
              happened before the bind (wrong ordering)"
         );
     }
+
+    /// Two adjacent free ports `(plain, plain + 1)`, so `resolve_tls_port`
+    /// derives an HTTPS port the test server can actually bind. Both probe
+    /// sockets drop before returning; the window before the server rebinds
+    /// them is acceptable in a `--test-threads=1` suite.
+    fn free_adjacent_ports() -> (u16, u16) {
+        for _ in 0..64 {
+            let probe = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+            let plain = probe.local_addr().unwrap().port();
+            if plain == u16::MAX {
+                continue;
+            }
+            if std::net::TcpListener::bind(("0.0.0.0", plain + 1)).is_ok() {
+                return (plain, plain + 1);
+            }
+        }
+        panic!("could not find two adjacent free ports");
+    }
+
+    async fn wait_until_listening(port: u16) {
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("port {port} never started listening");
+    }
+
+    /// Read the SSE response body until the JSON-RPC response for `id`
+    /// arrives, and return it decoded. The stream can stay open for
+    /// keep-alives after the message, so this reads chunks against a deadline
+    /// instead of collecting the whole body.
+    async fn read_jsonrpc_response(mut resp: reqwest::Response, id: u64) -> serde_json::Value {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        let mut buf = String::new();
+        loop {
+            let chunk = tokio::time::timeout_at(deadline, resp.chunk())
+                .await
+                .unwrap_or_else(|_| panic!("timed out waiting for response {id}; got: {buf}"))
+                .expect("reading the SSE body failed");
+            let Some(chunk) = chunk else {
+                panic!("SSE stream ended without a response to request {id}; got: {buf}");
+            };
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            for line in buf.lines() {
+                if let Some(data) = line.strip_prefix("data:") {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) {
+                        if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
+                            return v;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The end-to-end proof the [`resolve_plain_host`] doc comment points at:
+    /// a certificate fixture generated at test time, a real
+    /// [`start_mcp_server`], and an MCP `initialize` + `tools/list` exchange
+    /// carried over the HTTPS listener — the test #986 named and #1050 adds.
+    /// The client trusts exactly the fixture certificate (no
+    /// `danger_accept_invalid_certs`), so a passing handshake means the
+    /// server terminated TLS with that certificate, not merely that a socket
+    /// was open.
+    ///
+    /// Alongside it, the narrowing [`resolve_plain_host`] only *decides* is
+    /// observed on real sockets: while HTTPS is up, the plain listener
+    /// answers on 127.0.0.1 and refuses the rest of 127/8.
+    #[tokio::test]
+    async fn https_listener_carries_mcp_and_narrows_plain_to_loopback() {
+        // An inherited MCP_HOST would override the binding decisions this
+        // test observes.
+        std::env::remove_var("MCP_HOST");
+        // In production `run()` installs this before any listener starts
+        // (lib.rs); the test binary has to do it itself or rustls refuses to
+        // pick between the ring and aws-lc-rs features in the dependency tree.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate self-signed certificate");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+        std::fs::write(&key_path, cert.signing_key.serialize_pem()).unwrap();
+
+        let (plain_port, tls_port) = free_adjacent_ports();
+        let config = McpServerConfig {
+            port: plain_port,
+            host: None,
+            dynamic_class_tools: false,
+            tls: Some(TlsConfig {
+                cert_file_path: cert_path.to_string_lossy().into_owned(),
+                key_file_path: key_path.to_string_lossy().into_owned(),
+                // Only compared against plain_port + 1 in the clash check,
+                // never bound; any other value works.
+                tls_port: plain_port - 1,
+            }),
+        };
+        tokio::spawn(start_mcp_server(
+            Some("test-admin-cred".to_string()),
+            None,
+            config,
+        ));
+        wait_until_listening(tls_port).await;
+        wait_until_listening(plain_port).await;
+
+        let client = reqwest::Client::builder()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(cert.cert.pem().as_bytes()).unwrap(),
+            )
+            .build()
+            .unwrap();
+        let url = format!("https://localhost:{tls_port}/mcp");
+
+        let resp = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "tls-e2e-test", "version": "0" }
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize over HTTPS");
+        assert!(
+            resp.status().is_success(),
+            "initialize returned {}",
+            resp.status()
+        );
+        let session_id = resp
+            .headers()
+            .get("mcp-session-id")
+            .expect("initialize response carries a session id")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let init = read_jsonrpc_response(resp, 1).await;
+        assert_eq!(
+            init["result"]["serverInfo"]["name"], "ad4m-executor",
+            "the HTTPS listener answered initialize with something other than \
+             this server: {init}"
+        );
+
+        // The spec-required notification, then a second request on the same
+        // session: more MCP messages over the same TLS listener.
+        let resp = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", &session_id)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized"
+            }))
+            .send()
+            .await
+            .expect("initialized notification over HTTPS");
+        assert!(
+            resp.status().is_success(),
+            "initialized notification returned {}",
+            resp.status()
+        );
+
+        let resp = client
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", &session_id)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list"
+            }))
+            .send()
+            .await
+            .expect("tools/list over HTTPS");
+        let tools = read_jsonrpc_response(resp, 2).await;
+        let names: Vec<&str> = tools["result"]["tools"]
+            .as_array()
+            .expect("tools/list returns a tool array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(
+            names.contains(&"get_documentation"),
+            "tools/list over HTTPS is missing the static surface: {names:?}"
+        );
+
+        // The narrowing itself, on real sockets. 127.0.0.2 is loopback that
+        // the *address* 127.0.0.1 does not cover, so a 0.0.0.0 bind accepts
+        // it and a 127.0.0.1 bind refuses it. All of 127/8 sits on `lo` on
+        // Linux only; elsewhere the resolve_plain_host unit tests carry this.
+        tokio::net::TcpStream::connect(("127.0.0.1", plain_port))
+            .await
+            .expect("plain listener answers on loopback");
+        #[cfg(target_os = "linux")]
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.2", plain_port))
+                .await
+                .is_err(),
+            "the plain listener is reachable beyond 127.0.0.1 while HTTPS is up"
+        );
+    }
+
+    /// The other half of the pairing on real sockets: TLS configured but not
+    /// listening — its derived port already held — leaves the credentialed
+    /// plain listener wide. Narrowing here would remove remote access while
+    /// offering no encrypted port in exchange (#1050).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn plain_listener_stays_wide_when_tls_cannot_bind() {
+        std::env::remove_var("MCP_HOST");
+
+        let (plain_port, tls_port) = free_adjacent_ports();
+        let _holder = std::net::TcpListener::bind(("0.0.0.0", tls_port)).unwrap();
+        let config = McpServerConfig {
+            port: plain_port,
+            host: None,
+            dynamic_class_tools: false,
+            tls: Some(TlsConfig {
+                // Never read: the bind on the held port fails first.
+                cert_file_path: "/nonexistent/cert.pem".to_string(),
+                key_file_path: "/nonexistent/key.pem".to_string(),
+                tls_port: plain_port - 1,
+            }),
+        };
+        tokio::spawn(start_mcp_server(
+            Some("test-admin-cred".to_string()),
+            None,
+            config,
+        ));
+        wait_until_listening(plain_port).await;
+        tokio::net::TcpStream::connect(("127.0.0.2", plain_port))
+            .await
+            .expect("with no HTTPS listener, the credentialed plain listener stays on 0.0.0.0");
+    }
 }
