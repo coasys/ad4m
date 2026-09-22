@@ -3,6 +3,7 @@
  */
 
 import { writeFileSync, mkdirSync } from "fs";
+import { arch, cpus, platform, totalmem } from "os";
 import { join, dirname } from "path";
 import { ScenarioResult } from "./scenario.js";
 
@@ -54,7 +55,7 @@ export function comparisonReport(
   lines.push("# AD4M Wind Tunnel — Comparison Report");
   lines.push("");
   lines.push(`Generated: ${new Date().toISOString()}`);
-  lines.push(`Machine: Apple Silicon MacBook Pro (48GB RAM, 14 CPUs)`);
+  lines.push(`Machine: ${platform()}/${arch()} (${Math.round(totalmem() / 1024 ** 3)}GB RAM, ${cpus().length} CPUs)`);
   lines.push("");
 
   // Get scenario IDs from first branch results

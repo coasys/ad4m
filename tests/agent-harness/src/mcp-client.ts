@@ -63,7 +63,7 @@ export class McpClient {
       if (ctype.includes("text/event-stream")) {
         return await this.readSseForId(res, id, timeoutMs);
       }
-      const json = await res.json();
+      const json = (await res.json()) as { error?: unknown; result?: unknown };
       if (json.error) throw new Error(`MCP ${method} error: ${JSON.stringify(json.error)}`);
       return json.result;
     } finally {

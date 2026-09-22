@@ -39,6 +39,12 @@ async function main(): Promise<void> {
   console.log("║     AD4M AGENT HARNESS — Integration Testing               ║");
   console.log("╚══════════════════════════════════════════════════════════════╝");
 
+  const unknownIds = args.scenarios.filter((id) => !ALL_SCENARIOS.some((s) => s.id === id));
+  if (unknownIds.length > 0) {
+    console.error(`Unknown scenario id(s): ${unknownIds.join(", ")} (known: ${ALL_SCENARIOS.map((s) => s.id).join(", ")})`);
+    process.exit(1);
+  }
+
   const scenarios = args.scenarios.length > 0
     ? ALL_SCENARIOS.filter((s) => args.scenarios.includes(s.id))
     : ALL_SCENARIOS;
