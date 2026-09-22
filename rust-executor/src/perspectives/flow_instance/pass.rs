@@ -135,7 +135,20 @@ pub async fn run_flow_consensus_pass(
                 continue;
             }
         };
-        let derived = fold_read_set(flow, &read_set);
+        // Same treatment as a failed read: unresolvable role evidence means
+        // this instance has no derivable verdict this pass. Folding on with a
+        // candidate's grants missing could fire an edge that contention would
+        // otherwise have held — see `role_grant_views`.
+        let derived = match fold_read_set(flow, &read_set) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!(
+                    "run_flow_consensus_pass: folding {} failed; skipping instance this pass: {e:#}",
+                    record.instance_uri
+                );
+                continue;
+            }
+        };
         let already_marked = read_set.marked_proposals();
 
         // Catch-up (module doc): never derived here = no Local mark and no

@@ -12,6 +12,7 @@ use crate::agent::{
 use crate::entanglement_service::{
     add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key,
 };
+use crate::holochain_service::conductor_startup::spawn_conductor_startup;
 use crate::languages::LanguageController;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
 use crate::types::domain::Perspective as DomainPerspective;
@@ -329,28 +330,14 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         agent_service.dump().clone()
     });
 
-    // Start Holochain conductor
-    let config = crate::config::get_global_config();
-    let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
-        &config,
-        body.passphrase.clone(),
-    );
-
     let mut init_errors: Vec<String> = Vec::new();
 
-    if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
-        log::error!("Error initializing Holochain: {:?}", e);
-        init_errors.push(format!("Holochain init failed: {}", e));
-    } else {
-        log::info!("Holochain init complete");
-    }
-
+    // Start the conductor before loading languages: a seed whose system languages run on
+    // Holochain waits for it in their constructors. See `agent::conductor_startup`.
+    let startup = spawn_conductor_startup(body.passphrase.clone());
+    let config = crate::config::get_global_config();
     let language_language_only = config.language_language_only.unwrap_or(false);
-    let controller = LanguageController::global_instance();
-    if let Err(e) = controller
-        .load_system_languages(language_language_only)
-        .await
-    {
+    if let Err(e) = startup.load_core_languages(language_language_only).await {
         log::error!("Error loading system languages: {:?}", e);
         init_errors.push(format!("Failed to load system languages: {}", e));
     } else {
@@ -436,32 +423,12 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .is_unlocked();
 
     if is_unlocked {
-        if crate::holochain_service::maybe_get_holochain_service()
-            .await
-            .is_none()
-        {
-            log::info!("Holochain service not initialized. Initializing...");
-            let config = crate::config::get_global_config();
-            let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
-                &config,
-                body.passphrase.clone(),
-            );
-
-            if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
-                log::error!("Error initializing Holochain: {:?}", e);
-                init_errors.push(format!("Holochain init failed: {}", e));
-            } else {
-                log::info!("Holochain init complete");
-            }
-        }
-
+        // Start the conductor before loading languages: a seed whose system languages run on
+        // Holochain waits for it in their constructors. See `agent::conductor_startup`.
+        let startup = spawn_conductor_startup(body.passphrase.clone());
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
-        let controller = LanguageController::global_instance();
-        if let Err(e) = controller
-            .load_system_languages(language_language_only)
-            .await
-        {
+        if let Err(e) = startup.load_core_languages(language_language_only).await {
             log::error!("Error loading system languages: {:?}", e);
             init_errors.push(format!("Failed to load system languages: {}", e));
         } else {

@@ -386,6 +386,7 @@ mod tests {
             requires: None,
             semantic_check: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         }
     }
 
@@ -428,6 +429,7 @@ mod tests {
                 n: 1,
                 from_role: None,
             }),
+            consensus_rule_malformed: false,
         }
     }
 
