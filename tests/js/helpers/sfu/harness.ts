@@ -39,8 +39,10 @@ function nextPort(): number {
 export function sfuScenario(
   scenario: Scenario,
   timeoutMs: number = 180_000,
+  skip?: string,
 ): void {
-  describe(scenario.name, function () {
+  const block = skip ? describe.skip : describe;
+  block(scenario.name, function () {
     this.timeout(timeoutMs);
 
     const port = nextPort();
