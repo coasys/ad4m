@@ -263,10 +263,18 @@ pub enum Scope {
         /// records are hydrated once for the union — so three levels cost one request and one
         /// hydration instead of three of each.
         ///
-        /// Mutually exclusive with `transitive`, which is the unbounded form of the same walk: a
-        /// path expression reaches everything below the anchor and can be told nothing about depth.
-        /// It is also why `limit_per_anchor` alone cannot express this — with one anchor at the top
-        /// there is one group, so it caps the total rather than the breadth at each level.
+        /// Like `transitive`, the anchors are excluded from their own result. A walk that reaches
+        /// an anchor again — through a cycle, or because one anchor was named below another —
+        /// reports it once, at neither place: it is where the walk started, not something the walk
+        /// found.
+        ///
+        /// *Refused* alongside `transitive`, which is the unbounded form of the same walk: a path
+        /// expression reaches everything below the anchor and can be told nothing about depth.
+        /// Refused alongside `limit_per_anchor` too, which cannot express this on its own — with
+        /// one anchor at the top there is one group, so it caps the total rather than the breadth
+        /// at each level, and the walk sets its own per-level limit at every depth regardless.
+        /// Both are errors rather than a silent resolution in the walk's favour, which would be a
+        /// wrong answer wearing the shape of a right one.
         #[serde(default)]
         levels: Option<Vec<usize>>,
     },

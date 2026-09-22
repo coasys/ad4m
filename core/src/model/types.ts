@@ -95,7 +95,8 @@ export interface TraverseScope {
    * rebuild a tree, read the inverse relation (`@BelongsToOne`) alongside it and
    * assemble from the parent each row reports.
    *
-   * Excludes the anchor itself.
+   * Excludes the anchor itself. Refused alongside `levels`, which is the bounded form of the same
+   * walk.
    */
   transitive?: boolean;
   /**
@@ -116,7 +117,11 @@ export interface TraverseScope {
    * hydrates 5.
    *
    * Pair it with `order` — without one the "top" N is whatever the store
-   * happened to return first.
+   * happened to return first. A global `limit`/`offset` is applied to the
+   * sliced union afterwards, not before it.
+   *
+   * Refused alongside `levels`, which applies its own per-anchor limit at
+   * every depth.
    */
   limitPerAnchor?: number;
   /**
@@ -131,11 +136,18 @@ export interface TraverseScope {
    * three levels cost one request and one hydration rather than three of each.
    *
    * Results come back flat and breadth-first; read the inverse relation alongside to rebuild the
-   * tree, exactly as with `transitive`.
+   * tree, exactly as with `transitive`. The anchors are excluded from their own result, also as
+   * with `transitive` — a walk that reaches an anchor again, through a cycle or because one anchor
+   * was named below another, reports it at neither place.
    *
-   * Not combinable with `transitive`, which is the unbounded form of the same walk. Nor is
-   * `limitPerAnchor` a substitute: with a single anchor at the top there is one group, so it caps
-   * the total rather than the breadth at each level.
+   * A global `limit`/`offset` applies to that flat union once, after every level has been cut to
+   * its own breadth — not to each level.
+   *
+   * Combining this with `transitive` or `limitPerAnchor` is an **error**, not a preference the
+   * executor resolves: `transitive` is the unbounded form of the same walk, and `limitPerAnchor`
+   * has no place to act when the walk sets a per-anchor limit at every depth itself. (It is not a
+   * substitute either — with a single anchor at the top there is one group, so it caps the total
+   * rather than the breadth at each level.) Put the first level's breadth in `levels[0]`.
    */
   levels?: number[];
 }
