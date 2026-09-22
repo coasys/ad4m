@@ -46,7 +46,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
-use crate::types::LinkQuery;
+use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -83,7 +83,12 @@ pub struct SatisfiedTransition {
 /// matched, carried with its full `model_query` JSON so downstream LLM
 /// passes can evaluate content ("was this agreed?") rather than rubber-stamp
 /// a URI list.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Serialize` on purpose: the preimage behind a proposal's `evidence_hash`
+/// is what turns "this hash matches nothing I can see" into an inspectable
+/// object a reader can re-hash with [`evidence_hash`] and compare against the
+/// seal every voter verified before co-signing.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EvidenceItem {
     pub id: String,
     /// SHACL class the matching guard queried for.
@@ -96,7 +101,7 @@ pub struct EvidenceItem {
 /// Serialize a JSON value with recursively-sorted object keys — a stable
 /// form independent of the key order `model_query` happens to produce.
 /// Non-JSON content is hashed verbatim rather than dropped.
-fn canonical_json(v: &Value) -> String {
+pub(crate) fn canonical_json(v: &Value) -> String {
     match v {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -377,9 +382,10 @@ fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value
 
 /// One signed revocation tombstone: who wrote it and when.
 ///
-/// Rides in the read-set (see `flow_instance::roles::RoleGrantWindow`), so a
-/// verdict names the tombstones it honoured, not merely that "a revocation
-/// existed".
+/// A **computed view** over a carried tombstone link, not a carried value:
+/// `RoleGrantEvidence::resolve` derives it from the link's own author and
+/// timestamp after applying the authority rule. Nothing serialises it into a
+/// read-set, so nobody can assert a revocation that no link witnesses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleRevocation {
     /// The tombstone's author — the DID that signed it.
@@ -388,23 +394,111 @@ pub struct RoleRevocation {
     pub at: String,
 }
 
-/// What the store knows about one role instance's history for one DID: when the
-/// instance's `didProperty` link naming the DID was written, and every
-/// **signed** tombstone on the instance naming the DID.
+/// The links behind one role instance's history for one DID: the
+/// `instance --didProperty--> did` grant links, and the tombstones on the
+/// instance naming the DID — **as links, not as conclusions**.
 ///
-/// Signature is checked here, at the store boundary — the same rule
-/// `flow_instance::atom::signed_by` applies to votes: a link whose stored
-/// verdict is not `valid` is invisible. **Authority is not checked here**:
-/// whether the tombstone's author may revoke depends on the role query, so
-/// `resolve_role_grants` applies that filter. `granted_at` is `None` when
-/// the role query has no `didProperty` or no such link exists; the caller
-/// then falls back to the instance's own timestamp and never to "always".
-#[derive(Debug, Clone, Default)]
-pub struct RoleGrantTimestamps {
-    /// Earliest timestamp of an `instance --didProperty--> did` link, if any.
-    pub granted_at: Option<String>,
-    /// Every signed tombstone on this instance naming this DID, any author.
-    pub revocations: Vec<RoleRevocation>,
+/// The store returns the material; nothing here is collapsed into
+/// `granted_at` / `revoked_at`. That derivation is
+/// [`RoleGrantEvidence::resolve`](crate::perspectives::flow_instance::roles::RoleGrantEvidence::resolve),
+/// which is pure and therefore re-runnable by a reader holding only a
+/// serialised read-set. Carrying links rather than verdicts is what lets that
+/// reader check the chronology instead of believing the minter's summary.
+///
+/// Carried as plain [`LinkExpression`], not `DecoratedLinkExpression`: the
+/// decorated form's `proof.valid` / `status` are one executor's read-model
+/// flags for its own clients, and on material that travels they would be
+/// claims. Every signature check on these links —
+/// [`revocation_link_counts_for_did`], here and in the pure reader — computes
+/// the verdict from the signature itself, so there is deliberately no carried
+/// verdict to read (review r4076927995).
+///
+/// What is carried differs by kind, and the asymmetry is on purpose *for now*:
+///
+/// - **Tombstones** must be signed ([`revocation_link_counts_for_did`]),
+///   exactly as `flow_instance::atom::signed_by` requires it for votes: a
+///   link whose verdict is not `valid` is not a link anyone wrote. This is
+///   the rule the pre-#1027 code already applied, carried over unchanged.
+/// - **Grant links** are carried on target match alone
+///   ([`grant_link_names_did`]), also unchanged from pre-#1027.
+///
+/// Signature-filtering grant links too is the obvious next step and is
+/// deliberately **not** taken here: `granted_at` falls back to the instance's
+/// own timestamp when no grant link qualifies, and that fallback is normally
+/// *earlier* than the assignment link — so dropping links can land the window
+/// wider than leaving them in. Closing that hole needs the fallback, the
+/// `proof.valid` tri-state (#1046, which conflates never-evaluated with
+/// evaluated-and-failed) and the missing author filter to move together.
+/// Tracked as <https://github.com/coasys/ad4m/issues/1063>.
+///
+/// **Authority is deliberately not checked here** — whether a tombstone's
+/// author may revoke depends on the role query, so the reader applies
+/// [`revocation_authorised`](crate::perspectives::flow_instance::roles::revocation_authorised)
+/// itself against the definition it holds, and cannot be handed a
+/// pre-filtered set to trust.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoleGrantLinks {
+    /// Every `instance --didProperty--> did` link, earliest first.
+    /// Empty when the role query has no `didProperty` or no such link exists;
+    /// the reader then dates the grant from the instance itself, never from
+    /// "always".
+    pub grant_links: Vec<LinkExpression>,
+    /// Every signed tombstone on this instance naming this DID, any author,
+    /// **before** the authority filter. Never truncated: dropping a tombstone
+    /// can only widen a window.
+    pub revocation_links: Vec<LinkExpression>,
+}
+
+/// At most this many grant links are carried per `(instance, DID)`, earliest
+/// first. Only the earliest ever dates a grant, so the rest are redundancy;
+/// a cap can therefore only move `granted_at` later — fail-closed — while
+/// bounding what a receipt has to carry.
+///
+/// The cap is applied **after every collection-side filter** and to a
+/// signature-preferred ordering, so that a reader-side filter added later
+/// (#1063) cannot be inverted by forged links evicting a genuine one at
+/// collection time — see the comment at the truncation site.
+pub(crate) const MAX_GRANT_LINKS: usize = 8;
+
+/// Whether a **grant** link speaks about this DID's membership: its target
+/// names the DID. No signature check — see [`RoleGrantLinks`] and #1063.
+///
+/// Shared by the store boundary above and by the pure reader in
+/// `roles::RoleGrantEvidence::resolve`, on purpose. An asymmetric filter is
+/// not a style problem: a link the minter counts and the verifier drops
+/// mints receipts that fail their own verification, and — the direction that
+/// actually costs — a link the verifier counts and the minter dropped lets
+/// forged material widen a window. One predicate per kind, both sites.
+pub(crate) fn grant_link_names_did(link: &LinkExpression, did: &str, did_literal: &str) -> bool {
+    target_names_did(&link.data.target, did, did_literal)
+}
+
+/// Whether a **revocation** tombstone counts for this DID: its signature
+/// verifies, and its target names the DID. Same both-sites rule as
+/// [`grant_link_names_did`], plus the vote-layer signature check.
+///
+/// The verdict is **computed here from the signature**
+/// ([`LinkExpression::compute_proof_valid`]), never read from a carried flag
+/// — the carried form has none. That makes the both-sites symmetry exact:
+/// collection boundary and pure reader run the same crypto on the same
+/// material, so a verdict cannot differ between them and cannot be forged
+/// into either.
+pub(crate) fn revocation_link_counts_for_did(
+    link: &LinkExpression,
+    did: &str,
+    did_literal: &str,
+) -> bool {
+    link.compute_proof_valid() && grant_link_names_did(link, did, did_literal)
+}
+
+/// `literal:string:`-encode a DID for target matching — the form the SDNA
+/// setters write. Shared with the pure reader for the same reason
+/// [`grant_link_names_did`] is.
+pub(crate) fn did_literal_url(did: &str) -> anyhow::Result<String> {
+    use ad4m_client::literal::Literal;
+    Literal::from_string(did.to_string())
+        .to_url()
+        .map_err(|e| anyhow::anyhow!("literal encode DID `{did}`: {e}"))
 }
 
 /// The one perspective call the evaluator needs, behind a trait so the
@@ -413,25 +507,29 @@ pub struct RoleGrantTimestamps {
 pub trait RequiresQueryable: Send + Sync {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String>;
 
-    /// The store's history of one matched role instance for one DID — see
-    /// [`RoleGrantTimestamps`].
+    /// The store's links for one matched role instance and one DID — see
+    /// [`RoleGrantLinks`].
     ///
+    /// `role_class` — the role query's class, needed because `did_property`
+    ///   is a **property name** and only that class's shape says which RDF
+    ///   predicate carries it (see [`did_property_predicate`]).
     /// `instance_id` — the instance URI `model_query` returned.
-    /// `grant_predicate` — the role query's `didProperty`, if any; `None`
+    /// `did_property` — the role query's `didProperty`, if any; `None`
     ///   for `$did`-style queries, where no single property carries the DID.
     /// `did` — the candidate's plain DID.
     ///
-    /// The default knows nothing (no grant link, no tombstones). A caller
-    /// that gets `granted_at: None` must date the grant from the instance itself
+    /// The default knows nothing (no grant links, no tombstones). A caller
+    /// that gets no grant link must date the grant from the instance itself
     /// — `resolve_role_grants` does — so a stub that stays on this default
     /// never turns into "granted since forever".
-    async fn role_grant_timestamps(
+    async fn role_grant_links(
         &self,
+        _role_class: &str,
         _instance_id: &str,
-        _grant_predicate: Option<&str>,
+        _did_property: Option<&str>,
         _did: &str,
-    ) -> anyhow::Result<RoleGrantTimestamps> {
-        Ok(RoleGrantTimestamps::default())
+    ) -> anyhow::Result<RoleGrantLinks> {
+        Ok(RoleGrantLinks::default())
     }
 }
 
@@ -448,33 +546,115 @@ fn target_names_did(target: &str, did: &str, did_literal: &str) -> bool {
     target == did || crate::utils::normalize_legacy_literal(target).as_ref() == did_literal
 }
 
+impl PerspectiveInstance {
+    /// Resolve a role query's `didProperty` — a **property name** — to the RDF
+    /// predicate the assignment links in the graph actually carry.
+    ///
+    /// This is the asymmetry that made every `didProperty` role's grant links
+    /// come back empty before #1065. `model_query` resolves names through the
+    /// SDNA (`compile_leaf_condition` matches `p.name` and emits
+    /// `p.predicate`), so a `where.owner = <did>` condition matches. But
+    /// `get_links` forwards its `predicate` string verbatim
+    /// (`perspective_instance::get_links`), so querying `predicate: "owner"`
+    /// against a graph holding `ns://owner` matched nothing. `granted_at` then
+    /// silently fell back to `asserted_instance_timestamp` — the instance's
+    /// *earliest* link, earlier than the assignment — so the window meant to
+    /// be narrow was the widest possible one. Revocations were never affected
+    /// because their query uses the literal constant
+    /// `ad4m://flow/role_grant_revoked`, not a property name; that asymmetry
+    /// was the tell.
+    ///
+    /// Both spellings resolve: the property name (`owner`, the SDNA form) and
+    /// the predicate itself (`ns://owner`), because a hand-written SDNA may
+    /// name either and a role rule that used to be inert must not start
+    /// gating differently depending on which one its author picked.
+    ///
+    /// Unresolvable is an **`Err`**, not an empty predicate: a role rule
+    /// naming a property this class does not declare cannot be evaluated, and
+    /// per [`resolve_role_grants`](super::flow_instance::roles::resolve_role_grants)
+    /// a translation failure fails closed rather than degrading to "granted
+    /// since forever".
+    fn did_property_predicate(
+        &self,
+        role_class: &str,
+        did_property: &str,
+    ) -> anyhow::Result<String> {
+        let shape = self.get_shape(role_class).map_err(|e| {
+            anyhow::anyhow!(
+                "role_grant_links: cannot load shape for role class `{role_class}` to resolve \
+                 didProperty `{did_property}`: {e}"
+            )
+        })?;
+        let by_name = shape
+            .properties
+            .iter()
+            .find(|p| p.name == did_property && !p.predicate.is_empty())
+            .map(|p| p.predicate.clone())
+            .or_else(|| {
+                shape
+                    .include_relations
+                    .iter()
+                    .find(|r| r.name == did_property && !r.predicate.is_empty())
+                    .map(|r| r.predicate.clone())
+            });
+        if let Some(predicate) = by_name {
+            return Ok(predicate);
+        }
+        let declares_predicate = shape.predicates().iter().any(|p| p == did_property);
+        if declares_predicate {
+            return Ok(did_property.to_string());
+        }
+        anyhow::bail!(
+            "role_grant_links: role class `{role_class}` declares no property or relation named \
+             `{did_property}` (and no predicate spelled that way), so the assignment links for \
+             this role cannot be found; refusing to gate (fail-closed)"
+        )
+    }
+}
+
 #[async_trait]
 impl RequiresQueryable for PerspectiveInstance {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
         PerspectiveInstance::model_query(self, class_name, query_json).await
     }
 
-    async fn role_grant_timestamps(
+    async fn role_grant_links(
         &self,
+        role_class: &str,
         instance_id: &str,
-        grant_predicate: Option<&str>,
+        did_property: Option<&str>,
         did: &str,
-    ) -> anyhow::Result<RoleGrantTimestamps> {
-        use ad4m_client::literal::Literal;
-        let did_literal = Literal::from_string(did.to_string())
-            .to_url()
-            .map_err(|e| {
-                anyhow::anyhow!("role_grant_timestamps: literal encode DID `{did}`: {e}")
-            })?;
-        let names_did = |target: &str| target_names_did(target, did, &did_literal);
+    ) -> anyhow::Result<RoleGrantLinks> {
+        // `did_property` is a property NAME; the graph holds the predicate.
+        // Resolving it here is what makes grant links travel at all — see
+        // `did_property_predicate`.
+        let grant_predicate = match did_property {
+            Some(prop) => Some(self.did_property_predicate(role_class, prop)?),
+            None => None,
+        };
+        let grant_predicate = grant_predicate.as_deref();
+        let did_literal = did_literal_url(did)
+            .map_err(|e| anyhow::anyhow!("role_grant_links: {instance_id}: {e}"))?;
+        let grant_counts = |l: &LinkExpression| grant_link_names_did(l, did, &did_literal);
+        let revocation_counts =
+            |l: &LinkExpression| revocation_link_counts_for_did(l, did, &did_literal);
+        // Decorated → plain at the boundary: `proof.valid` and `status` are
+        // this executor's read-model flags, not link material — carrying them
+        // would carry claims, and every consumer computes the verdict from
+        // the signature itself (see `RoleGrantLinks`).
+        let as_carried = |l: DecoratedLinkExpression| {
+            let mut l = LinkExpression::from(l);
+            l.status = None;
+            l
+        };
 
-        // Earliest by parsed instant, not by string — grant links are
+        // Sorted by parsed instant, not by string — grant links are
         // client-stamped and clients disagree on RFC 3339 flavour (#1000).
-        // A link whose timestamp does not parse cannot date the grant; if
-        // none parses this stays `None`, so the caller falls back to the
-        // instance's own timestamp or fails closed.
+        // A link whose timestamp does not parse can never date a grant, so it
+        // is not worth carrying; when none parses this stays empty and the
+        // reader falls back to the instance's own timestamp or fails closed.
         use crate::perspectives::flow_instance::time::parse_link_timestamp;
-        let granted_at = match grant_predicate {
+        let raw_grant_links: Vec<LinkExpression> = match grant_predicate {
             Some(pred) => self
                 .get_links(&LinkQuery {
                     source: Some(instance_id.to_string()),
@@ -483,14 +663,71 @@ impl RequiresQueryable for PerspectiveInstance {
                 })
                 .await?
                 .into_iter()
-                .filter(|l| names_did(&l.data.target))
-                .filter_map(|l| parse_link_timestamp(&l.timestamp).map(|dt| (dt, l.timestamp)))
-                .min()
-                .map(|(_, ts)| ts),
-            None => None,
+                .map(as_carried)
+                .collect(),
+            None => Vec::new(),
         };
+        let mut grant_links: Vec<LinkExpression> = raw_grant_links
+            .iter()
+            .filter(|l| grant_counts(l) && parse_link_timestamp(&l.timestamp).is_some())
+            .cloned()
+            .collect();
+        // A `didProperty` role whose assignment links cannot be found is not a
+        // neutral outcome: `granted_at` falls back to
+        // `asserted_instance_timestamp`, which is the instance's *earliest*
+        // link and therefore normally EARLIER than the assignment — the
+        // widest possible window, not the narrow one the rule asked for. That
+        // is exactly the shape of the #1027 hole this commit's parent fixed,
+        // and what made it survive a fully green suite was that nothing
+        // distinguished "this query names no didProperty" from "this
+        // didProperty resolves to nothing". Warn so the next spelling drift
+        // announces itself instead of silently widening eligibility.
+        if let Some(pred) = grant_predicate {
+            if grant_links.is_empty() {
+                log::warn!(
+                    "role_grant_links: role class `{role_class}` instance `{instance_id}`: \
+                     didProperty `{}` resolved to predicate `{pred}` but no assignment link for \
+                     `{did}` survived (store returned {} link(s) on that predicate). \
+                     `granted_at` will fall back to the instance's own timestamp, which is \
+                     normally EARLIER than the assignment — a WIDER eligibility window than the \
+                     rule intends. Check that the didProperty spelling matches the class shape \
+                     and that the assignment link carries a parseable RFC 3339 timestamp.",
+                    did_property.unwrap_or(pred),
+                    raw_grant_links.len(),
+                );
+            }
+        }
+        grant_links.sort_by(|a, b| {
+            (parse_link_timestamp(&a.timestamp), &a.timestamp)
+                .cmp(&(parse_link_timestamp(&b.timestamp), &b.timestamp))
+        });
+        // Every filter runs before the cap, and the cap runs last. That order
+        // is load-bearing, not tidiness: the cap keeps the EARLIEST links, and
+        // a reader-side filter that only ever removes links (#1063 adds a
+        // signature one) then sees whatever survived collection. Cap first and
+        // the two invert — N forged early links evict the genuine later one
+        // here, the reader drops all N, `resolve` finds no grant link at all
+        // and falls back to `asserted_instance_timestamp`, which is *earlier*
+        // than the grant the filter existed to protect. Fail-open, from a
+        // filter meant to fail closed.
+        //
+        // So the cap is applied to a signature-preferred ordering: links whose
+        // signature verifies claim slots first — computed from the signature
+        // here, since the carried form deliberately has no verdict flag to
+        // read. This is a *preference*, never a filter — an unverified link
+        // is still carried while there is room, which is what keeps #1064 and
+        // #1063 out of this PR. Under the cap nothing changes; at the cap a
+        // forger cannot evict a genuine link, and dropping an unverified
+        // *earlier* link can only move `granted_at` later, which is the
+        // fail-closed direction.
+        grant_links.sort_by_cached_key(|l| !l.compute_proof_valid());
+        grant_links.truncate(MAX_GRANT_LINKS);
+        grant_links.sort_by(|a, b| {
+            (parse_link_timestamp(&a.timestamp), &a.timestamp)
+                .cmp(&(parse_link_timestamp(&b.timestamp), &b.timestamp))
+        });
 
-        let revocations: Vec<RoleRevocation> = self
+        let revocation_links: Vec<LinkExpression> = self
             .get_links(&LinkQuery {
                 source: Some(instance_id.to_string()),
                 predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
@@ -498,18 +735,13 @@ impl RequiresQueryable for PerspectiveInstance {
             })
             .await?
             .into_iter()
-            // The vote rule (`atom::signed_by`): a link whose signature does
-            // not verify is not a link anyone wrote.
-            .filter(|l| l.proof.valid == Some(true) && names_did(&l.data.target))
-            .map(|l| RoleRevocation {
-                by: l.author,
-                at: l.timestamp,
-            })
+            .map(as_carried)
+            .filter(revocation_counts)
             .collect();
 
-        Ok(RoleGrantTimestamps {
-            granted_at,
-            revocations,
+        Ok(RoleGrantLinks {
+            grant_links,
+            revocation_links,
         })
     }
 }
@@ -1206,6 +1438,82 @@ mod tests {
             canonical_json(&v),
             r#"{"a":1,"b":{"x":[{"p":0,"q":1}],"y":2}}"#
         );
+    }
+
+    /// The two predicates both sides of the wire share, pinned together so a
+    /// change to one that should have touched the other is visible here.
+    ///
+    /// Target matching is identical for both and must accept every spelling
+    /// the graph uses for a DID target — an unrecognised *tombstone* spelling
+    /// would fail open (#1014).
+    ///
+    /// They differ on signatures, and that difference is the tested contract,
+    /// not an accident: a tombstone needs a signature that verifies, a grant
+    /// link does not (yet — #1063). The verdict is **computed** from the
+    /// signature — the carried form has no verdict flag a fixture could set —
+    /// so a fixture that wants a tombstone to count has to sign it for real,
+    /// and a forged one is one signed by a key that is not its stated
+    /// author's.
+    #[test]
+    fn grant_and_revocation_predicates_differ_only_on_the_signature_check() {
+        use crate::agent::signatures::TestSigner;
+        use ad4m_client::literal::Literal;
+        let did = "did:key:alice";
+        let did_literal = did_literal_url(did).unwrap();
+        let other = Literal::from_string("did:key:bob".to_string())
+            .to_url()
+            .unwrap();
+        let legacy = did_literal.replace("literal:string:", "literal://string:");
+        let admin = TestSigner::generate();
+        let forger = TestSigner::generate();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // A valid link is signed by its stated author's own key; a forged one
+        // states the same author but carries somebody else's signature.
+        let signed = |target: &str, valid: bool| -> LinkExpression {
+            let signing_key = if valid { &admin } else { &forger };
+            let mut expr = signing_key.sign_at(
+                crate::types::Link {
+                    source: "r0".into(),
+                    predicate: Some("agent".into()),
+                    target: target.into(),
+                }
+                .normalize(),
+                at,
+            );
+            expr.author = admin.did.clone();
+            expr.proof.key = admin.key_id.clone();
+            LinkExpression::from(expr)
+        };
+
+        for target in [did, did_literal.as_str(), legacy.as_str()] {
+            assert!(
+                revocation_link_counts_for_did(&signed(target, true), did, &did_literal),
+                "a signed tombstone naming the DID as `{target}` counts"
+            );
+            assert!(
+                !revocation_link_counts_for_did(&signed(target, false), did, &did_literal),
+                "a tombstone whose signature does not verify never counts, whatever it names"
+            );
+            for valid in [true, false] {
+                assert!(
+                    grant_link_names_did(&signed(target, valid), did, &did_literal),
+                    "a grant link is carried on target match alone (valid={valid}); \
+                     signature-filtering it is #1063, not this PR"
+                );
+            }
+        }
+        for valid in [true, false] {
+            assert!(
+                !revocation_link_counts_for_did(&signed(&other, valid), did, &did_literal),
+                "a tombstone naming another DID is not this DID's history"
+            );
+            assert!(
+                !grant_link_names_did(&signed(&other, valid), did, &did_literal),
+                "a grant link naming another DID is not this DID's history"
+            );
+        }
     }
 
     #[test]

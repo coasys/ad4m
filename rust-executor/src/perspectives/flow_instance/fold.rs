@@ -16,15 +16,14 @@
 //!   is by an explicit sort key.
 //! - **Re-verifiable off-perspective.** [`fold`] takes plain data and does no
 //!   I/O, so a verifier outside the neighbourhood can re-run it over a
-//!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. How
-//!   much that verdict is worth differs by half: the proposals and votes are
-//!   signed links the verifier re-checks itself, while the `fromRole`
-//!   history — grant times and revocation tombstones, against which each
-//!   vote is gated as of its own timestamp — is what this replica read: the
-//!   read-set carries each role instance's [`RoleGrantWindow`](super::roles::RoleGrantWindow)
-//!   values but cites the underlying links by id, author and timestamp
-//!   rather than carrying them as signed links — see
-//!   [`ReadSet`](super::ReadSet).
+//!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. Both
+//!   halves are worth the same now: the proposals and votes are signed links
+//!   the verifier re-checks itself, and so is the `fromRole` history — the
+//!   read-set carries the grant links and revocation tombstones themselves,
+//!   and [`RoleGrantEvidence::resolve`](super::roles::RoleGrantEvidence::resolve)
+//!   recomputes each [`RoleGrantWindow`](super::roles::RoleGrantWindow) from
+//!   them, so no grant time or revocation is anyone's assertion. What stays
+//!   asserted is named on [`ReadSet`](super::ReadSet).
 //! - **A function of the links present now.** Delete a settled vote and the
 //!   fold recomputes without it, so the flow stands where it stood before
 //!   that vote. The graph is the truth and the state follows it.
