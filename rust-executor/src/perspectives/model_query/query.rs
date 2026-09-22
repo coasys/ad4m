@@ -101,7 +101,9 @@ async fn walk_levels(
     levels: &[usize],
 ) -> Result<Vec<String>, Error> {
     let mut ordered: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    // Seeded with the roots so that a cycle back to an anchor neither returns
+    // the anchor as its own descendant nor walks it a second time.
+    let mut seen: HashSet<String> = roots.iter().cloned().collect();
     let mut frontier = roots;
 
     for (depth, limit) in levels.iter().enumerate() {
@@ -201,6 +203,32 @@ pub(super) async fn execute_model_query_inner(
             instances: vec![],
             total_count: 0,
         });
+    }
+
+    // The scope's documentation promises these combinations are mutually
+    // exclusive; honouring only one of them silently would be a wrong answer
+    // that looks like a right one, so they are refused up front — the same
+    // treatment a transitive projection gives a reifier filter.
+    if let Some(Scope::Traverse {
+        transitive,
+        limit_per_anchor,
+        levels: Some(_),
+        ..
+    }) = &query_input.parent
+    {
+        if *transitive {
+            return Err(Error::msg(
+                "Traverse scope: `levels` and `transitive` are mutually exclusive — a bounded \
+                 walk names its depths, a transitive path reaches everything. Use one.",
+            ));
+        }
+        if limit_per_anchor.is_some() {
+            return Err(Error::msg(
+                "Traverse scope: `levels` and `limitPerAnchor` are mutually exclusive — the walk \
+                 applies its own per-anchor limit at every depth, so a separate one has no place \
+                 to act. Put the first level's breadth in `levels[0]`.",
+            ));
+        }
     }
 
     // Fast path: COUNT-only
@@ -303,8 +331,14 @@ pub(super) async fn execute_model_query_inner(
     // always such a filter, being link metadata rather than a property of the shape, so a thread
     // hiding muted authors — every thread WE draws — came back one level deep.
     //
-    // What stays tied to it is the global LIMIT/OFFSET below: truncating in the store before a
-    // post-hydration filter runs would discard rows that filter would have kept.
+    // The global LIMIT/OFFSET is pushed into the store only when the scope does NOT slice or walk.
+    // A pushed LIMIT truncates the id phase *before* the per-anchor slice, so one prolific anchor's
+    // rows fill the window and starve the others — and in a walk the same window would apply at
+    // every level, an OFFSET skipping rows at every depth. When the scope needs the phases for its
+    // own sake, the window is instead applied executor-side at the end, after the slice (and after
+    // any post-hydration filter). It also stays un-pushed when the filter itself cannot be:
+    // truncating in the store before a post-hydration filter runs would discard rows that filter
+    // would have kept.
     //
     // The per-level slice is applied before such a filter, so a row it later removes has still
     // taken one of its parent's places. That is the same trade `limit_per_anchor` has always made,
@@ -378,23 +412,27 @@ pub(super) async fn execute_model_query_inner(
                 }
             }
         };
+        let push_window = can_push_pagination && !scope_needs_phases;
         Some(SparqlPagination {
             sort_key,
             direction,
-            offset: if can_push_pagination {
+            offset: if push_window {
                 query_input.offset
             } else {
                 None
             },
-            limit: if can_push_pagination {
-                query_input.limit
-            } else {
-                None
-            },
+            limit: if push_window { query_input.limit } else { None },
         })
     } else {
         None
     };
+    // Whether the caller's window has already been applied by the store. When false but a
+    // pagination subquery still ran (a slicing/walking scope, or an un-pushable filter), the
+    // window is applied executor-side at the end of the pipeline instead.
+    let window_pushed = sparql_pagination
+        .as_ref()
+        .map(|pg| pg.limit.is_some() || pg.offset.is_some())
+        .unwrap_or(false);
 
     let query_plan = build_instance_sparql(
         shape,
@@ -547,7 +585,7 @@ pub(super) async fn execute_model_query_inner(
     };
 
     // Apply ordering and pagination
-    let mut paginated: Vec<Value> = if sparql_pagination.is_some() {
+    let mut paginated: Vec<Value> = if window_pushed {
         // Ordering was pushed into the SPARQL pagination subquery and the
         // correct sequence has already been restored above — do not re-sort.
         // (Re-sorting here would also be a no-op-or-worse for Projection /
@@ -555,6 +593,20 @@ pub(super) async fn execute_model_query_inner(
         // counts, hydrated relations — aren't resolved yet at this point in
         // the pipeline.)
         instances
+    } else if sparql_pagination.is_some() {
+        // The pagination subquery ran — the order above is already right, so
+        // no re-sort (see the previous arm) — but the caller's window was NOT
+        // pushed into the store: either the scope slices or walks (a pushed
+        // LIMIT would truncate the id phase before the slice) or the filter
+        // runs after hydration (a pushed LIMIT would discard rows the filter
+        // would have kept). Both have happened by this point, so the window
+        // lands here.
+        let offset = query_input.offset.unwrap_or(0);
+        if let Some(limit) = query_input.limit {
+            instances.into_iter().skip(offset).take(limit).collect()
+        } else {
+            instances.into_iter().skip(offset).collect()
+        }
     } else {
         if let Some(ref order) = query_input.order {
             sort_instances(&mut instances, order);
