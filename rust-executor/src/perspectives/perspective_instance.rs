@@ -481,7 +481,7 @@ pub struct PerspectiveInstance {
     pub is_fast_polling: bool,
     pub retries: u32,
 
-    is_teardown: Arc<AtomicBool>,
+    pub(crate) is_teardown: Arc<AtomicBool>,
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
@@ -501,6 +501,12 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// The one debounced flow consensus pass this perspective may have
+    /// queued for inbound neighbourhood links — see
+    /// `flow_instance::trigger`. A std mutex: held for a field swap, never
+    /// across an await.
+    pub(crate) flow_pass_queue:
+        Arc<std::sync::Mutex<crate::perspectives::flow_instance::trigger::FlowPassQueue>>,
     /// Test-only fault injection for [`Self::add_link_expression`] (#981).
     /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
     /// `0` means the *next* call returns an error instead of writing, then
@@ -572,6 +578,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
         }
@@ -1586,6 +1593,13 @@ impl PerspectiveInstance {
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
+
+        // A peer's proposal, vote or flow-instance row changes what this
+        // replica's flow consensus pass would derive, and only that pass can
+        // update the (Local) cache and marks here — so queue one. Debounced
+        // and scoped; a no-op for diffs outside the flow vocabulary.
+        self.schedule_flow_consensus_pass(&decorated_diff);
+
         self.pubsub_publish_diff(decorated_diff).await;
 
         Ok(())
@@ -2453,10 +2467,40 @@ impl PerspectiveInstance {
         shacl_json: Option<String>,
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
-        let mutex = self.sdna_change_mutex.clone();
-        let _guard = mutex.lock().await;
-        self.add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
-            .await
+        let is_flow = matches!(sdna_type, SdnaType::Flow);
+        let result = {
+            let mutex = self.sdna_change_mutex.clone();
+            let _guard = mutex.lock().await;
+            self.add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+                .await?
+        };
+
+        // A flow definition entering the perspective means callers will
+        // immediately try to read FlowInstance / FlowTransitionProposal rows.
+        // Register those two hard-wired runtime classes now, so `findAll`
+        // answers `[]` on a fresh perspective instead of "no SHACL shape
+        // stored" (#1007).
+        //
+        // This MUST be outside the `sdna_change_mutex` guard above, and the
+        // explicit block is what releases it. `ensure_flow_model_classes`
+        // reaches `ensure_subject_class`, which calls back into *this*
+        // function (`hardwired_class.rs:105`) — and `sdna_change_mutex` is a
+        // plain non-reentrant `tokio::sync::Mutex`, so re-entering it while
+        // held deadlocks. Calling from `add_sdna_inner` (the obvious seam,
+        // since it is the one path every caller funnels through) does exactly
+        // that: it hangs with no error, no panic and no CPU, and CI reports it
+        // only as "Root tests timed out". Boxing the future silences the
+        // compiler's E0733 but does nothing about the lock.
+        //
+        // `Box::pin` is still required here: the call is still recursive in
+        // *type* terms even though it no longer re-enters the lock.
+        if is_flow {
+            Box::pin(crate::perspectives::flow_classes::ensure_flow_model_classes(self, context))
+                .await
+                .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
+        }
+
+        Ok(result)
     }
 
     /// Remove every SHACL link associated with the given target-class URIs.
@@ -2541,16 +2585,35 @@ impl PerspectiveInstance {
         entries: Vec<(String, String, SdnaType, Option<String>)>,
         context: &AgentContext,
     ) -> Result<Vec<bool>, AnyError> {
-        let mutex = self.sdna_change_mutex.clone();
-        let _guard = mutex.lock().await;
+        let any_flow = entries
+            .iter()
+            .any(|(_, _, sdna_type, _)| matches!(sdna_type, SdnaType::Flow));
 
-        let mut results = Vec::with_capacity(entries.len());
-        for (name, sdna_code, sdna_type, shacl_json) in entries {
-            let result = self
-                .add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
-                .await?;
-            results.push(result);
+        let results = {
+            let mutex = self.sdna_change_mutex.clone();
+            let _guard = mutex.lock().await;
+
+            let mut results = Vec::with_capacity(entries.len());
+            for (name, sdna_code, sdna_type, shacl_json) in entries {
+                let result = self
+                    .add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+                    .await?;
+                results.push(result);
+            }
+            results
+        };
+
+        // Same rule as `add_sdna`: register the flow-runtime classes only after
+        // the guard is released, because doing so re-enters `add_sdna` and
+        // `sdna_change_mutex` is not reentrant. Once per batch rather than per
+        // entry — `ensure_subject_class` is idempotent, so the extra calls
+        // would be harmless, just wasted writes.
+        if any_flow {
+            Box::pin(crate::perspectives::flow_classes::ensure_flow_model_classes(self, context))
+                .await
+                .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
         }
+
         Ok(results)
     }
 
@@ -2661,6 +2724,16 @@ impl PerspectiveInstance {
             // next query re-parses against the fresh store state.
             self.invalidate_shape(&name);
         }
+
+        // A flow definition entering the perspective means callers will
+        // immediately try to read FlowTransitionProposal / FlowInstance rows.
+        // Register those two hard-wired runtime classes now so that findAll
+        // returns [] rather than an RPC 500 on a fresh perspective.
+        //
+        // NOTE: flow-runtime class registration deliberately does NOT happen
+        // here. This function runs while `sdna_change_mutex` is held, and
+        // registering those classes re-enters `add_sdna` — see the comment on
+        // `add_sdna`, which does it after releasing the guard.
 
         Ok(true)
     }
