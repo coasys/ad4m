@@ -194,9 +194,26 @@ function createHolochainDelegate(languageAddress) {
             // last-writer-wins. A language-scoped key gives each language its
             // own cell. Resolved once per language; an app already installed
             // under this language's own app id keeps its key (and cell).
-            const agentKey = dnas.length > 0
-                ? await HOLOCHAIN_SERVICE.getAgentKeyForLanguage(
-                    languageAddress, `${languageAddress}-${dnas[0].nick}`)
+            //
+            // Adoption must consider every DNA's app id, not just the first:
+            // a language whose existing install sits under a later DNA (e.g.
+            // a DNA prepended in a language update) would otherwise get a
+            // fresh key and end up with cells under two different agent
+            // keys. The stored mapping in Ad4mDb still short-circuits
+            // Rust-side, so the probe only matters on first resolution.
+            let keyAppId = dnas.length > 0
+                ? `${languageAddress}-${dnas[0].nick}` : null;
+            if (dnas.length > 1) {
+                for (const dna of dnas) {
+                    const candidate = `${languageAddress}-${dna.nick}`;
+                    if (await HOLOCHAIN_SERVICE.getAppInfo(candidate)) {
+                        keyAppId = candidate;
+                        break;
+                    }
+                }
+            }
+            const agentKey = keyAppId !== null
+                ? await HOLOCHAIN_SERVICE.getAgentKeyForLanguage(languageAddress, keyAppId)
                 : null;
             for (const dna of dnas) {
                 const appId = `${languageAddress}-${dna.nick}`;
