@@ -235,10 +235,23 @@ impl HolochainServiceInterface {
         language_address: &str,
         app_id: &str,
     ) -> Result<HoloHash<Agent>, AnyError> {
+        // Serialize per language across lookup → adoption → keygen →
+        // persist: a concurrent caller waits here and then finds the
+        // winner's key in the stored mapping instead of generating its own.
+        let lock = LANGUAGE_KEY_LOCKS
+            .lock()
+            .expect("LANGUAGE_KEY_LOCKS poisoned")
+            .entry(language_address.to_string())
+            .or_default()
+            .clone();
+        let _guard = lock.lock().await;
+
         let setting_key = format!("language_agent_key:{}", language_address);
+        // A failed read must propagate: treating it as "no stored key"
+        // would generate and persist a new key over a valid mapping,
+        // silently forking the language's cell identity.
         if let Some(stored) =
-            crate::db::Ad4mDb::with_global_instance(|db| db.get_setting(&setting_key))
-                .unwrap_or(None)
+            crate::db::Ad4mDb::with_global_instance(|db| db.get_setting(&setting_key))?
         {
             match holochain::prelude::AgentPubKey::try_from(stored.as_str()) {
                 Ok(key) => return Ok(key),
@@ -332,6 +345,14 @@ impl HolochainServiceInterface {
 lazy_static! {
     static ref HOLOCHAIN_SERVICE: Arc<RwLock<Option<HolochainServiceInterface>>> =
         Arc::new(RwLock::new(None));
+
+    /// Serializes `agent_key_for_language` per language: without this, two
+    /// concurrent first resolutions of the same language can both observe
+    /// "no stored key, no installed app" and each generate + persist a
+    /// different key — last write wins in the DB while apps may already be
+    /// installed under the losing key (cell id = DNA hash + agent key).
+    static ref LANGUAGE_KEY_LOCKS: std::sync::Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>> =
+        std::sync::Mutex::new(std::collections::HashMap::new());
 }
 
 /// Set while `HolochainService::init` is running. What `holochain_service_once_started`

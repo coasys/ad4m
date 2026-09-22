@@ -1581,6 +1581,20 @@ mod tests {
             .expect("Failed to resolve key for langB");
         assert_ne!(key_a, key_b, "Two languages must get distinct agent keys");
 
+        // Concurrent first resolutions of the same language must agree:
+        // the per-language lock makes the loser adopt the winner's
+        // persisted key instead of generating and persisting its own.
+        let (key_c1, key_c2) = tokio::join!(
+            iface.agent_key_for_language("langC", "langC-main"),
+            iface.agent_key_for_language("langC", "langC-main"),
+        );
+        let key_c1 = key_c1.expect("Failed concurrent resolve 1 for langC");
+        let key_c2 = key_c2.expect("Failed concurrent resolve 2 for langC");
+        assert_eq!(
+            key_c1, key_c2,
+            "Concurrent first resolutions of one language must yield one key"
+        );
+
         // A corrupt stored mapping is re-resolved instead of wedging the language
         crate::db::Ad4mDb::with_global_instance(|db| {
             db.set_setting("language_agent_key:langA", "not-a-valid-agent-key")
