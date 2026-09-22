@@ -8247,3 +8247,216 @@ async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {
     );
     assert_eq!(ids.iter().filter(|id| id.starts_with("we://c")).count(), 6);
 }
+
+// ---------------------------------------------------------------------------
+// Bounded traversal × the global window (limit/offset), and refused combos
+// ---------------------------------------------------------------------------
+
+/// The global window must cap the union AFTER the per-anchor slice. Pushed
+/// into the id subquery it lands before, where one prolific anchor's rows fill
+/// it and starve the others: LIMIT 3 kept root's c1,c2,c3, the slice kept c1,
+/// and c1-the-anchor's own top reply never came back — one row where the
+/// correct answer is one per anchor, capped at three total.
+#[tokio::test]
+async fn global_limit_caps_the_union_after_the_per_anchor_slice() {
+    let store = comment_tree_store();
+    let ids_for = |limit: usize| {
+        let store = &store;
+        async move {
+            let query = ModelQueryInput {
+                parent: Some(traverse_scope(
+                    &["we://root", "we://c1"],
+                    false,
+                    ScopeDirection::Out,
+                    Some(1),
+                )),
+                order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+                limit: Some(limit),
+                ..Default::default()
+            };
+            let result =
+                execute_model_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+                    .await
+                    .expect("query should execute");
+            result
+                .instances
+                .iter()
+                .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    assert_eq!(
+        ids_for(3).await,
+        vec!["we://c1".to_string(), "we://r1".to_string()],
+        "one per anchor, and both fit the window"
+    );
+    assert_eq!(
+        ids_for(1).await,
+        vec!["we://c1".to_string()],
+        "the window still truncates the sliced union"
+    );
+}
+
+/// When the scope forces the two-phase plan but the filter cannot be pushed
+/// down, the window is not pushed either — and it must still be applied, after
+/// the filter. It used to be silently dropped: `Some(pagination)` was read
+/// downstream as "the store already truncated this".
+#[tokio::test]
+async fn global_limit_applies_when_the_filter_cannot_be_pushed() {
+    let store = comment_tree_store();
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "author".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::json!(["did:key:muted"])),
+            ..Default::default()
+        }),
+    );
+    let query = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(3),
+        )),
+        where_clause: Some(where_clause),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://c1"],
+        "limit 1 after the filter, not dropped"
+    );
+}
+
+/// The window belongs to the walk's whole result. Pushed into the store it
+/// would apply at every level — an OFFSET skipping rows at every depth.
+#[tokio::test]
+async fn the_window_applies_to_the_walks_union_not_to_each_level() {
+    let store = wide_comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![3, 2]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        offset: Some(1),
+        limit: Some(4),
+        ..Default::default()
+    };
+    let ids: Vec<String> =
+        execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+            .await
+            .expect("walk should execute")
+            .instances
+            .iter()
+            .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+            .collect();
+    // Breadth-first union: a0 a1 a2 b00 b01 b10 b11 b20 b21 — skip 1, take 4.
+    assert_eq!(
+        ids,
+        vec!["we://a1", "we://a2", "we://b00", "we://b01"],
+        "one window over the whole walk"
+    );
+}
+
+/// The documented mutual exclusions are refused, not silently resolved:
+/// honouring one of the two would be a wrong answer that looks like a right
+/// one, which is the failure mode this feature refuses everywhere else.
+#[tokio::test]
+async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
+    let store = comment_tree_store();
+
+    let with_transitive = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: true,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![3]),
+        }),
+        ..Default::default()
+    };
+    let err =
+        execute_model_query_from_json(&store, "Comment", &with_transitive, COMMENT_SHAPE_JSON)
+            .await
+            .expect_err("transitive + levels must be refused");
+    assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+
+    let with_limit = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: Some(2),
+            levels: Some(vec![3]),
+        }),
+        ..Default::default()
+    };
+    let err = execute_model_query_from_json(&store, "Comment", &with_limit, COMMENT_SHAPE_JSON)
+        .await
+        .expect_err("limitPerAnchor + levels must be refused");
+    assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+}
+
+/// A cycle back to the anchor: the walk neither returns the anchor as its own
+/// descendant nor walks it twice. (The suite's other stores are all trees, so
+/// nothing else reaches this path.)
+#[tokio::test]
+async fn a_level_walk_through_a_cycle_terminates_and_excludes_the_anchor() {
+    let store = SparqlStore::new(None).unwrap();
+    for (parent, child, ts) in [
+        ("we://a", "we://b", "2026-01-01T00:00:1001Z"),
+        ("we://b", "we://a", "2026-01-01T00:00:1002Z"),
+    ] {
+        store
+            .add_link(&make_link(parent, "we://comment", child, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", ts))
+            .unwrap();
+    }
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://a".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![10, 10, 10]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://b"],
+        "b once, a never — the walk saw the cycle"
+    );
+}

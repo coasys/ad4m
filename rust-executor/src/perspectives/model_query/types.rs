@@ -217,6 +217,15 @@ pub enum Scope {
     /// blast radius than the feature deserves. The split is also honest: the
     /// variants above identify *an* anchor, this one says how to walk from
     /// *several*.
+    ///
+    /// `rename_all` because the TS `TraverseScope` is spread verbatim into the
+    /// wire JSON, spelling this variant's multi-word fields in camelCase — and
+    /// serde ignores unknown fields on an untagged variant, so a missed
+    /// spelling here is not an error but a silently dropped limit. The other
+    /// variants' fields are all single words, which is why the enum never
+    /// needed this before. The snake_case alias keeps Rust-side spellings
+    /// working.
+    #[serde(rename_all = "camelCase")]
     Traverse {
         /// The anchors to walk from. One query answers for all of them, which
         /// is what keeps a level of a tree to a single round trip (and a single
@@ -242,7 +251,7 @@ pub enum Scope {
         /// executor between the two phases of the query. That placement is the
         /// whole point: the id phase over-fetches rows of one string, and the
         /// hydration phase, which is the expensive half, sees only the survivors.
-        #[serde(default)]
+        #[serde(default, alias = "limit_per_anchor")]
         limit_per_anchor: Option<usize>,
         /// Walk the relation level by level, keeping this many results per anchor at each depth —
         /// `[10, 5, 3]` is "ten replies, five under each of those, three under each of *those*".

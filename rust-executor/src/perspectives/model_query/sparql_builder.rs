@@ -2658,6 +2658,45 @@ mod traverse_scope_tests {
         }
     }
 
+    /// The wire spelling is camelCase: TS spreads its `TraverseScope` verbatim
+    /// into the query JSON, and serde ignores unknown fields on an untagged
+    /// variant — so before the variant-level `rename_all`, `limitPerAnchor`
+    /// deserialized to a scope with *no* limit. A wrong answer, not an error,
+    /// which is why this is pinned.
+    #[test]
+    fn traverse_scope_fields_deserialize_from_the_camel_case_wire_spelling() {
+        let scope: Scope = serde_json::from_value(serde_json::json!({
+            "ids": "test://a",
+            "predicate": "test://comment",
+            "limitPerAnchor": 5,
+        }))
+        .expect("camelCase spelling");
+        match scope {
+            Scope::Traverse {
+                limit_per_anchor, ..
+            } => assert_eq!(
+                limit_per_anchor,
+                Some(5),
+                "the TS-spelled field must reach the executor"
+            ),
+            other => panic!("expected a Traverse scope, got {other:?}"),
+        }
+
+        // The snake_case alias keeps Rust-side JSON working.
+        let scope: Scope = serde_json::from_value(serde_json::json!({
+            "ids": "test://a",
+            "predicate": "test://comment",
+            "limit_per_anchor": 3,
+        }))
+        .expect("snake_case alias");
+        match scope {
+            Scope::Traverse {
+                limit_per_anchor, ..
+            } => assert_eq!(limit_per_anchor, Some(3)),
+            other => panic!("expected a Traverse scope, got {other:?}"),
+        }
+    }
+
     /// The untagged enum picks a variant by the fields present, so the existing
     /// two spellings must keep winning for payloads that have always meant them.
     #[test]
