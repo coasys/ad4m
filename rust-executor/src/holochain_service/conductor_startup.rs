@@ -22,11 +22,11 @@ use std::time::Duration;
 use log::{error, info, warn};
 use tokio::sync::watch;
 
-use crate::agent::AgentService;
-use crate::holochain_service::{
+use super::{
     maybe_get_holochain_service, ConductorStarting, HolochainService, LocalConductorConfig,
     SERVICE_WAIT,
 };
+use crate::agent::AgentService;
 use crate::languages::error::LanguageError;
 use crate::languages::LanguageController;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC};

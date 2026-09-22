@@ -6,13 +6,13 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
-use crate::agent::conductor_startup::spawn_conductor_startup;
 use crate::agent::{
     did_document_for_context, AgentContext, AgentService, AgentSignature as InternalAgentSignature,
 };
 use crate::entanglement_service::{
     add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key,
 };
+use crate::holochain_service::conductor_startup::spawn_conductor_startup;
 use crate::languages::LanguageController;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
 use crate::types::domain::Perspective as DomainPerspective;

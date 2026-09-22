@@ -30,6 +30,7 @@ use url2::Url2;
 
 use tokio_stream::StreamExt;
 
+pub mod conductor_startup;
 pub mod holochain_service_extension;
 pub(crate) mod interface;
 
