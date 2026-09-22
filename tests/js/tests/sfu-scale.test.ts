@@ -10,7 +10,7 @@ describe("SFU: Scale", function () {
   this.timeout(1200_000);
 
   sfuScenario(s1Sfu20Peer, 300_000);
-  sfuScenario(s2SfuCascade4Node, 300_000, "cascade redirect logic does not distribute peers across nodes");
+  sfuScenario(s2SfuCascade4Node, 300_000);
   sfuScenario(s3MaxParticipantsEnforced);
   sfuScenario(s4SfuMemoryChurn, 300_000);
 });
