@@ -8460,3 +8460,44 @@ async fn a_level_walk_through_a_cycle_terminates_and_excludes_the_anchor() {
         "b once, a never — the walk saw the cycle"
     );
 }
+
+/// One anchor named below another is still an anchor: it is where the walk
+/// starts, not something the walk found, so it does not occupy a place in the
+/// other's breadth — and its own subtree is walked from depth 0 rather than
+/// again one level down.
+///
+/// This is the multi-anchor face of seeding `seen` with the roots, and the
+/// spelling a caller reaches by accident — "refresh these two branches" where
+/// one happens to sit under the other. The cycle test covers a graph that loops
+/// back; this covers a tree where the caller's own anchor list overlaps.
+#[tokio::test]
+async fn an_anchor_named_below_another_is_not_also_reported_as_its_child() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string(), "we://c1".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![10, 10]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    // Depth 0 from both anchors: root's c2, c3 (c1 is an anchor) and c1's r1, r2.
+    // Depth 1 from those: r1's rr1. c1's subtree is walked once, from c1.
+    assert_eq!(
+        ids,
+        vec!["we://c2", "we://c3", "we://r1", "we://r2", "we://rr1"],
+        "c1 appears nowhere, and its subtree is not walked twice"
+    );
+}
