@@ -8501,3 +8501,284 @@ async fn an_anchor_named_below_another_is_not_also_reported_as_its_child() {
         "c1 appears nowhere, and its subtree is not walked twice"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A scope the builder cannot express, a slice that counts rows, and a total
+// that belongs to neither question
+// ---------------------------------------------------------------------------
+
+/// A shape with no flag property and no required property, so the timestamp
+/// probe falls back to `?source ?_anyP ?_anyT` and binds one row per property.
+/// That fallback is what turns "rows" and "instances" into different numbers.
+const LOOSE_SHAPE_JSON: &str = r#"{
+    "className": "Loose",
+    "properties": {
+        "text": { "predicate": "we://text", "required": false },
+        "title": { "predicate": "we://title", "required": false },
+        "note": { "predicate": "we://note", "required": false }
+    },
+    "relations": {}
+}"#;
+
+/// Build a store whose first child carries three properties and second carries
+/// one, so the two differ in how many timestamp rows they bind.
+fn lopsided_property_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    let mut link = |s: &str, p: &str, o: &str, t: &mut i32| {
+        *t += 1;
+        store
+            .add_link(&make_link(s, p, o, &format!("2026-01-01T00:00:{:04}Z", t)))
+            .unwrap();
+    };
+    link("we://root", "we://comment", "we://k1", &mut t);
+    link("we://k1", "we://text", "literal://string:a", &mut t);
+    link("we://k1", "we://title", "literal://string:b", &mut t);
+    link("we://k1", "we://note", "literal://string:c", &mut t);
+    link("we://root", "we://comment", "we://k2", &mut t);
+    link("we://k2", "we://text", "literal://string:d", &mut t);
+    link("we://root", "we://comment", "we://k3", &mut t);
+    link("we://k3", "we://text", "literal://string:e", &mut t);
+    store
+}
+
+/// A row of the id phase has to mean an instance, or every limit counts the
+/// wrong thing. The fallback timestamp probe binds one row per property, so
+/// without aggregation a source with three properties takes three of its
+/// parent's places and the caller gets one result where two were asked for.
+#[tokio::test]
+async fn a_per_anchor_limit_counts_instances_not_timestamp_rows() {
+    let store = lopsided_property_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: Some(2),
+            levels: None,
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://k1", "we://k2"],
+        "two per anchor means two instances, not two rows about one instance"
+    );
+}
+
+/// The same arithmetic on the ordinary paged path, which has always had it:
+/// `limit: 2` over a shape whose probe binds several rows per source returned
+/// one instance.
+#[tokio::test]
+async fn a_global_limit_counts_instances_not_timestamp_rows() {
+    let store = lopsided_property_store();
+    let query = ModelQueryInput {
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://k1", "we://k2"],
+        "two instances, not two rows"
+    );
+}
+
+/// An id or predicate that cannot be written as a term cannot match one, so a
+/// scope built on it selects nothing. Dropping the scope instead dropped the
+/// class conformance with it and answered with every link in the store — the
+/// unbounded read the empty anchor list is already guarded against.
+#[tokio::test]
+async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
+    let store = comment_tree_store();
+    store
+        .add_link(&make_link(
+            "we://unrelated",
+            "ad4m://type",
+            "we://Something",
+            "2026-01-01T00:00:9999Z",
+        ))
+        .unwrap();
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            // A space cannot appear in an IRI term.
+            predicate: "we://comment oops".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: None,
+        }),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert!(
+        result.instances.is_empty(),
+        "expected no rows, got {:?}",
+        result
+            .instances
+            .iter()
+            .filter_map(|i| i["id"].as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(result.total_count, 0, "and a total that agrees");
+}
+
+/// The same rule for the older spellings, which had the same hole: a `Raw`
+/// scope kept the class conformance and answered with every instance of the
+/// class, a `Model` scope dropped conformance too and answered with the store.
+#[tokio::test]
+async fn the_older_scopes_with_an_unwritable_id_match_nothing() {
+    let store = comment_tree_store();
+
+    let raw = ModelQueryInput {
+        parent: Some(Scope::Raw {
+            id: "we://root".to_string(),
+            predicate: "we://comment <oops>".to_string(),
+        }),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &raw, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert!(result.instances.is_empty(), "Raw scope must match nothing");
+
+    let model = ModelQueryInput {
+        parent: Some(Scope::Model {
+            id: "we://root <oops>".to_string(),
+            model: "Comment".to_string(),
+            field: None,
+        }),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &model, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert!(
+        result.instances.is_empty(),
+        "Model scope must match nothing"
+    );
+}
+
+/// A per-anchor limit picks its N in the store, so an order the store cannot
+/// express fully picks a different N than the caller asked for — and the rows
+/// it discards are never hydrated, so sorting afterwards cannot recover them.
+/// Refused rather than approximated.
+#[tokio::test]
+async fn a_per_anchor_limit_refuses_an_order_the_store_cannot_express() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(2),
+        )),
+        order: Some(vec![
+            ("text".to_string(), OrderDirection::ASC),
+            ("createdAt".to_string(), OrderDirection::ASC),
+        ]),
+        ..Default::default()
+    };
+    let err = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect_err("two order keys cannot drive a per-anchor slice");
+    assert!(err.to_string().contains("one key"), "got: {err}");
+
+    // One pushable key is the supported spelling and still works.
+    let ok = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(2),
+        )),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &ok, COMMENT_SHAPE_JSON)
+        .await
+        .expect("one key is fine");
+    assert_eq!(result.instances.len(), 2);
+
+    // A where-clause the store cannot push is not an ordering problem: the
+    // order is still pushed faithfully, so the slice is still right.
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "author".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::json!(["did:key:muted"])),
+            ..Default::default()
+        }),
+    );
+    let unpushable_filter = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(2),
+        )),
+        where_clause: Some(where_clause),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    execute_model_query_from_json(&store, "Comment", &unpushable_filter, COMMENT_SHAPE_JSON)
+        .await
+        .expect("a post-hydration filter is not a refusal");
+}
+
+/// A walk is bounded by its own figures, so the store's count answers a
+/// question it never asked — one step from the anchors, however many levels
+/// were walked. `levels: [1, 1]` returns two rows; the count reported three,
+/// the number of direct replies, which a client paging on reads as more to
+/// fetch.
+#[tokio::test]
+async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![1, 1]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["we://c1", "we://r1"], "one per level, two levels");
+    assert_eq!(
+        result.total_count, 2,
+        "the total is the walk's own union, not root's three direct replies"
+    );
+}
