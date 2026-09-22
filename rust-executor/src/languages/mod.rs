@@ -1131,7 +1131,7 @@ impl LanguageController {
 
     /// Apply template data to source language lines.
     /// Port of JS applyTemplateData method.
-    fn apply_template_data(
+    pub(crate) fn apply_template_data(
         source_lines: &mut Vec<String>,
         template_data: &serde_json::Map<String, JsonValue>,
     ) {
@@ -2870,5 +2870,155 @@ impl LanguageController {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_source(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn replaces_marked_const_variable() {
+        let mut lines = make_source(&[
+            "// preamble",
+            "//!@ad4m-template-variable",
+            r#"const SERVER_URL = "placeholder";"#,
+            "// rest of code",
+        ]);
+        let mut data = serde_json::Map::new();
+        data.insert("SERVER_URL".into(), json!("https://link.ad4m.dev"));
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(lines[2], r#"const SERVER_URL = "https://link.ad4m.dev""#);
+    }
+
+    #[test]
+    fn preserves_variable_when_key_absent_from_map() {
+        let mut lines = make_source(&[
+            "//!@ad4m-template-variable",
+            r#"const SERVER_URL = "https://link.ad4m.dev";"#,
+            "//!@ad4m-template-variable",
+            r#"const UID = "<to-be-filled>";"#,
+        ]);
+        let mut data = serde_json::Map::new();
+        data.insert("UID".into(), json!("abc-123"));
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(
+            lines[1], r#"const SERVER_URL = "https://link.ad4m.dev";"#,
+            "SERVER_URL must stay at its bundle default when not in the template map"
+        );
+        assert_eq!(lines[3], r#"const UID = "abc-123""#);
+    }
+
+    #[test]
+    fn handles_let_declaration() {
+        let mut lines = make_source(&["//!@ad4m-template-variable", r#"let uid = "";"#]);
+        let mut data = serde_json::Map::new();
+        data.insert("uid".into(), json!("some-uid"));
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(lines[1], r#"let uid = "some-uid""#);
+    }
+
+    #[test]
+    fn handles_var_declaration() {
+        let mut lines = make_source(&["//!@ad4m-template-variable", r#"var uid = "";"#]);
+        let mut data = serde_json::Map::new();
+        data.insert("uid".into(), json!("some-uid"));
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(lines[1], r#"var uid = "some-uid""#);
+    }
+
+    #[test]
+    fn multiple_variables_selective_replacement() {
+        let mut lines = make_source(&[
+            "//!@ad4m-template-variable",
+            r#"const SERVER_URL = "https://default.example";"#,
+            "//!@ad4m-template-variable",
+            r#"const UID = "<to-be-filled>";"#,
+            "//!@ad4m-template-variable",
+            r#"const DESCRIPTION = "default desc";"#,
+        ]);
+        let mut data = serde_json::Map::new();
+        data.insert("UID".into(), json!("my-uid"));
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(
+            lines[1], r#"const SERVER_URL = "https://default.example";"#,
+            "SERVER_URL untouched"
+        );
+        assert_eq!(lines[3], r#"const UID = "my-uid""#, "UID replaced");
+        assert_eq!(
+            lines[5], r#"const DESCRIPTION = "default desc";"#,
+            "DESCRIPTION untouched"
+        );
+    }
+
+    #[test]
+    fn no_marker_means_no_replacement() {
+        let mut lines = make_source(&[
+            r#"const SERVER_URL = "https://default.example";"#,
+            r#"const UID = "<to-be-filled>";"#,
+        ]);
+        let mut data = serde_json::Map::new();
+        data.insert("SERVER_URL".into(), json!("https://override.example"));
+        data.insert("UID".into(), json!("override-uid"));
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(
+            lines[0], r#"const SERVER_URL = "https://default.example";"#,
+            "without marker, even a matching key must not replace"
+        );
+        assert_eq!(lines[1], r#"const UID = "<to-be-filled>";"#);
+    }
+
+    #[test]
+    fn empty_template_map_changes_nothing() {
+        let original = vec![
+            "//!@ad4m-template-variable".to_string(),
+            r#"const UID = "<to-be-filled>";"#.to_string(),
+        ];
+        let mut lines = original.clone();
+        let data = serde_json::Map::new();
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(lines, original);
+    }
+
+    #[test]
+    fn json_escapes_special_characters() {
+        let mut lines = make_source(&["//!@ad4m-template-variable", r#"const NAME = "";"#]);
+        let mut data = serde_json::Map::new();
+        data.insert(
+            "NAME".into(),
+            json!("value with \"quotes\" and \\backslash"),
+        );
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(
+            lines[1], r#"const NAME = "value with \"quotes\" and \\backslash""#,
+            "special chars must get JSON-escaped so the bundle parses as valid JS"
+        );
+    }
+
+    #[test]
+    fn sll_fallback_scenario() {
+        let mut lines = make_source(&[
+            "//!@ad4m-template-variable",
+            r#"const SERVER_URL = "https://link.ad4m.dev";"#,
+            "//!@ad4m-template-variable",
+            r#"const UID = "<to-be-filled>";"#,
+        ]);
+        let mut data = serde_json::Map::new();
+        data.insert("UID".into(), json!("unique-id-123"));
+        data.insert("name".into(), json!("My Neighbourhood"));
+        LanguageController::apply_template_data(&mut lines, &data);
+        assert_eq!(
+            lines[1], r#"const SERVER_URL = "https://link.ad4m.dev";"#,
+            "SERVER_URL stays at default when MCP clone only provides uid+name"
+        );
+        assert_eq!(
+            lines[3], r#"const UID = "unique-id-123""#,
+            "UID gets replaced"
+        );
     }
 }

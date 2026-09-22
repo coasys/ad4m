@@ -8,7 +8,7 @@ use url::Url;
 use super::domain::{
     LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput,
 };
-use crate::agent::signatures::verify;
+use crate::agent::signatures::verify_or_false;
 use regex::Regex;
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -46,7 +46,7 @@ pub struct DecoratedExpressionProof {
 
 impl<T: Serialize> From<Expression<T>> for VerifiedExpression<T> {
     fn from(expr: Expression<T>) -> Self {
-        let valid = verify(&expr).unwrap_or(false);
+        let valid = verify_or_false(&expr, "VerifiedExpression::from");
         let invalid = !valid;
         VerifiedExpression {
             author: expr.author,
@@ -228,7 +228,18 @@ pub struct DecoratedLinkExpression {
 }
 
 impl DecoratedLinkExpression {
-    pub fn verify_signature(&mut self) {
+    /// Derive the signature verdict for this link, without touching
+    /// `self.proof.valid`.
+    ///
+    /// `proof.valid` is a *read view* over the signature, not a stored fact, so
+    /// every place that needs the verdict recomputes it from here rather than
+    /// trusting a value someone handed along. Normalizing `data` first is not
+    /// optional: the signature was produced over the normalized link, so
+    /// verifying the raw form reports a valid link as invalid.
+    ///
+    /// A verification error counts as "not verified" — see
+    /// [`verify_or_false`](crate::agent::signatures::verify_or_false).
+    pub fn compute_proof_valid(&self) -> bool {
         let link_expr = Expression::<Link> {
             author: self.author.clone(),
             timestamp: self.timestamp.clone(),
@@ -238,7 +249,11 @@ impl DecoratedLinkExpression {
                 signature: self.proof.signature.clone(),
             },
         };
-        let valid = verify(&link_expr).unwrap_or(false);
+        verify_or_false(&link_expr, "DecoratedLinkExpression::compute_proof_valid")
+    }
+
+    pub fn verify_signature(&mut self) {
+        let valid = self.compute_proof_valid();
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
     }
@@ -501,6 +516,7 @@ pub struct TriggeredNotification {
 pub enum ModelApiType {
     OpenAi,
     Anthropic,
+    Ollama,
 }
 
 impl FromStr for ModelApiType {
@@ -516,6 +532,9 @@ impl FromStr for ModelApiType {
             "anthropic" => Ok(ModelApiType::Anthropic),
             "Anthropic" => Ok(ModelApiType::Anthropic),
             "ANTHROPIC" => Ok(ModelApiType::Anthropic),
+            "ollama" => Ok(ModelApiType::Ollama),
+            "Ollama" => Ok(ModelApiType::Ollama),
+            "OLLAMA" => Ok(ModelApiType::Ollama),
             _ => Err(format!("Unknown ModelApiType: {}", s)),
         }
     }
@@ -527,6 +546,7 @@ impl ToString for ModelApiType {
         match self {
             ModelApiType::OpenAi => "OPEN_AI".to_string(),
             ModelApiType::Anthropic => "ANTHROPIC".to_string(),
+            ModelApiType::Ollama => "OLLAMA".to_string(),
         }
     }
 }

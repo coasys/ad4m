@@ -46,6 +46,7 @@ import {
     DenoTransport,
     DenoWebSocketFactory,
 } from "./src/adapters-deno.js";
+import { commitNeedsKeyRetry, type KeyRingStatus } from "./src/key-ring-policy.js";
 
 // ---------------------------------------------------------------------------
 // Template Variables
@@ -54,10 +55,10 @@ import {
 // Variables and possibleTemplateParams below.
 
 //!@ad4m-template-variable
-const SERVER_URL = "<to-be-filled>";
+const SERVER_URL = "https://link.ad4m.dev";
 
 //!@ad4m-template-variable
-const ROOM_ID = "<to-be-filled>";
+const UID = "<to-be-filled>";
 
 // ---------------------------------------------------------------------------
 // Module state (fresh per perspective instance — see language-interface-spec.md §2)
@@ -71,7 +72,6 @@ let wsClient: WsClient | null = null;
 /** The room's versioned key ring (version → decrypted AES-256-GCM key).
  * Null for a plaintext room OR while E2E setup is still in flight. */
 let keyRing: KeyRing | null = null;
-type KeyRingStatus = "none" | "ready" | "pending" | "error";
 /**
  * - "none": room has no E2E — plaintext commits are fine.
  * - "ready": key ring acquired and decrypted — encrypted commits ready.
@@ -83,9 +83,27 @@ type KeyRingStatus = "none" | "ready" | "pending" | "error";
 let keyRingStatus: KeyRingStatus = "none";
 /** True when this agent has been identified as the room admin. */
 let isRoomAdmin = false;
+/** Cooldown for key ring retries — shared across WS and HTTP paths (ms since epoch). */
+let lastKeyRingRetry = 0;
+const KEY_RING_RETRY_COOLDOWN_MS = 10_000;
+/** In-flight setupKeyRing promise for single-flight deduplication. */
+let keyRingInflight: Promise<void> | null = null;
+/** Monotonic lifecycle counter — incremented on teardown to invalidate
+ *  in-flight async operations from a previous lifecycle. */
+let lifecycleGen = 0;
 
 function isPlaceholder(value: string): boolean {
     return !value || value === "<to-be-filled>";
+}
+
+function setupKeyRingCoalesced(): Promise<void> {
+    if (!keyRingInflight) {
+        const p = setupKeyRing().finally(() => {
+            if (keyRingInflight === p) keyRingInflight = null;
+        });
+        keyRingInflight = p;
+    }
+    return keyRingInflight;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,20 +111,18 @@ function isPlaceholder(value: string): boolean {
 // ---------------------------------------------------------------------------
 
 async function setupKeyRing(): Promise<void> {
+    const gen = lifecycleGen;
     const config = getConfig();
     try {
         const token = await auth.getValidToken();
         const keysRes = await api.fetchRoomKeys(config, token);
+        if (gen !== lifecycleGen) return;
         if (!keysRes) {
-            // 404 — room has no E2E at all.
             keyRingStatus = "none";
             keyRing = null;
             return;
         }
         if (keysRes.keys.length === 0 && keysRes.e2e_enabled) {
-            // Room HAS E2E but this agent has no keys yet — a freshly
-            // added member awaiting grant from the admin. Refuse to
-            // commit plaintext into an encrypted room.
             keyRingStatus = "pending";
             keyRing = null;
             console.log(
@@ -126,6 +142,7 @@ async function setupKeyRing(): Promise<void> {
         const versions = [...keyRing.keys()].sort((a, b) => a - b);
         console.log(`[server-link-language] E2E key ring acquired (${versions.length} version(s): ${versions.join(", ")})`);
     } catch (err) {
+        if (gen !== lifecycleGen) return;
         keyRingStatus = "error";
         keyRing = null;
         console.error(
@@ -142,21 +159,21 @@ async function setupKeyRing(): Promise<void> {
  * get picked up. Returns true when new key versions were obtained.
  */
 async function refreshKeyRingIfNeeded(): Promise<boolean> {
+    const now = Date.now();
+    if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
+        return false;
+    }
+    lastKeyRingRetry = now;
     const prevSize = keyRing?.size ?? 0;
-    await setupKeyRing();
+    await setupKeyRingCoalesced();
     const newSize = keyRing?.size ?? 0;
     if (newSize > prevSize) {
         console.log("[server-link-language] key ring refreshed — re-bootstrapping");
         await syncModule.bootstrap();
-        // bootstrap() replaces the store but does not emit (by design —
-        // cold-start callers query the store directly).  Recovery callers
-        // must emit so the executor's perspective layer surfaces the
-        // recovered links.
         const recovered = syncModule.render();
         if (recovered.links.length > 0) {
             getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
         }
-        syncModule.clearPendingMissingVersions();
         return true;
     }
     return false;
@@ -289,16 +306,16 @@ const language = defineLanguage({
         myDid = getAgent().did();
         store.initStore(hash);
 
-        configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(ROOM_ID);
+        configured = !isPlaceholder(SERVER_URL) && !isPlaceholder(UID);
         if (!configured) {
             console.log(
                 `[server-link-language] init: did=${myDid}, template variables not filled in — ` +
-                "running inert until published with SERVER_URL/ROOM_ID.",
+                "running inert until published with SERVER_URL/UID.",
             );
             return;
         }
 
-        initAdapters({ config: { serverUrl: SERVER_URL, roomId: ROOM_ID } });
+        initAdapters({ config: { serverUrl: SERVER_URL, roomId: UID } });
         const config = getConfig();
 
         syncModule.initSync({
@@ -308,8 +325,13 @@ const language = defineLanguage({
             emitSyncState: (state) => getRuntime().emitSyncStateChange(state),
             getKeyRing: () => keyRing,
             refreshKeyRing: async () => {
+                const now = Date.now();
+                if (now - lastKeyRingRetry < KEY_RING_RETRY_COOLDOWN_MS) {
+                    return null;
+                }
+                lastKeyRingRetry = now;
                 const prevSize = keyRing?.size ?? 0;
-                await setupKeyRing();
+                await setupKeyRingCoalesced();
                 return (keyRing?.size ?? 0) > prevSize;
             },
             // Periodic admin key grants — fallback for when the WS
@@ -458,14 +480,11 @@ const language = defineLanguage({
             console.error("[server-link-language] initial websocket connect failed:", err);
         });
 
-        console.log(`[server-link-language] init complete: did=${myDid}, room=${ROOM_ID}`);
+        console.log(`[server-link-language] init complete: did=${myDid}, uid=${UID}`);
     },
 
     async teardown() {
-        // Drain any pending batched commits BEFORE we tear down auth/adapters.
-        // The main commit path now awaits the POST directly, but the batch
-        // infrastructure still exists (used by unit tests, retry timers) and
-        // may hold stale segments from a failed flush cycle.
+        lifecycleGen++;
         try {
             await syncModule.drainCommitBatch();
         } catch (err) {
@@ -485,6 +504,8 @@ const language = defineLanguage({
         keyRing = null;
         keyRingStatus = "none";
         isRoomAdmin = false;
+        lastKeyRingRetry = 0;
+        keyRingInflight = null;
         auth.resetAuth();
         resetAdapters();
         console.log("[server-link-language] teardown");
@@ -501,14 +522,24 @@ const language = defineLanguage({
         async commit(diff: PerspectiveDiff) {
             if (!configured) {
                 throw new Error(
-                    "server-link-language: not configured (SERVER_URL/ROOM_ID template variables unfilled)",
+                    "server-link-language: not configured (SERVER_URL/UID template variables unfilled)",
                 );
             }
-            if (keyRingStatus === "error" || keyRingStatus === "pending") {
+            if (commitNeedsKeyRetry(keyRingStatus)) {
                 console.log(
                     `[server-link-language] retrying E2E key ring acquisition before commit (status: ${keyRingStatus})...`,
                 );
-                await setupKeyRing();
+                await setupKeyRingCoalesced();
+                if (keyRingStatus === "ready") {
+                    console.log(
+                        "[server-link-language] key ring acquired — re-bootstrapping to recover skipped links",
+                    );
+                    await syncModule.bootstrap();
+                    const recovered = syncModule.render();
+                    if (recovered.links.length > 0) {
+                        getRuntime().emitPerspectiveDiff({ additions: recovered.links, removals: [] });
+                    }
+                }
             }
             if (keyRingStatus === "error") {
                 throw new Error(
@@ -671,4 +702,4 @@ export default language;
 // Template params metadata (for language.publish / LanguageMeta)
 // ---------------------------------------------------------------------------
 
-export const possibleTemplateParams: string[] = ["SERVER_URL", "ROOM_ID"];
+export const possibleTemplateParams: string[] = ["SERVER_URL", "UID"];
