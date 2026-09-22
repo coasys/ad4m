@@ -54,6 +54,12 @@ pub async fn chat_with_native_tools(
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
+    if let Some(name) = duplicate_tool_name(tools) {
+        return Err(OpenAIError::invalid_request(format!(
+            "`tools` names `{name}` twice"
+        )));
+    }
+
     let turns = to_turns(messages).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
     let specs = to_specs(tools);
 
@@ -150,13 +156,30 @@ pub(super) fn to_specs(tools: &[ToolDef]) -> Vec<ToolSpec> {
             description: tool.function.description.clone().unwrap_or_default(),
             // A function with no parameters still needs an object schema on the
             // wire; Anthropic rejects a tool whose `input_schema` is missing.
+            // `parameters: []` or `""` is rejected for the same reason, and the
+            // caller writes that field, so anything that is not an object is
+            // replaced here rather than sent and refused.
             parameters: tool
                 .function
                 .parameters
                 .clone()
+                .filter(Value::is_object)
                 .unwrap_or_else(|| json!({ "type": "object", "properties": {} })),
         })
         .collect()
+}
+
+/// The first name `tools[]` gives twice, if any.
+///
+/// A provider refuses a request with two tools of one name, and the caller
+/// wrote both, so this is a bad request rather than an executor fault. Keeping
+/// only one of them would be a guess about which the model should call.
+pub(super) fn duplicate_tool_name(tools: &[ToolDef]) -> Option<&str> {
+    let mut seen = std::collections::HashSet::new();
+    tools
+        .iter()
+        .map(|tool| tool.function.name.as_str())
+        .find(|name| !seen.insert(*name))
 }
 
 /// The reply as an OpenAI assistant message, keeping text written alongside

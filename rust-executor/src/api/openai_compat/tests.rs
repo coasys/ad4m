@@ -1405,6 +1405,37 @@ fn a_function_without_parameters_still_sends_an_object_schema() {
 }
 
 #[test]
+fn parameters_that_are_not_a_schema_object_are_replaced() {
+    // `"parameters": []` is the likeliest way a caller produces a request the
+    // provider refuses: an `input_schema` has to be an object.
+    let tools: Vec<ToolDef> = serde_json::from_value(serde_json::json!([
+        { "type": "function", "function": { "name": "a", "parameters": [] } },
+        { "type": "function", "function": { "name": "b", "parameters": "" } },
+        { "type": "function", "function": { "name": "c", "parameters": null } },
+    ]))
+    .unwrap();
+
+    for spec in native_tools::to_specs(&tools) {
+        assert_eq!(spec.parameters["type"], "object", "{}", spec.name);
+    }
+}
+
+#[test]
+fn two_tools_of_one_name_are_named_as_a_bad_request() {
+    // Anthropic refuses the pair, and choosing one of them for the caller is a
+    // guess about which the model should be able to call.
+    let tools: Vec<ToolDef> = serde_json::from_value(serde_json::json!([
+        { "type": "function", "function": { "name": "load" } },
+        { "type": "function", "function": { "name": "save" } },
+        { "type": "function", "function": { "name": "load" } },
+    ]))
+    .unwrap();
+
+    assert_eq!(native_tools::duplicate_tool_name(&tools), Some("load"));
+    assert_eq!(native_tools::duplicate_tool_name(&tools[..2]), None);
+}
+
+#[test]
 fn a_reply_with_calls_finishes_with_tool_calls_and_keeps_its_text() {
     let (message, finish_reason) = native_tools::response_message(reply_calling("Adding it now."));
     let body = serde_json::to_value(&message).unwrap();
