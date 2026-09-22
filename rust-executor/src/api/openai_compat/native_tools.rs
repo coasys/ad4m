@@ -279,14 +279,39 @@ pub(super) fn reply_chunks(
     chunks
 }
 
+/// One call the model made, as the OpenAI wire carries it.
+///
+/// `arguments` is a JSON *string* there, and the spec has it holding an object:
+/// a client parses it and indexes the result, so `"null"` or `"[]"` fails in the
+/// caller rather than in the tool, before anything can answer for it.
+///
+/// Both native providers can produce one. Anthropic documents `tool_use.input`
+/// as an object, but `ContentBlock::input` is `#[serde(default)]`, so a block
+/// that arrives without one reads as `Value::Null` and would go out as
+/// `"null"`. Ollama is the weaker guarantee of the two: `extract_tool_calls`
+/// copies `arguments` verbatim out of whatever a local model wrote, and no
+/// grammar constrains it to an object on the way.
+///
+/// So a value that is not an object goes under `_raw`, as it does coming the
+/// other way in `harness_bridge::to_provider_call`, and for the same reason:
+/// the model's output stays visible and the call stays answerable. An empty
+/// object would have the client dispatch the tool with no arguments and nothing
+/// to say anything was lost — a plausible wrong call in place of a legible bad
+/// one. It also makes the round trip stable, since `_raw` sent out is an object
+/// and comes back unchanged on the next turn.
 fn wire_call(call: crate::ai_service::providers::ToolCall) -> ToolCall {
+    let arguments = if call.arguments.is_object() {
+        call.arguments.to_string()
+    } else {
+        serde_json::json!({ "_raw": call.arguments.to_string() }).to_string()
+    };
+
     ToolCall {
         id: call.id,
         kind: "function".to_string(),
         function: FunctionCall {
             name: call.name,
-            // The wire carries arguments as a JSON string; providers parse it.
-            arguments: call.arguments.to_string(),
+            arguments,
         },
     }
 }

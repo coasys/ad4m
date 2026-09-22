@@ -1461,6 +1461,38 @@ fn a_reply_that_only_calls_omits_content() {
 }
 
 #[test]
+fn arguments_a_provider_did_not_send_as_an_object_go_out_under_raw() {
+    // `ContentBlock::input` is `#[serde(default)]`, so a `tool_use` block that
+    // arrives without one reads as null. Sent on as `"null"`, a client parses
+    // it and indexes the result — a failure in the caller, before the call can
+    // be answered. Under `_raw` the call is still a call, and still wrong in a
+    // way the model can see and correct.
+    let reply = ChatReply {
+        tool_calls: vec![crate::ai_service::providers::ToolCall {
+            id: "toolu_1".to_string(),
+            name: "update_schema".to_string(),
+            arguments: serde_json::Value::Null,
+        }],
+        ..Default::default()
+    };
+
+    let (message, _) = native_tools::response_message(reply.clone());
+    let body = serde_json::to_value(&message).unwrap();
+    assert_eq!(
+        body["tool_calls"][0]["function"]["arguments"],
+        r#"{"_raw":"null"}"#
+    );
+
+    // The streamed framing of the same reply says the same thing.
+    let chunks = native_tools::reply_chunks(&reply, "chatcmpl-1", "default", 7);
+    let call = serde_json::to_value(&chunks[1]).unwrap();
+    assert_eq!(
+        call["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+        r#"{"_raw":"null"}"#
+    );
+}
+
+#[test]
 fn a_reply_without_calls_is_a_plain_stop() {
     let (message, finish_reason) = native_tools::response_message(ChatReply {
         text: "Done.".to_string(),
