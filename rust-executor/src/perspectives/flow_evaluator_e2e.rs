@@ -6,10 +6,12 @@
 //! behave end to end.
 
 use super::flow_classes::{mint_flow_instance, write_flow_transition_proposal};
+use super::flow_context::FlowInstanceRecord;
 use super::flow_context::{load_flow_instances, load_shacl_flows};
 use super::flow_evaluator::{
     evaluate_flow_transitions, evidence_hash, run_engine_proposal_pass, SatisfiedTransition,
 };
+use super::flow_instance::{fold::DerivedState, FlowInstance, ReadSet};
 use super::flow_semantic_check::SemanticCheckLlm;
 use super::interpretation::LlmFlowProposal;
 use super::interpretation_test_support::{seed_instance, setup_perspective_no_llm, TASK_SDNA};
@@ -17,7 +19,7 @@ use super::model_query::types::ModelShape;
 use super::perspective_instance::PerspectiveInstance;
 use super::shacl_parser::parse_flow_to_links;
 use crate::agent::AgentContext;
-use crate::types::{LinkQuery, LinkStatus};
+use crate::types::{Link, LinkQuery, LinkStatus};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -25,14 +27,16 @@ const FLOW_URI: &str = "delivery://DeliveryFlow";
 const BASE_URI: &str = "ad4m://task/onboarding";
 const SCOPE_HINT: &str = "The scope is well-defined and actionable.";
 
-struct Fixture {
-    perspective: PerspectiveInstance,
+pub(super) struct Fixture {
+    pub(super) perspective: PerspectiveInstance,
     task_shape: ModelShape,
-    ctx: AgentContext,
-    instance_uri: String,
+    pub(super) ctx: AgentContext,
+    pub(super) instance_uri: String,
+    /// Canonical URI of the seeded flow definition (`{namespace}{name}Flow`).
+    pub(super) flow_uri: String,
 }
 
-fn literal(s: &str) -> String {
+pub(super) fn literal(s: &str) -> String {
     format!("literal:string:{}", urlencoding::encode(s))
 }
 
@@ -41,7 +45,7 @@ fn literal(s: &str) -> String {
 /// `semanticCheck` hint, plus one FlowInstance sitting in `identified`.
 /// `requires` and `semanticCheck` are declared in the flow JSON so
 /// `parse_flow_to_links` emits the production links.
-async fn seed_fixture(semantic_check: Option<&str>) -> Fixture {
+pub(super) async fn seed_fixture(semantic_check: Option<&str>) -> Fixture {
     seed_fixture_with_requires(
         serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]),
         semantic_check,
@@ -53,27 +57,42 @@ async fn seed_fixture_with_requires(
     requires: serde_json::Value,
     semantic_check: Option<&str>,
 ) -> Fixture {
-    let (mut perspective, mut shapes, ctx) =
-        setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
-
     let mut scoped_state =
         serde_json::json!({ "name": "scoped", "value": 0.5, "requires": requires });
     if let Some(hint) = semantic_check {
         scoped_state["semanticCheck"] = serde_json::Value::String(hint.to_string());
     }
-    let flow_json = serde_json::json!({
-        "name": "Delivery",
-        "namespace": "delivery://",
-        "states": [
-            { "name": "identified", "value": 0.0 },
-            scoped_state
-        ],
-        "transitions": [
-            { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
-        ],
-    })
-    .to_string();
-    let links = parse_flow_to_links(&flow_json, "Delivery").expect("parse_flow_to_links");
+    seed_flow(
+        serde_json::json!({
+            "name": "Delivery",
+            "namespace": "delivery://",
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                scoped_state
+            ],
+            "transitions": [
+                { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
+            ],
+        }),
+        "identified",
+    )
+    .await
+}
+
+/// Seed a perspective with one flow definition and one `FlowInstance` of it
+/// on [`BASE_URI`], sitting in `initial_state`. The definition goes in as
+/// production links via `parse_flow_to_links`, so the tests read exactly the
+/// shapes the writer emits.
+pub(super) async fn seed_flow(flow_json: serde_json::Value, initial_state: &str) -> Fixture {
+    let (mut perspective, mut shapes, ctx) =
+        setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
+
+    let name = flow_json["name"].as_str().expect("flow JSON has a name");
+    let flow_uri = format!(
+        "{}{name}Flow",
+        flow_json["namespace"].as_str().expect("namespace")
+    );
+    let links = parse_flow_to_links(&flow_json.to_string(), name).expect("parse_flow_to_links");
     for link in links {
         perspective
             .add_link(link, LinkStatus::Local, None, &ctx)
@@ -83,9 +102,9 @@ async fn seed_fixture_with_requires(
 
     let instance_uri = mint_flow_instance(
         &mut perspective,
-        FLOW_URI,
+        &flow_uri,
         BASE_URI,
-        "identified",
+        initial_state,
         "e2e-inst",
         None,
         &ctx,
@@ -98,18 +117,19 @@ async fn seed_fixture_with_requires(
         task_shape: shapes.remove(0),
         ctx,
         instance_uri,
+        flow_uri,
     }
 }
 
 /// Fixture with the guard already satisfied by one Task.
-async fn seed_satisfied_fixture(semantic_check: Option<&str>) -> Fixture {
+pub(super) async fn seed_satisfied_fixture(semantic_check: Option<&str>) -> Fixture {
     let mut f = seed_fixture(semantic_check).await;
     f.seed_task("ad4m://task/1", "Onboard Ana").await;
     f
 }
 
 impl Fixture {
-    async fn seed_task(&mut self, uri: &str, title: &str) {
+    pub(super) async fn seed_task(&mut self, uri: &str, title: &str) {
         seed_instance(
             &mut self.perspective,
             &self.ctx,
@@ -120,17 +140,107 @@ impl Fixture {
         .await;
     }
 
-    async fn satisfied(&self) -> Vec<SatisfiedTransition> {
-        let records = load_flow_instances(&self.perspective, &[BASE_URI.to_string()])
+    /// One `add_link` with the fixture's context, for the many test setups
+    /// that bolt a single link onto the seeded graph.
+    pub(super) async fn link(
+        &mut self,
+        source: &str,
+        predicate: &str,
+        target: &str,
+        status: LinkStatus,
+    ) {
+        self.perspective
+            .add_link(
+                Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: target.to_string(),
+                },
+                status,
+                None,
+                &self.ctx,
+            )
             .await
-            .expect("load_flow_instances");
+            .unwrap_or_else(|e| panic!("add_link({predicate}): {e:#}"));
+    }
+
+    /// `write_flow_transition_proposal` with the fixture's own DID, instance
+    /// URI and context filled in.
+    pub(super) async fn write_proposal(
+        &mut self,
+        proposal_id: &str,
+        from_state: &str,
+        to_state: &str,
+        evidence_ids: &[String],
+        evidence_hash: &str,
+    ) -> String {
+        let acting_did = crate::agent::did_for_context(&self.ctx).expect("did_for_context");
+        let instance_uri = self.instance_uri.clone();
+        write_flow_transition_proposal(
+            &mut self.perspective,
+            proposal_id,
+            &acting_did,
+            &instance_uri,
+            from_state,
+            to_state,
+            evidence_ids,
+            evidence_hash,
+            None,
+            None,
+            &self.ctx,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("write `{proposal_id}` proposal: {e:#}"))
+    }
+
+    pub(super) async fn instances(&self) -> Vec<FlowInstanceRecord> {
+        load_flow_instances(&self.perspective, &[BASE_URI.to_string()])
+            .await
+            .expect("load_flow_instances")
+    }
+
+    /// Everything the engine reads to decide this instance's state.
+    pub(super) async fn read_set(&self) -> ReadSet {
+        let flows = load_shacl_flows(&self.perspective).await.expect("flows");
+        let records = self.instances().await;
+        FlowInstance::from_record(&records[0], &flows[&self.flow_uri])
+            .read_set(&self.perspective)
+            .await
+            .expect("read_set")
+    }
+
+    /// The DERIVED state of the fixture's instance — the fold, never the cache.
+    pub(super) async fn derived(&self) -> DerivedState {
+        let flows = load_shacl_flows(&self.perspective).await.expect("flows");
+        let records = self.instances().await;
+        FlowInstance::from_record(&records[0], &flows[&self.flow_uri])
+            .derive_state(&self.perspective)
+            .await
+            .expect("derive_state")
+    }
+
+    /// The on-graph `currentState` CACHE — what the pass writes through, not
+    /// the authority.
+    pub(super) async fn cached_state(&self) -> String {
+        self.instances().await[0].current_state.clone()
+    }
+
+    /// One proposal pass that must mint exactly one proposal; its URI.
+    pub(super) async fn mint_one(&mut self) -> String {
+        let minted = self.run_pass(&[], None).await;
+        assert_eq!(minted.len(), 1, "got {minted:?}");
+        minted.into_iter().next().unwrap()
+    }
+
+    async fn satisfied(&self) -> Vec<SatisfiedTransition> {
+        let records = self.instances().await;
         let flows = load_shacl_flows(&self.perspective)
             .await
             .expect("load_shacl_flows");
         evaluate_flow_transitions(&self.perspective, &records, &flows, "did:key:acting").await
     }
 
-    async fn run_pass(
+    pub(super) async fn run_pass(
         &mut self,
         llm_proposals: &[LlmFlowProposal],
         semantic_check: Option<&dyn SemanticCheckLlm>,
@@ -156,7 +266,7 @@ impl Fixture {
         .await
     }
 
-    async fn links_by_predicate(&self, source: &str) -> HashMap<String, Vec<String>> {
+    pub(super) async fn links_by_predicate(&self, source: &str) -> HashMap<String, Vec<String>> {
         let links = self
             .perspective
             .get_links(&LinkQuery {
@@ -183,7 +293,7 @@ impl Fixture {
     }
 }
 
-fn assert_has_target(by_pred: &HashMap<String, Vec<String>>, pred: &str, want: &str) {
+pub(super) fn assert_has_target(by_pred: &HashMap<String, Vec<String>>, pred: &str, want: &str) {
     let targets = by_pred
         .get(pred)
         .unwrap_or_else(|| panic!("proposal must carry a `{pred}` link"));
@@ -258,7 +368,7 @@ async fn evaluate_flow_transitions_e2e() {
     assert_eq!(t.evidence_ids, vec!["ad4m://task/1".to_string()]);
     assert_eq!(
         t.evidence_hash,
-        evidence_hash(&["ns://Task".to_string()], &t.evidence_ids)
+        evidence_hash(&["ns://Task".to_string()], &t.evidence)
     );
     assert_eq!(t.semantic_check.as_deref(), Some(SCOPE_HINT));
 }

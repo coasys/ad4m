@@ -75,3 +75,46 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
     // Return true only if all bytes match and lengths are equal
     diff == 0
 }
+
+/// Rewrite the legacy double-slash `literal://<kind>:<value>` form (still
+/// minted by Flux's TypeScript `Literal`, and still arriving via sync from
+/// peers on pre-normalisation executors — see issue #1014) to the
+/// single-colon `literal:<kind>:<value>` form everything else in this
+/// executor speaks.
+///
+/// `literal://string:x` is *not* a parseable IRI — `string:x` reads as
+/// `host:port` with a non-numeric port, so oxigraph's SPARQL parser rejects
+/// `<literal://string:x>` outright and every query that inlines the value
+/// fails. Normalising means an agent that passes the legacy spelling gets
+/// the same node as one that passes the current spelling, instead of a hard
+/// SPARQL error or an unmatchable `NamedNode::new_unchecked` target.
+///
+/// Lives here (not in `mcp`) because both the MCP tool layer and the flow
+/// engine's role/tombstone matching need it: any comparison against a link
+/// target that ignores the legacy spelling silently misses links written in
+/// it.
+pub(crate) fn normalize_legacy_literal(value: &str) -> std::borrow::Cow<'_, str> {
+    match value.strip_prefix("literal://") {
+        // Only the `literal://<kind>:…` shape; `literal://` alone is not one.
+        Some(rest) if rest.contains(':') => std::borrow::Cow::Owned(format!("literal:{rest}")),
+        _ => std::borrow::Cow::Borrowed(value),
+    }
+}
+
+/// The *other* spelling of a `literal:` URI, or `None` if there isn't one.
+///
+/// The two spellings are mutually derivable — `literal://<kind>:<v>` ⇄
+/// `literal:<kind>:<v>` — and a store that was written across the
+/// normalisation boundary holds both for the same node, so a filter has to be
+/// tried in both directions. Anything that is not a two-part `literal:` URI
+/// (`ad4m://obj/…`, `did:key:…`, a bare `literal://`) has no counterpart and
+/// yields `None`, so no second query is spent on it.
+pub(crate) fn other_literal_spelling(value: &str) -> Option<String> {
+    if let Some(rest) = value.strip_prefix("literal://") {
+        // Mirrors `normalize_legacy_literal`: `literal://` alone is not the
+        // `literal://<kind>:<value>` shape.
+        return rest.contains(':').then(|| format!("literal:{rest}"));
+    }
+    let rest = value.strip_prefix("literal:")?;
+    rest.contains(':').then(|| format!("literal://{rest}"))
+}

@@ -1448,6 +1448,85 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     expect(callArg).toHaveProperty("pageSize", 10);
     expect(callArg).toHaveProperty("pageNumber", 1);
   });
+
+  it("paginateSubscribe must not deliver a stale re-fetch over a newer one", async () => {
+    // Two server dispatches each trigger a re-fetch, and the executor can
+    // answer them out of order: the re-fetch dispatched before a save
+    // committed (1 result) resolves AFTER the one that saw the save
+    // (2 results). Without ordering, the consumer's last page silently rolls
+    // back to the stale state and no later dispatch corrects it — the exact
+    // shape of the flaky "Paginate callback did not see second model save"
+    // failure in tests/js prolog-and-literals.
+    const mockSubscriptionId = "paginate-stale-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    // First call is the initial fetch (resolves immediately, empty). The two
+    // update-triggered re-fetches get manually controlled promises so the
+    // test can resolve them in reverse order.
+    const deferred: Array<(v: any) => void> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise(resolve => { deferred.push(resolve); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "StaleTest" })
+    class StaleTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://stale" })
+      type: string = "test://stale";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = StaleTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    // Two dispatches arrive back to back; both re-fetches are now in flight.
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(2);
+
+    // The NEWER re-fetch resolves first, with both models…
+    deferred[1]({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
+    await new Promise(r => setTimeout(r, 10));
+    // …then the STALE one resolves, with only the first model.
+    deferred[0]({ instances: [{ id: "m1" }], totalCount: 1 });
+    await new Promise(r => setTimeout(r, 10));
+
+    // The stale result must have been dropped: last delivered page is the
+    // 2-model one, and it was delivered exactly once.
+    expect(userCallback).toHaveBeenCalledTimes(1);
+    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
+    expect(lastArg.totalCount).toBe(2);
+    expect(lastArg.results.length).toBe(2);
+
+    builder.dispose();
+  });
 });
 
 // ============================================================================

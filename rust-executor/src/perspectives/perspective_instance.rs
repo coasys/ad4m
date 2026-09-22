@@ -39,6 +39,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
+#[cfg(test)]
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -479,7 +481,7 @@ pub struct PerspectiveInstance {
     pub is_fast_polling: bool,
     pub retries: u32,
 
-    is_teardown: Arc<AtomicBool>,
+    pub(crate) is_teardown: Arc<AtomicBool>,
     sdna_change_mutex: Arc<Mutex<()>>,
     prolog_update_mutex: Arc<RwLock<()>>,
     link_language: Arc<RwLock<Option<Language>>>,
@@ -499,6 +501,23 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// The one debounced flow consensus pass this perspective may have
+    /// queued for inbound neighbourhood links — see
+    /// `flow_instance::trigger`. A std mutex: held for a field swap, never
+    /// across an await.
+    pub(crate) flow_pass_queue:
+        Arc<std::sync::Mutex<crate::perspectives::flow_instance::trigger::FlowPassQueue>>,
+    /// Test-only fault injection for [`Self::add_link_expression`] (#981).
+    /// Compiled out entirely in non-test builds — see [`Self::fail_next_add_link`].
+    /// `0` means the *next* call returns an error instead of writing, then
+    /// resets to `-1` so later calls in the same test succeed normally; a
+    /// positive `n` counts down without failing until it reaches `0`. Lets a
+    /// test force a batch write to fail partway through — after a subject is
+    /// already staged, or after some of its collection links have landed —
+    /// without a real store fault, to assert `discard_batch` actually leaves
+    /// nothing behind.
+    #[cfg(test)]
+    fail_add_link_after: Arc<AtomicI64>,
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -559,7 +578,25 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
+            #[cfg(test)]
+            fail_add_link_after: Arc::new(AtomicI64::new(-1)),
         }
+    }
+
+    /// Test seam (#981): make the *next* [`Self::add_link_expression`] call
+    /// fail instead of writing, then resume normal behaviour. `after_n_calls`
+    /// lets calls that must succeed first (e.g. staging the subject itself)
+    /// through before the induced failure — `0` fails immediately, `1` lets
+    /// one call through first, and so on. Never called from production code;
+    /// exists so a test can prove a partial batch write actually rolls back
+    /// rather than only reading the `discard_batch` call sites and trusting
+    /// they run. The backing field only exists in test builds (`cfg(test)`),
+    /// so this seam has zero footprint in production.
+    #[cfg(test)]
+    pub(crate) fn fail_next_add_link(&self, after_n_calls: i64) {
+        self.fail_add_link_after
+            .store(after_n_calls, Ordering::SeqCst);
     }
 
     /// Look up a cached `ModelShape` for the given class name, loading it
@@ -1556,6 +1593,13 @@ impl PerspectiveInstance {
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_diff.clone()).await;
+
+        // A peer's proposal, vote or flow-instance row changes what this
+        // replica's flow consensus pass would derive, and only that pass can
+        // update the (Local) cache and marks here — so queue one. Debounced
+        // and scoped; a no-op for diffs outside the flow vocabulary.
+        self.schedule_flow_consensus_pass(&decorated_diff);
+
         self.pubsub_publish_diff(decorated_diff).await;
 
         Ok(())
@@ -1760,6 +1804,23 @@ impl PerspectiveInstance {
         status: LinkStatus,
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        // Test seam (#981) — see `fail_add_link_after`'s doc comment. The
+        // field (and this check) only exist in test builds, so this is
+        // entirely compiled out in production.
+        #[cfg(test)]
+        match self.fail_add_link_after.load(Ordering::SeqCst) {
+            0 => {
+                self.fail_add_link_after.store(-1, Ordering::SeqCst);
+                return Err(anyhow!(
+                    "injected fault (test seam): add_link_expression failed"
+                ));
+            }
+            n if n > 0 => {
+                self.fail_add_link_after.store(n - 1, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+
         link_expression.data.validate()?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -2406,10 +2467,40 @@ impl PerspectiveInstance {
         shacl_json: Option<String>,
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
-        let mutex = self.sdna_change_mutex.clone();
-        let _guard = mutex.lock().await;
-        self.add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
-            .await
+        let is_flow = matches!(sdna_type, SdnaType::Flow);
+        let result = {
+            let mutex = self.sdna_change_mutex.clone();
+            let _guard = mutex.lock().await;
+            self.add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+                .await?
+        };
+
+        // A flow definition entering the perspective means callers will
+        // immediately try to read FlowInstance / FlowTransitionProposal rows.
+        // Register those two hard-wired runtime classes now, so `findAll`
+        // answers `[]` on a fresh perspective instead of "no SHACL shape
+        // stored" (#1007).
+        //
+        // This MUST be outside the `sdna_change_mutex` guard above, and the
+        // explicit block is what releases it. `ensure_flow_model_classes`
+        // reaches `ensure_subject_class`, which calls back into *this*
+        // function (`hardwired_class.rs:105`) — and `sdna_change_mutex` is a
+        // plain non-reentrant `tokio::sync::Mutex`, so re-entering it while
+        // held deadlocks. Calling from `add_sdna_inner` (the obvious seam,
+        // since it is the one path every caller funnels through) does exactly
+        // that: it hangs with no error, no panic and no CPU, and CI reports it
+        // only as "Root tests timed out". Boxing the future silences the
+        // compiler's E0733 but does nothing about the lock.
+        //
+        // `Box::pin` is still required here: the call is still recursive in
+        // *type* terms even though it no longer re-enters the lock.
+        if is_flow {
+            Box::pin(crate::perspectives::flow_classes::ensure_flow_model_classes(self, context))
+                .await
+                .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
+        }
+
+        Ok(result)
     }
 
     /// Remove every SHACL link associated with the given target-class URIs.
@@ -2494,16 +2585,35 @@ impl PerspectiveInstance {
         entries: Vec<(String, String, SdnaType, Option<String>)>,
         context: &AgentContext,
     ) -> Result<Vec<bool>, AnyError> {
-        let mutex = self.sdna_change_mutex.clone();
-        let _guard = mutex.lock().await;
+        let any_flow = entries
+            .iter()
+            .any(|(_, _, sdna_type, _)| matches!(sdna_type, SdnaType::Flow));
 
-        let mut results = Vec::with_capacity(entries.len());
-        for (name, sdna_code, sdna_type, shacl_json) in entries {
-            let result = self
-                .add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
-                .await?;
-            results.push(result);
+        let results = {
+            let mutex = self.sdna_change_mutex.clone();
+            let _guard = mutex.lock().await;
+
+            let mut results = Vec::with_capacity(entries.len());
+            for (name, sdna_code, sdna_type, shacl_json) in entries {
+                let result = self
+                    .add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+                    .await?;
+                results.push(result);
+            }
+            results
+        };
+
+        // Same rule as `add_sdna`: register the flow-runtime classes only after
+        // the guard is released, because doing so re-enters `add_sdna` and
+        // `sdna_change_mutex` is not reentrant. Once per batch rather than per
+        // entry — `ensure_subject_class` is idempotent, so the extra calls
+        // would be harmless, just wasted writes.
+        if any_flow {
+            Box::pin(crate::perspectives::flow_classes::ensure_flow_model_classes(self, context))
+                .await
+                .map_err(|e| anyhow::anyhow!("ensure_flow_model_classes: {e:#}"))?;
         }
+
         Ok(results)
     }
 
@@ -2614,6 +2724,16 @@ impl PerspectiveInstance {
             // next query re-parses against the fresh store state.
             self.invalidate_shape(&name);
         }
+
+        // A flow definition entering the perspective means callers will
+        // immediately try to read FlowTransitionProposal / FlowInstance rows.
+        // Register those two hard-wired runtime classes now so that findAll
+        // returns [] rather than an RPC 500 on a fresh perspective.
+        //
+        // NOTE: flow-runtime class registration deliberately does NOT happen
+        // here. This function runs while `sdna_change_mutex` is held, and
+        // registering those classes re-enters `add_sdna` — see the comment on
+        // `add_sdna`, which does it after releasing the guard.
 
         Ok(true)
     }
@@ -5131,6 +5251,20 @@ impl PerspectiveInstance {
                                             if let Some(pred) = &cmd.predicate {
                                                 if pred == setter_pred {
                                                     cmd.target = Some(target_value.clone());
+                                                    // The constructor command survives this
+                                                    // merge, only its target is replaced — so
+                                                    // without carrying the setter's `local`
+                                                    // across, a property whose setter writes
+                                                    // Local links would be written Shared at
+                                                    // creation and Local on every later
+                                                    // update: the same property with two
+                                                    // different statuses depending on when it
+                                                    // was written. The setter is the
+                                                    // authority for how its own predicate is
+                                                    // stored.
+                                                    if setter_cmd.local.is_some() {
+                                                        cmd.local = setter_cmd.local;
+                                                    }
                                                     overwritten = true;
                                                     break;
                                                 }
@@ -7642,6 +7776,232 @@ mod tests {
             tag_links.len(),
             4,
             "update_subject must append each array element as its own link",
+        );
+    }
+
+    /// Hand-written `add_model` SHACL that declares `"local": true` on the
+    /// property shape and NOWHERE else — no action carries the flag. This is
+    /// what an agent authoring a class over MCP writes, and before the
+    /// property-level flag was propagated at parse time it produced Shared
+    /// links everywhere: the declaration was pure decoration.
+    ///
+    /// All three write paths are checked, because they reach
+    /// `execute_commands` through different command sources: the constructor
+    /// entry (initial value), the setter merged over that entry
+    /// (`create_subject` with a value), a setter on an existing instance
+    /// (`update_subject`), and the collection expansion that runs a setter
+    /// once per array element.
+    #[tokio::test]
+    async fn declarative_local_property_writes_local_links() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "t://Cache",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "t://Cache"},
+                {"action": "addLink", "source": "this", "predicate": "t://state", "target": "literal:string:init"}
+            ],
+            "destructor_actions": [],
+            "properties": [
+                {
+                    "path": "t://state", "name": "state", "datatype": "xsd://string",
+                    "min_count": 1, "max_count": 1, "writable": true, "local": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://state", "target": "value"}]
+                },
+                {
+                    "path": "t://mark", "name": "marks", "collection": true, "writable": true, "local": true,
+                    "setter": [{"action": "addLink", "source": "this", "predicate": "t://mark", "target": "value"}]
+                },
+                {
+                    "path": "t://title", "name": "title", "datatype": "xsd://string",
+                    "max_count": 1, "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://title", "target": "value"}]
+                }
+            ]
+        }"#;
+        let ctx = AgentContext::main_agent();
+        perspective
+            .add_sdna(
+                "Cache".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
+
+        async fn status_of(
+            perspective: &PerspectiveInstance,
+            uri: &str,
+            predicate: &str,
+        ) -> Vec<LinkStatus> {
+            perspective
+                .get_links(&LinkQuery {
+                    source: Some(uri.to_string()),
+                    predicate: Some(predicate.to_string()),
+                    ..Default::default()
+                })
+                .await
+                .expect("get_links")
+                .into_iter()
+                .map(|l| l.status.clone().unwrap_or(LinkStatus::Shared))
+                .collect()
+        }
+
+        // 1. Initial value only: the `t://state` link comes from the
+        //    constructor action, which the SHACL never marked local.
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Cache".to_string()),
+                    query: None,
+                },
+                "t://cache/1".to_string(),
+                Some(serde_json::json!({ "title": "first" })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "t://state").await,
+            vec![LinkStatus::Local],
+            "the constructor's initial value for a `local: true` property must be local",
+        );
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "t://title").await,
+            vec![LinkStatus::Shared],
+            "a property that declares no `local` must stay shared",
+        );
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "rdf://type").await,
+            vec![LinkStatus::Shared],
+            "a class marker on no local property's predicate must stay shared",
+        );
+
+        // 2. Setter value supplied at creation: `create_subject` merges the
+        //    setter's target INTO the constructor command, keeping that
+        //    command. Same property, same instance — must be local as well,
+        //    or one property ends up with two statuses depending on the call.
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Cache".to_string()),
+                    query: None,
+                },
+                "t://cache/2".to_string(),
+                Some(serde_json::json!({ "state": "running", "marks": ["a", "b"] })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        assert_eq!(
+            status_of(&perspective, "t://cache/2", "t://state").await,
+            vec![LinkStatus::Local],
+            "a setter value merged over the constructor entry must stay local",
+        );
+        let mark_statuses = status_of(&perspective, "t://cache/2", "t://mark").await;
+        assert_eq!(mark_statuses.len(), 2, "both collection elements written");
+        assert!(
+            mark_statuses.iter().all(|s| *s == LinkStatus::Local),
+            "every element added to a local collection must be local, got {mark_statuses:?}",
+        );
+
+        // 3. A later setter write on an existing instance.
+        perspective
+            .update_subject(
+                SubjectClassOption {
+                    class_name: Some("Cache".to_string()),
+                    query: None,
+                },
+                "t://cache/1".to_string(),
+                serde_json::json!({ "state": "updated", "marks": ["c"] }),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("update_subject");
+
+        let state_statuses = status_of(&perspective, "t://cache/1", "t://state").await;
+        assert!(
+            state_statuses.iter().all(|s| *s == LinkStatus::Local),
+            "setter writes on a local property must be local, got {state_statuses:?}",
+        );
+        assert_eq!(
+            status_of(&perspective, "t://cache/1", "t://mark").await,
+            vec![LinkStatus::Local],
+        );
+    }
+
+    /// The decorator path: `shacl-gen.ts` copies `local` into the
+    /// setter/adder/remover actions but NOT into the constructor entries it
+    /// emits for an `initial` value or a required writable property. The
+    /// constructor command survives `create_subject`'s merge (only its target
+    /// is replaced), so without carrying the setter's `local` across, the
+    /// creation-time value lands Shared while every later write lands Local.
+    ///
+    /// Declared here without a property-level `local` on purpose: it isolates
+    /// the merge, so this still fails if parse-time propagation is removed.
+    #[tokio::test]
+    async fn action_level_local_survives_the_constructor_merge() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "t://Flow",
+            "constructor_actions": [
+                {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "t://Flow"},
+                {"action": "addLink", "source": "this", "predicate": "t://current_state", "target": "literal:string:init"}
+            ],
+            "destructor_actions": [],
+            "properties": [
+                {
+                    "path": "t://current_state", "name": "currentState", "datatype": "xsd://string",
+                    "min_count": 1, "max_count": 1, "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://current_state", "target": "value", "local": true}]
+                }
+            ]
+        }"#;
+        let ctx = AgentContext::main_agent();
+        perspective
+            .add_sdna(
+                "Flow".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
+
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Flow".to_string()),
+                    query: None,
+                },
+                "t://flow/1".to_string(),
+                Some(serde_json::json!({ "currentState": "started" })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        let links = perspective
+            .get_links(&LinkQuery {
+                source: Some("t://flow/1".to_string()),
+                predicate: Some("t://current_state".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].status.clone().unwrap_or(LinkStatus::Shared),
+            LinkStatus::Local,
+            "the setter's `local` must survive being merged into the constructor command",
         );
     }
 

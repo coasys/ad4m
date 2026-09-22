@@ -7,6 +7,7 @@
   "scripts": {
     "build": "deno run --allow-all esbuild.ts",
     "typecheck": "tsc --noEmit",
+    "pretest": "deno run --allow-all esbuild.ts",
     "test": "node --experimental-vm-modules --import tsx --test tests/*.test.ts"
   },
   "dependencies": {

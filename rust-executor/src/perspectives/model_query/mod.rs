@@ -98,6 +98,10 @@ mod test_helpers;
 pub(crate) mod types;
 pub(crate) mod utils;
 
+/// The per-value condition evaluator, shared with the flow engine so a
+/// `fromRole` rule's `author` condition means the same thing whether it is
+/// applied to a grant row here or to a revocation tombstone there.
+pub(crate) use filtering::matches_condition;
 pub use getters::evaluate_getters_batch;
 pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;

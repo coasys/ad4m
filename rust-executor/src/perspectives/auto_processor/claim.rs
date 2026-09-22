@@ -194,6 +194,62 @@ pub async fn write_claim(
     Ok(())
 }
 
+/// Extend the lease: rewrite this peer's claim with `now + ttl_ms` as the new
+/// expiry. Called by the [`LeaseGuard`] heartbeat at `ttl_ms / 3` intervals.
+///
+/// This makes the TTL a **liveness** parameter (how fast a *crashed* claimant
+/// is detected and its slot freed) rather than a **capacity** parameter (how
+/// long the biggest model may run) — a live pass keeps pushing the expiry
+/// forward, so the TTL only bites when the pass dies silently.
+pub async fn renew_claim(
+    perspective: &mut PerspectiveInstance,
+    processor: &str,
+    key: &str,
+    claimant: &str,
+    ttl_ms: i64,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    renew_claim_at(
+        perspective,
+        processor,
+        key,
+        claimant,
+        ttl_ms,
+        now_ms,
+        context,
+    )
+    .await
+}
+
+/// [`renew_claim`] with the clock injected, so the renewal semantics can be
+/// tested without sleeping through a real TTL. `renew_claim` is this function
+/// with `now_ms` read from the system clock, and holds no other logic — tests
+/// that exercise this exercise the production path.
+pub async fn renew_claim_at(
+    perspective: &mut PerspectiveInstance,
+    processor: &str,
+    key: &str,
+    claimant: &str,
+    ttl_ms: i64,
+    now_ms: i64,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    write_claim(
+        perspective,
+        processor,
+        key,
+        claimant,
+        now_ms + ttl_ms,
+        context,
+    )
+    .await
+}
+
 /// DIDs of every claimant whose claim on the batch is `active` and not yet
 /// expired at `now_ms`. Reads the claims as subject instances scoped to the
 /// batch node, so only claims actually hung off *this* batch are considered.
@@ -428,6 +484,99 @@ mod tests {
         assert!(
             matches!(outcome, ClaimOutcome::BackedOff { .. }),
             "second claimant must back off; got {outcome:?}"
+        );
+    }
+
+    /// `renew_claim` pushes the expiry forward, so a claim that would have
+    /// expired at `t0 + short_ttl` remains active at `t0 + short_ttl + 1`
+    /// after a renewal with a new TTL.
+    ///
+    /// This is the core guarantee that makes TTL a liveness parameter rather
+    /// than a capacity parameter: a live pass keeps renewing, and the TTL only
+    /// bites when the pass crashes silently.
+    #[tokio::test]
+    async fn renew_extends_expiry_past_original_ttl() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let key = batch_key(&["i1".to_string()]);
+        let claimant = "did:test:renewer";
+        let short_ttl_ms: i64 = 1_000; // original TTL: 1s
+        let t0: i64 = 1_000_000; // arbitrary epoch-offset
+
+        // Write the original claim expiring at t0 + 1s.
+        write_claim(&mut p, "proc", &key, claimant, t0 + short_ttl_ms, &ctx)
+            .await
+            .expect("initial claim");
+
+        // At t = t0 + short_ttl_ms + 1, the original claim has expired.
+        let after_original_expiry = t0 + short_ttl_ms + 1;
+        let before_renewal = active_claimants(&p, "proc", &key, after_original_expiry)
+            .await
+            .expect("active_claimants before renewal");
+        assert!(
+            before_renewal.is_empty(),
+            "original claim should have expired; got {before_renewal:?}"
+        );
+
+        // Renew through the production path, with the clock injected rather
+        // than slept through. `renew_claim` is `renew_claim_at` plus a
+        // `SystemTime::now()` read, so this exercises the real renewal logic.
+        let long_ttl_ms: i64 = 120_000;
+        renew_claim_at(
+            &mut p,
+            "proc",
+            &key,
+            claimant,
+            long_ttl_ms,
+            after_original_expiry,
+            &ctx,
+        )
+        .await
+        .expect("renewal write");
+
+        // After renewal the claimant is active again well past the original TTL.
+        let after_renewal = active_claimants(&p, "proc", &key, after_original_expiry)
+            .await
+            .expect("active_claimants after renewal");
+        assert_eq!(
+            after_renewal,
+            vec![claimant.to_string()],
+            "renewed claim must be active past the original TTL"
+        );
+    }
+
+    /// An idle claimant whose claim expired while a different peer renewed its
+    /// own claim stays evicted: renewal extends *this* peer's claim, not others'.
+    #[tokio::test]
+    async fn renewal_does_not_resurrect_idle_claimant() {
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let key = batch_key(&["i1".to_string()]);
+        let idle = "aaa:idle";
+        let active = "zzz:active";
+        let t0: i64 = 1_000_000;
+        let short_ttl: i64 = 1_000;
+        let long_ttl: i64 = 120_000;
+
+        // Both claim initially with the same short TTL.
+        write_claim(&mut p, "proc", &key, idle, t0 + short_ttl, &ctx)
+            .await
+            .expect("idle claim");
+        write_claim(&mut p, "proc", &key, active, t0 + short_ttl, &ctx)
+            .await
+            .expect("active initial claim");
+
+        // Only the `active` peer renews past the original TTL.
+        let after_expiry = t0 + short_ttl + 1;
+        renew_claim_at(&mut p, "proc", &key, active, long_ttl, after_expiry, &ctx)
+            .await
+            .expect("active renewal");
+
+        let holders = active_claimants(&p, "proc", &key, after_expiry)
+            .await
+            .expect("active_claimants");
+        assert_eq!(
+            holders,
+            vec![active.to_string()],
+            "only the renewing peer should remain active; got {holders:?}"
         );
     }
 }

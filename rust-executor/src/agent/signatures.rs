@@ -32,6 +32,38 @@ pub fn verify<T: Serialize>(expr: &Expression<T>) -> Result<bool, AnyError> {
     Ok(result)
 }
 
+/// Verify `expr`, collapsing a verification *error* to "not verified".
+///
+/// `proof.valid` answers exactly one question — does this signature verify? —
+/// so every way of failing to establish a signature has to answer it `false`.
+/// [`verify`] only returns `Err` for a malformed proof envelope: a signature
+/// that is not hex, or a timestamp that does not parse. Neither of those is a
+/// signature that verifies. A wrong signature or an unparseable DID does not
+/// even reach here — [`inner_verify`] already answers those `Ok(false)`.
+///
+/// This exists because the three call sites used to spell it
+/// `verify(&expr).unwrap_or(false)`, which reaches the same verdict but throws
+/// the error away, leaving a malformed envelope indistinguishable from a forged
+/// one in the logs. The verdict is unchanged; it is now observable. Making the
+/// error a *third* verdict instead would push the "unevaluated" ambiguity that
+/// #1046 removed from storage back up into the producer.
+///
+/// `context` names the caller in the log line.
+pub fn verify_or_false<T: Serialize>(expr: &Expression<T>, context: &str) -> bool {
+    match verify(expr) {
+        Ok(valid) => valid,
+        Err(e) => {
+            log::warn!(
+                "{}: malformed proof on expression by {} ({}) — treating as not verified",
+                context,
+                expr.author,
+                e
+            );
+            false
+        }
+    }
+}
+
 pub(super) fn hash_data_and_timestamp<T: Serialize>(
     data: &T,
     timestamp: &DateTime<Utc>,
@@ -68,5 +100,56 @@ fn inner_verify(did: &str, message: &[u8], signature: &[u8]) -> bool {
     } else {
         error!("Failed to parse DID as key method: {}", did);
         false
+    }
+}
+
+/// A second signing identity for tests: a real `did:key` keypair that signs
+/// the way [`crate::agent::create_signed_expression`] signs for the local
+/// agent, so links it authors verify on the receiving side
+/// (`proof.valid == Some(true)`).
+///
+/// It lives next to [`verify`] deliberately. The flow engine counts a vote
+/// only when the stored signature verdict is valid, so a test can no longer
+/// stand in for a second agent by writing a link with a made-up signature —
+/// it has to hold a key.
+#[cfg(test)]
+pub struct TestSigner {
+    keypair: PatchedKeyPair,
+    /// `did:key:…` — the author of everything this signer signs.
+    pub did: String,
+    /// The verification-method id that goes into `proof.key`.
+    pub key_id: String,
+}
+
+#[cfg(test)]
+impl TestSigner {
+    pub fn generate() -> Self {
+        use did_key::{DIDCore, Ed25519KeyPair};
+        let keypair = did_key::generate::<Ed25519KeyPair>(None);
+        let document = keypair.get_did_document(did_key::Config::default());
+        TestSigner {
+            did: document.id.clone(),
+            key_id: document.verification_method[0].id.clone(),
+            keypair,
+        }
+    }
+
+    /// Sign `data` now, producing the same `Expression` shape the wallet path
+    /// produces.
+    pub fn sign<T: Serialize>(&self, data: T) -> Expression<T> {
+        let timestamp = Utc::now();
+        let signature = hex::encode(
+            self.keypair
+                .sign(&hash_data_and_timestamp(&data, &timestamp)),
+        );
+        Expression {
+            author: self.did.clone(),
+            timestamp: timestamp.to_rfc3339_opts(SecondsFormat::Millis, true),
+            data,
+            proof: crate::types::ExpressionProof {
+                key: self.key_id.clone(),
+                signature,
+            },
+        }
     }
 }

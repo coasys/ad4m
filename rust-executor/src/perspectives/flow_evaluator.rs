@@ -11,9 +11,10 @@
 //! A `requires` guard is an array of `ModelQuery`s with AND semantics.
 //! Each query is translated to a `model_query` input, run against the
 //! perspective and checked against its `count` cardinality. The matched
-//! instance IDs form the proposal's evidence bag, sealed by an
-//! order-independent SHA256 in [`evidence_hash`] so a later verification
-//! can detect evidence that no longer resolves.
+//! instances (IDs + canonicalized content) form the proposal's evidence
+//! bag, sealed by an order-independent SHA256 in [`evidence_hash`] so a
+//! voter can detect evidence that no longer resolves — or was edited —
+//! before co-signing.
 //!
 //! Two optional refinements sit between evaluation and the write:
 //!
@@ -35,6 +36,7 @@ use crate::perspectives::flow_classes::write_flow_transition_proposal;
 use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, reachable_next_states, FlowInstanceRecord, FlowTokens,
 };
+use crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
 use crate::perspectives::flow_semantic_check::{
     build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
 };
@@ -44,8 +46,10 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
+use crate::types::LinkQuery;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -62,9 +66,12 @@ pub struct SatisfiedTransition {
     pub evidence_ids: Vec<String>,
     /// The same instances as `evidence_ids`, hydrated with the JSON
     /// `model_query` returned for each — the semantic check reasons over
-    /// this content, not over bare identifiers. Deliberately NOT part of
-    /// [`evidence_hash`]: the seal stays a function of class names + IDs, so
-    /// a content edit to an already-sealed instance doesn't re-open a guard.
+    /// this content, not over bare identifiers, and its canonicalized form
+    /// is sealed into [`evidence_hash`]. Editing a cited instance therefore
+    /// re-opens the guard under a NEW hash: the mint side misses its dedup
+    /// and mints a fresh proposal for the current evidence, while a voter
+    /// asked to co-sign the stale-sealed one refuses
+    /// (`flow_instance::accept`).
     pub evidence: Vec<EvidenceItem>,
     /// See [`evidence_hash`].
     pub evidence_hash: String,
@@ -86,23 +93,72 @@ pub struct EvidenceItem {
     pub content: String,
 }
 
-/// Order-independent seal over a satisfied guard's evidence: SHA256 of the
-/// class names joined by `|`, a NUL, and the sorted evidence IDs joined by
-/// newlines. Two evaluations of the same guard against the same graph
-/// produce the same hash regardless of result order.
-pub fn evidence_hash(class_names: &[String], evidence_ids: &[String]) -> String {
-    let mut sorted_ids = evidence_ids.to_vec();
-    sorted_ids.sort();
+/// Serialize a JSON value with recursively-sorted object keys — a stable
+/// form independent of the key order `model_query` happens to produce.
+/// Non-JSON content is hashed verbatim rather than dropped.
+fn canonical_json(v: &Value) -> String {
+    match v {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let body: Vec<String> = keys
+                .iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        Value::String((*k).clone()),
+                        canonical_json(&map[*k])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        Value::Array(items) => {
+            let body: Vec<String> = items.iter().map(canonical_json).collect();
+            format!("[{}]", body.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Order-independent seal over a satisfied guard's evidence: SHA256 over the
+/// class names followed by each evidence item's `(class, id,
+/// canonical-content)` triple, sorted. Every field is length-prefixed before
+/// hashing, so no field's *content* can shift bytes across a boundary.
+///
+/// Two evaluations of the same guard against the same graph produce the same
+/// hash regardless of result order; **editing a cited instance changes the
+/// hash**, which is what lets a voter detect a stale seal before co-signing.
+pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> String {
+    fn frame(hasher: &mut Sha256, field: &str) {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+    let mut items: Vec<(String, String, String)> = evidence
+        .iter()
+        .map(|e| {
+            let canonical = serde_json::from_str::<Value>(&e.content)
+                .map(|v| canonical_json(&v))
+                .unwrap_or_else(|_| e.content.clone());
+            (e.class_name.clone(), e.id.clone(), canonical)
+        })
+        .collect();
+    items.sort();
     let mut hasher = Sha256::new();
-    hasher.update(class_names.join("|"));
-    hasher.update(b"\0");
-    hasher.update(sorted_ids.join("\n"));
+    for name in class_names {
+        frame(&mut hasher, name);
+    }
+    for (class, id, content) in &items {
+        frame(&mut hasher, class);
+        frame(&mut hasher, id);
+        frame(&mut hasher, content);
+    }
     hex::encode(hasher.finalize())
 }
 
 /// `count.{min,max}` check with inclusive bounds. An unset `count` means
 /// "at least one match"; `{ max: 0 }` is a valid negative guard.
-fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool {
+pub(crate) fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usize) -> bool {
     match count {
         None => actual >= 1,
         Some(c) => {
@@ -129,6 +185,21 @@ fn substitute_tokens(s: &str, record: &FlowInstanceRecord, acting_did: &str) -> 
     tokens.substitute(s)
 }
 
+/// Substitute tokens everywhere a string can appear in a condition value.
+///
+/// Objects are recursed into, not cloned. `WhereCondition` admits object
+/// shapes — `Ops` (`{"not": …}`, `{"contains": …}`) and `SubClause` — so a
+/// rule may legitimately carry `$did` inside one, e.g.
+/// `{"members": {"equals": {"not": "$did"}}}`. Cloning such an object left
+/// the literal `"$did"` in the query handed to `model_query`, which produces
+/// the **same** query for every candidate: the role then stops discriminating
+/// between DIDs. Under a negating operator that fails *open* — no instance
+/// has a property equal to the literal `"$did"`, so `not` matches everyone
+/// and every candidate is granted the role.
+///
+/// The `did_dependent` guard in `resolve_role_grants` does not catch this:
+/// it tests the serialised *rule* for `$did`, which is present, rather than
+/// the generated *input*, where it was never resolved.
 fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str) -> Value {
     match value {
         Value::String(s) => Value::String(substitute_tokens(s, record, acting_did)),
@@ -138,7 +209,27 @@ fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str)
                 .map(|v| substitute_json(v, record, acting_did))
                 .collect(),
         ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(k, v)| (k.clone(), substitute_json(v, record, acting_did)))
+                .collect(),
+        ),
         other => other.clone(),
+    }
+}
+
+/// Whether any string anywhere in `value` still contains an unresolved
+/// `$`-token. Used as a post-substitution assertion: substitution is total
+/// over the JSON tree, so a surviving token means a shape it does not know
+/// how to walk, and a query that cannot discriminate must fail closed rather
+/// than run.
+fn has_unresolved_token(value: &Value) -> bool {
+    match value {
+        Value::String(s) => FlowTokens::contains_token(s),
+        Value::Array(items) => items.iter().any(has_unresolved_token),
+        Value::Object(fields) => fields.values().any(has_unresolved_token),
+        _ => false,
     }
 }
 
@@ -151,7 +242,7 @@ fn substitute_json(value: &Value, record: &FlowInstanceRecord, acting_did: &str)
 /// `exists` and `matches` have no `model_query` counterpart yet, so a
 /// guard using them fails translation and is skipped instead of being
 /// evaluated against a wrong query.
-fn requires_query_input(
+pub(crate) fn requires_query_input(
     query: &ModelQuery,
     record: &FlowInstanceRecord,
     acting_did: &str,
@@ -167,6 +258,16 @@ fn requires_query_input(
     let out = Value::Object(out);
     serde_json::from_value::<ModelQueryInput>(out.clone())
         .map_err(|e| anyhow!("translated query is not a valid ModelQueryInput: {e}"))?;
+    // Substitution is total over the JSON tree, so a surviving token means a
+    // shape it could not walk. Refuse rather than run: a role query still
+    // carrying `$did` is byte-identical for every candidate, and under a
+    // negating operator it matches all of them.
+    if has_unresolved_token(&out) {
+        bail!(
+            "translated query still contains an unresolved token — it would be identical for \
+             every candidate and cannot discriminate between DIDs: {out}"
+        );
+    }
     Ok(out)
 }
 
@@ -274,17 +375,142 @@ fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value
     Ok(json!({ "id": id, "predicate": predicate }))
 }
 
+/// One signed revocation tombstone: who wrote it and when.
+///
+/// Rides in the read-set (see `flow_instance::roles::RoleGrantWindow`), so a
+/// verdict names the tombstones it honoured, not merely that "a revocation
+/// existed".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleRevocation {
+    /// The tombstone's author — the DID that signed it.
+    pub by: String,
+    /// The tombstone's link timestamp: the moment the grant stopped counting.
+    pub at: String,
+}
+
+/// What the store knows about one role instance's history for one DID: when the
+/// instance's `didProperty` link naming the DID was written, and every
+/// **signed** tombstone on the instance naming the DID.
+///
+/// Signature is checked here, at the store boundary — the same rule
+/// `flow_instance::atom::signed_by` applies to votes: a link whose stored
+/// verdict is not `valid` is invisible. **Authority is not checked here**:
+/// whether the tombstone's author may revoke depends on the role query, so
+/// `resolve_role_grants` applies that filter. `granted_at` is `None` when
+/// the role query has no `didProperty` or no such link exists; the caller
+/// then falls back to the instance's own timestamp and never to "always".
+#[derive(Debug, Clone, Default)]
+pub struct RoleGrantTimestamps {
+    /// Earliest timestamp of an `instance --didProperty--> did` link, if any.
+    pub granted_at: Option<String>,
+    /// Every signed tombstone on this instance naming this DID, any author.
+    pub revocations: Vec<RoleRevocation>,
+}
+
 /// The one perspective call the evaluator needs, behind a trait so the
 /// composition below can be unit-tested against a stub.
 #[async_trait]
 pub trait RequiresQueryable: Send + Sync {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String>;
+
+    /// The store's history of one matched role instance for one DID — see
+    /// [`RoleGrantTimestamps`].
+    ///
+    /// `instance_id` — the instance URI `model_query` returned.
+    /// `grant_predicate` — the role query's `didProperty`, if any; `None`
+    ///   for `$did`-style queries, where no single property carries the DID.
+    /// `did` — the candidate's plain DID.
+    ///
+    /// The default knows nothing (no grant link, no tombstones). A caller
+    /// that gets `granted_at: None` must date the grant from the instance itself
+    /// — `resolve_role_grants` does — so a stub that stays on this default
+    /// never turns into "granted since forever".
+    async fn role_grant_timestamps(
+        &self,
+        _instance_id: &str,
+        _grant_predicate: Option<&str>,
+        _did: &str,
+    ) -> anyhow::Result<RoleGrantTimestamps> {
+        Ok(RoleGrantTimestamps::default())
+    }
+}
+
+/// Does a link target name this DID? Accepts the raw DID (the flow's own
+/// `proposer` links), the `literal:string:`-encoded form the SDNA setters
+/// write, and the legacy `literal://string:` spelling still minted by Flux's
+/// TypeScript `Literal` and by pre-normalisation peers (#1014).
+///
+/// The legacy spelling matters more here than anywhere else in this file:
+/// every other malformed input in this read path fails *closed* (undated instance
+/// → error, non-discriminating query → error), but an unrecognised
+/// *tombstone* spelling would fail open — the revocation simply is not seen.
+fn target_names_did(target: &str, did: &str, did_literal: &str) -> bool {
+    target == did || crate::utils::normalize_legacy_literal(target).as_ref() == did_literal
 }
 
 #[async_trait]
 impl RequiresQueryable for PerspectiveInstance {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
         PerspectiveInstance::model_query(self, class_name, query_json).await
+    }
+
+    async fn role_grant_timestamps(
+        &self,
+        instance_id: &str,
+        grant_predicate: Option<&str>,
+        did: &str,
+    ) -> anyhow::Result<RoleGrantTimestamps> {
+        use ad4m_client::literal::Literal;
+        let did_literal = Literal::from_string(did.to_string())
+            .to_url()
+            .map_err(|e| {
+                anyhow::anyhow!("role_grant_timestamps: literal encode DID `{did}`: {e}")
+            })?;
+        let names_did = |target: &str| target_names_did(target, did, &did_literal);
+
+        // Earliest by parsed instant, not by string — grant links are
+        // client-stamped and clients disagree on RFC 3339 flavour (#1000).
+        // A link whose timestamp does not parse cannot date the grant; if
+        // none parses this stays `None`, so the caller falls back to the
+        // instance's own timestamp or fails closed.
+        use crate::perspectives::flow_instance::time::parse_link_timestamp;
+        let granted_at = match grant_predicate {
+            Some(pred) => self
+                .get_links(&LinkQuery {
+                    source: Some(instance_id.to_string()),
+                    predicate: Some(pred.to_string()),
+                    ..Default::default()
+                })
+                .await?
+                .into_iter()
+                .filter(|l| names_did(&l.data.target))
+                .filter_map(|l| parse_link_timestamp(&l.timestamp).map(|dt| (dt, l.timestamp)))
+                .min()
+                .map(|(_, ts)| ts),
+            None => None,
+        };
+
+        let revocations: Vec<RoleRevocation> = self
+            .get_links(&LinkQuery {
+                source: Some(instance_id.to_string()),
+                predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            // The vote rule (`atom::signed_by`): a link whose signature does
+            // not verify is not a link anyone wrote.
+            .filter(|l| l.proof.valid == Some(true) && names_did(&l.data.target))
+            .map(|l| RoleRevocation {
+                by: l.author,
+                at: l.timestamp,
+            })
+            .collect();
+
+        Ok(RoleGrantTimestamps {
+            granted_at,
+            revocations,
+        })
     }
 }
 
@@ -301,7 +527,7 @@ enum RequiresResult {
 /// Run one already-translated guard query. Returns the matched instances,
 /// hydrated with the JSON `model_query` already returned for each (no
 /// second read).
-async fn run_query<Q: RequiresQueryable + ?Sized>(
+pub(crate) async fn run_query<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     class_name: &str,
     input: &Value,
@@ -390,7 +616,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         instance_uri: record.instance_uri.clone(),
                         from_state: record.current_state.clone(),
                         to_state: state.name.clone(),
-                        evidence_hash: evidence_hash(&class_names, &evidence_ids),
+                        evidence_hash: evidence_hash(&class_names, &evidence),
                         evidence_ids,
                         evidence,
                         semantic_check: state.semantic_check.clone(),
@@ -413,6 +639,61 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
         }
     }
     out
+}
+
+/// Re-run one target state's `requires` against the CURRENT graph and return
+/// the freshly-computed evidence hash. Used at **vote time**: a replica
+/// re-checks a proposal's seal on its own graph before co-signing it
+/// (`flow_instance::accept`).
+///
+/// - `Ok(Some(hash))` — guard still satisfied; the caller compares it with
+///   the proposal's sealed hash.
+/// - `Ok(None)` — nothing verifiable remains: the guard no longer holds, or
+///   the flow/state/guard definition changed out from under the proposal.
+/// - `Err` — transient query/store failure.
+///
+/// A caller may only ever refuse its own action on any of these; none of
+/// them is grounds for touching somebody else's proposal.
+///
+/// `acting_did` must be the PROPOSER's DID: `$did`-substituted guards
+/// resolved against the proposer at mint time, so re-verification must
+/// substitute the same identity or the hash could never match.
+pub(crate) async fn recompute_evidence_hash<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    flow: &SHACLFlow,
+    record: &FlowInstanceRecord,
+    to_state: &str,
+    acting_did: &str,
+) -> Result<Option<String>> {
+    let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
+        log::warn!(
+            "recompute_evidence_hash: state `{to_state}` no longer exists on flow `{}`",
+            flow.name
+        );
+        return Ok(None);
+    };
+    let requires = state.requires.as_deref().unwrap_or_default();
+    if requires.is_empty() {
+        log::warn!(
+            "recompute_evidence_hash: `{}.{to_state}` no longer carries a `requires` guard",
+            flow.name
+        );
+        return Ok(None);
+    }
+    match evaluate_requires(perspective, requires, record, acting_did).await {
+        RequiresResult::Satisfied(class_names, evidence) => {
+            Ok(Some(evidence_hash(&class_names, &evidence)))
+        }
+        RequiresResult::Unmet => Ok(None),
+        RequiresResult::Untranslatable(e) => {
+            log::warn!(
+                "recompute_evidence_hash: `{}.{to_state}` became untranslatable: {e:#}",
+                flow.name
+            );
+            Ok(None)
+        }
+        RequiresResult::QueryFailed(e) => Err(e),
+    }
 }
 
 /// Load → evaluate → (confirm) → write, called by the extraction pass once
@@ -456,6 +737,33 @@ pub async fn run_engine_proposal_pass(
             return Vec::new();
         }
     };
+    // Mint path: always derive, never use the `currentState` cache.  This is
+    // deliberate even though the cache is `Local`-verified since #987: minting
+    // from a stale cache (debounce gap, role-change lag) would issue proposals
+    // on the wrong edge and each one costs paid LLM tokens.  The evaluator
+    // runs rarely and needs the freshest fold immediately before minting, so
+    // the derive cost here is acceptable and correct.
+    let derived =
+        crate::perspectives::flow_instance::derive_states(perspective, &records, &flows_by_uri)
+            .await;
+    // Honour the invariant from issue #998: a contested flow is irreversibly
+    // stalled — two edges already carry quorum, so more proposals cannot resolve
+    // it. Proposing into such a flow wastes LLM tokens and misleads governance.
+    let records: Vec<_> = derived
+        .into_iter()
+        .filter_map(|df| {
+            if let Some(ref c) = df.contested {
+                log::info!(
+                    "run_engine_proposal_pass: {} is contested in state {:?}; skipping mint (issue #998)",
+                    df.record.instance_uri,
+                    c.from_state,
+                );
+                None
+            } else {
+                Some(df.record)
+            }
+        })
+        .collect();
 
     let satisfied =
         evaluate_flow_transitions(perspective, &records, &flows_by_uri, &acting_did).await;
@@ -578,6 +886,28 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                  ({e:#}); treating as already-proposed (fail-closed, skipping mint)"
             );
         };
+        // A proposal carrying `resolved_as` is the recorded history of a
+        // consensus event, not a live proposal, and must not suppress a re-mint.
+        // Without this a cyclic flow wedges: same graph → same seal → the
+        // already-settled proposal matches the whole dedup key, so the mint
+        // is skipped and the edge can never fire on the next visit.
+        match store
+            .get_proposal_links(&LinkQuery {
+                source: Some(proposal_uri.clone()),
+                predicate: Some(
+                    crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE.to_string(),
+                ),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => continue,
+            Ok(_) => {}
+            Err(e) => {
+                fail_closed(e);
+                return true;
+            }
+        }
         match links_to("ad4m://flow/instance", transition.instance_uri.clone()).await {
             Ok(false) => continue,
             Ok(true) => {}
@@ -663,6 +993,37 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
+    #[test]
+    fn target_names_did_accepts_raw_and_both_literal_spellings() {
+        let did = "did:key:zAlice";
+        let lit = "literal:string:did%3Akey%3AzAlice";
+        assert!(target_names_did(did, did, lit));
+        assert!(target_names_did(lit, did, lit));
+        // The legacy double-slash spelling names the same DID — a tombstone
+        // written in it must be seen, or revocation fails open.
+        assert!(target_names_did(
+            "literal://string:did%3Akey%3AzAlice",
+            did,
+            lit
+        ));
+        assert!(!target_names_did(
+            "literal:string:did%3Akey%3AzBob",
+            did,
+            lit
+        ));
+        assert!(!target_names_did("literal://", did, lit));
+    }
+
+    #[test]
+    fn to_url_emits_the_single_colon_spelling_target_names_did_expects() {
+        use ad4m_client::literal::Literal;
+        let url = Literal::from_string("did:key:zAlice".to_string())
+            .to_url()
+            .expect("literal encode");
+        assert!(url.starts_with("literal:") && !url.starts_with("literal://"));
+        assert!(target_names_did(&url, "did:key:zAlice", &url));
+    }
+
     fn mq(class: &str) -> ModelQuery {
         ModelQuery {
             class_name: class.to_string(),
@@ -698,17 +1059,51 @@ mod tests {
         Some(ModelQueryCount { min, max })
     }
 
+    /// Test 18. The seal is order-independent (two evaluations of the same
+    /// guard agree however the store ordered the instances) and
+    /// content-sensitive (an edit that keeps the same IDs changes it) — the
+    /// second half is what lets a voter refuse to co-sign edited evidence.
     #[test]
     fn evidence_hash_is_order_independent_and_content_sensitive() {
         let classes = vec!["ns://A".to_string()];
-        let a = evidence_hash(&classes, &["b".into(), "a".into(), "c".into()]);
-        let b = evidence_hash(&classes, &["c".into(), "a".into(), "b".into()]);
-        assert_eq!(a, b);
+        let item = |id: &str, content: &str| EvidenceItem {
+            id: id.into(),
+            class_name: "ns://A".into(),
+            content: content.into(),
+        };
+        let abc = vec![
+            item("a", r#"{"id":"a","title":"one"}"#),
+            item("b", r#"{"id":"b","title":"two"}"#),
+            item("c", r#"{"id":"c","title":"three"}"#),
+        ];
+        let cab = vec![abc[2].clone(), abc[0].clone(), abc[1].clone()];
+        let a = evidence_hash(&classes, &abc);
+        assert_eq!(a, evidence_hash(&classes, &cab), "order-independent");
         assert_eq!(a.len(), 64, "hex-encoded SHA256");
-        assert_ne!(a, evidence_hash(&classes, &["a".into(), "b".into()]));
+        assert_ne!(a, evidence_hash(&classes, &abc[..2]), "id-set-sensitive");
         assert_ne!(
             a,
-            evidence_hash(&["ns://B".into()], &["a".into(), "b".into(), "c".into()])
+            evidence_hash(&["ns://B".into()], &abc),
+            "class-sensitive"
+        );
+
+        let mut edited = abc.clone();
+        edited[1].content = r#"{"id":"b","title":"two EDITED"}"#.into();
+        assert_ne!(a, evidence_hash(&classes, &edited), "content-sensitive");
+
+        // JSON key order is canonicalized away, so the seal does not drift
+        // with whatever order `model_query` happened to serialise.
+        let mut reordered = abc.clone();
+        reordered[1].content = r#"{"title":"two","id":"b"}"#.into();
+        assert_eq!(a, evidence_hash(&classes, &reordered), "key order ignored");
+    }
+
+    #[test]
+    fn canonical_json_sorts_keys_recursively() {
+        let v: Value = serde_json::from_str(r#"{"b":{"y":2,"x":[{"q":1,"p":0}]},"a":1}"#).unwrap();
+        assert_eq!(
+            canonical_json(&v),
+            r#"{"a":1,"b":{"x":[{"p":0,"q":1}],"y":2}}"#
         );
     }
 
@@ -812,6 +1207,76 @@ mod tests {
             )],
         );
         assert!(requires_query_input(&matches, &inst(), "did:key:x").is_err());
+    }
+
+    /// A `$did` inside an **object**-valued condition must be substituted like
+    /// one inside a string or an array. `WhereCondition` admits object shapes
+    /// (`Ops`, `SubClause`), so this is a legal rule — and before the fix
+    /// `substitute_json` cloned objects wholesale, leaving the literal
+    /// `"$did"` in the query. Every candidate then received a byte-identical
+    /// query, so the role stopped discriminating between DIDs.
+    #[test]
+    fn query_input_substitutes_did_inside_an_object_valued_condition() {
+        let q = with_where(
+            mq("ns://Member"),
+            vec![(
+                "holder",
+                PropertyCondition::Equals {
+                    equals: json!({ "not": "$did" }),
+                },
+            )],
+        );
+        let out = qin(&q, "did:key:alice");
+        assert_eq!(
+            out,
+            json!({ "where": { "holder": { "not": "did:key:alice" } } }),
+            "object-valued conditions must be substituted, not cloned: {out}"
+        );
+
+        // Two different candidates must get two different queries — the
+        // property the role gate depends on.
+        assert_ne!(qin(&q, "did:key:alice"), qin(&q, "did:key:bob"));
+    }
+
+    /// Nested one level deeper, to pin that the walk is recursive rather than
+    /// a single-level special case.
+    #[test]
+    fn query_input_substitutes_did_nested_in_arrays_inside_objects() {
+        let q = with_where(
+            mq("ns://Member"),
+            vec![(
+                "holder",
+                PropertyCondition::Equals {
+                    equals: json!({ "not": { "OR": [{ "did": "$did" }] } }),
+                },
+            )],
+        );
+        let out = qin(&q, "did:key:alice");
+        assert!(
+            !serde_json::to_string(&out).unwrap().contains("$did"),
+            "no token may survive at any depth: {out}"
+        );
+    }
+
+    /// Fail-closed backstop: if substitution ever misses a shape, the query
+    /// must be refused rather than run. A role query that still carries a
+    /// token is identical for every candidate, and under a negating operator
+    /// it matches all of them — the failure direction is *open*, which is why
+    /// this is an error rather than a warning.
+    #[test]
+    fn query_input_refuses_a_query_with_an_unresolved_token() {
+        // An empty acting DID makes `FlowTokens::substitute` a deliberate
+        // no-op for `$did` (empty field = "not set"), which is the cheapest
+        // way to reach the post-substitution assertion.
+        let q = with_where(
+            mq("ns://Member"),
+            vec![("holder", PropertyCondition::Str("$did".into()))],
+        );
+        let err = requires_query_input(&q, &inst(), "")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unresolved token"), "{err}");
+        assert!(err.contains("cannot discriminate"), "{err}");
     }
 
     #[test]
@@ -1054,6 +1519,80 @@ mod tests {
         )])
     }
 
+    /// Test 19. The vote-time check's contract: on an unchanged graph the
+    /// recomputed seal reproduces the minted one exactly, and an edit to the
+    /// cited instance — same ID, different content — produces a different
+    /// one. This is what a voter compares before deciding to co-sign.
+    #[tokio::test]
+    async fn recompute_reproduces_the_minted_hash_and_detects_edits() {
+        // `SHACLFlow` is not `Clone`, so build one and borrow it back out of
+        // the map the evaluator needs rather than constructing it twice.
+        let built = flow(
+            "Delivery",
+            "identified",
+            "scoped",
+            Some(vec![mq("ns://Vote")]),
+        );
+        let flow_uri = built.flow_uri();
+        let flows = HashMap::from([(flow_uri.clone(), built)]);
+        let f = &flows[&flow_uri];
+
+        let stub = StubPerspective::default()
+            .with_instance_objects("ns://Vote", vec![json!({"id": "v1", "value": "yes"})]);
+        let minted = evaluate_flow_transitions(&stub, &[inst()], &flows, "did:key:me").await;
+        assert_eq!(minted.len(), 1);
+
+        let same = recompute_evidence_hash(&stub, f, &inst(), "scoped", "did:key:me")
+            .await
+            .unwrap();
+        assert_eq!(same.as_deref(), Some(minted[0].evidence_hash.as_str()));
+
+        let edited = StubPerspective::default()
+            .with_instance_objects("ns://Vote", vec![json!({"id": "v1", "value": "no"})]);
+        let changed = recompute_evidence_hash(&edited, f, &inst(), "scoped", "did:key:me")
+            .await
+            .unwrap()
+            .expect("guard still satisfied");
+        assert_ne!(changed, minted[0].evidence_hash);
+    }
+
+    /// The two dispositions a voter must tell apart: "nothing verifiable
+    /// remains" (refuse to co-sign) and "the store failed" (try again later).
+    /// Neither is ever grounds for touching the proposal.
+    #[tokio::test]
+    async fn recompute_is_none_when_unverifiable_and_err_on_store_failure() {
+        let f = flow(
+            "Delivery",
+            "identified",
+            "scoped",
+            Some(vec![mq("ns://Vote")]),
+        );
+        let empty = StubPerspective::default().with_instances("ns://Vote", &[]);
+        let unguarded = flow("Delivery", "identified", "scoped", None);
+        #[rustfmt::skip]
+        let unverifiable = [
+            ("guard no longer satisfied", &empty, &f, "scoped"),
+            ("target state vanished from the flow definition", &empty, &f, "shipped"),
+            ("guard-less state: nothing to verify", &empty, &unguarded, "scoped"),
+        ];
+        for (name, store, flow, to_state) in unverifiable {
+            assert_eq!(
+                recompute_evidence_hash(store, flow, &inst(), to_state, "did:key:me")
+                    .await
+                    .unwrap(),
+                None,
+                "{name}"
+            );
+        }
+
+        let broken = StubPerspective::default().with_error("ns://Vote", "store down");
+        assert!(
+            recompute_evidence_hash(&broken, &f, &inst(), "scoped", "did:key:me")
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn satisfied_guard_yields_one_transition_with_sealed_evidence() {
         let mut flows = delivery(vec![mq("ns://Task")]);
@@ -1074,7 +1613,14 @@ mod tests {
                     class_name: "ns://Task".into(),
                     content: json!({ "id": "ad4m://task/1" }).to_string(),
                 }],
-                evidence_hash: evidence_hash(&["ns://Task".into()], &["ad4m://task/1".into()]),
+                evidence_hash: evidence_hash(
+                    &["ns://Task".into()],
+                    &[EvidenceItem {
+                        id: "ad4m://task/1".into(),
+                        class_name: "ns://Task".into(),
+                        content: json!({ "id": "ad4m://task/1" }).to_string(),
+                    }],
+                ),
                 semantic_check: Some("Agreed?".into()),
             }]
         );
@@ -1103,10 +1649,10 @@ mod tests {
         assert!(out[0].evidence[0]
             .content
             .contains("We agreed on the scope."));
-        // Hash contract untouched: still a function of class names + IDs.
+        // The seal covers class names + IDs + canonicalized content.
         assert_eq!(
             out[0].evidence_hash,
-            evidence_hash(&["ns://Task".into()], &["ad4m://task/1".into()])
+            evidence_hash(&["ns://Task".into()], &out[0].evidence)
         );
     }
 
@@ -1153,7 +1699,7 @@ mod tests {
         assert_eq!(out[0].evidence_ids, vec!["x/1", "x/2", "x/3"]);
         assert_eq!(
             out[0].evidence_hash,
-            evidence_hash(&["ns://A".into(), "ns://B".into()], &out[0].evidence_ids)
+            evidence_hash(&["ns://A".into(), "ns://B".into()], &out[0].evidence)
         );
 
         let stub = StubPerspective::default()

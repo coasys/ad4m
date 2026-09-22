@@ -460,7 +460,7 @@ fn to_openai_tool_calls(extracted: Vec<ExtractedToolCall>) -> Vec<ToolCall> {
 /// calls and `role:"tool"` results are rendered into text using the Qwen
 /// `<tool_call>` / `<tool_response>` convention, since the local chat
 /// template has no tool role.
-fn flatten_message(m: &ChatMessage) -> (String, String) {
+pub(super) fn flatten_message(m: &ChatMessage) -> (String, String) {
     let base_text = m
         .content
         .as_ref()
@@ -470,11 +470,16 @@ fn flatten_message(m: &ChatMessage) -> (String, String) {
     match m.role {
         // Tool result → a `<tool_response>` block in a user turn. Shared
         // renderer with harness_bridge so a fix in one place propagates.
-        // Legacy: `ChatMessage` doesn't carry `tool_call_id` on `Role::Tool`
-        // today; passing `None` matches the pre-refactor bare-tag output.
+        //
+        // The id is carried through when the caller sent one, so a turn that
+        // dispatched several tools at once can be matched back to which call
+        // each result answers. Without it the model sees an unordered pile of
+        // `<tool_response>` blocks and has to guess — which it does badly, and
+        // silently. Absent id still renders the bare tag, for callers that
+        // send none and for the hand-written messages in tests.
         Role::Tool => (
             "user".to_string(),
-            tool_grammar::render_tool_response_block(&base_text, None),
+            tool_grammar::render_tool_response_block(&base_text, m.tool_call_id.as_deref()),
         ),
         // Assistant turn that called tools → re-render the calls so the model
         // sees its own prior invocations.

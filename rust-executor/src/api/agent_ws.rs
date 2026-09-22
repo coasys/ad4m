@@ -20,8 +20,26 @@ use crate::types::*;
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
+/// Convert a client-supplied profile link into the decorated form, **deriving
+/// the validity verdict on this replica** rather than believing the caller.
+///
+/// The wire type [`ExpressionProof`] carries only `key` and `signature`: it has
+/// no validity field, precisely so that a peer cannot assert one.
+/// `LinkExpressionInput` does carry `valid`/`invalid`, and copying them across
+/// re-introduces by hand the field the wire format deliberately omits — a
+/// caller could then hand us a garbage signature with `valid: true` and we
+/// would store that verdict. Routing through
+/// `DecoratedLinkExpression::from((LinkExpression, LinkStatus))` runs
+/// `verify()` here and fails closed when verification errors, which is what
+/// every other ingest path already does.
+///
+/// A missing key or signature is still accepted, as before — it simply cannot
+/// verify, so it lands as `valid: false`. This is deliberately not an error:
+/// rejecting the write would change which profile updates succeed, and the
+/// defect being fixed is the trustworthiness of the verdict, not the
+/// tolerance of the endpoint.
 fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLinkExpression {
-    DecoratedLinkExpression {
+    let unverified = LinkExpression {
         author: lei.author.clone(),
         timestamp: lei.timestamp.clone(),
         data: Link {
@@ -29,14 +47,18 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
             target: lei.data.target.clone(),
             predicate: lei.data.predicate.clone(),
         },
-        proof: DecoratedExpressionProof {
+        proof: ExpressionProof {
             key: lei.proof.key.clone().unwrap_or_default(),
             signature: lei.proof.signature.clone().unwrap_or_default(),
-            valid: lei.proof.valid,
-            invalid: lei.proof.invalid,
         },
         status: lei.status.clone(),
-    }
+    };
+    // `LinkStatus::Shared` is the enum's own `#[default]`, and the conversion
+    // stores `Some(status)`. Profile links from a client that sent no status
+    // therefore become `SHARED` instead of staying `None`, which matches what
+    // every other link in the store looks like.
+    let status = lei.status.clone().unwrap_or_default();
+    DecoratedLinkExpression::from((unverified, status))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -269,6 +291,20 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(serde_json::to_value(agent)?)
 }
 
+/// Publishes the main agent to the agent language without holding up the caller.
+///
+/// The publish is best-effort (a failure is only logged) and reaches a remote
+/// server, so awaiting it made generate/unlock take as long as that server took
+/// to answer or time out. `publish_agent_to_language` serializes publishes, so a
+/// profile update made right after this still wins.
+fn spawn_main_agent_publish() {
+    tokio::spawn(async {
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!("Error publishing agent expression: {}", e);
+        }
+    });
+}
+
 /// agent.generate — generate agent identity
 async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
@@ -321,9 +357,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         log::info!("System languages loaded");
     }
 
-    if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-        log::warn!("Error publishing agent expression: {}", e);
-    }
+    spawn_main_agent_publish();
 
     if !init_errors.is_empty() {
         agent.error = Some(init_errors.join("; "));
@@ -436,9 +470,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
         log::info!("AD4M init complete");
 
-        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-            log::warn!("Error publishing agent expression: {}", e);
-        }
+        spawn_main_agent_publish();
     }
 
     let mut agent = {
@@ -855,4 +887,116 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "agent.entanglementProofPreflight",
         entanglement_proof_preflight,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::signatures::TestSigner;
+    use crate::types::domain::{ExpressionProofInput, LinkInput};
+
+    /// Build the wire input a client sends, with whatever verdict it cares to claim.
+    fn input_claiming(
+        author: &str,
+        timestamp: &str,
+        signature: &str,
+        claimed_valid: Option<bool>,
+    ) -> LinkExpressionInput {
+        LinkExpressionInput {
+            author: author.to_string(),
+            timestamp: timestamp.to_string(),
+            data: LinkInput {
+                source: "did:key:alice".into(),
+                target: "literal://string:hello".into(),
+                predicate: Some("ad4m://has_name".into()),
+            },
+            proof: ExpressionProofInput {
+                key: Some("#z6Mk-key".into()),
+                signature: Some(signature.to_string()),
+                valid: claimed_valid,
+                invalid: claimed_valid.map(|v| !v),
+            },
+            status: None,
+        }
+    }
+
+    /// The defect: a caller could assert `valid: true` over a signature that
+    /// does not verify, and the executor stored that verdict verbatim.
+    #[test]
+    fn a_forged_valid_verdict_is_overruled_by_local_verification() {
+        let signer = TestSigner::generate();
+        let input = input_claiming(
+            &signer.did,
+            "2026-09-17T06:00:00.000Z",
+            // Well-formed hex so `verify` gets past `hex::decode` and actually
+            // checks the signature — a non-hex string would fail earlier and
+            // pass this test for the wrong reason.
+            &"ab".repeat(64),
+            Some(true),
+        );
+
+        let decorated = link_expression_input_to_decorated(&input);
+
+        assert_eq!(
+            decorated.proof.valid,
+            Some(false),
+            "a signature that does not verify must be recorded invalid no matter what the caller claimed"
+        );
+        assert_eq!(decorated.proof.invalid, Some(true));
+    }
+
+    /// The other direction, and the reason this pair is a contract rather than
+    /// a mirror: a fix that simply hardcoded `valid: false` would satisfy the
+    /// test above. A genuinely signed link must come out valid even when the
+    /// caller claims the opposite, which pins that the verdict is *computed*
+    /// and that the caller's field is ignored in both directions.
+    #[test]
+    fn a_genuine_signature_is_honoured_even_when_the_caller_claims_invalid() {
+        let signer = TestSigner::generate();
+        let link = Link {
+            source: "did:key:alice".into(),
+            target: "literal://string:hello".into(),
+            predicate: Some("ad4m://has_name".into()),
+        }
+        .normalize();
+        let signed = signer.sign(link.clone());
+
+        let mut input = input_claiming(
+            &signed.author,
+            &signed.timestamp,
+            &signed.proof.signature,
+            Some(false),
+        );
+        input.data = LinkInput {
+            source: link.source.clone(),
+            target: link.target.clone(),
+            predicate: link.predicate.clone(),
+        };
+
+        let decorated = link_expression_input_to_decorated(&input);
+
+        assert_eq!(
+            decorated.proof.valid,
+            Some(true),
+            "a signature that verifies must be recorded valid even though the caller said invalid"
+        );
+        assert_eq!(decorated.proof.invalid, Some(false));
+    }
+
+    /// A client that sends no status gets the store's default rather than a
+    /// hole, matching every other link in the system.
+    #[test]
+    fn a_missing_status_becomes_shared() {
+        let signer = TestSigner::generate();
+        let input = input_claiming(
+            &signer.did,
+            "2026-09-17T06:00:00.000Z",
+            &"ab".repeat(64),
+            None,
+        );
+        assert_eq!(
+            link_expression_input_to_decorated(&input).status,
+            Some(LinkStatus::Shared)
+        );
+    }
 }

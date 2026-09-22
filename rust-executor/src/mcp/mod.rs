@@ -2,14 +2,17 @@
 //!
 //! Provides a standardized interface for AI agents to interact with AD4M's
 //! distributed knowledge graph. Agents can create perspectives, register SHACL
-//! models, create/query/modify typed subject instances, manage collections,
-//! and work with flows (state machines) — all through MCP's tool-calling protocol.
+//! models, create/query/modify typed instances of any class through the
+//! generic `instance_*` tools, manage collections and the `ad4m://has_child`
+//! tree, and work with flows (state machines) — all through MCP's tool-calling
+//! protocol.
 //!
 //! ## Architecture
 //!
 //! - [`server`] — HTTP transport setup and auth middleware
 //! - [`shacl`] — SHACL class/property parsing from perspective links
 //! - `tools` — MCP tool definitions (static + dynamic SHACL-generated)
+//! - `docs/` — the markdown served by the `get_documentation` tool
 
 pub mod server;
 pub mod shacl;

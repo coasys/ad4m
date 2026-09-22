@@ -479,6 +479,16 @@ pub struct ShapeProperty {
     /// property node.  `false` when the SDNA declared no identity — a class
     /// with no identity property is never deduplicated.
     pub(crate) identity: bool,
+    /// Whether this property's links are written with `LinkStatus::Local`,
+    /// read back from the `ad4m://local` link on the property node.  Local
+    /// links stay in the executor's own store: they are never gossiped to the
+    /// neighbourhood, so remote agents cannot read this property at all and
+    /// its values do not survive a re-sync from the network.  `false` is the
+    /// default (shared) for every property that does not declare it.
+    ///
+    /// Surfaced through `describe_perspective` so an agent can tell which
+    /// properties of a class are executor-private before writing to them.
+    pub(crate) local: bool,
 }
 
 impl ShapeProperty {

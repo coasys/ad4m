@@ -167,6 +167,26 @@ fn status_str(status: &Option<LinkStatus>) -> &'static str {
     }
 }
 
+/// Decode a stored `proofValid` annotation into a verdict.
+///
+/// The store holds a *boolean*, never a third "unevaluated" state:
+/// [`SparqlStore::insert_link_triples`] writes the annotation unconditionally,
+/// deriving the verdict from the signature when the caller did not supply one.
+/// `proof.valid` is a read view over the signature — something the executor
+/// computes so a UI or a SPARQL querier does not have to roll its own crypto —
+/// and a read view has no reason to record that nobody looked yet.
+///
+/// The empty string means the annotation is absent, which this maps to `false`.
+/// Absence is not reachable from anything this store writes; it can only come
+/// from hand-seeded or foreign data, so it is answered fail-closed, the same way
+/// every consumer that branches on the field (`signed_by`, the `flow_evaluator`
+/// revocation filter, `get_sdna_facts`) reads an unverified link. Both SPARQL
+/// read paths bind `?proofValid` through `OPTIONAL` and the solution accessors
+/// yield `""` for an unbound variable, so this is the shape absence arrives in.
+fn decode_proof_valid(s: &str) -> bool {
+    s == "true"
+}
+
 /// Back-compat SPARQL function for legacy notification triggers and SDNA
 /// queries that still call `<ad4m://fn/parse_literal>(?target)`.
 ///
@@ -477,19 +497,51 @@ impl SparqlStore {
 
         // 3. Metadata on the reifier node (all default graph)
         let proof = &link.proof;
-        let valid_str = proof.valid.unwrap_or(false).to_string();
 
-        let annotations: &[(&str, &str)] = &[
+        // `proof.valid` is a read view over the signature, so the store never
+        // records "nobody has checked": the annotation is written every time,
+        // as "true" or "false". When the caller already computed the verdict we
+        // take it; when it left the field empty — the rusqlite→SPARQL migration
+        // used to hard-code `None` — we compute it here from the signature, so
+        // no caller can put an unevaluated link on disk by forgetting.
+        let valid_str = link
+            .proof
+            .valid
+            .unwrap_or_else(|| link.compute_proof_valid())
+            .to_string();
+
+        let annotations: Vec<(&str, &str)> = vec![
             (ONT_AUTHOR, &link.author),
             (ONT_TIMESTAMP, &link.timestamp),
             (ONT_PROOF_KEY, &proof.key),
             (ONT_PROOF_SIG, &proof.signature),
-            (ONT_PROOF_VALID, &valid_str),
             (ONT_STATUS, status_str(&link.status)),
+            (ONT_PROOF_VALID, &valid_str),
         ];
 
-        for (pred_uri, value) in annotations {
+        for (pred_uri, value) in &annotations {
             let pred = NamedNodeRef::new_unchecked(pred_uri);
+
+            // Delete before insert. `make_reifier_iri` hashes author, source,
+            // predicate, target and timestamp — not the proof — so re-inserting
+            // a link whose verdict, key or signature changed lands on the same
+            // reifier. Without the delete the old annotation stays alongside the
+            // new one: a link once stored "true" keeps reading back verified,
+            // and the `OPTIONAL { ?reifier <proofValid> ?proofValid }` in
+            // `query_links` matches both quads and returns the link twice.
+            let stale: Vec<_> = self
+                .store
+                .quads_for_pattern(
+                    Some(reifier_iri.as_ref().into()),
+                    Some(pred),
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+            for quad in &stale {
+                self.store.remove(quad)?;
+            }
+
             let lit = literal(value);
             self.store.insert(QuadRef::new(
                 reifier_iri.as_ref(),
@@ -868,11 +920,7 @@ impl SparqlStore {
                     }
                 }
 
-                let proof_valid = if proof_valid_str.is_empty() {
-                    None
-                } else {
-                    Some(proof_valid_str == "true")
-                };
+                let proof_valid = decode_proof_valid(&proof_valid_str);
                 let status = match status_val.as_str() {
                     "Local" => Some(LinkStatus::Local),
                     "Shared" => Some(LinkStatus::Shared),
@@ -894,8 +942,8 @@ impl SparqlStore {
                     proof: DecoratedExpressionProof {
                         key: proof_key,
                         signature: proof_sig,
-                        valid: proof_valid,
-                        invalid: proof_valid.map(|v| !v),
+                        valid: Some(proof_valid),
+                        invalid: Some(!proof_valid),
                     },
                     status,
                 };
@@ -1011,11 +1059,7 @@ impl SparqlStore {
         let proof_key = get_str("proofKey");
         let proof_sig = get_str("proofSig");
         let proof_valid_str = get_str("proofValid");
-        let proof_valid = if proof_valid_str.is_empty() {
-            None
-        } else {
-            Some(proof_valid_str == "true")
-        };
+        let proof_valid = decode_proof_valid(&proof_valid_str);
         let status_val = get_str("status");
         let status = match status_val.as_str() {
             "Local" => Some(LinkStatus::Local),
@@ -1035,8 +1079,8 @@ impl SparqlStore {
             proof: DecoratedExpressionProof {
                 key: proof_key,
                 signature: proof_sig,
-                valid: proof_valid,
-                invalid: proof_valid.map(|v| !v),
+                valid: Some(proof_valid),
+                invalid: Some(!proof_valid),
             },
             status,
         })
@@ -1248,240 +1292,12 @@ impl SparqlStore {
         self.flush()?;
         Ok(())
     }
-
-    /// Check the migration version stored in the store.
-    /// Returns 0 if no migration version is found.
-    pub fn migration_version(&self) -> u32 {
-        let migration_subj = NamedNodeRef::new_unchecked("ad4m://system/migration");
-        let migration_pred = NamedNodeRef::new_unchecked("ad4m://system/version");
-        self.store
-            .quads_for_pattern(
-                Some(migration_subj.into()),
-                Some(migration_pred),
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .next()
-            .and_then(|r| r.ok())
-            .and_then(|q| match &q.object {
-                Term::Literal(l) => l.value().parse::<u32>().ok(),
-                _ => None,
-            })
-            .unwrap_or(0)
-    }
-
-    /// Set the migration version marker.
-    pub fn set_migration_version(&self, version: u32) -> Result<(), Error> {
-        let migration_subj = NamedNode::new_unchecked("ad4m://system/migration");
-        let migration_pred = NamedNodeRef::new_unchecked("ad4m://system/version");
-
-        // Remove old version marker if any
-        let old_quads: Vec<_> = self
-            .store
-            .quads_for_pattern(
-                Some(migration_subj.as_ref().into()),
-                Some(migration_pred),
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-        for q in &old_quads {
-            self.store.remove(q)?;
-        }
-
-        // Insert new version
-        let version_lit = Literal::new_simple_literal(&version.to_string());
-        self.store.insert(QuadRef::new(
-            migration_subj.as_ref(),
-            migration_pred,
-            TermRef::Literal(version_lit.as_ref()),
-            GraphNameRef::DefaultGraph,
-        ))?;
-
-        Ok(())
-    }
-
-    /// Migrate data from named-graph storage model to reifier storage model.
-    /// Returns the number of links migrated.
-    pub fn migrate_named_graphs_to_reifiers(&self) -> Result<usize, Error> {
-        // Check if already migrated
-        if self.migration_version() >= 2 {
-            return Ok(0);
-        }
-
-        // Check if there are any named graphs (old storage model)
-        let has_named_graphs = self.store.named_graphs().next().is_some();
-
-        if !has_named_graphs {
-            // No old data to migrate, just set version
-            self.set_migration_version(2)?;
-            return Ok(0);
-        }
-
-        log::info!("Migrating link storage from named graphs to RDF 1.2 reifiers...");
-
-        // Collect all old-format links by querying named graphs
-        // We use the deprecated query_opt with set_default_graph_as_union to read old data
-        let query = r#"
-            SELECT ?g ?source ?predicate ?target ?author ?timestamp
-                   ?proofKey ?proofSig ?proofValid ?status
-            WHERE {
-                GRAPH ?g { ?source ?predicate ?target . }
-                FILTER(isIRI(?source) && isIRI(?predicate))
-                ?g <ad4m://ontology/author> ?author .
-                ?g <ad4m://ontology/timestamp> ?timestamp .
-                OPTIONAL { ?g <ad4m://ontology/proofKey> ?proofKey . }
-                OPTIONAL { ?g <ad4m://ontology/proofSignature> ?proofSig . }
-                OPTIONAL { ?g <ad4m://ontology/proofValid> ?proofValid . }
-                OPTIONAL { ?g <ad4m://ontology/status> ?status . }
-            }
-        "#;
-
-        // Use the deprecated API to read old named-graph data
-        #[allow(deprecated)]
-        let results = {
-            let evaluator = self.sparql_evaluator();
-            let mut parsed_query = oxigraph::sparql::Query::parse(query, None)
-                .map_err(|e| anyhow!("Failed to parse migration query: {}", e))?;
-            parsed_query.dataset_mut().set_default_graph_as_union();
-            self.store.query_opt(parsed_query, evaluator)?
-        };
-
-        let mut links_to_migrate: Vec<DecoratedLinkExpression> = Vec::new();
-        let mut graph_iris: Vec<NamedNode> = Vec::new();
-
-        if let QueryResults::Solutions(solutions) = results {
-            for solution in solutions {
-                let solution = solution?;
-
-                let get_str = |var: &str| -> String {
-                    solution
-                        .get(var)
-                        .and_then(|t| match t {
-                            Term::Literal(l) => Some(l.value().to_string()),
-                            Term::NamedNode(n) => Some(n.as_str().to_string()),
-                            _ => None,
-                        })
-                        .unwrap_or_default()
-                };
-
-                if let Some(Term::NamedNode(g)) = solution.get("g") {
-                    graph_iris.push(g.clone());
-                }
-
-                let source = match solution.get("source") {
-                    Some(Term::NamedNode(n)) => n.as_str().to_string(),
-                    _ => continue,
-                };
-                let predicate = match solution.get("predicate") {
-                    Some(Term::NamedNode(n)) => {
-                        let s = n.as_str().to_string();
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(s)
-                        }
-                    }
-                    _ => continue,
-                };
-                let target = match solution.get("target") {
-                    Some(Term::NamedNode(n)) => n.as_str().to_string(),
-                    _ => continue,
-                };
-
-                let author = get_str("author");
-                let timestamp = get_str("timestamp");
-                let proof_key = get_str("proofKey");
-                let proof_sig = get_str("proofSig");
-                let proof_valid_str = get_str("proofValid");
-                let proof_valid = if proof_valid_str.is_empty() {
-                    None
-                } else {
-                    Some(proof_valid_str == "true")
-                };
-                let status_val = get_str("status");
-                let status = match status_val.as_str() {
-                    "Local" => Some(LinkStatus::Local),
-                    "Shared" => Some(LinkStatus::Shared),
-                    _ => None,
-                };
-
-                links_to_migrate.push(DecoratedLinkExpression {
-                    author,
-                    timestamp,
-                    data: Link {
-                        source,
-                        predicate,
-                        target,
-                    },
-                    proof: DecoratedExpressionProof {
-                        key: proof_key,
-                        signature: proof_sig,
-                        valid: proof_valid,
-                        invalid: proof_valid.map(|v| !v),
-                    },
-                    status,
-                });
-            }
-        }
-
-        let count = links_to_migrate.len();
-        log::info!("Found {} links in named-graph format to migrate", count);
-
-        // Safety: write new reifier-format data BEFORE deleting old named-graph
-        // data so a crash mid-migration doesn't lose the only readable copy.
-        for link in &links_to_migrate {
-            self.insert_link_triples(link)?;
-        }
-
-        // Now remove old named-graph data
-        for graph_iri in &graph_iris {
-            // Remove quads in the named graph
-            let ng_quads: Vec<_> = self
-                .store
-                .quads_for_pattern(
-                    None,
-                    None,
-                    None,
-                    Some(GraphNameRef::NamedNode(graph_iri.as_ref())),
-                )
-                .collect::<Result<Vec<_>, _>>()?;
-            for q in &ng_quads {
-                self.store.remove(q)?;
-            }
-
-            // Remove metadata in default graph
-            let meta_quads: Vec<_> = self
-                .store
-                .quads_for_pattern(
-                    Some(graph_iri.as_ref().into()),
-                    None,
-                    None,
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .collect::<Result<Vec<_>, _>>()?;
-            for q in &meta_quads {
-                self.store.remove(q)?;
-            }
-
-            // Remove the named graph itself
-            let _ = self.store.remove_named_graph(graph_iri.as_ref());
-        }
-
-        // Set migration version only after both insert and cleanup succeeded
-        self.set_migration_version(2)?;
-
-        log::info!(
-            "Migration complete: {} links migrated to reifier format",
-            count
-        );
-        Ok(count)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::signatures::TestSigner;
 
     fn make_link(source: &str, predicate: &str, target: &str) -> DecoratedLinkExpression {
         DecoratedLinkExpression {
@@ -2851,36 +2667,257 @@ mod tests {
         assert_eq!(results.len(), 1, "exact from+until should include the link");
     }
 
-    // ── Migration tests ──
+    // ── proof.valid is a derived boolean, never "unevaluated" ──
+    //
+    // `proof.valid` is a read view over the signature. The store's contract is
+    // that `proofValid` is always present and always "true" or "false", and
+    // that the value is always one a signature check produced — either the
+    // caller's, or one the store derives when the caller left the field empty.
+    //
+    // Each test below names the mutation that turns it red. Every one of those
+    // mutations was applied and confirmed red before this landed.
 
-    #[test]
-    fn test_migration_version_default_zero() {
-        let svc = new_service();
-        assert_eq!(svc.migration_version(), 0);
+    /// Build a link whose signature genuinely verifies, with the verdict left
+    /// uncomputed — the shape `migrate_links_from_rusqlite_to_sparql` used to
+    /// hand the store.
+    fn signed_link_without_verdict(signer: &TestSigner, source: &str) -> DecoratedLinkExpression {
+        let signed = signer.sign(
+            Link {
+                source: source.to_string(),
+                predicate: Some("ad4m://pred".to_string()),
+                target: "ad4m://tgt".to_string(),
+            }
+            .normalize(),
+        );
+        DecoratedLinkExpression {
+            author: signed.author,
+            timestamp: signed.timestamp,
+            data: signed.data,
+            proof: DecoratedExpressionProof {
+                key: signed.proof.key,
+                signature: signed.proof.signature,
+                valid: None,
+                invalid: None,
+            },
+            status: Some(LinkStatus::Shared),
+        }
     }
 
-    #[test]
-    fn test_migration_version_set_and_get() {
-        let svc = new_service();
-        svc.set_migration_version(2).unwrap();
-        assert_eq!(svc.migration_version(), 2);
+    /// Count the `proofValid` quads on a link's reifier. A stale verdict left
+    /// behind by a re-insert shows up here as a second quad.
+    fn proof_valid_quads(svc: &SparqlStore, link: &DecoratedLinkExpression) -> Vec<String> {
+        let reifier = make_reifier_iri(link);
+        svc.store
+            .quads_for_pattern(
+                Some(reifier.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(ONT_PROOF_VALID)),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .map(|q| match q.unwrap().object {
+                Term::Literal(l) => l.value().to_string(),
+                other => panic!("proofValid must be a literal, got {other:?}"),
+            })
+            .collect()
     }
 
+    /// A caller that supplies no verdict gets one computed from the signature,
+    /// not the absent annotation the tri-state used to write.
+    ///
+    /// Turns red on: deleting `.unwrap_or_else(|| link.compute_proof_valid())`
+    /// in `insert_link_triples` and writing `proof.valid.unwrap_or(false)`
+    /// instead — the pre-#1064 write. The link reads back `Some(false)`.
     #[test]
-    fn test_migration_no_named_graphs_sets_version() {
+    fn store_derives_the_verdict_when_the_caller_supplies_none() {
         let svc = new_service();
-        // No old data, migration should just set version
-        let count = svc.migrate_named_graphs_to_reifiers().unwrap();
-        assert_eq!(count, 0);
-        assert_eq!(svc.migration_version(), 2);
+        let signer = TestSigner::generate();
+        let link = signed_link_without_verdict(&signer, "ad4m://derive-src");
+        svc.add_link(&link).unwrap();
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].proof.valid,
+            Some(true),
+            "a genuinely valid signature with no caller verdict must be \
+             verified by the store, not recorded as unevaluated or false — got \
+             {:?}",
+            links[0].proof.valid
+        );
+        assert_eq!(links[0].proof.invalid, Some(false));
     }
 
+    /// The derivation is a real signature check, not a constant `true`.
+    ///
+    /// Turns red on: making the derivation a constant —
+    /// `.unwrap_or_else(|| true)` in `insert_link_triples`. That mutation
+    /// leaves `caller_supplied_false_is_stored_as_false` green, so only this
+    /// test pins that the store actually checks the signature.
     #[test]
-    fn test_migration_skips_if_already_done() {
+    fn store_derives_false_for_a_broken_signature() {
         let svc = new_service();
-        svc.set_migration_version(2).unwrap();
-        let count = svc.migrate_named_graphs_to_reifiers().unwrap();
-        assert_eq!(count, 0);
+        let signer = TestSigner::generate();
+        let mut link = signed_link_without_verdict(&signer, "ad4m://derive-bad");
+        // Same length, still valid hex, wrong bytes: this reaches the crypto
+        // and fails there, rather than erroring out of `hex::decode`.
+        link.proof.signature = link.proof.signature.replace('a', "b");
+        svc.add_link(&link).unwrap();
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].proof.valid,
+            Some(false),
+            "a tampered signature must derive as false"
+        );
+        assert_eq!(links[0].proof.invalid, Some(true));
+    }
+
+    /// A malformed proof envelope — the case where `verify` returns `Err`
+    /// rather than `Ok(false)` — is a failed verification, not a panic and not
+    /// a third state. `!!!` is not hex, so `hex::decode` errors.
+    ///
+    /// Turns red on: changing `verify_or_false` to return `true` on `Err`.
+    /// It also catches a `.unwrap()`/`.expect()` there, as a panic.
+    #[test]
+    fn store_derives_false_when_verification_errors() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        let mut link = signed_link_without_verdict(&signer, "ad4m://derive-malformed");
+        link.proof.signature = "!!!not-hex!!!".to_string();
+        svc.add_link(&link).unwrap();
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].proof.valid,
+            Some(false),
+            "a proof that cannot even be parsed has not verified"
+        );
+    }
+
+    /// Re-inserting a link whose verdict changed must overwrite the stored one.
+    ///
+    /// `make_reifier_iri` hashes author, source, predicate, target and
+    /// timestamp — not the proof — so the second insert lands on the same
+    /// reifier. Before the delete-before-insert fix the old `proofValid` quad
+    /// stayed: a link once stored "true" kept reading back verified, and
+    /// `query_links` returned it twice because its `OPTIONAL` matched both
+    /// quads.
+    ///
+    /// Turns red on: removing the `stale` collect-and-remove loop from
+    /// `insert_link_triples`. Both assertions fail — two quads, and
+    /// `get_all_links` yields the stale `Some(true)`.
+    #[test]
+    fn reinserting_a_link_overwrites_a_stale_verdict() {
+        let svc = new_service();
+        let mut link = make_link("ad4m://restale", "ad4m://pred", "ad4m://tgt");
+
+        link.proof.valid = Some(true);
+        link.proof.invalid = Some(false);
+        svc.add_link(&link).unwrap();
+
+        link.proof.valid = Some(false);
+        link.proof.invalid = Some(true);
+        svc.add_link(&link).unwrap();
+
+        assert_eq!(
+            proof_valid_quads(&svc, &link),
+            vec!["false".to_string()],
+            "a re-insert must replace the verdict quad, not add a second one"
+        );
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(
+            links.len(),
+            1,
+            "a duplicated verdict quad makes the OPTIONAL match twice and the \
+             link come back twice"
+        );
+        assert_eq!(
+            links[0].proof.valid,
+            Some(false),
+            "the re-inserted verdict must win over the stored one"
+        );
+    }
+
+    /// Every write carries the annotation, so the two read paths never have to
+    /// answer "nobody checked". Pins both, because each decodes independently.
+    ///
+    /// Turns red on: dropping the `(ONT_PROOF_VALID, &valid_str)` entry from
+    /// the `annotations` vec in `insert_link_triples` — the state the old
+    /// `if let Some(valid_str) = …` guard produced for a caller-`None` link.
+    #[test]
+    fn stored_verdict_is_always_present_and_boolean() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        let link = signed_link_without_verdict(&signer, "ad4m://always-present");
+        svc.add_link(&link).unwrap();
+
+        assert_eq!(
+            proof_valid_quads(&svc, &link).len(),
+            1,
+            "exactly one proofValid quad must be stored for every link"
+        );
+
+        for from_get_all in svc.get_all_links().unwrap() {
+            assert!(
+                from_get_all.proof.valid.is_some(),
+                "get_all_links must never report an unevaluated verdict"
+            );
+        }
+        for from_query in svc
+            .query_links(Some("ad4m://always-present"), None, None, None, None, None)
+            .unwrap()
+        {
+            assert!(
+                from_query.proof.valid.is_some(),
+                "query_links must never report an unevaluated verdict"
+            );
+        }
+    }
+
+    /// A negative verdict the caller computed is still recorded as one — the
+    /// control that stops "always store true" from passing the tests above.
+    ///
+    /// Turns red on: hard-coding `"true"` as the `ONT_PROOF_VALID` value.
+    #[test]
+    fn caller_supplied_false_is_stored_as_false() {
+        let svc = new_service();
+        let mut link = make_link("ad4m://neg", "ad4m://pred", "ad4m://tgt");
+        link.proof.valid = Some(false);
+        link.proof.invalid = Some(true);
+        svc.add_link(&link).unwrap();
+
+        let from_get_all = svc.get_all_links().unwrap();
+        assert_eq!(from_get_all.len(), 1);
+        assert_eq!(from_get_all[0].proof.valid, Some(false));
+        assert_eq!(from_get_all[0].proof.invalid, Some(true));
+
+        let from_query = svc
+            .query_links(Some("ad4m://neg"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(from_query.len(), 1);
+        assert_eq!(from_query[0].proof.valid, Some(false));
+        assert_eq!(from_query[0].proof.invalid, Some(true));
+    }
+
+    /// Data this store did not write — hand-seeded rows, a foreign dump — can
+    /// still arrive with no `proofValid` quad. That decodes fail-closed, the
+    /// way every consumer of the field reads an unverified link, and never as
+    /// an "unevaluated" third state.
+    ///
+    /// Turns red on: `decode_proof_valid(s) -> bool { s != "false" }`, the
+    /// fail-open reading, under which an absent annotation reports verified.
+    #[test]
+    fn absent_annotation_decodes_fail_closed() {
+        assert!(!decode_proof_valid(""), "absent must read as not verified");
+        assert!(!decode_proof_valid("false"));
+        assert!(decode_proof_valid("true"));
+        assert!(
+            !decode_proof_valid("TRUE"),
+            "only the exact literal this store writes counts as verified"
+        );
     }
 
     /// v4 migration converts every `literal:*:` IRI-shaped object into the

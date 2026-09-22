@@ -106,10 +106,12 @@ describe("MCP Neighbourhood Integration Tests", function () {
         });
 
         it("should authenticate via request_capability + generate_jwt", async function() {
+            // Admin credential in the Authorization header: since #851-3 the
+            // inline code is only auto-permitted for authenticated callers.
             const capResult = await callMcpTool(MCP_BASE_URL, "request_capability", {
                 app_name: "Neighbourhood Test",
                 app_desc: "MCP neighbourhood integration test"
-            }, mcpSessionId);
+            }, mcpSessionId, { Authorization: `Bearer ${ADMIN_CREDENTIAL}` });
             expect(capResult.request_id).to.be.a('string');
             expect(capResult.code).to.be.a('string');
             console.log("Got capability request_id:", capResult.request_id);

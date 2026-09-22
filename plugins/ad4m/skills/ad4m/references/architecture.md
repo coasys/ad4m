@@ -1,258 +1,57 @@
-# AD4M Architecture
+# AD4M Architecture — plugin notes
 
-## Agent-Centric Model
-
-AD4M inverts the traditional app-centric paradigm. Instead of users creating accounts on applications, each agent (user or AI) runs their own AD4M executor — a personal semantic web node.
-
-- **No central servers** — agents communicate P2P via Holochain
-- **Data sovereignty** — all data lives in agent-controlled perspectives
-- **Protocol evolvability** — languages abstract away storage, enabling migration without data loss
-
-## Perspectives
-
-A perspective is a subjective graph of links — a personal knowledge graph. Every piece of data in AD4M exists as links within perspectives.
+The architecture document itself — perspectives, links, languages,
+neighbourhoods, and the SHACL subject-class (social DNA) format with every
+`PropertyShape` field, the relation/setter traps, the generated-tool table
+and the link mapping — is served by the executor, not kept in this skill:
 
 ```
-Perspective "My Notes"
-├── Link: (ad4m://self) --has_name--> (literal:string:Data)
-├── Link: (ad4m://self) --has_role--> (literal:string:AI Agent)
-└── Link: (did:key:z6Mk...) --authored--> (Qm...expression-hash)
+ad4m_get_documentation(topic="architecture")
 ```
 
-Perspectives are local by default. Publishing a perspective as a neighbourhood makes it shared.
+It needs no authentication and is compiled into the executor binary, so it
+always describes the node you are connected to. `topic="overview"` is the
+shorter companion: the tool surface, the workflow, authentication over MCP,
+and the rules for writing data other agents and humans can use. When this
+skill and the executor disagree, the executor is describing what is actually
+running.
 
-### Key Operations
+This file only records what is specific to reaching the executor through the
+OpenClaw plugin.
 
-- `ad4m_add_perspective(name)` — create a new perspective
-- `ad4m_query_links(perspective_id, source?, predicate?, target?)` — query links by source/predicate/target
-- `ad4m_add_link(perspective_id, source, predicate, target)` — add a link
-- `ad4m_add_model(perspective_id, class_name, shacl_json)` — register a subject class schema
+## Tool names carry an `ad4m_` prefix
 
-## Links
+The executor docs name tools bare (`describe_perspective`, `instance_create`,
+`add_model`). The plugin registers every bridged tool as `ad4m_<name>`
+(`ad4m_describe_perspective`, `ad4m_instance_create`, …). Same tool, same
+parameters; only the name differs. `topic` values, `class_name`s and every
+parameter are passed through unchanged.
 
-The fundamental data unit. An RDF-like triple:
+## Only manifest-listed tools are bridged
 
-```typescript
-interface Link {
-  source: string; // URI — what the link is about
-  predicate?: string; // URI — the relationship type (optional)
-  target: string; // URI — what it points to
-}
-```
+The executor exposes more tools than the plugin bridges natively. Whatever is
+not in `contracts.tools` (Rule 0 of the main skill) is real but does not reach
+you as an `ad4m_*` tool — for example `request_capability` and
+`generate_jwt`. `ad4m-setup` calls both for you; the manual path is in
+`references/setup.md` → "Calling MCP tools without the plugin".
+`add_model` *is* bridged natively (SKILL.md, "Subject Classes (SHACL)"), so authoring a schema needs no
+fallback.
 
-Wrapped as `LinkExpression` with metadata:
+## Per-class (dynamic) tools and the manifest
 
-```typescript
-interface LinkExpression {
-  data: Link; // The actual triple
-  author: string; // DID of creator
-  timestamp: string; // ISO datetime
-  proof: object; // Cryptographic signature
-}
-```
+The executor's "Generated MCP Tools" section describes the opt-in
+`--dynamic-class-tools` mode. Through the plugin there is a second gate: even
+with the flag on server-side, a client only sees a per-class tool name that
+is *also* declared in `contracts.tools`, and there is no wildcard or pattern
+support for those names. So the mode does not scale past a small, fixed set
+of classes known in advance — see Rules 0 and 9 of the main skill — and the
+`instance_*` tools are the default for a reason.
 
-### URI Conventions
+## Where the rest lives
 
-- `ad4m://self` — the perspective itself
-- `literal:string:value` — inline string literal
-- `literal:number:42` — inline number
-- `literal:json:{"key":"value"}` — inline JSON
-- `did:key:z6Mk...` — agent identity
-- `Qm...` — content-addressed expression (language-specific)
-
-### Links Alone Don't Give You Uniqueness
-
-`addLink` is a raw graph-edge primitive — `ad4m_add_link(perspective_id, source, predicate, target)` writes exactly the triple you give it and has no opinion about whether `source` or `target` uniquely identifies anything in your domain. Link directly against content (e.g. using a message's text itself as the source or target of a link, instead of a dedicated instance IRI) and two logically distinct entities with identical content collapse onto the same graph node — there's nothing left to tell them apart.
-
-**Reifiers provide provenance, not identity.** Every link is stored with an RDF 1.2 reifier — `<link:HASH> rdf:reifies <<( source predicate target )>>` — carrying author, timestamp, and signature metadata for that specific triple-assertion (`rust-executor/src/perspectives/sparql_store.rs`). This answers "who claimed this link, when, and is it validly signed" for any individual write. It does **not** give the entity the triple describes a stable, addressable identity. Two different messages, each independently reified with their own author and timestamp, are still indistinguishable as entities if both use the same literal as their source/target — the reifier authenticates the assertion, not the thing being asserted about.
-
-**Subject classes are the canonical fix.** Instantiating a subject class always mints a fresh, random, content-independent base expression (`ad4m://obj/<24 random chars>` — see `core/src/model/Ad4mModel.ts`) *before* any property is written, and every property write for that instance uses this IRI as the link's `source` — never the property's own value. Two instances with byte-identical properties therefore stay distinct: identity lives in the instance's IRI, not in whatever its properties happen to hold. Work at the class/model level (`ad4m_add_model`, `{class}_create`, `@Property`) rather than writing raw links directly, unless you're deliberately reconstructing this uniqueness guarantee yourself.
-
-## Languages
-
-Protocol abstractions that handle expression storage and retrieval. A language defines:
-
-- How to create expressions (write)
-- How to retrieve expressions by address (read)
-- Optionally: real-time sync via Holochain
-
-Examples:
-
-- **Holochain-based languages** — P2P shared state (used for neighbourhoods)
-- **Note/IPFS language** — content-addressed immutable storage
-- **Direct message language** — encrypted P2P messaging
-
-Languages are installed from the bootstrap seed on first init.
-
-## Neighbourhoods
-
-A shared perspective. Created by publishing a local perspective with a link language (Holochain DNA for sync).
-
-```
-Agent A's Perspective ←──sync──→ Agent B's Perspective
-         └──── Link Language (Holochain) ────┘
-```
-
-### Creating a Neighbourhood
-
-1. Create a perspective
-2. Publish with a link language: `ad4m_neighbourhoodPublishFromPerspective(perspectiveUUID, linkLanguage, meta)`
-3. Share the `neighbourhood://...` URL
-
-### Joining a Neighbourhood
-
-1. `ad4m_neighbourhoodJoinFromUrl(url)` — downloads meta, installs required languages, syncs links
-
-## Subject Classes (SHACL SDNA)
-
-Subject classes impose structure on the link graph using SHACL (Shapes Constraint Language). They define schemas that map object-oriented concepts to link patterns.
-
-### How It Works
-
-Classes are registered via the `ad4m_add_model` MCP tool (or `add_sdna()` in Rust) using a JSON representation of a SHACL shape. The JSON is parsed by `SHACLShape` / `PropertyShape` structs and converted to RDF links in the perspective.
-
-Each instance's identity is its base expression — a freshly generated, content-independent `ad4m://obj/<id>` IRI (see [Links Alone Don't Give You Uniqueness](#links-alone-dont-give-you-uniqueness) above). This is what makes subject classes the canonical way to model anything where two instances might end up with identical property values.
-
-### SHACL JSON Format
-
-```json
-{
-  "target_class": "message://Message",
-  "constructor_actions": [
-    {
-      "action": "addLink",
-      "source": "this",
-      "predicate": "rdf://type",
-      "target": "message://Message"
-    }
-  ],
-  "destructor_actions": [
-    {
-      "action": "removeLink",
-      "source": "this",
-      "predicate": "rdf://type",
-      "target": "message://Message"
-    }
-  ],
-  "properties": [
-    {
-      "path": "message://body",
-      "name": "body",
-      "datatype": "xsd://string",
-      "min_count": 1,
-      "max_count": 1,
-      "writable": true,
-      "setter": [
-        {
-          "action": "setSingleTarget",
-          "source": "this",
-          "predicate": "message://body",
-          "target": "value"
-        }
-      ]
-    },
-    {
-      "path": "message://reactions",
-      "name": "reactions",
-      "node_kind": "IRI",
-      "collection": true,
-      "adder": [
-        {
-          "action": "addLink",
-          "source": "this",
-          "predicate": "message://reactions",
-          "target": "value"
-        }
-      ],
-      "remover": [
-        {
-          "action": "removeLink",
-          "source": "this",
-          "predicate": "message://reactions",
-          "target": "value"
-        }
-      ]
-    }
-  ]
-}
-```
-
-### Top-Level Fields
-
-| Field                 | Type            | Description                                                                                                     |
-| --------------------- | --------------- | --------------------------------------------------------------------------------------------------------------- |
-| `target_class`        | string (URI)    | Fully qualified class URI. The scheme becomes the namespace (e.g. `message://Message` → namespace `message://`) |
-| `constructor_actions` | AD4MAction[]    | Link operations executed when creating an instance                                                              |
-| `destructor_actions`  | AD4MAction[]    | Link operations executed when deleting an instance                                                              |
-| `properties`          | PropertyShape[] | Property definitions (see below)                                                                                |
-
-### PropertyShape Fields
-
-| Field              | Type         | Description                                                            |
-| ------------------ | ------------ | ---------------------------------------------------------------------- |
-| `path`             | string (URI) | Predicate URI used in links for this property                          |
-| `name`             | string?      | Property name (derived from `path` if omitted)                         |
-| `datatype`         | string?      | Value type constraint, e.g. `xsd://string`, `xsd://dateTime`           |
-| `min_count`        | number?      | Minimum cardinality. `1` = required on creation                        |
-| `max_count`        | number?      | Maximum cardinality. `1` = scalar property. Omit or `> 1` = collection |
-| `writable`         | bool?        | Whether the property can be updated after creation                     |
-| `collection`       | bool?        | Explicit collection flag (alternative to omitting `max_count`)         |
-| `node_kind`        | string?      | `"IRI"` for references to other entities, `"Literal"` for values       |
-| `local`            | bool?        | If true, links are stored locally (not shared in neighbourhood)        |
-| `resolve_language` | string?      | Language to use when resolving expression URIs (e.g. `"literal"`)      |
-| `setter`           | AD4MAction[] | Actions for setting a scalar property value                            |
-| `adder`            | AD4MAction[] | Actions for adding to a collection                                     |
-| `remover`          | AD4MAction[] | Actions for removing from a collection                                 |
-
-### AD4MAction Fields
-
-| Field       | Type   | Description                                                    |
-| ----------- | ------ | -------------------------------------------------------------- |
-| `action`    | string | Operation: `"addLink"`, `"removeLink"`, or `"setSingleTarget"` |
-| `source`    | string | `"this"` (instance URI) or a literal URI                       |
-| `predicate` | string | Predicate URI for the link                                     |
-| `target`    | string | `"value"` (substituted at runtime) or a literal URI            |
-| `local`     | bool?  | If true, the link is local-only                                |
-
-### Generated MCP Tools
-
-Once registered, dynamic tools are auto-generated:
-
-| Property type                                     | Generated tools                               |
-| ------------------------------------------------- | --------------------------------------------- |
-| Scalar (`max_count: 1`)                           | `{class}_set_{prop}`                          |
-| Collection (`collection: true` or no `max_count`) | `{class}_add_{prop}`, `{class}_remove_{prop}` |
-| Required (`min_count: 1`)                         | Parameter included in `{class}_create`        |
-
-### Link Mapping
-
-When you set `message.body = "Hello"` via a subject class:
-
-```
-Link: (<message-instance-uri>) --message://body--> (literal:string:Hello)
-```
-
-When you add to a collection `message.reactions.add(uri)`:
-
-```
-Link: (<message-instance-uri>) --message://reactions--> (<reaction-uri>)
-```
-
-### SDNA Storage in Perspectives
-
-SHACL definitions are decomposed into RDF links in the perspective. Key link patterns:
-
-```
-(ad4m://self) --ad4m://has_shacl--> (literal:string:shacl://Message)
-(literal:string:shacl://Message) --ad4m://shacl_shape_uri--> (message://MessageShape)
-(message://Message) --rdf://type--> (ad4m://SubjectClass)
-(message://MessageShape) --sh://property--> (message://Message.body)
-```
-
-Query available models: `get_models` (MCP) or retrieve links with predicate `ad4m://has_shacl`.
-
-## Built-in Services
-
-- **AI Service** — local LLM inference, embeddings, Whisper transcription
-- **Prolog Engine** — logic queries over perspectives (legacy, being replaced)
-- **SPARQL (Oxigraph)** — per-perspective RDF store for indexed queries
+- Getting, running, unlocking and authenticating against an executor:
+  `references/setup.md`. This is skill-only on purpose — the executor does not
+  serve it, because an agent that can call `get_documentation` is already past
+  setup.
+- Waker / subscription configuration: `references/waker.md`.
+- Everything else about the data model: `ad4m_get_documentation(topic="architecture")`.

@@ -26,6 +26,22 @@ export class AIClient {
         return this.#apiClient.call<Model[]>('ai.models');
     }
 
+    /**
+     * Ask a remote endpoint which models it serves, before adding one.
+     *
+     * Takes the credentials of a model that does not exist yet — a settings
+     * form is being filled in and wants the list to pick from. Rejects when
+     * the endpoint is unreachable or the key is refused, which makes this the
+     * credential check too: without it a bad key surfaces later as a failed
+     * completion carrying an error from a different layer.
+     *
+     * `apiType` defaults to the OpenAI shape, which is what every endpoint
+     * that is not Anthropic speaks.
+     */
+    async discoverModels(baseUrl: string, apiKey?: string, apiType?: string): Promise<string[]> {
+        return this.#apiClient.call<string[]>('ai.discoverModels', { baseUrl, apiKey, apiType });
+    }
+
     async addModel(model: ModelInput): Promise<string> {
         return this.#apiClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) });
     }

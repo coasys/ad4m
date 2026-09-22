@@ -15,7 +15,6 @@ use std::env;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::sync::Mutex;
 use tauri::{Emitter, Listener, WebviewWindow};
 //use tauri::Size;
 use tracing_subscriber::fmt::format;
@@ -27,7 +26,6 @@ use config::app_url;
 use menu::build_menu;
 use system_tray::build_system_tray;
 use tauri::{AppHandle, RunEvent};
-use tokio::sync::broadcast;
 use uuid::Uuid;
 
 mod app_state;
@@ -47,7 +45,6 @@ use crate::commands::app::{
     set_selected_agent, set_smtp_config, set_tls_config, show_main_window, test_smtp_config,
     validate_tls_config,
 };
-use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::config::log_path;
 
@@ -59,15 +56,6 @@ use tauri::Manager;
 #[derive(Clone, serde::Serialize)]
 struct Payload {
     message: String,
-}
-
-pub struct ProxyState(Mutex<ProxyService>);
-
-#[derive(Default)]
-pub struct ProxyService {
-    credential: Option<String>,
-    endpoint: Option<String>,
-    shutdown_signal: Option<broadcast::Sender<()>>,
 }
 
 pub struct AppState {
@@ -251,14 +239,9 @@ pub fn run() {
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
         .manage(app_state)
-        .manage(ProxyState(Default::default()))
         .invoke_handler(tauri::generate_handler![
             get_port,
             request_credential,
-            login_proxy,
-            setup_proxy,
-            get_proxy,
-            stop_proxy,
             close_application,
             close_main_window,
             show_main_window,

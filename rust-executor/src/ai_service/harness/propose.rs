@@ -1648,6 +1648,7 @@ mod tests {
                     class: Some("Person".into()),
                     resolve_language: None,
                     interpretation_hint: None,
+                    local: false,
                 },
                 // Untyped IRI relation — no sh:class, nodeKind = IRI.
                 ShaclProperty {
@@ -1662,6 +1663,7 @@ mod tests {
                     class: None,
                     resolve_language: None,
                     interpretation_hint: None,
+                    local: false,
                 },
                 // Literal-typed scalar — must NOT be surfaced as a relation.
                 ShaclProperty {
@@ -1676,6 +1678,7 @@ mod tests {
                     class: None,
                     resolve_language: None,
                     interpretation_hint: None,
+                    local: false,
                 },
             ],
         };

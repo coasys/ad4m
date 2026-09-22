@@ -8,7 +8,7 @@
 
 use crate::perspectives::model_query::types::ModelShape;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::LinkQuery;
+use crate::types::{LinkQuery, LinkStatus};
 
 /// A SHACL subject class with its properties and metadata.
 ///
@@ -65,6 +65,11 @@ pub struct ShaclProperty {
     /// derive from" instead of just "some link". `None` when the SDNA
     /// declared no hint on this property.
     pub interpretation_hint: Option<String>,
+    /// `ad4m://local` — links written for this property get
+    /// `LinkStatus::Local`: they stay in this executor's store and are never
+    /// gossiped to the neighbourhood. `false` (shared) unless the property
+    /// shape declares otherwise.
+    pub local: bool,
 }
 
 impl ShaclClass {
@@ -207,6 +212,7 @@ fn shape_to_shacl_class(class_name: &str, shape: &ModelShape) -> ShaclClass {
                 class: class_uri,
                 resolve_language: p.resolve_language.clone(),
                 interpretation_hint: p.interpretation_hint.clone(),
+                local: p.local,
             }
         })
         .collect();
@@ -449,6 +455,29 @@ pub async fn load_class_properties_with_uri(
             _ => None,
         };
 
+        // `ad4m://local` — executor-private storage for this property's
+        // links. Read here as well as in `load_shape`, because this
+        // link-walking path is what the dynamic per-class tools resolve
+        // against; missing it would leave them writing Shared links for a
+        // property the shape declares local.
+        let local = match perspective
+            .get_links(&LinkQuery {
+                source: Some(prop_uri.clone()),
+                predicate: Some("ad4m://local".to_string()),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(links) if !links.is_empty() => links[0]
+                .data
+                .target
+                .rsplit(':')
+                .next()
+                .map(|v| v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+            _ => false,
+        };
+
         properties.push(ShaclProperty {
             name: prop_name,
             is_collection,
@@ -461,6 +490,7 @@ pub async fn load_class_properties_with_uri(
             class: class_uri,
             resolve_language,
             interpretation_hint,
+            local,
         });
     }
 
@@ -541,6 +571,48 @@ pub async fn resolve_property_predicate(
         class_name,
         available.join(", ")
     ))
+}
+
+/// Resolve the [`LinkStatus`] a property's links must be written with.
+///
+/// `ad4m://local` on the property shape → [`LinkStatus::Local`] (kept in this
+/// executor's store, never gossiped); everything else → [`LinkStatus::Shared`].
+///
+/// The write paths that run the class's declared SHACL actions get this from
+/// the action's own `local` field inside `execute_commands`. The MCP paths
+/// that bypass those actions and write links directly — collection add, the
+/// collection arrays of `instance_create`, the dynamic per-class tools — have
+/// no action to read, so they resolve the status here instead. Without it a
+/// `local` collection would be written Shared by exactly those tools while its
+/// scalar siblings stayed Local.
+///
+/// An unknown class or property resolves to `Shared`. That default is *not*
+/// justified by "never withhold data" — for a privacy-adjacent flag the safe
+/// failure is the opposite one: withholding is recoverable, gossiping a value
+/// the class declared executor-private is not.
+///
+/// It is sound here only because the branch is unreachable in practice: every
+/// caller resolves the property's predicate from the same class SHACL first and
+/// aborts on failure, so reaching this function at all means the class and
+/// property exist. If that precondition ever stops holding, propagate the
+/// lookup failure instead of widening the default.
+pub async fn resolve_property_link_status(
+    perspective: &PerspectiveInstance,
+    class_name: &str,
+    property_name: &str,
+) -> LinkStatus {
+    let properties = load_class_properties(perspective, class_name).await;
+    let prop_lower = property_name.to_lowercase();
+    let is_local = properties
+        .iter()
+        .find(|prop| prop.name == property_name || prop.name.to_lowercase() == prop_lower)
+        .map(|prop| prop.local)
+        .unwrap_or(false);
+    if is_local {
+        LinkStatus::Local
+    } else {
+        LinkStatus::Shared
+    }
 }
 
 /// Resolve a property's resolve_language (the general expression-language

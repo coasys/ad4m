@@ -4,6 +4,43 @@
   "description": "Connect to AD4M — join P2P neighbourhoods, message humans and other AI agents, watch for changes in real-time. Bridges AD4M's MCP server into OpenClaw as native agent tools.",
   "version": "0.1.0",
   "skills": ["skills/ad4m"],
+  "contracts": {
+    "tools": [
+      "ad4m_get_sample_config",
+      "ad4m_get_documentation",
+      "ad4m_get_my_did",
+      "ad4m_auth_status",
+      "ad4m_login_email",
+      "ad4m_signup",
+      "ad4m_verify_email_code",
+      "ad4m_set_agent_profile",
+      "ad4m_list_perspectives",
+      "ad4m_add_perspective",
+      "ad4m_add_model",
+      "ad4m_neighbourhood_join_from_url",
+      "ad4m_neighbourhood_publish_from_perspective",
+      "ad4m_list_link_language_templates",
+      "ad4m_add_link",
+      "ad4m_query_links",
+      "ad4m_describe_perspective",
+      "ad4m_instance_create",
+      "ad4m_instance_query",
+      "ad4m_instance_get",
+      "ad4m_instance_update",
+      "ad4m_instance_add_to_collection",
+      "ad4m_instance_remove_from_collection",
+      "ad4m_instance_remove",
+      "ad4m_instance_transcript",
+      "ad4m_add_child",
+      "ad4m_get_children",
+      "ad4m_subscribe_to_mentions",
+      "ad4m_unsubscribe_from_mentions",
+      "ad4m_subscribe_to_children",
+      "ad4m_unsubscribe_from_children",
+      "ad4m_list_waker_subscriptions",
+      "ad4m_set_profile_picture_from_file"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "properties": {
@@ -17,6 +54,11 @@
         "type": "string",
         "description": "AD4M executor MCP endpoint URL"
       },
+      "allowInsecureHttp": {
+        "type": "boolean",
+        "default": false,
+        "description": "Allow sending AD4M credentials to a non-loopback plaintext http:// mcpEndpoint. This is a client-side guard only — it does not change how the executor serves MCP, which has no TLS of its own; put a TLS front (Caddy, Cloudflare Tunnel) in front of it and use https:// for anything off-LAN. Loopback, SSH tunnels and https:// are already allowed without this flag, so the one case it exists for is a plaintext endpoint on a trusted LAN (e.g. http://host.local:3002/mcp)."
+      },
       "token": {
         "type": "string",
         "description": "Auth token — JWT obtained during external mode setup. In managed mode this is generated automatically and not persisted."
@@ -28,11 +70,6 @@
       "ad4mBinaryPath": {
         "type": "string",
         "description": "Full path to the ad4m-executor binary. Only needed if ad4m-executor is not in PATH."
-      },
-      "toolRefreshIntervalMs": {
-        "type": "number",
-        "default": 30000,
-        "description": "How often to poll for new dynamic SHACL tools (ms)"
       },
       "executorUrl": {
         "type": "string",
@@ -117,6 +154,10 @@
     },
     "wakeToken": {
       "label": "Wake Token",
+      "sensitive": true
+    },
+    "password": {
+      "label": "Account Password",
       "sensitive": true
     }
   }

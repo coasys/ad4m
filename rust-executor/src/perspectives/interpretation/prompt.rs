@@ -2,7 +2,7 @@ use super::{
     class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
 };
 use crate::db::Ad4mDb;
-use crate::perspectives::flow_context::{render_consensus_rule, FlowContext};
+use crate::perspectives::flow_context::{render_consensus_rule, ContentionStatus, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
 use std::collections::HashMap;
@@ -13,8 +13,9 @@ use std::collections::HashMap;
 /// `{ "classes": [{ "name", "hint",
 ///                  "existing": [{ "id", "title", "class" }, …],
 ///                  "fields": [{ "name", "required", "hint" }],
-///                  "relations": [{ "name", "targetClass", "hint" }] }],
-///    "transcript": [{ "speaker", "text", "timestamp"? }] }`.
+///                  "relations": [{ "name", "targetClass", "cardinality", "hint" }] }],
+///    "transcript": [{ "speaker", "speakerDid"? (same-name collisions only),
+///                     "text", "timestamp"? }] }`.
 ///
 /// `existing` maps a class's local name to the instances already in the graph
 /// (`id` = base URI, `title` = the class's declared identity value, `class` =
@@ -49,11 +50,26 @@ use std::collections::HashMap;
 /// tokens on flow scaffolding (and the LLM never sees an empty section that
 /// might confuse it into inventing flows). Callers with no active flows can
 /// safely pass `&[]`.
+///
+/// `speaker_names` maps a raw DID string to the human-readable display name the
+/// LLM should see as `"speaker"`. An unknown DID renders verbatim.
+///
+/// `"speakerDid"` has exactly one job — disambiguation: it is emitted only
+/// when two *different* DIDs in this transcript resolve to the *same*
+/// display name, so the model can still tell the speakers apart. In every
+/// other case the field is omitted: the LLM is the sole consumer of this
+/// JSON, the preamble tells it to reason about identity via `speaker`, and a
+/// per-turn field the model is never told how to act on buys nothing on an
+/// empirically-tuned prompt (the #1013 standard). Build the map with
+/// [`build_speaker_name_map`] for production callers; pass `&HashMap::new()`
+/// in tests that supply human-readable names directly in
+/// [`TranscriptTurn::speaker`].
 pub fn build_interpretation_input(
     shapes: &[ModelShape],
     transcript: &[TranscriptTurn],
     existing: &ExistingInstances,
     active_flows: &[FlowContext],
+    speaker_names: &HashMap<String, String>,
 ) -> String {
     // Group the id-keyed source by class once for the per-class `existing`
     // blocks below (deterministically ordered — see `instances_by_class`).
@@ -94,8 +110,10 @@ pub fn build_interpretation_input(
                 // `belongsToMany` are inherently reverse (target class holds
                 // the outbound edge), so writing them requires resolving the
                 // inverse predicate — out of scope until Phase 3. Forward
-                // `hasOne` and `hasMany` both surface here; cardinality is
-                // enforced downstream when the planner resolves refs.
+                // `hasOne` and `hasMany` both surface here, and each one now
+                // *declares* its cardinality (below) as well as having it
+                // enforced downstream when the planner resolves refs —
+                // enforcement alone was not enough, see #1005.
                 .filter(|r| r.direction == "forward")
                 .map(|r| {
                     // Collision-aware label (CodeRabbit #881 review): the
@@ -117,9 +135,22 @@ pub fn build_interpretation_input(
                         .find(|s| !s.shape_uri.is_empty() && s.shape_uri == r.target_class_uri)
                         .map(|s| class_label(&s.target_class, shapes))
                         .unwrap_or_else(|| r.target_class_name.clone());
+                    // Cardinality is the difference between "attach the one
+                    // target" and "attach every target that applies", and the
+                    // model cannot infer it from the name or the hint. Without
+                    // it a `hasMany` relation has no valid shape to express two
+                    // targets in, so the model improvises — in the case that
+                    // produced #1005 it emitted the same key twice and
+                    // last-wins silently dropped one side of a tension.
+                    //
+                    // `kind` is already carried on the shape
+                    // (`ShapeRelation::kind`); only forward relations reach
+                    // here, so it is `hasMany` or `hasOne`.
+                    let cardinality = if r.kind == "hasMany" { "many" } else { "one" };
                     serde_json::json!({
                         "name": r.name,
                         "targetClass": target_class_label,
+                        "cardinality": cardinality,
                         "hint": rel_hint_by_pred.get(r.predicate.as_str()).and_then(|h| *h),
                     })
                 })
@@ -167,10 +198,35 @@ pub fn build_interpretation_input(
             })
         })
         .collect();
+    // A display name is ambiguous when two different DIDs in this transcript
+    // resolve to it — only then does `speakerDid` have a job (see the doc
+    // comment above).
+    let ambiguous_names: std::collections::HashSet<&str> = {
+        let mut by_name: HashMap<&str, &str> = HashMap::new();
+        let mut ambiguous = std::collections::HashSet::new();
+        for t in transcript {
+            if let Some(name) = speaker_names.get(&t.speaker) {
+                match by_name.get(name.as_str()) {
+                    Some(&prior_did) if prior_did != t.speaker.as_str() => {
+                        ambiguous.insert(name.as_str());
+                    }
+                    _ => {
+                        by_name.insert(name.as_str(), t.speaker.as_str());
+                    }
+                }
+            }
+        }
+        ambiguous
+    };
     let turns: Vec<serde_json::Value> = transcript
         .iter()
         .map(|t| {
-            let mut obj = serde_json::json!({ "speaker": t.speaker, "text": t.text });
+            let resolved = speaker_names.get(&t.speaker);
+            let speaker_label = resolved.map(|s| s.as_str()).unwrap_or(t.speaker.as_str());
+            let mut obj = serde_json::json!({ "speaker": speaker_label, "text": t.text });
+            if resolved.is_some_and(|name| ambiguous_names.contains(name.as_str())) {
+                obj["speakerDid"] = serde_json::json!(t.speaker);
+            }
             if !t.timestamp.is_empty() {
                 obj["timestamp"] = serde_json::json!(t.timestamp);
             }
@@ -249,6 +305,24 @@ fn render_active_flow_for_prompt(fc: &FlowContext) -> serde_json::Value {
             serde_json::json!(render_consensus_rule(rule)),
         );
     }
+    // A verified-contested flow must never read as "awaiting votes" — the
+    // preamble tells the model not to propose transitions on it. `Unknown`
+    // (cache-sourced, contention not computed) deliberately renders nothing:
+    // flagging every cached flow would be noise, and the accepted staleness
+    // is documented on `ContentionStatus::Unknown`.
+    if let ContentionStatus::Contested(ref c) = fc.contested {
+        obj.insert(
+            "contested".into(),
+            serde_json::json!({
+                "stalled": true,
+                "between": c
+                    .candidates
+                    .iter()
+                    .map(|e| e.to_state.as_str())
+                    .collect::<Vec<_>>(),
+            }),
+        );
+    }
     let next: Vec<serde_json::Value> = fc
         .reachable_next_states
         .iter()
@@ -298,8 +372,8 @@ You receive a JSON object with these fields:
   - `classes`: available subject classes. Each has a `name`, a natural-language
     `hint` describing when to instantiate it, a list of `fields` (each with a
     `name`, optional `hint`, and `required` flag), a `relations` list of
-    forward instance-reference slots (each with a `name`, `targetClass`, and
-    optional `hint`), and an `existing` array of instances already present in
+    forward instance-reference slots (each with a `name`, `targetClass`,
+    `cardinality`, and optional `hint`), and an `existing` array of instances already present in
     the graph for that class. Each existing entry is `{id, title, class}`, and
     may also carry a `properties` object holding the instance's current
     secondary-scalar values (e.g. a rolling summary). `id` is the stable
@@ -307,7 +381,10 @@ You receive a JSON object with these fields:
     optional `properties` object shows its *current state* so you can judge
     whether new turns continue that instance or belong to a fresh one.
   - `transcript`: an array of turns `{speaker, text}` and, when known,
-    `timestamp` (the source link's RFC3339 time).
+    `timestamp` (the source link's RFC3339 time). Use `speaker` for identity
+    reasoning. When two different participants share the same display name,
+    each of their turns also carries `speakerDid` (the signing agent's raw
+    DID) — use it only to tell those same-named speakers apart.
   - `active_flows` (OPTIONAL — present only when flows are running on this
     scope): an array of live `FlowInstance` summaries. Each entry has an
     `instance` URI, the `subject` base expression it rides on, the `flow`
@@ -329,7 +406,10 @@ You receive a JSON object with these fields:
     transcript matches a `nextStates` entry's `hint`, prefer extracting
     instances that will satisfy its `requires` guard so the flow can
     advance. When `active_flows` is absent, extract freely on the class
-    hints alone.
+    hints alone. An entry may carry `contested` (`{stalled, between}`):
+    that flow is irreversibly stalled between the listed target states —
+    do NOT extract instances aimed at advancing it; the deadlock needs
+    human resolution first.
 
 Emit a JSON array. Each element is `{\"class\": <class name>, ...fields, ...relations}`,
 where fields carry strings drawn from what participants actually said or
@@ -366,6 +446,9 @@ Relations (linking instances together):
   - Only set a relation when the transcript clearly identifies the target;
     omit the relation field otherwise. Never invent an `id`, and never emit a
     `\"new:<Class>:<n>\"` ref for which no matching output element exists.
+  - Each relation's `cardinality` fixes the shape of its value: `\"many\"`
+    takes an ARRAY of refs even for a single target, `\"one\"` takes a bare
+    ref. Never repeat a key to add a second target — JSON keeps only the last.
 
 Worked examples follow (as prior turns) before your real input — study how
 every co-present item is captured, then apply the same to your input.
@@ -510,7 +593,8 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
     // Message via `new:<Class>:<n>` refs. Teaches the LLM (a) the per-class
     // 1-based ordinal counting, (b) that BOTH endpoints can be freshly-minted
     // siblings, (c) how relation fields carry references not free-form
-    // strings. A dedicated Message class is preferred over stuffing a
+    // strings, and (d) that a `many` relation is an array whether it carries
+    // two refs or one. A dedicated Message class is preferred over stuffing a
     // literal-URI value into `expression` — using only `new:` refs keeps the
     // example consistent with the "never invent an `id`" rule in the system
     // prompt.
@@ -519,14 +603,28 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
             {"name":"Message","hint":"An utterance exchanged in the transcript.","existing":[],
              "fields":[{"name":"content","required":true,"hint":"Short summary of what was said."}]},
             {"name":"Topic","hint":"A subject the participants discuss.","existing":[],
-             "fields":[{"name":"title","required":true,"hint":"Short topic label."}]},
+             "fields":[{"name":"title","required":true,"hint":"Short topic label."}],
+             // The `many` half of the cardinality rule (#1005). Declaring the
+             // rule without ever demonstrating it is what broke the harness:
+             // `basedOn` and `contradicts` are both `hasMany`, and with no
+             // example carrying an array the model stopped populating them at
+             // all. The outputs below show both cases the rule covers — two
+             // refs, and a single ref that is *still* wrapped in an array.
+             "relations":[
+                 {"name":"mentionedIn","targetClass":"Message","cardinality":"many","hint":"Every message that discusses this topic."}
+             ]},
             {"name":"SemanticRelationship",
              "hint":"An edge that tags a Message with a Topic and a relevance score.",
              "existing":[],
              "fields":[{"name":"relevance","required":true,"hint":"0..1 confidence that the tag applies."}],
+             // `cardinality` mirrors what the generated descriptor now carries
+             // (#1005). Both of these are genuinely single-valued, and the
+             // outputs below emit bare refs accordingly — an example whose
+             // shape disagreed with its declared cardinality would teach the
+             // model to ignore the field.
              "relations":[
-                 {"name":"tag","targetClass":"Topic","hint":"The topic being tagged."},
-                 {"name":"expression","targetClass":"Message","hint":"The message the topic tags."}
+                 {"name":"tag","targetClass":"Topic","cardinality":"one","hint":"The topic being tagged."},
+                 {"name":"expression","targetClass":"Message","cardinality":"one","hint":"The message the topic tags."}
              ]}
         ],
         "transcript":[
@@ -538,8 +636,8 @@ pub(crate) fn interpretation_examples() -> Vec<AIPromptExamples> {
     let ex4_out = serde_json::json!([
         {"class":"Message","content":"We should log all failed webhook retries to debug the payments outage."},
         {"class":"Message","content":"Retry logging is basically an observability question."},
-        {"class":"Topic","title":"Webhook retry logging"},
-        {"class":"Topic","title":"Observability"},
+        {"class":"Topic","title":"Webhook retry logging","mentionedIn":["new:Message:1","new:Message:2"]},
+        {"class":"Topic","title":"Observability","mentionedIn":["new:Message:2"]},
         {"class":"SemanticRelationship","relevance":0.9,
          "tag":"new:Topic:1","expression":"new:Message:1"},
         {"class":"SemanticRelationship","relevance":0.8,
@@ -702,6 +800,7 @@ mod tests {
             )],
             &no_existing(),
             &[],
+            &HashMap::new(),
         );
 
         // class-level hints reach the prompt
@@ -744,7 +843,8 @@ mod tests {
         let shapes = vec![shape_from_sdna("Intention", INTENTION_SDNA)];
         let mut turn = TranscriptTurn::from_speaker_text("Nico", "I'll ship it");
         turn.timestamp = "2026-08-13T12:00:00.000Z".into();
-        let input = build_interpretation_input(&shapes, &[turn], &no_existing(), &[]);
+        let input =
+            build_interpretation_input(&shapes, &[turn], &no_existing(), &[], &HashMap::new());
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         assert_eq!(v["transcript"][0]["timestamp"], "2026-08-13T12:00:00.000Z");
         let without = build_interpretation_input(
@@ -752,6 +852,7 @@ mod tests {
             &[TranscriptTurn::from_speaker_text("Nico", "I'll ship it")],
             &no_existing(),
             &[],
+            &HashMap::new(),
         );
         let v2: serde_json::Value = serde_json::from_str(&without).unwrap();
         assert!(
@@ -782,6 +883,7 @@ mod tests {
             )],
             &existing,
             &[],
+            &HashMap::new(),
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         let task_class = v["classes"]
@@ -845,6 +947,7 @@ mod tests {
             )],
             &existing,
             &[],
+            &HashMap::new(),
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         let sg_class = v["classes"]
@@ -927,7 +1030,7 @@ mod tests {
     // Passes with no active flows must be byte-identical to the pre-slice-10.2
     // prompt (guarded below).
 
-    use crate::perspectives::flow_context::{FlowContext, NextStateSummary};
+    use crate::perspectives::flow_context::{ContentionStatus, FlowContext, NextStateSummary};
     use crate::perspectives::shacl_parser::ConsensusRule;
 
     fn sample_delivery_context() -> FlowContext {
@@ -954,6 +1057,7 @@ mod tests {
                 n: 1,
                 from_role: None,
             }),
+            contested: ContentionStatus::NotContested,
         }
     }
 
@@ -972,6 +1076,7 @@ mod tests {
             )],
             &no_existing(),
             &[],
+            &HashMap::new(),
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         assert!(
@@ -983,6 +1088,50 @@ mod tests {
         assert!(
             keys.len() == 2 && keys.contains(&"classes") && keys.contains(&"transcript"),
             "pre-slice-10.2 keys must be preserved when active_flows is empty; got {keys:?}"
+        );
+    }
+
+    /// A verified-contested flow renders a `contested` key (`stalled` +
+    /// `between` target states) so the model never reads it as "awaiting
+    /// votes". `Unknown` (cache-sourced, contention not computed) renders
+    /// nothing — flagging every cached flow would be noise; the staleness
+    /// contract lives on `ContentionStatus::Unknown`.
+    #[test]
+    fn active_flows_contested_renders_stall_and_unknown_stays_silent() {
+        use crate::perspectives::flow_instance::fold::{Contention, SettledEdge};
+        let edge = |to: &str| SettledEdge {
+            from_state: "doing".to_string(),
+            to_state: to.to_string(),
+            settled_at: "2026-01-01T00:00:00.000Z".to_string(),
+            atom_uris: vec![],
+            voters: vec![],
+        };
+        let mut contested_ctx = sample_delivery_context();
+        contested_ctx.contested = ContentionStatus::Contested(Contention {
+            from_state: "doing".to_string(),
+            candidates: vec![edge("done"), edge("cancelled")],
+        });
+        let mut unknown_ctx = sample_delivery_context();
+        unknown_ctx.contested = ContentionStatus::Unknown;
+        let shapes = vec![shape_from_sdna("Task", TASK_SDNA)];
+        let input = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text("Ana", "hello")],
+            &no_existing(),
+            &[contested_ctx, unknown_ctx],
+            &HashMap::new(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let arr = v["active_flows"].as_array().unwrap();
+        assert_eq!(arr[0]["contested"]["stalled"], true);
+        assert_eq!(
+            arr[0]["contested"]["between"],
+            serde_json::json!(["done", "cancelled"]),
+            "contested must name the deadlocked target states"
+        );
+        assert!(
+            arr[1].get("contested").is_none(),
+            "Unknown (cache-sourced) must not render a contested flag"
         );
     }
 
@@ -1003,6 +1152,7 @@ mod tests {
             )],
             &no_existing(),
             &flows,
+            &HashMap::new(),
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         let arr = v["active_flows"]
@@ -1077,12 +1227,14 @@ mod tests {
                 consensus_rule: None,
             }],
             consensus_rule: None,
+            contested: ContentionStatus::NotContested,
         };
         let input = build_interpretation_input(
             &shapes,
             &[TranscriptTurn::from_speaker_text("Ana", "I like this")],
             &no_existing(),
             &[bare],
+            &HashMap::new(),
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         let fc = &v["active_flows"][0];
@@ -1151,6 +1303,266 @@ mod tests {
         assert!(p.contains("At most one proposal"));
     }
 
+    /// The renderer itself must declare cardinality, mapped from the shape's
+    /// `kind` (#1005) — this is the test that fails if the `cardinality`
+    /// line is deleted from `build_interpretation_input`.
+    ///
+    /// The two fixture tests below it check the *hand-written few-shot
+    /// examples* agree with the rule; neither calls the renderer, so without
+    /// this test the actual fix was unpinned (Lal's #1013 review). It also
+    /// pins the `kind == "hasMany" → "many"` mapping in both directions,
+    /// which nothing else checks.
+    #[test]
+    fn build_interpretation_input_declares_cardinality_from_relation_kind() {
+        const REVIEW_WITH_HAS_ONE_SDNA: &str = r#"{
+          "target_class":"ns://Review",
+          "interpretation_hint":"A review of one task.",
+          "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://review"}],
+          "properties":[
+            {"path":"ns://type","name":"type","has_value":"ns://review","min_count":1,"max_count":1},
+            {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]},
+            {"path":"ns://subject","name":"subject","relation_kind":"hasOne","target_class_name":"Task","class":"ns://TaskShape","interpretation_hint":"The task under review."}
+          ]
+        }"#;
+        let shapes = vec![
+            // `blocks`: hasMany -> Task (shared fixture)
+            shape_from_sdna("Task", TASK_WITH_RELATION_SDNA),
+            // `subject`: hasOne -> Task
+            shape_from_sdna("Review", REVIEW_WITH_HAS_ONE_SDNA),
+        ];
+        let input = build_interpretation_input(
+            &shapes,
+            &[TranscriptTurn::from_speaker_text("Nico", "review the task")],
+            &no_existing(),
+            &[],
+            &HashMap::new(),
+        );
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let relation = |class: &str, name: &str| -> serde_json::Value {
+            v["classes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == class)
+                .unwrap_or_else(|| panic!("class {class} not rendered"))["relations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["name"] == name)
+                .unwrap_or_else(|| panic!("relation {class}.{name} not rendered"))
+                .clone()
+        };
+        assert_eq!(relation("Task", "blocks")["cardinality"], "many");
+        assert_eq!(relation("Review", "subject")["cardinality"], "one");
+    }
+
+    /// Every rendered relation must declare its cardinality (#1005).
+    ///
+    /// Without it the model has no valid shape for a second target on a
+    /// `hasMany` relation. What it does instead is improvise: the run that
+    /// produced #1005 emitted `{"between": "a", "between": "b"}`, and JSON
+    /// last-wins silently dropped one side of a tension. The value is never
+    /// absent and is never anything but the two legal words.
+    ///
+    /// Scope: iterates the hand-written few-shot fixtures, not the renderer —
+    /// the renderer end is pinned by
+    /// [`build_interpretation_input_declares_cardinality_from_relation_kind`].
+    #[test]
+    fn every_fixture_relation_declares_its_cardinality() {
+        let examples = interpretation_examples();
+        let mut checked = 0usize;
+        for ex in &examples {
+            let v: serde_json::Value = serde_json::from_str(&ex.input).unwrap();
+            for class in v["classes"].as_array().unwrap() {
+                // Few-shot inputs are hand-written fixtures; a class with no
+                // relations simply omits the key rather than carrying `[]`.
+                let Some(rels) = class["relations"].as_array() else {
+                    continue;
+                };
+                for rel in rels {
+                    let card = rel["cardinality"].as_str().unwrap_or_else(|| {
+                        panic!(
+                            "relation {:?} on class {:?} renders no `cardinality`",
+                            rel["name"], class["name"]
+                        )
+                    });
+                    assert!(
+                        card == "one" || card == "many",
+                        "cardinality must be \"one\" or \"many\", got {card:?} for {:?}",
+                        rel["name"]
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no relations rendered in any few-shot example — this test would pass vacuously"
+        );
+    }
+
+    /// The few-shot outputs must not teach the opposite of the rule the
+    /// preamble states.
+    ///
+    /// This is the cheapest way for the #1005 fix to be silently undone: the
+    /// instruction says a `many` relation takes an array, and an example three
+    /// paragraphs later shows a bare string. Models weight the demonstration
+    /// over the instruction, so a contradiction here is worse than saying
+    /// nothing at all.
+    #[test]
+    fn few_shot_outputs_match_the_declared_cardinality() {
+        for ex in interpretation_examples() {
+            let input: serde_json::Value = serde_json::from_str(&ex.input).unwrap();
+            // class name -> relation name -> cardinality
+            let mut card: std::collections::HashMap<(String, String), String> =
+                std::collections::HashMap::new();
+            for class in input["classes"].as_array().unwrap() {
+                let cname = class["name"].as_str().unwrap_or_default().to_string();
+                let Some(rels) = class["relations"].as_array() else {
+                    continue;
+                };
+                for rel in rels {
+                    card.insert(
+                        (
+                            cname.clone(),
+                            rel["name"].as_str().unwrap_or_default().to_string(),
+                        ),
+                        rel["cardinality"].as_str().unwrap_or_default().to_string(),
+                    );
+                }
+            }
+            let Ok(out) = serde_json::from_str::<serde_json::Value>(&ex.output) else {
+                continue; // non-JSON example output (e.g. the empty-array case)
+            };
+            let Some(items) = out.as_array() else {
+                continue;
+            };
+            for item in items {
+                let Some(obj) = item.as_object() else {
+                    continue;
+                };
+                let cname = obj
+                    .get("class")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                for (key, val) in obj {
+                    let Some(kind) = card.get(&(cname.clone(), key.clone())) else {
+                        continue; // a scalar field, not a relation
+                    };
+                    match kind.as_str() {
+                        "many" => assert!(
+                            val.is_array(),
+                            "{cname}.{key} is cardinality \"many\" but the example emits {val} — \
+                             a bare value here teaches the model to ignore the array rule"
+                        ),
+                        "one" => assert!(
+                            !val.is_array(),
+                            "{cname}.{key} is cardinality \"one\" but the example emits an array {val}"
+                        ),
+                        other => panic!("unexpected cardinality {other:?} for {cname}.{key}"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Some example must actually *show* a `many` relation carrying an array.
+    ///
+    /// `few_shot_outputs_match_the_declared_cardinality` only catches an
+    /// example that contradicts the rule; it passes vacuously when every
+    /// fixture relation is `one`, which is what the first cut of #1005
+    /// shipped. Declaring a shape the model has never seen used turned out to
+    /// be worse than saying nothing: the real-LLM harness stopped populating
+    /// `basedOn` and `contradicts` — both `hasMany` — entirely.
+    ///
+    /// So the demonstration is a contract, not a nicety, and this is the test
+    /// that fails if someone removes it.
+    #[test]
+    fn some_example_demonstrates_a_many_relation_as_an_array() {
+        let mut demonstrated = Vec::new();
+        for ex in interpretation_examples() {
+            let input: serde_json::Value = serde_json::from_str(&ex.input).unwrap();
+            let mut many: std::collections::HashSet<(String, String)> = Default::default();
+            for class in input["classes"].as_array().unwrap() {
+                let cname = class["name"].as_str().unwrap_or_default().to_string();
+                let Some(rels) = class["relations"].as_array() else {
+                    continue;
+                };
+                for rel in rels {
+                    if rel["cardinality"].as_str() == Some("many") {
+                        many.insert((
+                            cname.clone(),
+                            rel["name"].as_str().unwrap_or_default().to_string(),
+                        ));
+                    }
+                }
+            }
+            if many.is_empty() {
+                continue;
+            }
+            let Ok(out) = serde_json::from_str::<serde_json::Value>(&ex.output) else {
+                continue;
+            };
+            for item in out.as_array().into_iter().flatten() {
+                let Some(obj) = item.as_object() else {
+                    continue;
+                };
+                let cname = obj
+                    .get("class")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                for (key, val) in obj {
+                    if many.contains(&(cname.clone(), key.clone())) && val.is_array() {
+                        demonstrated.push((
+                            cname.clone(),
+                            key.clone(),
+                            val.as_array().unwrap().len(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            !demonstrated.is_empty(),
+            "no few-shot example emits an array for a `many` relation — the rule is stated but \
+             never shown, which is the shape that regressed the harness in #1013"
+        );
+        // Both readings of "array": more than one ref, and a single ref that is
+        // still wrapped. The second is the one a model gets wrong on its own.
+        assert!(
+            demonstrated.iter().any(|(_, _, n)| *n > 1),
+            "no example shows a `many` relation with several refs: {demonstrated:?}"
+        );
+        assert!(
+            demonstrated.iter().any(|(_, _, n)| *n == 1),
+            "no example shows a single-target `many` relation still wrapped in an array — \
+             that is the case the rule spells out and the one models improvise on: {demonstrated:?}"
+        );
+    }
+
+    /// The preamble must actually state the value shape, not merely ship the
+    /// field. A `cardinality` the model is never told how to act on buys
+    /// nothing.
+    #[test]
+    fn system_prompt_states_the_cardinality_value_shape() {
+        let p = INTERPRETATION_SYSTEM_PROMPT;
+        assert!(
+            p.contains("`cardinality`") || p.contains("cardinality"),
+            "system prompt must introduce `cardinality`"
+        );
+        assert!(
+            p.contains("ARRAY of references") || p.contains("takes an ARRAY"),
+            "system prompt must say a `many` relation takes an array"
+        );
+        assert!(
+            p.contains("Never repeat a key"),
+            "system prompt must forbid the duplicate-key form that caused #1005"
+        );
+    }
+
     #[test]
     fn relations_few_shot_example_is_present_and_upsert_is_last() {
         // The few-shot set must include a dedicated relations example demonstrating
@@ -1208,6 +1620,80 @@ mod tests {
             "the last few-shot example must be the upsert one (an `existing` entry \
          carrying an `id`), so id-upsert keeps the recency slot; last input was: {}",
             last.input
+        );
+    }
+
+    /// Resolved DID renders as the human name; with no same-name collision the
+    /// `speakerDid` field is omitted — it has exactly one job (disambiguation)
+    /// and costs prompt tokens per turn otherwise.
+    #[test]
+    fn speaker_did_resolves_to_name_when_map_provided() {
+        let did = "did:key:z6MkAlice1234567890";
+        let mut names = HashMap::new();
+        names.insert(did.to_string(), "Alice".to_string());
+        let turn = TranscriptTurn::from_speaker_text(did, "hello world");
+        let input = build_interpretation_input(&[], &[turn], &no_existing(), &[], &names);
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(
+            v["transcript"][0]["speaker"], "Alice",
+            "resolved speaker must appear as the display name, not the raw DID"
+        );
+        assert!(
+            v["transcript"][0].get("speakerDid").is_none(),
+            "speakerDid must be omitted when the display name is unambiguous"
+        );
+    }
+
+    /// Two different DIDs resolving to the same display name: every turn of
+    /// the colliding name carries `speakerDid`, so the model can still tell
+    /// the speakers apart — the one job the field has. A third,
+    /// uniquely-named speaker in the same transcript stays `speakerDid`-free.
+    #[test]
+    fn same_display_name_collision_adds_speaker_did_to_both() {
+        let did_a = "did:key:z6MkAlice1111";
+        let did_b = "did:key:z6MkAlice2222";
+        let did_c = "did:key:z6MkBob3333";
+        let mut names = HashMap::new();
+        names.insert(did_a.to_string(), "Alice".to_string());
+        names.insert(did_b.to_string(), "Alice".to_string());
+        names.insert(did_c.to_string(), "Bob".to_string());
+        let turns = vec![
+            TranscriptTurn::from_speaker_text(did_a, "first"),
+            TranscriptTurn::from_speaker_text(did_c, "second"),
+            TranscriptTurn::from_speaker_text(did_b, "third"),
+        ];
+        let input = build_interpretation_input(&[], &turns, &no_existing(), &[], &names);
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(v["transcript"][0]["speaker"], "Alice");
+        assert_eq!(
+            v["transcript"][0]["speakerDid"], did_a,
+            "colliding name: first speaker's turns must carry the DID"
+        );
+        assert_eq!(
+            v["transcript"][2]["speakerDid"], did_b,
+            "colliding name: second speaker's turns must carry the DID"
+        );
+        assert!(
+            v["transcript"][1].get("speakerDid").is_none(),
+            "uniquely-named speaker must stay speakerDid-free"
+        );
+    }
+
+    /// Unknown DID renders verbatim; no `speakerDid` field added.
+    /// This test fails on the unfixed code (before the speaker_names parameter).
+    #[test]
+    fn unknown_did_falls_back_to_raw_did() {
+        let did = "did:key:z6MkUnknown9999";
+        let turn = TranscriptTurn::from_speaker_text(did, "hello world");
+        let input = build_interpretation_input(&[], &[turn], &no_existing(), &[], &HashMap::new());
+        let v: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(
+            v["transcript"][0]["speaker"], did,
+            "unresolved DID must render as-is in the speaker field"
+        );
+        assert!(
+            v["transcript"][0].get("speakerDid").is_none(),
+            "speakerDid must be absent when the DID was not resolved"
         );
     }
 }

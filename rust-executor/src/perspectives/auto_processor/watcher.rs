@@ -26,7 +26,7 @@ use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkStatus};
 
-use super::claim::{batch_key, try_claim, ClaimOutcome};
+use super::claim::{batch_key, renew_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
 use super::events::{
     emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
@@ -35,6 +35,101 @@ use super::events::{
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+/// RAII guard that keeps a processing claim alive for the full duration of a
+/// pass, turning the claim TTL into a **liveness** parameter (crash-detection
+/// speed) rather than a **capacity** parameter (max pass duration).
+///
+/// A background task fires every `ttl_ms / 3` ms, rewrites the claim's expiry
+/// to `now + ttl_ms`, and — for managed users — also touches `last_seen` in the
+/// database so a long interpretation pass never makes a user look offline to the
+/// `managed_user_auto_processor_supervisor`. When the guard is dropped (on any
+/// exit: normal completion, error, or early return), `Drop` aborts the task, and
+/// the claim will expire naturally after one more `ttl_ms` window — exactly the
+/// crash-detection window the module doc intends.
+struct LeaseGuard {
+    abort_handle: tokio::task::AbortHandle,
+    /// Set to `true` if a renewal write fails. Callers can check this before
+    /// committing expensive results to detect the rare case where the claim
+    /// expired mid-pass and may have been re-taken by another peer.
+    renewal_failed: Arc<AtomicBool>,
+}
+
+impl LeaseGuard {
+    fn spawn(
+        mut perspective: PerspectiveInstance,
+        processor: String,
+        key: String,
+        claimant: String,
+        ttl_ms: i64,
+        context: AgentContext,
+    ) -> Self {
+        let renewal_failed = Arc::new(AtomicBool::new(false));
+        let rf = renewal_failed.clone();
+        // Renew at ttl_ms/3 so three missed beats still leave at least one TTL
+        // window before expiry — same safety margin as the lease-heartbeat
+        // pattern used in distributed systems.
+        let interval_ms = (ttl_ms / 3).max(1_000) as u64;
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+            ticker.tick().await; // skip the immediate first tick; pass just started
+            loop {
+                ticker.tick().await;
+                match renew_claim(
+                    &mut perspective,
+                    &processor,
+                    &key,
+                    &claimant,
+                    ttl_ms,
+                    &context,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        // Also refresh last_seen so the supervisor sees this
+                        // user as still active during a long interpretation
+                        // pass (fix for #1010: processing counts as liveness).
+                        if let Some(email) = &context.user_email {
+                            let email = email.clone();
+                            if let Err(e) = crate::db::Ad4mDb::with_global_instance(|db| {
+                                db.update_user_last_seen(&email)
+                            }) {
+                                log::debug!(
+                                    "lease heartbeat: update_user_last_seen({email}) failed: {e:#}"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "claim renewal failed for {processor}/{key}: {e:#}; \
+                             pass may be overtaken before it finishes"
+                        );
+                        rf.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+        Self {
+            abort_handle: handle.abort_handle(),
+            renewal_failed,
+        }
+    }
+
+    /// `true` while every renewal has succeeded. A `false` here means the
+    /// claim may have expired; another peer could have re-claimed the batch.
+    fn is_healthy(&self) -> bool {
+        !self.renewal_failed.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for LeaseGuard {
+    fn drop(&mut self) {
+        self.abort_handle.abort();
+    }
+}
 
 /// Stable id for a `(speaker, text, timestamp)` transcript turn — the atom the
 /// polling watch loop feeds to [`WatcherState::record_item`] and (indirectly)
@@ -636,6 +731,32 @@ pub async fn run_one_pass(
     ))
     .await;
 
+    // Touch last_seen immediately so the supervisor sees activity before the
+    // first heartbeat fires — a managed user running a long pass must not look
+    // offline while doing the most active work it ever does (fix for #1010).
+    if let Some(email) = &context.user_email {
+        let email = email.clone();
+        if let Err(e) =
+            crate::db::Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&email))
+        {
+            log::debug!("run_one_pass: initial update_user_last_seen({email}) failed: {e:#}");
+        }
+    }
+
+    // Spawn the lease-renewal heartbeat. Fires every `claim_ttl_ms / 3` ms,
+    // rewriting the expiry so the TTL acts as a crash-detection window rather
+    // than a capacity limit. Dropped at every exit path (RAII) — the Drop impl
+    // cancels the task so the claim expires naturally after one more TTL window
+    // once the pass ends (fix for #1009).
+    let _lease = LeaseGuard::spawn(
+        perspective.clone(),
+        cfg.processor_id.clone(),
+        batch_key_hex.clone(),
+        me.clone(),
+        cfg.claim_ttl_ms,
+        context.clone(),
+    );
+
     // 2. Resolve shapes.
     let store = &*perspective.sparql_store;
     let mut shapes = Vec::with_capacity(cfg.interpretation_classes.len());
@@ -728,6 +849,22 @@ pub async fn run_one_pass(
     }
 
     let transcript: Vec<TranscriptTurn> = turns.iter().map(|t| t.as_transcript()).collect();
+
+    // Guard: abort before calling the LLM if the renewal heartbeat already
+    // failed. Without renewal the claim would have expired and another peer may
+    // have re-taken it; writing our output would produce duplicates (#1009).
+    if !_lease.is_healthy() {
+        let holder = String::from("(claim expired mid-pass)");
+        log::warn!(
+            "❌ ⚙️ auto-processor claim lost (renewal failed) before interpretation — \
+             abandoning processor={} items={} perspective={}",
+            cfg.processor_id,
+            item_ids.len(),
+            uuid
+        );
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
+    }
 
     // 4. Interpret.
     signal!(AutoProcessorStep::RunningInterpretation);
@@ -859,6 +996,34 @@ pub async fn run_one_pass(
             (outcome.bases, outcome.debug)
         }
     };
+
+    // Second lease check, after the expensive part. The pre-LLM check above
+    // catches a claim already lost when the pass started; this one catches the
+    // case #1009 was actually filed for — renewal failing *during* a
+    // multi-minute inference.
+    //
+    // KNOWN GAP, stated rather than papered over: by the time control reaches
+    // here the interpretation has already written its bases — that write
+    // happens inside `run_interpretation_*`, not out here. So this cannot
+    // prevent the duplicate, only refuse to compound it (no mint-scope
+    // re-parenting, no `Processed` event asserting a clean pass) and leave a
+    // findable line in the log. Refusing the write itself needs a cancellation
+    // check threaded into the interpretation engine; that is a larger change,
+    // tracked on #1009 rather than bolted on here.
+    if !_lease.is_healthy() {
+        log::warn!(
+            "❌ ⚙️ auto-processor claim renewal failed DURING interpretation — \
+             processor={} items={} perspective={}: bases may already be written, \
+             and another peer may have re-processed this batch. Not emitting \
+             Processed. See #1009.",
+            cfg.processor_id,
+            item_ids.len(),
+            uuid
+        );
+        let holder = String::from("(claim lost during interpretation)");
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
+    }
 
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the
@@ -1606,6 +1771,35 @@ mod tests {
         assert!(
             created.is_empty(),
             "when every base pre-existed, no new links are written"
+        );
+    }
+
+    // ---- liveness-touch: idle reap is preserved, active pass is kept --------
+
+    /// The LeaseGuard heartbeat refreshes `last_seen` during a long pass, which
+    /// keeps the user in the online window. Simulated here via
+    /// `select_online_managed_users`: a user freshly touched at `now - 10s` is
+    /// still online, while one untouched at `now - 400s` is reaped. This
+    /// documents the invariant that idle-loop reaping is NOT disabled — only
+    /// passes that actually refresh `last_seen` stay alive (#1010).
+    #[test]
+    fn liveness_touch_keeps_active_user_and_reaps_idle_user() {
+        let now = 2_000_000_i64;
+        let window = 300_i64;
+        // `active` had last_seen refreshed 10s ago (simulates lease heartbeat).
+        // `idle` had last_seen 400s ago (no heartbeat — idle loop).
+        let online = select_online_managed_users(
+            vec![
+                ("active@x".into(), Some(now - 10)), // heartbeat touched last_seen
+                ("idle@x".into(), Some(now - 400)),  // no activity — should be reaped
+            ],
+            now,
+            window,
+        );
+        assert_eq!(
+            online,
+            vec!["active@x"],
+            "idle user must be reaped; active must remain"
         );
     }
 
