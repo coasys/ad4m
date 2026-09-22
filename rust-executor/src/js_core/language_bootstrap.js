@@ -177,6 +177,13 @@ globalThis.__handleHolochainSignal__ = async function(signal) {
  * Provides registerDNAs, call, and callAsync methods.
  */
 function createHolochainDelegate(languageAddress) {
+    // dna.nick → actual installed_app_id. Usually `${languageAddress}-${nick}`,
+    // but when this language's DNA+agent cell was already installed under another
+    // app (e.g. a language published/templated without changing the network seed),
+    // installApp recovers by reusing the owning app, whose id differs — zome calls
+    // must then be routed to that app id.
+    const appIdByNick = new Map();
+    const appIdFor = (nick) => appIdByNick.get(nick) || `${languageAddress}-${nick}`;
     return {
         async registerDNAs(dnas, signalCallback) {
             const results = [];
@@ -221,15 +228,23 @@ function createHolochainDelegate(languageAddress) {
                 };
                 let appInfo;
                 try {
+                    // installApp recovers internally when the same DNA+agent cell is
+                    // already installed under a different app_id (CellAlreadyExists,
+                    // e.g. published/templated languages sharing a network seed) by
+                    // returning the owning app's info instead.
                     appInfo = await HOLOCHAIN_SERVICE.installApp(installPayload);
                 } catch (e) {
-                    // App may already be installed (possibly under a different app_id
-                    // but with the same DNA+agent cell, e.g. when templating languages)
+                    // The app may already be installed under this exact app_id
+                    // (e.g. a concurrent install of the same language)
                     appInfo = await HOLOCHAIN_SERVICE.getAppInfo(appId);
                     if (!appInfo) {
                         throw new Error(`[registerDNAs] Conductor unavailable or install failed for ${appId}: ${e.message || e}`);
                     }
                 }
+                if (appInfo.installed_app_id && appInfo.installed_app_id !== appId) {
+                    console.warn(`[registerDNAs] ${appId} reuses existing app ${appInfo.installed_app_id} (same DNA+agent cell)`);
+                }
+                appIdByNick.set(dna.nick, appInfo.installed_app_id || appId);
                 results.push(appInfo);
 
                 // Wire the signalCallback to every cell_id in this app
@@ -239,16 +254,15 @@ function createHolochainDelegate(languageAddress) {
         },
 
         async call(dnaNick, zomeName, fnName, params) {
-            const appId = `${languageAddress}-${dnaNick}`;
             return await HOLOCHAIN_SERVICE.callZomeFunction(
-                appId, dnaNick, zomeName, fnName, params
+                appIdFor(dnaNick), dnaNick, zomeName, fnName, params
             );
         },
 
         async callAsync(calls, timeoutMs) {
             const promises = calls.map(call =>
                 HOLOCHAIN_SERVICE.callZomeFunction(
-                    `${languageAddress}-${call.dnaNick}`,
+                    appIdFor(call.dnaNick),
                     call.dnaNick,
                     call.zomeName,
                     call.fnName,
