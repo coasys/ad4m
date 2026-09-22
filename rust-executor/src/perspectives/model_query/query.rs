@@ -590,7 +590,25 @@ pub(super) async fn execute_model_query_inner(
     }
 
     // Calculate total count
-    let total_count = if sparql_pagination.is_some() {
+    //
+    // A walk counts itself. The COUNT query is built from the scope as written, and the scope says
+    // nothing about depth — `levels` is walked here, not there — so it answers for one step from
+    // the anchors however many levels were asked for. For `levels: [1, 1]` over a thread it reports
+    // every direct reply to the anchor while the walk returns one of them and one below it: not
+    // "how many exist" and not "how many you got", but a third number belonging to neither, which a
+    // client paging on it reads as more rows to fetch.
+    //
+    // The walk is bounded by its own figures, so "how many exist below the anchor" is not a
+    // question it asked. What it has is the size of the union it built — that is the total the
+    // window below pages through, which is what a total is for. `instances` is that union here:
+    // hydrated, filtered, and not yet cut to the caller's page.
+    //
+    // A per-anchor limit without a walk keeps the store's count. There the scope *is* the whole
+    // question — "how many replies exist under these anchors" — and the limit says how many of them
+    // to return, exactly the "showing 5 of 320" reading a total carries everywhere else.
+    let total_count = if walk.is_some() {
+        instances.len()
+    } else if sparql_pagination.is_some() {
         if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
