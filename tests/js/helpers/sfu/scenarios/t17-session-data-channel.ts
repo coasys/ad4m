@@ -109,18 +109,18 @@ export const t17SessionDataChannel: Scenario = {
         await evts.connect();
         eventClients.push(evts);
 
-        evts.on("sfu-data-channel", (frame: EventFrame) => {
+        evts.on("sfu-data", (frame: EventFrame) => {
           received[i].push({
             label: frame.channelLabel as string,
             data: frame.data as string,
             binary: (frame.binary as boolean) ?? false,
-            from: (frame.fromDid as string) ?? "",
+            from: (frame.senderDid as string) ?? "",
             timestamp: Date.now(),
           });
         });
       }
 
-      await sleep(500);
+      await sleep(2_000);
 
       // ── Peer 0 sends string data ───────────────────────────────────
       const payload0 = JSON.stringify({ type: "reaction", emoji: "👍", ts: Date.now() });
@@ -158,8 +158,8 @@ export const t17SessionDataChannel: Scenario = {
       });
       samples.push({ name: "send_binary_peer0", durationMs: Date.now() - tBin, timestamp: Date.now() });
 
-      // ── Wait for delivery ──────────────────────────────────────────
-      await sleep(3_000);
+      // ── Wait for delivery (poll instead of fixed sleep) ────────────
+      await waitForMessages(received, { peer0: 1, peer1: 2 }, 15_000);
 
       // ── Verify received messages ───────────────────────────────────
       // Peer 1 should have received peer 0's "reactions" and "binary-test" messages.
@@ -195,7 +195,7 @@ export const t17SessionDataChannel: Scenario = {
       }
       samples.push({ name: `send_burst_${burstCount}`, durationMs: Date.now() - tBurst, timestamp: Date.now() });
 
-      await sleep(3_000);
+      await waitForMessages(received, { peer0: 1, peer1: 2 + burstCount }, 15_000);
 
       const peer1burst = received[1].filter((m) => m.label === "burst");
       metrics["burst_sent"] = burstCount;
@@ -281,6 +281,18 @@ async function waitForParticipantCount(
   throw new Error(
     `T17 waitForParticipantCount: room=${roomName} expected=${expected} within ${timeoutMs}ms`,
   );
+}
+
+async function waitForMessages(
+  received: [ReceivedDataMessage[], ReceivedDataMessage[]],
+  expected: { peer0: number; peer1: number },
+  timeoutMs: number,
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (received[0].length >= expected.peer0 && received[1].length >= expected.peer1) return;
+    await sleep(200);
+  }
 }
 
 function sleep(ms: number): Promise<void> {

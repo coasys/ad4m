@@ -166,6 +166,17 @@ impl SfuService {
             }
         }
 
+        // Periodic heartbeat: re-announce all active rooms every 10s so
+        // that cascade peers maintain a fresh view.  Without this,
+        // rooms announced during startup get evicted by the 30s stale
+        // timeout if no peers join within that window.
+        {
+            let svc = Arc::clone(&service);
+            tokio::spawn(async move {
+                svc.run_cascade_heartbeat().await;
+            });
+        }
+
         SFU_SERVICE
             .set(service.clone())
             .map_err(|_| "SFU service already initialized".to_string())?;
@@ -547,6 +558,25 @@ impl SfuService {
     ///    arrived.  Without this, a crashed node that stops announcing
     ///    never gets evicted because the sweep only ran inside the
     ///    Announce handler.
+    async fn run_cascade_heartbeat(self: Arc<Self>) {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        interval.tick().await; // skip immediate first tick
+        loop {
+            interval.tick().await;
+            let snapshots: Vec<(String, u32)> = {
+                let rooms = self.rooms.read().await;
+                rooms
+                    .list_rooms()
+                    .iter()
+                    .map(|r| (r.id.to_string(), r.participant_count() as u32))
+                    .collect()
+            };
+            for (room_id, count) in snapshots {
+                self.announce_room(&room_id, count).await;
+            }
+        }
+    }
+
     async fn run_cascade_cleanup(
         self: Arc<Self>,
         mut dead_pipe_rx: tokio::sync::mpsc::Receiver<super::server::DeadPipe>,

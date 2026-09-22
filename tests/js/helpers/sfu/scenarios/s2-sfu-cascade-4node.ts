@@ -63,6 +63,9 @@ export const s2SfuCascade4Node: Scenario = {
         });
       }
 
+      // Let gossip propagate announce messages across all 4 nodes.
+      await sleep(3_000);
+
       clusterSessions = await provisionClusterPeers({
         nodes: cluster.nodes.map((n) => ({
           nodeId: n.did,
