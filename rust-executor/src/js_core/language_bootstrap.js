@@ -227,8 +227,7 @@ function createHolochainDelegate(languageAddress) {
                     // but with the same DNA+agent cell, e.g. when templating languages)
                     appInfo = await HOLOCHAIN_SERVICE.getAppInfo(appId);
                     if (!appInfo) {
-                        console.warn(`[registerDNAs] Failed to install app ${appId}: ${e.message || e}. Continuing without this DNA.`);
-                        continue;
+                        throw new Error(`[registerDNAs] Conductor unavailable or install failed for ${appId}: ${e.message || e}`);
                     }
                 }
                 results.push(appInfo);

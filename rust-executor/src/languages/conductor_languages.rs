@@ -1,10 +1,13 @@
-//! The system-language loading steps that wait for the Holochain conductor.
+//! The system-language loading steps that run after the Holochain conductor is up.
 //!
-//! Known link languages and most installed languages (every neighbourhood's link
-//! language) install or look up a Holochain app in their constructor, and that call
-//! waits in `get_holochain_service()` until the conductor is up. Kept apart from
-//! `load_core_system_languages` so a caller that must not wait for the conductor can
-//! load the core languages alone and run these once it has started.
+//! Languages that use Holochain call into `holochain_service_once_started()` at each op
+//! boundary, so the conductor readiness wait is scoped to each operation rather than to the
+//! load step. These languages are still loaded after the conductor starts — not because they
+//! must wait for it, but because loading installed languages skips the core system languages
+//! by their registered addresses, which only exist after `load_core_system_languages`
+//! completes. Kept apart from `load_core_system_languages` so a caller that must reply
+//! before the conductor is up can load the core languages alone and run these in the
+//! background.
 
 use log::{info, warn};
 
