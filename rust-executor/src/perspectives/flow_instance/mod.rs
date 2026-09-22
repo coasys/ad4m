@@ -107,9 +107,9 @@ use crate::perspectives::flow_evaluator::requires_query_input;
 use crate::perspectives::flow_spawn::initial_state_of;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
-use crate::types::DecoratedLinkExpression;
+use crate::types::{DecoratedLinkExpression, LinkExpression};
 use atom::{marked_fired, TransitionAtom};
-use fold::{fold, rule_for, Contention, DerivedState, VouchedAtom};
+use fold::{fold, rule_for, Contention, DerivedState, ResolvedRule, VouchedAtom};
 use roles::{eligible_votes, resolve_role_grants, RoleGrant, RoleGrantEvidence};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -182,12 +182,13 @@ pub struct ProposalLinks {
 /// nothing a reader decides may rest on it unchecked. The two halves of the
 /// read-set are at different stages of honouring that:
 ///
-/// - **Role evidence re-verifies by construction.**
-///   [`roles::RoleGrantEvidence::resolve`] re-decorates every revocation link
-///   with
-///   [`DecoratedLinkExpression::verify_signature`](crate::types::DecoratedLinkExpression::verify_signature)
-///   before filtering, and it is the only path from carried evidence to a
-///   window — so there is no version of this call that skips the check.
+/// - **Role evidence cannot carry a verdict at all.** It holds plain
+///   [`LinkExpression`](crate::types::LinkExpression) — no `proof.valid`, no
+///   `status` — and `revocation_link_counts_for_did` computes the verdict
+///   from the signature on every call, inside
+///   [`roles::RoleGrantEvidence::resolve`], the only path from carried
+///   evidence to a window. There is no version of this call that skips the
+///   check, and no field a forger could set instead (r4076927995).
 /// - **Proposals and votes read the carried verdict** inside the fold, via
 ///   `atom::signed_by`. What makes that safe is [`ReadSet::reverified`]: the
 ///   ingest seam of <https://github.com/coasys/ad4m/issues/1068>, which
@@ -317,11 +318,13 @@ impl ReadSet {
     ///   look at — and a proposal carries links from *every* author, so a
     ///   third party who writes a garbage link onto someone else's proposal
     ///   must not be able to make the whole receipt unverifiable.
-    /// - **Revocation tombstones are re-decorated** for symmetry;
-    ///   [`RoleGrantEvidence::resolve`] re-decorates them again by
-    ///   construction, which is deliberate redundancy — that call is the
-    ///   unskippable one.
-    /// - **Grant links are re-decorated and then FILTERED**, because nothing
+    /// - **Revocation tombstones only lose their locality claim.** They are
+    ///   plain [`LinkExpression`] — no verdict field a sender could set — and
+    ///   [`RoleGrantEvidence::resolve`] computes the verdict from the
+    ///   signature on every call
+    ///   ([`revocation_link_counts_for_did`](crate::perspectives::flow_evaluator)),
+    ///   so that call is the unskippable check.
+    /// - **Grant links are signature-FILTERED here**, because nothing
     ///   downstream checks their signatures at all
     ///   ([`grant_link_names_did`](crate::perspectives::flow_evaluator) —
     ///   #1063). See [`reverified_history`] for why dropping one also
@@ -423,30 +426,39 @@ fn link_counts(link: &DecoratedLinkExpression) -> bool {
 /// would have held. A broken grant signature therefore **collapses** the
 /// eligibility window instead of widening it.
 ///
-/// Tombstones are never dropped here, only re-decorated: dropping one could
-/// only widen a window, and `resolve` re-verifies them anyway.
+/// Tombstones are never dropped here, only stripped of their locality claim:
+/// dropping one could only widen a window, and `resolve` verifies them by
+/// construction
+/// ([`revocation_link_counts_for_did`](crate::perspectives::flow_evaluator)).
 fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstanceHistory {
-    let grant_links: Vec<DecoratedLinkExpression> = history
+    let grant_links: Vec<LinkExpression> = history
         .grant_links
         .iter()
-        .map(reverified_link)
-        .filter(link_counts)
+        .filter(|l| l.compute_proof_valid())
+        .map(delocalized)
         .collect();
     let dropped_a_grant_link = grant_links.len() != history.grant_links.len();
     roles::RoleInstanceHistory {
         instance_id: history.instance_id.clone(),
         grant_links,
-        revocation_links: history
-            .revocation_links
-            .iter()
-            .map(reverified_link)
-            .collect(),
+        revocation_links: history.revocation_links.iter().map(delocalized).collect(),
         asserted_instance_timestamp: if dropped_a_grant_link {
             None
         } else {
             history.asserted_instance_timestamp.clone()
         },
     }
+}
+
+/// The `status` half of [`reverified_link`], for the role-evidence halves of
+/// the read-set: those carry plain [`LinkExpression`] with no verdict field
+/// to recompute (the type refuses to carry one — see
+/// [`roles::RoleInstanceHistory`]), but locality is still a carried claim and
+/// is discarded for exactly the reasons [`reverified_link`] gives.
+fn delocalized(link: &LinkExpression) -> LinkExpression {
+    let mut link = link.clone();
+    link.status = None;
+    link
 }
 
 /// The state of a flow, re-derived from a read-set. **Pure** — no store
@@ -472,9 +484,16 @@ pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Der
         .atoms()
         .into_iter()
         .map(|atom| {
-            let rule = rule_for(flow, &atom.to_state);
+            // An unreadable rule leaves no vote eligible. `settle_edge`
+            // refuses the edge anyway; emptying the set here means the
+            // refusal also holds for anything reading `eligible_votes`
+            // directly, rather than resting on one call site (#1078).
+            let eligible_votes = match rule_for(flow, &atom.to_state) {
+                ResolvedRule::Rule(rule) => eligible_votes(&atom, &rule, &grants),
+                ResolvedRule::Refused => Vec::new(),
+            };
             VouchedAtom {
-                eligible_votes: eligible_votes(&atom, &rule, &grants),
+                eligible_votes,
                 atom,
             }
         })
@@ -506,7 +525,12 @@ fn role_grant_views(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<
     let record = read_set.as_record(flow);
     let mut grants = Vec::with_capacity(read_set.role_grants.len());
     for evidence in &read_set.role_grants {
-        let rule = rule_for(flow, &evidence.to_state);
+        // A refused rule is not the fail-open drop warned about above: it bars
+        // the edge for every voter (`fold_read_set` empties `eligible_votes`),
+        // so evidence targeting that state cannot sway any outcome.
+        let ResolvedRule::Rule(rule) = rule_for(flow, &evidence.to_state) else {
+            continue;
+        };
         let Some(role) = rule.from_role.as_ref() else {
             continue;
         };
@@ -594,7 +618,13 @@ impl<'a> FlowInstance<'a> {
         let atoms = read_set.atoms();
         let targets: BTreeSet<&str> = atoms.iter().map(|a| a.to_state.as_str()).collect();
         for to_state in targets {
-            let rule = rule_for(self.flow, to_state);
+            // No role resolution for a refused target: the edge cannot settle
+            // whoever voted, so resolving grants for it would be I/O whose
+            // result nothing reads. Not a fail-open — the refusal is
+            // `settle_edge`'s, and `fold_read_set` empties the eligible set.
+            let ResolvedRule::Rule(rule) = rule_for(self.flow, to_state) else {
+                continue;
+            };
             let Some(role) = rule.from_role.as_ref() else {
                 continue;
             };

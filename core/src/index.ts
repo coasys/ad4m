@@ -19,10 +19,9 @@ export * from "./perspectives/PerspectiveProxy";
 export * from "./perspectives/AutoProcessor";
 export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/FlowModels";
+// Also exports FlowFireOutcome / FlowProposeResult, the result shapes of the
+// flow write API — they live beside the `proposeTransition()` surface.
 export * from "./perspectives/FlowInstance";
-// The result shapes of the flow write API. Named exports rather than
-// `export *`: PerspectiveClient's class surface is internal.
-export type { FlowFireOutcome, FlowProposeResult } from "./perspectives/PerspectiveClient";
 export * from "./perspectives/SparqlBindings";
 export * from "./perspectives/WakerSubscriptionManager";
 export * from "./perspectives/PerspectiveDiff";

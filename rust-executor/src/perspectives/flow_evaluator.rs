@@ -46,7 +46,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
-use crate::types::{DecoratedLinkExpression, LinkQuery};
+use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -430,6 +430,14 @@ pub struct RoleRevocation {
 /// serialised read-set. Carrying links rather than verdicts is what lets that
 /// reader check the chronology instead of believing the minter's summary.
 ///
+/// Carried as plain [`LinkExpression`], not `DecoratedLinkExpression`: the
+/// decorated form's `proof.valid` / `status` are one executor's read-model
+/// flags for its own clients, and on material that travels they would be
+/// claims. Every signature check on these links —
+/// [`revocation_link_counts_for_did`], here and in the pure reader — computes
+/// the verdict from the signature itself, so there is deliberately no carried
+/// verdict to read (review r4076927995).
+///
 /// What is carried differs by kind, and the asymmetry is on purpose *for now*:
 ///
 /// - **Tombstones** must be signed ([`revocation_link_counts_for_did`]),
@@ -459,11 +467,11 @@ pub struct RoleGrantLinks {
     /// Empty when the role query has no `didProperty` or no such link exists;
     /// the reader then dates the grant from the instance itself, never from
     /// "always".
-    pub grant_links: Vec<DecoratedLinkExpression>,
+    pub grant_links: Vec<LinkExpression>,
     /// Every signed tombstone on this instance naming this DID, any author,
     /// **before** the authority filter. Never truncated: dropping a tombstone
     /// can only widen a window.
-    pub revocation_links: Vec<DecoratedLinkExpression>,
+    pub revocation_links: Vec<LinkExpression>,
 }
 
 /// At most this many grant links are carried per `(instance, DID)`, earliest
@@ -486,23 +494,26 @@ pub(crate) const MAX_GRANT_LINKS: usize = 8;
 /// mints receipts that fail their own verification, and — the direction that
 /// actually costs — a link the verifier counts and the minter dropped lets
 /// forged material widen a window. One predicate per kind, both sites.
-pub(crate) fn grant_link_names_did(
-    link: &DecoratedLinkExpression,
-    did: &str,
-    did_literal: &str,
-) -> bool {
+pub(crate) fn grant_link_names_did(link: &LinkExpression, did: &str, did_literal: &str) -> bool {
     target_names_did(&link.data.target, did, did_literal)
 }
 
 /// Whether a **revocation** tombstone counts for this DID: its signature
-/// verified, and its target names the DID. Same both-sites rule as
+/// verifies, and its target names the DID. Same both-sites rule as
 /// [`grant_link_names_did`], plus the vote-layer signature check.
+///
+/// The verdict is **computed here from the signature**
+/// ([`LinkExpression::compute_proof_valid`]), never read from a carried flag
+/// — the carried form has none. That makes the both-sites symmetry exact:
+/// collection boundary and pure reader run the same crypto on the same
+/// material, so a verdict cannot differ between them and cannot be forged
+/// into either.
 pub(crate) fn revocation_link_counts_for_did(
-    link: &DecoratedLinkExpression,
+    link: &LinkExpression,
     did: &str,
     did_literal: &str,
 ) -> bool {
-    link.proof.valid == Some(true) && grant_link_names_did(link, did, did_literal)
+    link.compute_proof_valid() && grant_link_names_did(link, did, did_literal)
 }
 
 /// `literal:string:`-encode a DID for target matching — the form the SDNA
@@ -649,9 +660,18 @@ impl RequiresQueryable for PerspectiveInstance {
         let grant_predicate = grant_predicate.as_deref();
         let did_literal = did_literal_url(did)
             .map_err(|e| anyhow::anyhow!("role_grant_links: {instance_id}: {e}"))?;
-        let grant_counts = |l: &DecoratedLinkExpression| grant_link_names_did(l, did, &did_literal);
+        let grant_counts = |l: &LinkExpression| grant_link_names_did(l, did, &did_literal);
         let revocation_counts =
-            |l: &DecoratedLinkExpression| revocation_link_counts_for_did(l, did, &did_literal);
+            |l: &LinkExpression| revocation_link_counts_for_did(l, did, &did_literal);
+        // Decorated → plain at the boundary: `proof.valid` and `status` are
+        // this executor's read-model flags, not link material — carrying them
+        // would carry claims, and every consumer computes the verdict from
+        // the signature itself (see `RoleGrantLinks`).
+        let as_carried = |l: DecoratedLinkExpression| {
+            let mut l = LinkExpression::from(l);
+            l.status = None;
+            l
+        };
 
         // Sorted by parsed instant, not by string — grant links are
         // client-stamped and clients disagree on RFC 3339 flavour (#1000).
@@ -659,18 +679,20 @@ impl RequiresQueryable for PerspectiveInstance {
         // is not worth carrying; when none parses this stays empty and the
         // reader falls back to the instance's own timestamp or fails closed.
         use crate::perspectives::flow_instance::time::parse_link_timestamp;
-        let raw_grant_links: Vec<DecoratedLinkExpression> = match grant_predicate {
-            Some(pred) => {
-                self.get_links(&LinkQuery {
+        let raw_grant_links: Vec<LinkExpression> = match grant_predicate {
+            Some(pred) => self
+                .get_links(&LinkQuery {
                     source: Some(instance_id.to_string()),
                     predicate: Some(pred.to_string()),
                     ..Default::default()
                 })
                 .await?
-            }
+                .into_iter()
+                .map(as_carried)
+                .collect(),
             None => Vec::new(),
         };
-        let mut grant_links: Vec<DecoratedLinkExpression> = raw_grant_links
+        let mut grant_links: Vec<LinkExpression> = raw_grant_links
             .iter()
             .filter(|l| grant_counts(l) && parse_link_timestamp(&l.timestamp).is_some())
             .cloned()
@@ -715,20 +737,22 @@ impl RequiresQueryable for PerspectiveInstance {
         // filter meant to fail closed.
         //
         // So the cap is applied to a signature-preferred ordering: links whose
-        // carried proof already verifies claim slots first. This is a
-        // *preference*, never a filter — an unverified link is still carried
-        // while there is room, which is what keeps #1064 and #1063 out of this
-        // PR. Under the cap nothing changes; at the cap a forger cannot evict
-        // a genuine link, and dropping an unverified *earlier* link can only
-        // move `granted_at` later, which is the fail-closed direction.
-        grant_links.sort_by_key(|l| l.proof.valid != Some(true));
+        // signature verifies claim slots first — computed from the signature
+        // here, since the carried form deliberately has no verdict flag to
+        // read. This is a *preference*, never a filter — an unverified link
+        // is still carried while there is room, which is what keeps #1064 and
+        // #1063 out of this PR. Under the cap nothing changes; at the cap a
+        // forger cannot evict a genuine link, and dropping an unverified
+        // *earlier* link can only move `granted_at` later, which is the
+        // fail-closed direction.
+        grant_links.sort_by_cached_key(|l| !l.compute_proof_valid());
         grant_links.truncate(MAX_GRANT_LINKS);
         grant_links.sort_by(|a, b| {
             (parse_link_timestamp(&a.timestamp), &a.timestamp)
                 .cmp(&(parse_link_timestamp(&b.timestamp), &b.timestamp))
         });
 
-        let revocation_links: Vec<DecoratedLinkExpression> = self
+        let revocation_links: Vec<LinkExpression> = self
             .get_links(&LinkQuery {
                 source: Some(instance_id.to_string()),
                 predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
@@ -736,6 +760,7 @@ impl RequiresQueryable for PerspectiveInstance {
             })
             .await?
             .into_iter()
+            .map(as_carried)
             .filter(revocation_counts)
             .collect();
 
@@ -1504,12 +1529,15 @@ mod tests {
     /// would fail open (#1014).
     ///
     /// They differ on signatures, and that difference is the tested contract,
-    /// not an accident: a tombstone needs a verified signature, a grant link
-    /// does not (yet — #1063). For tombstones, `valid: None` is "not
-    /// evaluated", never "fine": the option-conflation direction that would
-    /// make an unverified link count.
+    /// not an accident: a tombstone needs a signature that verifies, a grant
+    /// link does not (yet — #1063). The verdict is **computed** from the
+    /// signature — the carried form has no verdict flag a fixture could set —
+    /// so a fixture that wants a tombstone to count has to sign it for real,
+    /// and a forged one is one signed by a key that is not its stated
+    /// author's.
     #[test]
     fn grant_and_revocation_predicates_differ_only_on_the_signature_check() {
+        use crate::agent::signatures::TestSigner;
         use ad4m_client::literal::Literal;
         let did = "did:key:alice";
         let did_literal = did_literal_url(did).unwrap();
@@ -1517,47 +1545,53 @@ mod tests {
             .to_url()
             .unwrap();
         let legacy = did_literal.replace("literal:string:", "literal://string:");
-        let signed = |target: &str, valid: Option<bool>| DecoratedLinkExpression {
-            author: "did:key:admin".into(),
-            timestamp: "2026-01-01T00:00:00.000Z".into(),
-            data: crate::types::Link {
-                source: "r0".into(),
-                predicate: Some("agent".into()),
-                target: target.into(),
-            },
-            proof: crate::types::DecoratedExpressionProof {
-                key: String::new(),
-                signature: "sig".into(),
-                valid,
-                invalid: valid.map(|v| !v),
-            },
-            status: None,
+        let admin = TestSigner::generate();
+        let forger = TestSigner::generate();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // A valid link is signed by its stated author's own key; a forged one
+        // states the same author but carries somebody else's signature.
+        let signed = |target: &str, valid: bool| -> LinkExpression {
+            let signing_key = if valid { &admin } else { &forger };
+            let mut expr = signing_key.sign_at(
+                crate::types::Link {
+                    source: "r0".into(),
+                    predicate: Some("agent".into()),
+                    target: target.into(),
+                }
+                .normalize(),
+                at,
+            );
+            expr.author = admin.did.clone();
+            expr.proof.key = admin.key_id.clone();
+            LinkExpression::from(expr)
         };
 
         for target in [did, did_literal.as_str(), legacy.as_str()] {
             assert!(
-                revocation_link_counts_for_did(&signed(target, Some(true)), did, &did_literal),
+                revocation_link_counts_for_did(&signed(target, true), did, &did_literal),
                 "a signed tombstone naming the DID as `{target}` counts"
             );
-            for verdict in [Some(false), None] {
+            assert!(
+                !revocation_link_counts_for_did(&signed(target, false), did, &did_literal),
+                "a tombstone whose signature does not verify never counts, whatever it names"
+            );
+            for valid in [true, false] {
                 assert!(
-                    !revocation_link_counts_for_did(&signed(target, verdict), did, &did_literal),
-                    "an unverified tombstone ({verdict:?}) never counts, whatever it names"
-                );
-                assert!(
-                    grant_link_names_did(&signed(target, verdict), did, &did_literal),
-                    "a grant link is carried on target match alone ({verdict:?}); \
+                    grant_link_names_did(&signed(target, valid), did, &did_literal),
+                    "a grant link is carried on target match alone (valid={valid}); \
                      signature-filtering it is #1063, not this PR"
                 );
             }
         }
-        for verdict in [Some(true), Some(false), None] {
+        for valid in [true, false] {
             assert!(
-                !revocation_link_counts_for_did(&signed(&other, verdict), did, &did_literal),
+                !revocation_link_counts_for_did(&signed(&other, valid), did, &did_literal),
                 "a tombstone naming another DID is not this DID's history"
             );
             assert!(
-                !grant_link_names_did(&signed(&other, verdict), did, &did_literal),
+                !grant_link_names_did(&signed(&other, valid), did, &did_literal),
                 "a grant link naming another DID is not this DID's history"
             );
         }
@@ -1932,6 +1966,7 @@ mod tests {
             requires,
             semantic_check: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         }
     }
 
@@ -1953,6 +1988,7 @@ mod tests {
             creation_hint: None,
             context: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         }
     }
 

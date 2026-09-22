@@ -439,6 +439,7 @@ mod tests {
     use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
     use crate::types::DecoratedLinkExpression;
+    use crate::types::LinkExpression;
     use serde_json::{json, Value};
 
     const INSTANCE: &str = "ad4m://flow/instance/i1";
@@ -733,17 +734,20 @@ mod tests {
     }
 
     /// `r0 --agent--> did`, the assignment link that dates a grant.
-    /// `valid` is honoured cryptographically; `claims_valid` is what the
-    /// carried read-set *says* about it.
-    fn grant_link(who: &str, valid: bool, claims_valid: Option<bool>) -> DecoratedLinkExpression {
-        signed_link("r0", "agent", did_of(who), "admin", valid, claims_valid, T2)
+    /// `valid` is honoured cryptographically: a forged link is signed with a
+    /// key that is not the author's. Plain [`LinkExpression`] on purpose —
+    /// since #1065 the role-evidence half of a read-set cannot carry a
+    /// verdict claim at all, so "claims to be valid" is unrepresentable and
+    /// a forgery has nothing left to assert but its (wrong) signature.
+    fn grant_link(who: &str, valid: bool) -> LinkExpression {
+        signed_link("r0", "agent", did_of(who), "admin", valid, None, T2).into()
     }
 
-    fn reviewer_evidence(grant: DecoratedLinkExpression) -> RoleGrantEvidence {
+    fn reviewer_evidence(grant: LinkExpression) -> RoleGrantEvidence {
         reviewer_evidence_from(vec![grant])
     }
 
-    fn reviewer_evidence_from(grant_links: Vec<DecoratedLinkExpression>) -> RoleGrantEvidence {
+    fn reviewer_evidence_from(grant_links: Vec<LinkExpression>) -> RoleGrantEvidence {
         RoleGrantEvidence {
             to_state: "done".into(),
             role_class: REVIEWER.into(),
@@ -778,10 +782,11 @@ mod tests {
     ///   (keep `history.asserted_instance_timestamp.clone()`) — the window
     ///   widens to `INSTANCE_CREATED`, the vote at `T3` becomes eligible and
     ///   the tampered receipt reports `Verified`;
-    /// - write the grant filter as `.filter(|l| l.proof.valid != Some(false))`
-    ///   over the *carried* links instead of `reverified_link` + `link_counts`
-    ///   — the forgery's own `"valid": true` is inherited, the link survives,
-    ///   and the tampered receipt reports `Verified`.
+    /// - write the grant filter as a pass-through (skip
+    ///   `compute_proof_valid`) — the forgery survives on its wrong-key
+    ///   signature, and the tampered receipt reports `Verified`. (The older
+    ///   shape of this mutation — inheriting a carried `"valid": true` — is
+    ///   unrepresentable since #1065: the plain type has no verdict field.)
     ///
     /// And red in the third scenario if the collapse is not the *filter's*
     /// doing — see the comment there for why a verdict assertion alone cannot
@@ -792,7 +797,7 @@ mod tests {
         let honest = read_set(
             // Vote at T3, grant at T2: eligible as of its own timestamp.
             vec![proposal("ad4m://p/1", ALICE, "done", T3)],
-            vec![reviewer_evidence(grant_link(ALICE, true, None))],
+            vec![reviewer_evidence(grant_link(ALICE, true))],
         );
         let receipt = mint(&flow, honest);
         let reader = catalogue(vec![flow]);
@@ -802,10 +807,9 @@ mod tests {
         );
 
         // What arrives: the same receipt, its assignment link replaced by one
-        // signed with somebody else's key and still claiming to be valid.
+        // signed with somebody else's key.
         let mut tampered = receipt;
-        tampered.read_set.role_grants =
-            vec![reviewer_evidence(grant_link(ALICE, false, Some(true)))];
+        tampered.read_set.role_grants = vec![reviewer_evidence(grant_link(ALICE, false))];
 
         let verdict = verify_receipt(&reader, &tampered);
         assert!(
@@ -844,8 +848,8 @@ mod tests {
         // for `resolve` to date a window from.
         let mut half_forged = tampered;
         half_forged.read_set.role_grants = vec![reviewer_evidence_from(vec![
-            grant_link(ALICE, false, Some(true)),
-            grant_link(ALICE, true, None),
+            grant_link(ALICE, false),
+            grant_link(ALICE, true),
         ])];
         let verdict = verify_receipt(&reader, &half_forged);
         assert!(
