@@ -65,6 +65,11 @@ export const t15SimulcastCascade: Scenario = {
     const metrics: Record<string, unknown> = {};
     let cluster: CascadeCluster | null = null;
     let passed = false;
+    let peerA: WebRtcPeer | null = null;
+    let peerB: WebRtcPeer | null = null;
+    let wireA: RenegotiationWire | null = null;
+    let wireB: RenegotiationWire | null = null;
+    let clusterSessions: ClusterPeerSession[] = [];
 
     try {
       cluster = await startCluster({
@@ -90,7 +95,7 @@ export const t15SimulcastCascade: Scenario = {
       await sleep(2_000);
 
       // Provision peers across both nodes.
-      const clusterSessions = await provisionClusterPeers({
+      clusterSessions = await provisionClusterPeers({
         nodes: cluster.nodes.map((n) => ({
           nodeId: n.did,
           admin: n.client,
@@ -110,13 +115,13 @@ export const t15SimulcastCascade: Scenario = {
 
       // --- Peer A (node 0) with simulcast ---
       const csA = clusterSessions[0];
-      const peerA = new WebRtcPeer(csA.label, {
+      peerA = new WebRtcPeer(csA.label, {
         audioToneHz: 440,
         simulcastEncodings: SIMULCAST_LAYERS,
       });
       await peerA.attachSyntheticStream();
       const clientA = csA.byNode.get(nodeA.did)!.client;
-      const wireA = await wireRenegotiation({
+      wireA = await wireRenegotiation({
         client: clientA,
         peer: peerA,
         token: csA.byNode.get(nodeA.did)!.token,
@@ -144,7 +149,7 @@ export const t15SimulcastCascade: Scenario = {
 
       // --- Peer B (node 1) — should land on B due to max-per-node=1 ---
       const csB = clusterSessions[1];
-      const peerB = new WebRtcPeer(csB.label, { audioToneHz: 880 });
+      peerB = new WebRtcPeer(csB.label, { audioToneHz: 880 });
       peerB.enableAudioFingerprinting([440, 880]);
       await peerB.attachSyntheticStream();
 
@@ -183,7 +188,7 @@ export const t15SimulcastCascade: Scenario = {
       metrics["peerB_landed"] = landedNode.did;
 
       await peerB.acceptAnswer(JSON.parse(joinB.sdpAnswer));
-      const wireB = await wireRenegotiation({
+      wireB = await wireRenegotiation({
         client: csB.byNode.get(landedNode.did)!.client,
         peer: peerB,
         token: csB.byNode.get(landedNode.did)!.token,
@@ -320,6 +325,11 @@ export const t15SimulcastCascade: Scenario = {
         prefsAccepted &&
         prefPropagated;
     } finally {
+      await wireA?.detach().catch(() => {});
+      await wireB?.detach().catch(() => {});
+      await peerA?.close().catch(() => {});
+      await peerB?.close().catch(() => {});
+      await disconnectClusterPeers(clusterSessions).catch(() => {});
       if (cluster) {
         await cluster.shutdown();
       }
