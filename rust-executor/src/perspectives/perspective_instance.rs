@@ -908,7 +908,15 @@ impl PerspectiveInstance {
     ) -> Result<(), deno_core::anyhow::Error> {
         let link_exprs: Vec<LinkExpression> = links
             .iter()
-            .map(|l| LinkExpression::from(l.clone()))
+            .map(|l| {
+                let mut le = LinkExpression::from(l.clone());
+                // The rusqlite source always records a status, so `None` here
+                // is a legacy anomaly. Default it to Shared at this boundary
+                // rather than letting one odd row abort the whole boot-time
+                // rebuild (the store refuses status-less inserts).
+                le.status = le.status.or(Some(LinkStatus::Shared));
+                le
+            })
             .collect();
         self.sparql_store.reload(link_exprs)?;
         self.shape_cache.write().unwrap().clear();
@@ -1570,8 +1578,18 @@ impl PerspectiveInstance {
             }
         }
 
+        // Links arriving from the link language are shared by definition, but
+        // the wire form usually carries `status: None`. Assign it explicitly
+        // here — the store refuses status-less inserts rather than defaulting.
         let store_diff = PerspectiveDiff {
-            additions: unique_additions.clone(),
+            additions: unique_additions
+                .iter()
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(LinkStatus::Shared);
+                    l
+                })
+                .collect(),
             removals: unique_removals.clone(),
         };
         let decorated_diff = DecoratedPerspectiveDiff {
@@ -8460,7 +8478,8 @@ mod tests {
                 target: t.to_string(),
             };
             let signed = signer.sign_at(data, &ts);
-            let link = LinkExpression::from(signed);
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
             perspective.sparql_store.add_link(&link).expect("add link");
         }
 
@@ -8555,7 +8574,8 @@ mod tests {
                 target: tgt.to_string(),
             };
             let signed = signer.sign_at(data, &ts);
-            let link = LinkExpression::from(signed);
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
             perspective.sparql_store.add_link(&link).expect("add_link");
         }
 

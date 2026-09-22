@@ -31,7 +31,9 @@ fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpre
             key: "key".to_string(),
             signature: "sig".to_string(),
         },
-        status: None,
+        // The store refuses status-less inserts; Shared is the plain case,
+        // `make_link_with_status` overrides for the local-property tests.
+        status: Some(crate::types::LinkStatus::Shared),
     }
 }
 

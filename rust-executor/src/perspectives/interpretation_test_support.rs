@@ -187,7 +187,10 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
     let signer = TestSigner::generate();
     for l in links {
         let signed = signer.sign(l);
-        store.add_link(&LinkExpression::from(signed)).unwrap();
+        let mut le = LinkExpression::from(signed);
+        // The store refuses status-less inserts.
+        le.status = Some(crate::types::LinkStatus::Shared);
+        store.add_link(&le).unwrap();
     }
     load_shape(&store, class).unwrap()
 }

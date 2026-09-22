@@ -17,7 +17,10 @@ use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::{Link, LinkExpression};
 
 fn make_link_for_round_trip(signer: &TestSigner, link: Link) -> LinkExpression {
-    LinkExpression::from(signer.sign(link))
+    let mut le = LinkExpression::from(signer.sign(link));
+    // The store refuses status-less inserts.
+    le.status = Some(crate::types::LinkStatus::Shared);
+    le
 }
 
 /// Helper: parse the SHACL JSON, fan it out into links, ingest those links

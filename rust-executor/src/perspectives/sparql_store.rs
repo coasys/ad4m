@@ -159,11 +159,10 @@ fn literal(val: &str) -> Literal {
     Literal::new_simple_literal(val)
 }
 
-fn status_str(status: &Option<LinkStatus>) -> &'static str {
+fn status_str(status: &LinkStatus) -> &'static str {
     match status {
-        Some(LinkStatus::Shared) => "Shared",
-        Some(LinkStatus::Local) => "Local",
-        None => "Shared",
+        LinkStatus::Shared => "Shared",
+        LinkStatus::Local => "Local",
     }
 }
 
@@ -505,12 +504,28 @@ impl SparqlStore {
         // ignored here â tests that want `Some(true)` must carry a real signature.
         let valid_str = link.compute_proof_valid().to_string();
 
+        // Status must be decided by the caller, not defaulted here. A silent
+        // `None => Shared` fallback would let any write path that forgot to
+        // set it mislabel a local link as shared — the kind of quiet
+        // conflation that never surfaces in tests. Every production path
+        // (add/update/batch, link-language ingest, migration, boot rebuild)
+        // assigns status at its own boundary; a `None` reaching this point is
+        // a bug, and refusing the insert makes it fail loudly.
+        let status = link.status.as_ref().ok_or_else(|| {
+            anyhow!(
+                "Refusing to store link without an explicit local/shared status: {} -[{}]-> {}",
+                link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                link.data.target
+            )
+        })?;
+
         let annotations: Vec<(&str, &str)> = vec![
             (ONT_AUTHOR, &link.author),
             (ONT_TIMESTAMP, &link.timestamp),
             (ONT_PROOF_KEY, &proof.key),
             (ONT_PROOF_SIG, &proof.signature),
-            (ONT_STATUS, status_str(&link.status)),
+            (ONT_STATUS, status_str(status)),
             (ONT_PROOF_VALID, &valid_str),
         ];
 
