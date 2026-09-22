@@ -2929,9 +2929,13 @@ describe("Multi-User Simple integration tests", () => {
         // Bug: managed user on Node 2 does not receive signals from Node 1's main agent,
         // even though the reverse direction works.
         const node3AppDataPath = path.join(TEST_DIR, "agents", "flux-remote-main");
-        const node3GqlPort = 16100;
-        const node3HcAdminPort = 16101;
-        const node3HcAppPort = 16102;
+        // Allocated in before(), not hard-coded: cleanup.js reaps stray
+        // executors by reading the registry that registerPorts() writes, so a
+        // static port here is the one executor in this suite that survives a
+        // killed mocha run — and the next run then panics binding it.
+        let node3GqlPort: number;
+        let node3HcAdminPort: number;
+        let node3HcAppPort: number;
 
         let node3ExecutorProcess: ChildProcess | null = null;
         let node3MainClient: Ad4mClient | null = null;
@@ -2955,6 +2959,8 @@ describe("Multi-User Simple integration tests", () => {
             await cleanupAllMainExecutorPerspectives();
 
             console.log("\n=== [Flux Scenario] Setting up remote standalone node (Node 3) ===");
+            [node3GqlPort, node3HcAdminPort, node3HcAppPort] = await getFreePorts(3);
+            registerPorts([node3GqlPort, node3HcAdminPort, node3HcAppPort]);
             if (!fs.existsSync(node3AppDataPath)) {
                 fs.mkdirSync(node3AppDataPath, { recursive: true });
             }
@@ -3008,6 +3014,7 @@ describe("Multi-User Simple integration tests", () => {
         after(async function() {
             this.timeout(20000);
             await gracefulShutdown(node3ExecutorProcess, "node 3 executor");
+            deregisterPorts([node3GqlPort, node3HcAdminPort, node3HcAppPort]);
         });
 
         it("should route signals between remote main agent and local managed user", async function() {
