@@ -274,16 +274,23 @@ export function buildSPARQLQuery(
   if (query.parent) {
     const parentPredicate = resolveParentPredicate(query.parent, modelClass);
     if (isTraverseScope(query.parent)) {
-      const { ids, transitive, direction, limitPerAnchor } = query.parent;
-      // `limitPerAnchor` is applied by the executor between selecting ids and
-      // hydrating them, which is a shape this path does not have — it builds one
-      // query and reads the rows. Refused rather than ignored: quietly returning
-      // every reply where five per parent were asked for is a wrong answer that
-      // looks like a right one.
+      const { ids, transitive, direction, limitPerAnchor, levels } = query.parent;
+      // `limitPerAnchor` and `levels` are applied by the executor between
+      // selecting ids and hydrating them, which is a shape this path does not
+      // have — it builds one query and reads the rows. Refused rather than
+      // ignored: quietly returning every reply where five per parent were
+      // asked for — or one unbounded level where a walk was asked for — is a
+      // wrong answer that looks like a right one.
       if (limitPerAnchor !== undefined) {
         throw new Error(
           'buildSPARQLQuery: limitPerAnchor is applied by the executor between query phases and ' +
             'has no equivalent here. Use the model query path for per-anchor limits.',
+        );
+      }
+      if (levels !== undefined) {
+        throw new Error(
+          'buildSPARQLQuery: levels is walked by the executor between query phases and ' +
+            'has no equivalent here. Use the model query path for level walks.',
         );
       }
       const anchors = (Array.isArray(ids) ? ids : [ids]).map(iri).join(' ');
