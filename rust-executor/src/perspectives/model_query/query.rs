@@ -264,7 +264,7 @@ pub(super) async fn execute_model_query_inner(
     //     property exists as a scalar on the target shape.
     // Anything else (or more than one key) falls back to the post-hydration
     // Rust sort.
-    let can_push_pagination = all_where_pushable(query_input, shape, Some(resolver)) && {
+    let order_fully_pushable = {
         match &query_input.order {
             None => true,
             Some(order) => {
@@ -314,6 +314,8 @@ pub(super) async fn execute_model_query_inner(
             }
         }
     };
+    let can_push_pagination =
+        all_where_pushable(query_input, shape, Some(resolver)) && order_fully_pushable;
 
     // A per-anchor limit forces the two-phase shape even with no global limit.
     // The whole value of slicing per anchor is that it happens on the id phase,
@@ -323,6 +325,29 @@ pub(super) async fn execute_model_query_inner(
     // matters, and the truncation is per anchor.
     let anchor_limit = per_anchor_limit(query_input);
     let walk = level_limits(query_input).cloned();
+
+    // A per-anchor limit picks its N *in the store*, so the store has to be able to express the
+    // order that decides which N. Only the first key is emitted, and a key the builder cannot
+    // translate falls back to the reifier timestamp — so an order the store cannot express fully
+    // means the slice kept rows the caller did not ask for, and no amount of re-sorting afterwards
+    // puts them back: the rows it dropped were never hydrated.
+    //
+    // Sorting the survivors instead is the tempting repair and it is the wrong one, twice over. It
+    // cannot recover a discarded row, and where the order *was* pushed faithfully it would undo a
+    // correct SPARQL ordering — projection counts and relation properties are not resolved at that
+    // point in the pipeline, so sorting on them compares nulls.
+    //
+    // Refused rather than approximated, for the same reason `levels` + `transitive` is: a result
+    // that answers a question the caller did not ask, while looking exactly like one that did.
+    // An absent `order` is not refused — asking for no order is a legitimate "any N".
+    if (anchor_limit.is_some() || walk.is_some()) && !order_fully_pushable {
+        return Err(Error::msg(
+            "Traverse scope: a per-anchor limit selects its results in the store, so `order` must \
+             be one key the store can sort by — a timestamp synonym, a scalar property, a \
+             projection count, or a relation path. Several keys, or a key outside that set, would \
+             slice on a different ordering than the one requested.",
+        ));
+    }
 
     // A walk and a per-anchor limit are properties of the SCOPE, not of paging, so they need the
     // two-phase shape whether or not the filter can be pushed down — the first phase is where the
