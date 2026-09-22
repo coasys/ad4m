@@ -458,7 +458,7 @@ describe("SFU path", () => {
         }))
         await session.join(fakeMediaStream())
 
-        const call = (SfuManager as jest.Mock).mock.calls[0]
+        const call = (SfuManager as unknown as jest.Mock).mock.calls[0]
         const iceConfig = call[4]
         expect(iceConfig.stun).toEqual(["stun:stun.example.com:3478"])
         expect(iceConfig.turn).toEqual([{
