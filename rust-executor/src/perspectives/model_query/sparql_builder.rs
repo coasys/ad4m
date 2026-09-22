@@ -84,6 +84,13 @@ fn typed_number_literal(n: f64) -> Option<String> {
 /// probe tries to use a specific conformance predicate (flag or required
 /// property) for efficiency, falling back to a generic `?source ?_anyP ?_anyT`
 /// pattern if no specific predicate is available.
+///
+/// It binds `?_first_ts_v`, one row per matching reifier, which the caller
+/// folds to one row per source with `MIN`. The fallback pattern matches every
+/// property of the source, so a source with three properties binds three
+/// timestamps; a caller that read them as rows would count one instance three
+/// times against a limit. Aggregating is therefore not an optimisation — it is
+/// what makes a row mean an instance.
 pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
     let ont_ts = "ad4m://ontology/timestamp";
@@ -102,7 +109,7 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     }) {
         let initial = prop.initial_value.as_ref().unwrap();
         return format!(
-            "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts .",
+            "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts_v .",
             prop.predicate
         );
     }
@@ -114,13 +121,13 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     {
         let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
         return format!(
-            "?_r <{rdf_reifies}> <<( ?source <{}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts .",
+            "?_r <{rdf_reifies}> <<( ?source <{}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts_v .",
             prop.predicate
         );
     }
 
     format!(
-        "?source ?_anyP ?_anyT . ?_r <{rdf_reifies}> <<( ?source ?_anyP ?_anyT )>> . ?_r <{ont_ts}> ?_first_ts ."
+        "?source ?_anyP ?_anyT . ?_r <{rdf_reifies}> <<( ?source ?_anyP ?_anyT )>> . ?_r <{ont_ts}> ?_first_ts_v ."
     )
 }
 
@@ -225,11 +232,11 @@ pub(super) fn build_instance_sparql(
             SortKey::Timestamp => {
                 let ts_probe = build_timestamp_probe(shape);
                 format!(
-                    r#"SELECT DISTINCT ?source{anchor_select} ?_first_ts WHERE {{
+                    r#"SELECT DISTINCT ?source{anchor_select} (MIN(?_first_ts_v) AS ?_first_ts) WHERE {{
 {conformance}
 {where_extra}
             {ts_probe}
-        }}{pagination_suffix}"#
+        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
             SortKey::Property(predicate) => {
