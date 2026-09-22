@@ -418,9 +418,9 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
  *  variants narrow inference into `IncludeExtras` (count → number, limit-1 → scalar). */
 export type TypedIncludeProjection<T extends Ad4mModel> = {
   [K in RelationKeysOf<T>]:
-    | { from: K; count: true }
-    | { from: K; limit: 1; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> }
-    | { from: K; limit?: number; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> };
+    | { from: K; count: true; transitive?: boolean }
+    | { from: K; limit: 1; transitive?: boolean; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> }
+    | { from: K; limit?: number; transitive?: boolean; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> };
 }[RelationKeysOf<T>];
 
 type StrictTypedIncludeMap<T extends Ad4mModel> =
