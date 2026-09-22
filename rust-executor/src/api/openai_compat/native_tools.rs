@@ -20,6 +20,11 @@
 //! `tool_choice: "required"` and a named function are not enforced on this
 //! path. They are not enforced for a remote model on the injected path either:
 //! the decoding constraint that implements them only reaches local models.
+//! `parallel_tool_calls: false` is not passed on either, for the same reason:
+//! it reaches [`super::tool_grammar::build_tool_call_parser`] on the injected
+//! path, and that constraint binds only for [`crate::ai_service::LlmModel::Local`].
+//! Wiring either one through means a provider-level request field, not a change
+//! here.
 
 use std::convert::Infallible;
 
