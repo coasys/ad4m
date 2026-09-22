@@ -33,10 +33,14 @@ use super::{
     ChatReply, ChatRequest, ChatRole, ChatTurn, ChatUsage, RemoteChat, ToolCall, ToolSpec,
 };
 
-/// Cap: never request more context than this, even if the model advertises a
-/// larger window.  131072 tokens covers the WE schema context (~75K) plus
-/// conversation history with room to spare.
-const MAX_NUM_CTX: u32 = 131_072;
+/// Default cap: never request more context than this, even if the model
+/// advertises a larger window.  131072 tokens covers the WE schema context
+/// (~75K) plus conversation history with room to spare.
+///
+/// This is only the fallback — how much VRAM to spend on KV cache is the
+/// Ollama admin's call, so a model entry can override it via
+/// [`ModelApi::max_num_ctx`](crate::types::ModelApi::max_num_ctx).
+const DEFAULT_MAX_NUM_CTX: u32 = 131_072;
 
 /// Fallback if `/api/show` cannot determine the model's native window.
 /// Matches Ollama's own default, which allocates a KV cache the model
@@ -55,6 +59,9 @@ pub struct OllamaChat {
     base: String,
     /// Per-model context window cache.  Populated on first use via `/api/show`.
     model_ctx_cache: Mutex<HashMap<String, u32>>,
+    /// Ceiling for `num_ctx`, from the model entry's `max_num_ctx` when the
+    /// operator set one, else [`DEFAULT_MAX_NUM_CTX`].
+    max_num_ctx: u32,
 }
 
 impl OllamaChat {
@@ -63,7 +70,10 @@ impl OllamaChat {
     /// Accepts the base URL with or without a trailing slash.  A `/v1` suffix
     /// is stripped — saved URLs from previous configurations may carry the
     /// OpenAI-compat path, and appending `/api/chat` to that would break.
-    pub fn new(_api_key: &str, base_url: Url) -> Self {
+    ///
+    /// `max_num_ctx` is the operator's ceiling for the context window; `None`
+    /// uses [`DEFAULT_MAX_NUM_CTX`].
+    pub fn new(_api_key: &str, base_url: Url, max_num_ctx: Option<u32>) -> Self {
         let trimmed = base_url.as_str().trim_end_matches('/');
         let root = trimmed.strip_suffix("/v1").unwrap_or(trimmed);
         Self {
@@ -74,6 +84,7 @@ impl OllamaChat {
             endpoint: format!("{root}/api/chat"),
             base: root.to_string(),
             model_ctx_cache: Mutex::new(HashMap::new()),
+            max_num_ctx: max_num_ctx.unwrap_or(DEFAULT_MAX_NUM_CTX),
         }
     }
 
@@ -82,9 +93,9 @@ impl OllamaChat {
     /// Ollama sizes the KV cache from `num_ctx` at model load.  Requesting
     /// 131K on a model whose native window is 4K or 8K causes multi-GB KV
     /// allocations that can exhaust VRAM or force layers to CPU.  Querying
-    /// the model's own context length and capping at `MAX_NUM_CTX` avoids
-    /// this: a 4K model gets 4K; a 128K model gets 128K; nothing exceeds
-    /// the cap.
+    /// the model's own context length and capping at `self.max_num_ctx`
+    /// avoids this: a 4K model gets 4K; a 128K model gets 128K; nothing
+    /// exceeds the cap.
     ///
     /// Result is cached per model name for the lifetime of this client.
     async fn resolve_num_ctx(&self, model: &str) -> u32 {
@@ -107,8 +118,11 @@ impl OllamaChat {
     ///
     /// Walks the `model_info` map looking for `<arch>.context_length`.  Falls
     /// back to `FALLBACK_NUM_CTX` on any error — the request still goes out,
-    /// just with a conservative window.
+    /// just with a conservative window.  Every path is capped at
+    /// `self.max_num_ctx`, including the fallback, so an operator's ceiling
+    /// is never exceeded.
     async fn query_model_ctx(&self, model: &str) -> u32 {
+        let fallback = FALLBACK_NUM_CTX.min(self.max_num_ctx);
         let url = format!("{}/api/show", self.base);
         let response = match self
             .http
@@ -120,16 +134,16 @@ impl OllamaChat {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 log::warn!(
-                    "Ollama /api/show returned {} for {model}; falling back to num_ctx={FALLBACK_NUM_CTX}",
+                    "Ollama /api/show returned {} for {model}; falling back to num_ctx={fallback}",
                     r.status()
                 );
-                return FALLBACK_NUM_CTX;
+                return fallback;
             }
             Err(e) => {
                 log::warn!(
-                    "Could not query Ollama /api/show for {model}: {e}; falling back to num_ctx={FALLBACK_NUM_CTX}"
+                    "Could not query Ollama /api/show for {model}: {e}; falling back to num_ctx={fallback}"
                 );
-                return FALLBACK_NUM_CTX;
+                return fallback;
             }
         };
 
@@ -137,7 +151,7 @@ impl OllamaChat {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("Could not parse /api/show response for {model}: {e}");
-                return FALLBACK_NUM_CTX;
+                return fallback;
             }
         };
 
@@ -147,7 +161,7 @@ impl OllamaChat {
             for (key, val) in info {
                 if key.ends_with(".context_length") {
                     if let Some(ctx) = val.as_u64() {
-                        let capped = (ctx as u32).min(MAX_NUM_CTX);
+                        let capped = (ctx as u32).min(self.max_num_ctx);
                         log::info!(
                             "Ollama model {model}: context_length={ctx}, using num_ctx={capped}"
                         );
@@ -163,7 +177,7 @@ impl OllamaChat {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 && parts[0] == "num_ctx" {
                     if let Ok(ctx) = parts[1].parse::<u32>() {
-                        let capped = ctx.min(MAX_NUM_CTX);
+                        let capped = ctx.min(self.max_num_ctx);
                         log::info!("Ollama model {model}: Modelfile num_ctx={ctx}, using {capped}");
                         return capped;
                     }
@@ -171,8 +185,10 @@ impl OllamaChat {
             }
         }
 
-        log::warn!("Could not determine context_length for {model}; falling back to num_ctx={FALLBACK_NUM_CTX}");
-        FALLBACK_NUM_CTX
+        log::warn!(
+            "Could not determine context_length for {model}; falling back to num_ctx={fallback}"
+        );
+        fallback
     }
 }
 
@@ -550,19 +566,19 @@ mod tests {
 
     #[test]
     fn the_endpoint_strips_a_trailing_v1() {
-        let client = OllamaChat::new("", url("http://localhost:11434/v1"));
+        let client = OllamaChat::new("", url("http://localhost:11434/v1"), None);
         assert_eq!(client.endpoint, "http://localhost:11434/api/chat");
     }
 
     #[test]
     fn a_bare_origin_gets_api_chat_appended() {
-        let client = OllamaChat::new("", url("http://localhost:11434"));
+        let client = OllamaChat::new("", url("http://localhost:11434"), None);
         assert_eq!(client.endpoint, "http://localhost:11434/api/chat");
     }
 
     #[test]
     fn a_trailing_slash_is_tolerated() {
-        let client = OllamaChat::new("", url("http://localhost:11434/"));
+        let client = OllamaChat::new("", url("http://localhost:11434/"), None);
         assert_eq!(client.endpoint, "http://localhost:11434/api/chat");
     }
 
@@ -602,7 +618,7 @@ mod tests {
 
     #[test]
     fn this_provider_advertises_native_tool_support() {
-        let client = OllamaChat::new("", url("http://localhost:11434"));
+        let client = OllamaChat::new("", url("http://localhost:11434"), None);
         assert!(client.supports_native_tools());
     }
 
@@ -693,12 +709,12 @@ mod tests {
             })],
             stream: false,
             options: ChatOptions {
-                num_ctx: MAX_NUM_CTX,
+                num_ctx: DEFAULT_MAX_NUM_CTX,
             },
         };
 
         let json = serde_json::to_value(&body).expect("body serialises");
-        assert_eq!(json["options"]["num_ctx"], MAX_NUM_CTX);
+        assert_eq!(json["options"]["num_ctx"], DEFAULT_MAX_NUM_CTX);
         assert_eq!(json["tools"][0]["type"], "function");
         assert_eq!(json["stream"], false);
     }
@@ -784,7 +800,7 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         let reply = client
             .chat(ChatRequest::new("qwen3:32b", turns()))
             .await
@@ -818,7 +834,7 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         client
             .chat(ChatRequest::new("qwen3:32b", turns()))
             .await
@@ -834,7 +850,7 @@ mod wire_tests {
         let mock = server
             .mock("POST", "/api/chat")
             .match_body(mockito::Matcher::PartialJson(json!({
-                "options": {"num_ctx": MAX_NUM_CTX},
+                "options": {"num_ctx": DEFAULT_MAX_NUM_CTX},
             })))
             .with_status(200)
             .with_body(
@@ -847,9 +863,96 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         client
             .chat(ChatRequest::new("big-model:latest", turns()))
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_configured_max_num_ctx_overrides_the_default_cap() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 1_048_576).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "options": {"num_ctx": 8192},
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "ok"},
+                    "done": true,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), Some(8192));
+        client
+            .chat(ChatRequest::new("big-model:latest", turns()))
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_configured_cap_does_not_inflate_a_smaller_model_window() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show(&mut server, 4096).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "options": {"num_ctx": 4096},
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "ok"},
+                    "done": true,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), Some(131_072));
+        client
+            .chat(ChatRequest::new("small-model:latest", turns()))
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn the_show_fallback_respects_a_configured_ceiling() {
+        let mut server = mockito::Server::new_async().await;
+        let _show = mock_show_missing(&mut server).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "options": {"num_ctx": 1024},
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "ok"},
+                    "done": true,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), Some(1024));
+        client
+            .chat(ChatRequest::new("missing:latest", turns()))
             .await
             .expect("completion succeeds");
 
@@ -876,7 +979,7 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         client
             .chat(ChatRequest::new("missing:latest", turns()))
             .await
@@ -912,7 +1015,7 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         client
             .chat(
                 ChatRequest::new("qwen3:32b", turns()).with_tools(vec![ToolSpec {
@@ -954,7 +1057,7 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         let reply = client
             .chat(ChatRequest::new("qwen3:32b", turns()))
             .await
@@ -978,7 +1081,7 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         let error = client
             .chat(ChatRequest::new("qwen3:32b", turns()))
             .await
@@ -1009,7 +1112,7 @@ mod wire_tests {
             .await;
 
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         let reply = client
             .chat_stream(ChatRequest::new("qwen3:32b", turns()), tx)
             .await
@@ -1054,7 +1157,7 @@ mod wire_tests {
             .await;
 
         let (tx, _rx) = mpsc::unbounded_channel();
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         let reply = client
             .chat_stream(ChatRequest::new("qwen3:32b", turns()), tx)
             .await
@@ -1113,7 +1216,7 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         let error = client
             .chat(ChatRequest::new("qwen3:70b", turns()))
             .await
@@ -1143,7 +1246,7 @@ mod wire_tests {
             .create_async()
             .await;
 
-        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap());
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let error = client
             .chat_stream(ChatRequest::new("qwen3:70b", turns()), tx)

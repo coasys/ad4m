@@ -300,6 +300,7 @@ pub(crate) async fn setup_interpretation_e2e(
                     .unwrap_or_else(|_| "ollama".into()),
                 model,
                 api_type: crate::types::ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
             }),
         })
         .await
