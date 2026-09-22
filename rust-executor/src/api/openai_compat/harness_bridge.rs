@@ -360,7 +360,9 @@ fn structured_turn(m: &Value) -> Result<ChatTurn> {
 /// `arguments` arrives as a JSON *string* on the OpenAI wire and as an object
 /// once it has been through the harness. Both are accepted.
 ///
-/// Unparseable arguments are kept rather than dropped, under `_raw`. Dropping
+/// Arguments that are not an object — a string that will not parse, and one
+/// that parses to an array, a number or `null` — are kept rather than dropped,
+/// under `_raw`. Dropping
 /// the call looked safer and is not: the harness has already dispatched it and
 /// appends the matching `tool_result` on the next turn, so a missing `tool_use`
 /// leaves a result whose `tool_use_id` refers to nothing, and Anthropic rejects
@@ -387,10 +389,16 @@ fn to_provider_call(raw: &Value) -> Option<ToolCall> {
     };
 
     let arguments = match function.get("arguments") {
-        Some(Value::String(text)) => {
-            serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({ "_raw": text }))
-        }
-        Some(value) => value.clone(),
+        Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+            Ok(value) if value.is_object() => value,
+            // `"[]"`, `"1"` and `"null"` are valid JSON and invalid arguments:
+            // a `tool_use` input must be an object. They go under `_raw` with
+            // the strings that did not parse at all, for the same reason — the
+            // call has to stay, or its result has nothing to name.
+            _ => serde_json::json!({ "_raw": text }),
+        },
+        Some(value) if value.is_object() => value.clone(),
+        Some(value) => serde_json::json!({ "_raw": value.to_string() }),
         None => Value::Object(Default::default()),
     };
 
@@ -823,6 +831,31 @@ mod native_mapping_tests {
         // tool_use_id matches no tool_use.
         assert_eq!(turn.tool_calls.len(), 1);
         assert_eq!(turn.tool_calls[0].arguments["_raw"], "{not json");
+    }
+
+    #[test]
+    fn arguments_that_parse_to_something_other_than_an_object_go_under_raw_too() {
+        // `"[]"` is valid JSON and an invalid `tool_use` input: the provider
+        // wants an object. Passing it through refuses the whole conversation,
+        // and dropping the call unbalances it, so it joins the `_raw` case.
+        for arguments in [json!("[1,2]"), json!("7"), json!("null"), json!([1, 2])] {
+            let turn = structured_turn(&json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_10",
+                    "function": { "name": "search", "arguments": arguments },
+                }],
+            }))
+            .expect("maps");
+
+            assert_eq!(turn.tool_calls.len(), 1);
+            assert!(
+                turn.tool_calls[0].arguments.is_object(),
+                "{arguments} reached the provider as a non-object"
+            );
+            assert!(turn.tool_calls[0].arguments["_raw"].is_string());
+        }
     }
 
     #[test]
