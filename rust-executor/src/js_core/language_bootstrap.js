@@ -187,6 +187,17 @@ function createHolochainDelegate(languageAddress) {
     return {
         async registerDNAs(dnas, signalCallback) {
             const results = [];
+            // Per-language agent key (issue #1099): with the global conductor
+            // key, two languages bundling the same DNA + network seed collide
+            // on one cell (cell id = DNA hash + agent pubkey) — zome calls can
+            // share the recovered app, but signal routing is per-cell and
+            // last-writer-wins. A language-scoped key gives each language its
+            // own cell. Resolved once per language; an app already installed
+            // under this language's own app id keeps its key (and cell).
+            const agentKey = dnas.length > 0
+                ? await HOLOCHAIN_SERVICE.getAgentKeyForLanguage(
+                    languageAddress, `${languageAddress}-${dnas[0].nick}`)
+                : null;
             for (const dna of dnas) {
                 const appId = `${languageAddress}-${dna.nick}`;
 
@@ -220,7 +231,7 @@ function createHolochainDelegate(languageAddress) {
 
                 const installPayload = {
                     installed_app_id: appId,
-                    agent_key: await HOLOCHAIN_SERVICE.getAgentKey(),
+                    agent_key: agentKey,
                     membrane_proofs: {},
                     existing_cells: {},
                     network_seed: dna.network_seed || undefined,

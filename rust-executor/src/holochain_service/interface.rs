@@ -215,6 +215,49 @@ impl HolochainServiceInterface {
         }
     }
 
+    /// Resolve the Holochain agent key for one language (issue #1099).
+    ///
+    /// Each language gets its own agent key so that two languages bundling
+    /// the same DNA + network seed produce distinct cells (cell id =
+    /// DNA hash + agent pubkey) instead of colliding on one shared cell
+    /// with last-writer-wins signal routing. Resolution order:
+    ///
+    /// 1. The mapping stored in Ad4mDb from a previous resolution.
+    /// 2. Adoption: an app already installed under the language's own
+    ///    app id predates per-language keys — keep its key so existing
+    ///    installs keep their cell, source chain, and DHT identity.
+    /// 3. A fresh keypair otherwise.
+    ///
+    /// The resolved key is persisted, so every path is stable across
+    /// restarts.
+    pub async fn agent_key_for_language(
+        &self,
+        language_address: &str,
+        app_id: &str,
+    ) -> Result<HoloHash<Agent>, AnyError> {
+        let setting_key = format!("language_agent_key:{}", language_address);
+        if let Some(stored) =
+            crate::db::Ad4mDb::with_global_instance(|db| db.get_setting(&setting_key))
+                .unwrap_or(None)
+        {
+            match holochain::prelude::AgentPubKey::try_from(stored.as_str()) {
+                Ok(key) => return Ok(key),
+                Err(_) => log::warn!(
+                    "Stored agent key for language {} is in invalid format, re-resolving",
+                    language_address
+                ),
+            }
+        }
+        let key = match self.get_app_info(app_id.to_string()).await? {
+            Some(app_info) => app_info.agent_pub_key,
+            None => self.new_sign_keypair_random().await?,
+        };
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_setting(&setting_key, &key.to_string())
+        })?;
+        Ok(key)
+    }
+
     pub async fn get_app_info(&self, app_id: String) -> Result<Option<AppInfo>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.sender

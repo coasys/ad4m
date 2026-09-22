@@ -357,6 +357,28 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
         .map_err(AnyhowWrapperError::from)
 }
 
+/// Per-language agent key (issue #1099): distinct languages get distinct
+/// cells even when they bundle the same DNA + network seed. See
+/// `HolochainServiceInterface::agent_key_for_language` for the resolution
+/// rules (stored mapping → adoption of an existing install → fresh key).
+#[op2(async(lazy), fast)]
+#[serde]
+async fn get_agent_key_for_language(
+    #[string] language_address: String,
+    #[string] app_id: String,
+) -> Result<HoloHash<Agent>, AnyhowWrapperError> {
+    let interface = holochain_service_once_started()
+        .await
+        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
+    timeout(
+        TIMEOUT_DURATION,
+        interface.agent_key_for_language(&language_address, &app_id),
+    )
+    .await
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
+}
+
 #[op2(async(lazy), fast)]
 #[string]
 async fn pack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> {
@@ -408,7 +430,7 @@ async fn unpack_happ(#[string] path: String) -> Result<String, AnyhowWrapperErro
 //Implement signal callbacks from dna/holochain to js
 deno_core::extension!(
     holochain_service,
-    ops = [start_holochain_conductor, log_dht_status, install_app, get_app_info, call_zome_function, agent_infos, add_agent_infos, remove_app, sign_string, shutdown, get_agent_key, pack_dna, unpack_dna, pack_happ, unpack_happ],
+    ops = [start_holochain_conductor, log_dht_status, install_app, get_app_info, call_zome_function, agent_infos, add_agent_infos, remove_app, sign_string, shutdown, get_agent_key, get_agent_key_for_language, pack_dna, unpack_dna, pack_happ, unpack_happ],
     esm_entry_point = "ext:holochain_service/holochain_service_extension.js",
     esm = [dir "src/holochain_service", "holochain_service_extension.js"]
 );
