@@ -36,8 +36,9 @@ export interface SyncDeps {
     /** Returns the current key ring, or null for a plaintext (non-E2E) room. */
     getKeyRing: () => KeyRing | null;
     /** Re-fetches the key ring from the server. Returns true if new versions
-     *  were obtained (callers should re-bootstrap to recover skipped links). */
-    refreshKeyRing?: () => Promise<boolean>;
+     *  were obtained, false if refreshed but nothing new, or null if the
+     *  call was skipped (e.g. cooldown). */
+    refreshKeyRing?: () => Promise<boolean | null>;
     /** Called after every successful sync cycle. The admin uses this to grant
      *  historical keys to members who joined while WS was down — the periodic
      *  HTTP sync is the fallback discovery path when onPeerJoined never fires. */
@@ -544,15 +545,12 @@ export async function bootstrap(): Promise<void> {
     const { config, getToken } = deps();
     const token = await getToken();
 
-    // The render response now includes revision + sequence, so we avoid the
-    // extra fetchRevision round-trip that the old code made.
     const rendered = await api.fetchRender(config, token);
 
-    // Route through fromWireDiff so encrypted links that can't be
-    // decrypted yet (freshly joined member awaiting key grant) get
-    // skipped instead of crashing the entire bootstrap. The
-    // catchUp() → refreshKeyRing → re-bootstrap path recovers them
-    // once the admin grants keys.
+    // Clear stale pending versions before re-processing the full snapshot.
+    // fromWireDiff will re-track any versions that remain missing.
+    _pendingMissingVersions.clear();
+
     const renderDiff: WirePerspectiveDiff = { additions: rendered.links, removals: [] };
     const { diff, missingVersions } = fromWireDiff(renderDiff);
 
@@ -561,6 +559,7 @@ export async function bootstrap(): Promise<void> {
             `[server-link-language] bootstrap: skipped ${missingVersions.size} undecryptable ` +
             `key version(s): ${[...missingVersions].join(", ")} — will recover after key grant`,
         );
+        trackMissingKeyVersions(missingVersions);
     }
 
     // Replace the local link set atomically: remove any stale links left
@@ -627,16 +626,13 @@ export async function catchUp(): Promise<PerspectiveDiff> {
         );
         try {
             const gotNew = await _deps.refreshKeyRing();
-            if (gotNew) {
+            if (gotNew === null) {
+                console.log(
+                    "[server-link-language] key ring refresh skipped (cooldown) — will retry next cycle",
+                );
+            } else if (gotNew) {
                 console.log("[server-link-language] key ring refreshed with new versions — re-bootstrapping");
-                _pendingMissingVersions.clear();
                 await bootstrap();
-                // Emit the full store so the executor's perspective layer
-                // sees the recovered links. bootstrap() itself does not
-                // emit (correct for cold start — the executor queries the
-                // store directly for initial state). The recovery path
-                // here must emit because the executor only surfaces
-                // runtime-added links via emitPerspectiveDiff.
                 const recovered = store.allLinks();
                 if (recovered.links.length > 0) {
                     deps().emitDiff({ additions: recovered.links, removals: [] });

@@ -1,4 +1,15 @@
 version: 2.1
+
+# Scheduled pipelines (Project Settings → Triggers) set this true.
+# In-config `triggers: schedule` is deprecated and does not show up under
+# "Scheduled Pipelines"; on the GitHub-App project it also never reaches
+# resource class `coasys/marvin` (legacy org `gh/coasys/ad4m` still fires
+# the old trigger at 03:06 UTC and dies in ~1s with runner-org-unauthorized).
+parameters:
+  run-nightly-llm:
+    type: boolean
+    default: false
+
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
@@ -250,8 +261,8 @@ jobs:
 
   # Runs everything gated by #[ignore = "llm-e2e"] (Rust) or LLM_E2E=1 (JS).
   # These hit Marvin's local Ollama; too slow + occasionally flaky for
-  # per-push CI, so they run once nightly against `dev`. Trigger:
-  # `workflows.nightly-llm-e2e` at the bottom of this file.
+  # per-push CI, so they run once nightly against `dev` via a scheduled
+  # pipeline (`run-nightly-llm: true`).
   llm-e2e:
     machine: true
     resource_class: coasys/marvin
@@ -266,7 +277,7 @@ jobs:
           name: Skip if dev SHA unchanged since last successful llm-e2e
           command: |
             LAST_SHA=$(curl -sL -H "Circle-Token: $CIRCLECI_API_TOKEN" \
-              "https://circleci.com/api/v2/insights/gh/coasys/ad4m/workflows/nightly-llm-e2e/jobs?branch=dev" \
+              "https://circleci.com/api/v2/insights/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/workflows/nightly-llm-e2e/jobs?branch=dev" \
               | jq -r '.items[]? | select(.status=="success") | .commit_id' \
               | head -1)
             if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" = "$CIRCLE_SHA1" ]; then
@@ -341,6 +352,8 @@ jobs:
 workflows:
   version: 2
   build-and-test:
+    when:
+      not: << pipeline.parameters.run-nightly-llm >>
     jobs:
       - build-and-test
       - plugin-ad4m-tests
@@ -360,19 +373,11 @@ workflows:
           requires:
             - build-and-test
 
-  # Nightly at 03:00 UTC against dev. Runs the LLM-heavy suites that are
-  # skipped from the per-push workflow (Rust `#[ignore = "llm-e2e"]` +
-  # JS `LLM_E2E=1`). Same resource class (Marvin) so the Ollama endpoint
-  # is local. If it fails, look for a real regression against dev — the
-  # gate exists to keep per-push CI fast, not to hide breakage.
+  # Nightly against `dev`. Fired by a CircleCI *scheduled pipeline*
+  # (visible under Project → Triggers), not by in-config cron.
+  # Same resource class (Marvin) so Ollama is local.
   nightly-llm-e2e:
-    triggers:
-      - schedule:
-          cron: "0 3 * * *"
-          filters:
-            branches:
-              only:
-                - dev
+    when: << pipeline.parameters.run-nightly-llm >>
     jobs:
       - llm-e2e:
           # Provides `CIRCLECI_API_TOKEN` for the skip-if-unchanged preflight.

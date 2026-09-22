@@ -37,6 +37,129 @@ fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> Decorated
     }
 }
 
+/// `make_link` with an explicit [`LinkStatus`], for the local-property read tests.
+fn make_link_with_status(
+    source: &str,
+    predicate: &str,
+    target: &str,
+    ts: &str,
+    status: crate::types::LinkStatus,
+) -> DecoratedLinkExpression {
+    let mut link = make_link(source, predicate, target, ts);
+    link.status = Some(status);
+    link
+}
+
+const LOCAL_CACHE_SHAPE_JSON: &str = r#"{
+    "className": "Cache",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "cache://Cache"
+        },
+        "state": {
+            "predicate": "cache://state",
+            "required": false,
+            "resolveLanguage": "literal",
+            "local": true
+        }
+    },
+    "relations": {}
+}"#;
+
+/// A `local: true` property must hydrate only from `LinkStatus::Local` links.
+///
+/// Nothing stops a peer gossiping a Shared link on a predicate the class declared
+/// local. Before the read-side filter the hydration path had no status handling at
+/// all, so that foreign link was read back as the property's value — the class
+/// declared the field executor-private and whoever gossiped last decided what it
+/// said.
+///
+/// The spoof case is asserted with the Shared link as the *only* link on the
+/// predicate, so the test is deterministic: without the filter the value hydrates,
+/// with it the property is absent. Asserting against a mixture would let
+/// result-ordering decide the outcome and pass by luck on unfiltered code.
+#[tokio::test]
+async fn local_property_hydrates_only_from_local_links() {
+    use crate::types::LinkStatus;
+
+    // Case 1 — spoof only: a Shared link is the sole value on the local predicate.
+    let store = SparqlStore::new(None).unwrap();
+    let spoofed = "literal:string:cache_spoofed";
+    store
+        .add_link(&make_link(
+            spoofed,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000000",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link_with_status(
+            spoofed,
+            "cache://state",
+            "literal:string:gossiped",
+            "1700000000001",
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.instances.len(), 1, "instance should still be found");
+    let state = &result.instances[0]["state"];
+    assert!(
+        state.is_null(),
+        "a Shared link on a local predicate must not hydrate, got: {state}"
+    );
+
+    // Case 2 — the genuine article: a Local link on the same predicate does hydrate.
+    let store2 = SparqlStore::new(None).unwrap();
+    let genuine = "literal:string:cache_genuine";
+    store2
+        .add_link(&make_link(
+            genuine,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000000",
+        ))
+        .unwrap();
+    store2
+        .add_link(&make_link_with_status(
+            genuine,
+            "cache://state",
+            "literal:string:warm",
+            "1700000000001",
+            LinkStatus::Local,
+        ))
+        .unwrap();
+
+    let result2 = execute_model_query_from_json(
+        &store2,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result2.instances.len(), 1);
+    assert_eq!(
+        result2.instances[0]["state"],
+        json!("warm"),
+        "a Local link on a local predicate must hydrate normally"
+    );
+}
+
 #[tokio::test]
 async fn test_full_model_query_with_where_filter() {
     // Create an in-memory store
@@ -670,6 +793,7 @@ fn make_shape_with_relation(class: &str, rel_name: &str, predicate: &str) -> Mod
             transform: None,
             interpretation_hint: None,
             identity: false,
+            local: false,
             ordering: None,
         }],
         include_relations: vec![],
@@ -1249,6 +1373,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            local: false,
             ordering: None,
         }],
         include_relations: vec![],
@@ -1295,7 +1420,7 @@ async fn test_strip_trailing_limit() {
 async fn test_convert_ask_to_batched_select() {
     let result = convert_ask_to_batched_select(
         r#"ASK WHERE { ?source <test://active> "true" . }"#,
-        "<test://a> <test://b>",
+        "VALUES ?source { <test://a> <test://b> }",
     );
     assert!(
         result.contains("SELECT ?source"),
@@ -1313,8 +1438,10 @@ async fn test_convert_ask_to_batched_select() {
 
 #[tokio::test]
 async fn test_convert_ask_with_base_to_batched_select() {
-    let result =
-        convert_ask_to_batched_select("ASK WHERE { <Base> <test://active> ?x }", "<test://a>");
+    let result = convert_ask_to_batched_select(
+        "ASK WHERE { <Base> <test://active> ?x }",
+        "VALUES ?source { <test://a> }",
+    );
     assert!(
         result.contains("?source <test://active>"),
         "should replace <Base> with ?source: {result}"
@@ -1329,7 +1456,7 @@ async fn test_convert_ask_with_base_to_batched_select() {
 async fn test_inject_values_into_select() {
     let result = inject_values_into_select(
         "SELECT ?target WHERE { ?source <test://reply> ?target . } LIMIT 1",
-        "<test://a> <test://b>",
+        "VALUES ?source { <test://a> <test://b> }",
     );
     assert!(
         result.contains("?source"),
@@ -1349,7 +1476,7 @@ async fn test_inject_values_into_select() {
 async fn test_inject_values_adds_source_to_projection() {
     let result = inject_values_into_select(
         "SELECT ?target WHERE { ?source <test://p> ?target . }",
-        "<test://a>",
+        "VALUES ?source { <test://a> }",
     );
     // ?source should appear in the SELECT projection
     let upper = result.to_uppercase();
@@ -1817,6 +1944,7 @@ async fn test_where_filter_signed_expression_string() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            local: false,
             ordering: None,
         }],
         include_relations: vec![],
@@ -1895,6 +2023,7 @@ async fn test_where_filter_signed_expression_no_matches() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            local: false,
             ordering: None,
         }],
         include_relations: vec![],
@@ -2021,6 +2150,7 @@ async fn test_where_filter_multiple_conditions() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            local: false,
             ordering: None,
         }],
         include_relations: vec![],
@@ -2092,6 +2222,7 @@ async fn test_where_filter_missing_property_on_target() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            local: false,
             ordering: None,
         }],
         include_relations: vec![],
@@ -2161,6 +2292,7 @@ async fn test_where_filter_plain_literal_string() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            local: false,
             ordering: None,
         }],
         include_relations: vec![],
@@ -2253,6 +2385,7 @@ async fn test_where_filter_on_multiple_instances() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            local: false,
             ordering: None,
         }],
         include_relations: vec![],
@@ -2646,6 +2779,7 @@ fn scalar_prop(name: &str, predicate: &str, required: bool, flag: bool) -> Shape
         transform: None,
         interpretation_hint: None,
         identity: false,
+        local: false,
         ordering: None,
     }
 }
@@ -2669,6 +2803,7 @@ fn collection_prop(name: &str, predicate: &str, getter: Option<&str>) -> ShapePr
         transform: None,
         interpretation_hint: None,
         identity: false,
+        local: false,
         ordering: None,
     }
 }
@@ -4201,6 +4336,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
             transform: None,
             interpretation_hint: None,
             identity: false,
+            local: false,
             ordering: None,
         }],
         include_relations: vec![],
@@ -7382,6 +7518,84 @@ async fn test_untyped_reverse_include_without_polymorphic_explains_itself() {
     let msg = err.to_string();
     assert!(msg.contains("containers"), "names the relation: {msg}");
     assert!(msg.contains("polymorphic"), "names the fix: {msg}");
+}
+
+#[tokio::test]
+async fn legacy_non_iri_store_id_round_trips_through_add_link_and_model_query() {
+    // The store contract this PR bets on, pinned end-to-end rather than at the
+    // emitted-SPARQL level: the write path stores sources with
+    // NamedNode::new_unchecked, so a legacy Flux id like `literal://string:xyz`
+    // (non-numeric port ⇒ not a parseable RFC-3987 IRI) exists in the store as
+    // a NamedNode term. A class-wide query over a batch containing that id and
+    // a well-formed one must return BOTH, hydrated — via the FILTER(STR(…))
+    // fallback — not fail to parse and not silently drop the odd row.
+    let store = SparqlStore::new(None).unwrap();
+
+    let legacy = "literal://string:h4o520legacyid";
+    let modern = "ad4m://obj/abcdefghijklmnopqrstuvwx";
+
+    for (base, name, ts) in [
+        (legacy, "Legacy row", "1700000000000"),
+        (modern, "Modern row", "1700000000010"),
+    ] {
+        let flag = make_link(base, "ad4m://type", "ad4m://recipe", ts);
+        store.add_link(&flag).unwrap();
+        let name_target = format!("literal:string:{}", literal_percent_encode(name));
+        let name_link = make_link(base, "recipe://name", &name_target, ts);
+        store.add_link(&name_link).unwrap();
+    }
+
+    let shape_json = r#"{
+        "className": "Recipe",
+        "properties": {
+            "type": {
+                "predicate": "ad4m://type",
+                "required": true,
+                "flag": true,
+                "initial": "ad4m://recipe"
+            },
+            "name": {
+                "predicate": "recipe://name",
+                "required": false,
+                "resolveLanguage": "literal"
+            }
+        },
+        "relations": {}
+    }"#;
+
+    // Class-wide read: the batch mixes an unparseable id with a real IRI.
+    let result =
+        execute_model_query_from_json(&store, "Recipe", &ModelQueryInput::default(), shape_json)
+            .await
+            .expect("a non-IRI store id must not make the query fail to parse");
+    assert_eq!(
+        result.instances.len(),
+        2,
+        "both rows must come back: {:?}",
+        result.instances
+    );
+    let by_id: HashMap<&str, &Value> = result
+        .instances
+        .iter()
+        .map(|i| (i["id"].as_str().unwrap(), &i["name"]))
+        .collect();
+    assert_eq!(by_id[legacy], &json!("Legacy row"), "legacy row hydrated");
+    assert_eq!(by_id[modern], &json!("Modern row"), "modern row hydrated");
+
+    // Where-by-id on the legacy spelling: the id lands in the where-by-id
+    // emission site, which must take the STR() fallback for this value.
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert("id".to_string(), WhereCondition::String(legacy.to_string()));
+    let query = ModelQueryInput {
+        where_clause: Some(where_clause),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Recipe", &query, shape_json)
+        .await
+        .expect("where-by-id on a non-IRI id must not fail to parse");
+    assert_eq!(result.instances.len(), 1, "exactly the legacy row");
+    assert_eq!(result.instances[0]["id"], json!(legacy));
+    assert_eq!(result.instances[0]["name"], json!("Legacy row"));
 }
 
 /// An ordered collection comes back in CRDT order through the ORM read path.
