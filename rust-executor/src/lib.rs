@@ -538,8 +538,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     LanguageController::init_global_instance();
 
-    // NOTE: load_system_languages() is called directly from Rust in
-    // agent_generate/agent_unlock mutation resolvers.
+    // NOTE: system languages are loaded from the agent.generate/agent.unlock handlers:
+    // the core ones inline, the conductor-dependent ones in `agent::conductor_startup`.
 
     // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
