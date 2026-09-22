@@ -514,10 +514,40 @@ impl RequiresQueryable for PerspectiveInstance {
     }
 }
 
+/// Tri-state seal result for one target state's guard, used by the manual
+/// proposal path and by `accept.rs` when re-verifying a co-sign.
+///
+/// - `Sealed(hash)` — guard is present and currently satisfied; hash is
+///   the SHA256 over the evidence, exactly as [`evidence_hash`] produces.
+/// - `NoGuard` — the target state carries no `requires` guard; the seal is
+///   defined as `evidence_hash(&[], &[])` (the hash of an empty bag), so
+///   proposer and voter always agree on it by construction.
+/// - `Unmet` — the guard exists but is not currently satisfied, or the flow
+///   / state definition changed since the proposal was minted.  The caller
+///   must refuse its own action and write nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EvidenceSeal {
+    Sealed(String),
+    NoGuard,
+    Unmet,
+}
+
+impl EvidenceSeal {
+    /// Canonical hash string: `Sealed(h) → h`, `NoGuard → hash of empty bag`.
+    /// Returns `None` for `Unmet` so callers can treat it as "unverifiable".
+    pub(crate) fn hash(&self) -> Option<String> {
+        match self {
+            EvidenceSeal::Sealed(h) => Some(h.clone()),
+            EvidenceSeal::NoGuard => Some(evidence_hash(&[], &[])),
+            EvidenceSeal::Unmet => None,
+        }
+    }
+}
+
 /// Outcome of AND-ing a state's `requires`. Translation failures are
 /// split from query failures so the composer can `warn!` the former
 /// (persistent misconfig) and `debug!` the latter (transient).
-enum RequiresResult {
+pub(crate) enum RequiresResult {
     Satisfied(Vec<String>, Vec<EvidenceItem>),
     Unmet,
     Untranslatable(anyhow::Error),
@@ -556,7 +586,7 @@ pub(crate) async fn run_query<Q: RequiresQueryable + ?Sized>(
 /// AND across a state's `requires`. Unmet as soon as one guard misses;
 /// `Satisfied` (class names and hydrated evidence, both deduplicated in
 /// first-seen order, evidence by instance ID) when every guard holds.
-async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
+pub(crate) async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     requires: &[ModelQuery],
     record: &FlowInstanceRecord,
@@ -641,16 +671,26 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     out
 }
 
-/// Re-run one target state's `requires` against the CURRENT graph and return
-/// the freshly-computed evidence hash. Used at **vote time**: a replica
-/// re-checks a proposal's seal on its own graph before co-signing it
-/// (`flow_instance::accept`).
+/// A recomputed [`EvidenceSeal`] together with the evidence it was computed
+/// over, for the one caller that has to *write* that evidence (the mint).
 ///
-/// - `Ok(Some(hash))` — guard still satisfied; the caller compares it with
-///   the proposal's sealed hash.
-/// - `Ok(None)` — nothing verifiable remains: the guard no longer holds, or
-///   the flow/state/guard definition changed out from under the proposal.
-/// - `Err` — transient query/store failure.
+/// `evidence` is empty for `NoGuard` (the canonical seal is over an empty
+/// bag, by definition) and for `Unmet` (there is nothing to cite).
+pub(crate) struct SealedEvidence {
+    pub seal: EvidenceSeal,
+    pub evidence: Vec<EvidenceItem>,
+}
+
+/// Re-run one target state's `requires` against the CURRENT graph and return
+/// an [`EvidenceSeal`] that a voter can compare with the proposal's stored
+/// hash before co-signing.
+///
+/// - `Ok(Sealed(hash))` — guard satisfied; compare with `atom.evidence_hash`.
+/// - `Ok(NoGuard)` — the target state carries no guard; the canonical seal
+///   is `evidence_hash(&[], &[])` (see [`EvidenceSeal::hash`]).
+/// - `Ok(Unmet)` — guard exists but is not currently satisfied, or the
+///   flow / state definition changed.  The caller must refuse its own action.
+/// - `Err` — transient query / store failure.
 ///
 /// A caller may only ever refuse its own action on any of these; none of
 /// them is grounds for touching somebody else's proposal.
@@ -658,42 +698,64 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 /// `acting_did` must be the PROPOSER's DID: `$did`-substituted guards
 /// resolved against the proposer at mint time, so re-verification must
 /// substitute the same identity or the hash could never match.
+///
+/// **This is the one definition of "the seal for state S".** Both places a
+/// vote comes into existence go through it — the co-sign in
+/// `flow_instance::accept` via [`recompute_evidence_hash`], and the mint in
+/// `flow_instance::propose` via this function — so the proposer's own vote is
+/// sealed by exactly the code every other replica re-runs against it.
+pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    flow: &SHACLFlow,
+    record: &FlowInstanceRecord,
+    to_state: &str,
+    acting_did: &str,
+) -> Result<SealedEvidence> {
+    let unmet = |seal| SealedEvidence {
+        seal,
+        evidence: Vec::new(),
+    };
+    let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
+        log::warn!(
+            "recompute_evidence_hash: state `{to_state}` no longer exists on flow `{}`",
+            flow.name
+        );
+        return Ok(unmet(EvidenceSeal::Unmet));
+    };
+    let requires = state.requires.as_deref().unwrap_or_default();
+    if requires.is_empty() {
+        return Ok(unmet(EvidenceSeal::NoGuard));
+    }
+    match evaluate_requires(perspective, requires, record, acting_did).await {
+        RequiresResult::Satisfied(class_names, evidence) => Ok(SealedEvidence {
+            seal: EvidenceSeal::Sealed(evidence_hash(&class_names, &evidence)),
+            evidence,
+        }),
+        RequiresResult::Unmet => Ok(unmet(EvidenceSeal::Unmet)),
+        RequiresResult::Untranslatable(e) => {
+            log::warn!(
+                "recompute_evidence_hash: `{}.{to_state}` became untranslatable: {e:#}",
+                flow.name
+            );
+            Ok(unmet(EvidenceSeal::Unmet))
+        }
+        RequiresResult::QueryFailed(e) => Err(e),
+    }
+}
+
+/// [`recompute_evidence_seal`] without the evidence — what a voter needs.
 pub(crate) async fn recompute_evidence_hash<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     flow: &SHACLFlow,
     record: &FlowInstanceRecord,
     to_state: &str,
     acting_did: &str,
-) -> Result<Option<String>> {
-    let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
-        log::warn!(
-            "recompute_evidence_hash: state `{to_state}` no longer exists on flow `{}`",
-            flow.name
-        );
-        return Ok(None);
-    };
-    let requires = state.requires.as_deref().unwrap_or_default();
-    if requires.is_empty() {
-        log::warn!(
-            "recompute_evidence_hash: `{}.{to_state}` no longer carries a `requires` guard",
-            flow.name
-        );
-        return Ok(None);
-    }
-    match evaluate_requires(perspective, requires, record, acting_did).await {
-        RequiresResult::Satisfied(class_names, evidence) => {
-            Ok(Some(evidence_hash(&class_names, &evidence)))
-        }
-        RequiresResult::Unmet => Ok(None),
-        RequiresResult::Untranslatable(e) => {
-            log::warn!(
-                "recompute_evidence_hash: `{}.{to_state}` became untranslatable: {e:#}",
-                flow.name
-            );
-            Ok(None)
-        }
-        RequiresResult::QueryFailed(e) => Err(e),
-    }
+) -> Result<EvidenceSeal> {
+    Ok(
+        recompute_evidence_seal(perspective, flow, record, to_state, acting_did)
+            .await?
+            .seal,
+    )
 }
 
 /// Load → evaluate → (confirm) → write, called by the extraction pass once
@@ -833,41 +895,61 @@ pub async fn run_engine_proposal_pass(
     minted
 }
 
-/// Check whether a proposal with the same evidence hash already exists for
-/// the same flow instance AND target state. Keeps the pass idempotent:
-/// minting does not advance `currentState`, so without this check every
-/// later pass re-proposes each satisfied-unconsumed transition — and a
-/// consensus rule counting proposals rather than distinct DIDs could then
-/// be gamed by one agent re-running its own pass. The `to_state` check
-/// matters because two distinct transitions can share identical `requires`
+/// **Every** live proposal carrying this transition's dedup key —
+/// `(evidence_hash, instance_uri, to_state)` — sorted by URI; empty when
+/// there is none.
+///
+/// *Live* excludes any proposal carrying `resolved_as`: that is the recorded
+/// history of a consensus event, not an open proposal, and it must not
+/// suppress a re-mint. Without the exclusion a cyclic flow wedges — same
+/// graph → same seal → the already-settled proposal matches the whole key,
+/// so the mint is skipped and the edge can never fire on the next visit.
+///
+/// The key deliberately carries **no proposer**. That is what lets a second
+/// agent find the one open proposal for an edge and co-sign it instead of
+/// minting an unreachable twin (`flow_instance::propose`). `to_state` is in
+/// the key because two distinct transitions can share identical `requires`
 /// guards and therefore identical evidence hashes.
-async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
+///
+/// **All matches, not the first.** The key carries no `from_state` either, so
+/// in a flow with two transitions into one state under identical guards a
+/// proposal on the *other* edge shares the key. Nothing orders these links,
+/// so a first-match lookup is a coin flip: the manual path would classify a
+/// foreign candidate, miss the joinable one sitting behind it, and mint — and
+/// mint *again* on the next press, splitting the vote it exists to gather and
+/// breaking invariant 4 (`flow_instance::propose`). Returning the whole set
+/// lets that caller prefer its own edge. The engine pass only asks whether the
+/// set is non-empty, which is what it asked before.
+///
+/// **Sorted by URI**, because the store's own iteration order is arbitrary —
+/// `query_links` walks matched quads and never orders them, so the same graph
+/// can hand back the same two candidates in either order on two runs. Two
+/// things need that not to be true. The manual path picks the first
+/// `Joinable` among twins, and unordered input makes that pick vary run to
+/// run and replica to replica for no reason (harmless to quorum, since
+/// `fold::settle_edge` pools across twins, but it scatters co-signs). And the
+/// ordering-dependent bug above cannot be tested through the store at all
+/// unless the order is fixed. A total order over URIs is enough for both.
+///
+/// Every store failure is an `Err`, with no disposition chosen here: the two
+/// callers need opposite ones. The engine pass fails closed
+/// ([`proposal_already_exists`]) because it retries on the next pass; the
+/// manual path surfaces the error, because a user's click has no next pass.
+pub(crate) async fn find_live_proposals<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
-) -> bool {
+) -> Result<Vec<String>> {
     use crate::types::LinkQuery;
+    let mut found = Vec::new();
     let literal = |s: &str| format!("literal:string:{}", urlencoding::encode(s));
-    // Every lookup below fails CLOSED (treat as already-proposed): a missed
-    // mint on a transient store error is recovered on the next pass, while a
-    // duplicate mint is exactly what this function exists to prevent — see
-    // the invariant above.
-    let hash_links = match store
+    let hash_links = store
         .get_proposal_links(&LinkQuery {
             predicate: Some("ad4m://flow/evidence_hashes".into()),
             target: Some(literal(&transition.evidence_hash)),
             ..Default::default()
         })
         .await
-    {
-        Ok(links) => links,
-        Err(e) => {
-            log::warn!(
-                "proposal_already_exists: evidence-hash lookup failed ({e:#}); \
-                 treating as already-proposed (fail-closed, skipping mint)"
-            );
-            return true;
-        }
-    };
+        .map_err(|e| anyhow!("evidence-hash lookup failed ({e:#})"))?;
     for link in &hash_links {
         let proposal_uri = &link.data.source;
         let links_to = |predicate: &'static str, want: String| async move {
@@ -879,19 +961,9 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                 })
                 .await
                 .map(|links| links.iter().any(|l| l.data.target == want))
+                .map_err(|e| anyhow!("candidate lookup on {proposal_uri} failed ({e:#})"))
         };
-        let fail_closed = |e: anyhow::Error| {
-            log::warn!(
-                "proposal_already_exists: candidate lookup on {proposal_uri} failed \
-                 ({e:#}); treating as already-proposed (fail-closed, skipping mint)"
-            );
-        };
-        // A proposal carrying `resolved_as` is the recorded history of a
-        // consensus event, not a live proposal, and must not suppress a re-mint.
-        // Without this a cyclic flow wedges: same graph → same seal → the
-        // already-settled proposal matches the whole dedup key, so the mint
-        // is skipped and the edge can never fire on the next visit.
-        match store
+        let resolved = store
             .get_proposal_links(&LinkQuery {
                 source: Some(proposal_uri.clone()),
                 predicate: Some(
@@ -900,32 +972,61 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                 ..Default::default()
             })
             .await
-        {
-            Ok(links) if !links.is_empty() => continue,
-            Ok(_) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
+            .map_err(|e| anyhow!("candidate lookup on {proposal_uri} failed ({e:#})"))?;
+        if !resolved.is_empty() {
+            continue;
         }
-        match links_to("ad4m://flow/instance", transition.instance_uri.clone()).await {
-            Ok(false) => continue,
-            Ok(true) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
+        if !links_to("ad4m://flow/instance", transition.instance_uri.clone()).await? {
+            continue;
         }
-        match links_to("ad4m://flow/to_state", literal(&transition.to_state)).await {
-            Ok(true) => return true,
-            Ok(false) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
+        if links_to("ad4m://flow/to_state", literal(&transition.to_state)).await? {
+            found.push(proposal_uri.clone());
         }
     }
-    false
+    found.sort();
+    Ok(found)
+}
+
+/// Idempotency for the **engine pass**: has a proposal with this transition's
+/// evidence hash already been minted for the same instance AND target state?
+///
+/// Minting does not advance `currentState`, so without this check every later
+/// pass re-proposes each satisfied-unconsumed transition — and a consensus
+/// rule counting proposals rather than distinct DIDs could then be gamed by
+/// one agent re-running its own pass.
+///
+/// **Both guarantees are about the engine pass**, and the fail-closed
+/// disposition below is too: it assumes a caller that runs again shortly and
+/// whose acting DID is this replica's. A caller that runs once, on a human's
+/// click, satisfies neither — it must call [`find_live_proposals`] and choose
+/// its own disposition. `flow_instance::propose` does exactly that; this
+/// wrapper exists so the engine's behaviour is unchanged by that split.
+///
+/// **The `from_state`-free key bites here, and only here.** Asking whether the
+/// set is non-empty cannot tell an `A→C` proposal from a `B→C` one, so a
+/// stranded proposal on one edge suppresses the engine ever proposing the
+/// other, silently, for as long as it stays open. The manual path discriminates
+/// and recovers; this one has nowhere to put the distinction — skipping is its
+/// whole contract — so it does not. Narrow (it needs two guard-identical edges
+/// into one state) and pre-existing, but real: prefer widening the key here
+/// over re-flattening the manual path onto it.
+pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
+    store: &S,
+    transition: &SatisfiedTransition,
+) -> bool {
+    match find_live_proposals(store, transition).await {
+        Ok(found) => !found.is_empty(),
+        // Fail CLOSED: a missed mint on a transient store error is recovered
+        // on the next pass, while a duplicate mint is exactly what this
+        // function exists to prevent — see the invariant above.
+        Err(e) => {
+            log::warn!(
+                "proposal_already_exists: {e:#}; treating as already-proposed \
+                 (fail-closed, skipping mint)"
+            );
+            true
+        }
+    }
 }
 
 /// The one perspective call the idempotency check needs, behind a trait so
@@ -950,7 +1051,7 @@ impl ProposalLookup for PerspectiveInstance {
 
 /// Write one proposal inside its own batch, so readers never see a
 /// half-written proposal and one failed write does not roll back the rest.
-async fn write_proposal(
+pub(crate) async fn write_proposal(
     perspective: &mut PerspectiveInstance,
     transition: &SatisfiedTransition,
     proposer_did: &str,
@@ -1427,7 +1528,7 @@ mod tests {
     }
 
     impl StubPerspective {
-        fn with_instances(mut self, class: &str, ids: &[&str]) -> Self {
+        fn with_instances(self, class: &str, ids: &[&str]) -> Self {
             self.with_instance_objects(class, ids.iter().map(|id| json!({ "id": id })).collect())
         }
         fn with_instance_objects(mut self, class: &str, objects: Vec<Value>) -> Self {
@@ -1547,22 +1648,28 @@ mod tests {
         let same = recompute_evidence_hash(&stub, f, &inst(), "scoped", "did:key:me")
             .await
             .unwrap();
-        assert_eq!(same.as_deref(), Some(minted[0].evidence_hash.as_str()));
+        assert_eq!(
+            same.hash().as_deref(),
+            Some(minted[0].evidence_hash.as_str()),
+            "unchanged graph reproduces the minted hash"
+        );
 
         let edited = StubPerspective::default()
             .with_instance_objects("ns://Vote", vec![json!({"id": "v1", "value": "no"})]);
         let changed = recompute_evidence_hash(&edited, f, &inst(), "scoped", "did:key:me")
             .await
             .unwrap()
-            .expect("guard still satisfied");
+            .hash()
+            .expect("guard still satisfied even after edit — different hash, not Unmet");
         assert_ne!(changed, minted[0].evidence_hash);
     }
 
-    /// The two dispositions a voter must tell apart: "nothing verifiable
-    /// remains" (refuse to co-sign) and "the store failed" (try again later).
-    /// Neither is ever grounds for touching the proposal.
+    /// `Unmet` for an unsatisfied/missing guard, `NoGuard` for a guard-less
+    /// target state, and `Err` for a transient store failure. The voter uses
+    /// `EvidenceSeal::hash()` which returns `None` for `Unmet` and `Some` for
+    /// both `Sealed` and `NoGuard`, so the accept check catches only `Unmet`.
     #[tokio::test]
-    async fn recompute_is_none_when_unverifiable_and_err_on_store_failure() {
+    async fn recompute_returns_unmet_or_noguard_and_err_on_store_failure() {
         let f = flow(
             "Delivery",
             "identified",
@@ -1571,21 +1678,34 @@ mod tests {
         );
         let empty = StubPerspective::default().with_instances("ns://Vote", &[]);
         let unguarded = flow("Delivery", "identified", "scoped", None);
-        #[rustfmt::skip]
-        let unverifiable = [
+
+        // Unmet cases: guard exists but is not satisfied, or state is gone.
+        for (name, store, flow, to_state) in [
             ("guard no longer satisfied", &empty, &f, "scoped"),
-            ("target state vanished from the flow definition", &empty, &f, "shipped"),
-            ("guard-less state: nothing to verify", &empty, &unguarded, "scoped"),
-        ];
-        for (name, store, flow, to_state) in unverifiable {
+            (
+                "target state vanished from the flow definition",
+                &empty,
+                &f,
+                "shipped",
+            ),
+        ] {
             assert_eq!(
                 recompute_evidence_hash(store, flow, &inst(), to_state, "did:key:me")
                     .await
                     .unwrap(),
-                None,
+                EvidenceSeal::Unmet,
                 "{name}"
             );
         }
+
+        // Guard-less state: commit A's fix — returns NoGuard, not Unmet.
+        assert_eq!(
+            recompute_evidence_hash(&empty, &unguarded, &inst(), "scoped", "did:key:me")
+                .await
+                .unwrap(),
+            EvidenceSeal::NoGuard,
+            "guard-less state must return NoGuard so co-signing can succeed"
+        );
 
         let broken = StubPerspective::default().with_error("ns://Vote", "store down");
         assert!(
@@ -1884,6 +2004,182 @@ mod tests {
                 by_predicate: HashMap::new(),
             };
             assert!(!proposal_already_exists(&store, &transition()).await);
+        }
+
+        /// The split the manual path needed. Both callers run the same lookup
+        /// over the same failing store and must reach OPPOSITE dispositions:
+        /// the engine pass fails closed because it retries on the next pass,
+        /// and the manual path surfaces the error because a user's click has
+        /// no next pass — silence there reports a lost vote as success.
+        #[tokio::test]
+        async fn a_store_failure_is_an_error_for_the_manual_path_and_fail_closed_for_the_pass() {
+            let hash_lookup_fails = ScriptedStore {
+                by_predicate: HashMap::from([("ad4m://flow/evidence_hashes".to_string(), None)]),
+            };
+            let err = find_live_proposals(&hash_lookup_fails, &transition())
+                .await
+                .expect_err("a failed evidence-hash lookup must be an Err, not Ok(None)");
+            assert!(
+                format!("{err:#}").contains("evidence-hash lookup failed"),
+                "the error must name what failed: {err:#}"
+            );
+            assert!(
+                proposal_already_exists(&hash_lookup_fails, &transition()).await,
+                "the engine pass still fails closed on the very same store"
+            );
+
+            let candidate_lookup_fails = ScriptedStore {
+                by_predicate: HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/evidence_hashes",
+                            "literal:string:hash",
+                        )]),
+                    ),
+                    ("ad4m://flow/instance".to_string(), None),
+                ]),
+            };
+            let err = find_live_proposals(&candidate_lookup_fails, &transition())
+                .await
+                .expect_err("a failed candidate lookup must be an Err too");
+            assert!(
+                format!("{err:#}").contains("candidate lookup on proposal://1 failed"),
+                "the error must name the candidate: {err:#}"
+            );
+            assert!(
+                proposal_already_exists(&candidate_lookup_fails, &transition()).await,
+                "the engine pass still fails closed here as well"
+            );
+        }
+
+        /// The other half of the same split: on a clean store the two agree,
+        /// and `find_live_proposals` hands back the URIs rather than a bool —
+        /// which is what lets the manual path co-sign what it found.
+        #[tokio::test]
+        async fn a_live_match_yields_the_proposal_uri_and_a_settled_one_yields_none() {
+            let matching = |extra: Vec<(String, Option<Vec<DecoratedLinkExpression>>)>| {
+                let mut by_predicate = HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/evidence_hashes",
+                            "literal:string:hash",
+                        )]),
+                    ),
+                    (
+                        "ad4m://flow/instance".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/instance",
+                            "ad4m://flow/instance/1",
+                        )]),
+                    ),
+                    (
+                        "ad4m://flow/to_state".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/to_state",
+                            "literal:string:scoped",
+                        )]),
+                    ),
+                ]);
+                by_predicate.extend(extra);
+                ScriptedStore { by_predicate }
+            };
+
+            let live = matching(vec![]);
+            assert_eq!(
+                find_live_proposals(&live, &transition())
+                    .await
+                    .expect("a clean store must not error"),
+                vec!["proposal://1".to_string()],
+                "the URI, not a bool — the manual path co-signs what it finds"
+            );
+            assert!(proposal_already_exists(&live, &transition()).await);
+
+            // A `resolved_as` mark makes it history, not a live proposal: it
+            // must not suppress a re-mint, or a cyclic flow wedges.
+            let settled = matching(vec![(
+                crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE.to_string(),
+                Some(vec![link(
+                    "proposal://1",
+                    crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE,
+                    "literal:string:fired",
+                )]),
+            )]);
+            assert_eq!(
+                find_live_proposals(&settled, &transition())
+                    .await
+                    .expect("no error"),
+                Vec::<String>::new(),
+                "a settled proposal is history and must not be found as live"
+            );
+            assert!(!proposal_already_exists(&settled, &transition()).await);
+        }
+
+        /// Two live proposals share the dedup key, because it carries no
+        /// `from_state` and the flow has two guard-identical edges into one
+        /// state. The lookup must hand back BOTH.
+        ///
+        /// Returning only the first is a coin flip on link order, and losing
+        /// that flip is not cosmetic: `flow_instance::propose` would classify
+        /// the foreign proposal, never see the joinable one behind it, and
+        /// mint — then mint again on the next press, splitting the very vote
+        /// the dedup key exists to gather. Only this caller can tell the two
+        /// apart (it knows the acting DID and the derived `from_state`), so
+        /// the lookup's whole job is to not decide for it.
+        ///
+        /// It does decide the ORDER, though: sorted by URI, not however the
+        /// store happened to iterate. Two runs over one graph must classify
+        /// the same candidate first.
+        #[tokio::test]
+        async fn every_proposal_sharing_the_dedup_key_is_returned_not_just_the_first() {
+            let both = |uri: &str| {
+                (
+                    uri.to_string(),
+                    link(uri, "ad4m://flow/instance", "ad4m://flow/instance/1"),
+                )
+            };
+            let (a, link_a) = both("proposal://aaa");
+            let (b, link_b) = both("proposal://bbb");
+            // Fed to the store in DESCENDING order, which the real store is
+            // free to do: `query_links` never orders its matches.
+            let store = ScriptedStore {
+                by_predicate: HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![
+                            link(&b, "ad4m://flow/evidence_hashes", "literal:string:hash"),
+                            link(&a, "ad4m://flow/evidence_hashes", "literal:string:hash"),
+                        ]),
+                    ),
+                    (
+                        "ad4m://flow/instance".to_string(),
+                        Some(vec![link_b, link_a]),
+                    ),
+                    (
+                        "ad4m://flow/to_state".to_string(),
+                        Some(vec![
+                            link(&b, "ad4m://flow/to_state", "literal:string:scoped"),
+                            link(&a, "ad4m://flow/to_state", "literal:string:scoped"),
+                        ]),
+                    ),
+                ]),
+            };
+
+            assert_eq!(
+                find_live_proposals(&store, &transition())
+                    .await
+                    .expect("a clean store must not error"),
+                vec![a, b],
+                "both matches, sorted by URI rather than left in the store's arbitrary \
+                 order — the caller picks its own edge, and it must pick the same one twice"
+            );
+            // The engine pass asked "is there one?" before and still does.
+            assert!(proposal_already_exists(&store, &transition()).await);
         }
     }
 }

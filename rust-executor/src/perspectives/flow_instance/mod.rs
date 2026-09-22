@@ -86,6 +86,7 @@ pub mod fold;
 #[cfg(test)]
 mod ordering_tests;
 pub mod pass;
+pub mod propose;
 pub mod roles;
 pub mod time;
 pub mod trigger;
