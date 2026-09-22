@@ -40,6 +40,15 @@ pub(super) fn literal(s: &str) -> String {
     format!("literal:string:{}", urlencoding::encode(s))
 }
 
+/// A second acting identity backed by a real wallet key, so links written
+/// with the returned context carry a DID that verifies — a stub DID string
+/// would be dropped by every authorship check the fold makes.
+pub(super) fn second_agent(user_email: &str) -> AgentContext {
+    crate::agent::AgentService::ensure_user_key_exists(user_email)
+        .unwrap_or_else(|e| panic!("ensure_user_key_exists({user_email}): {e:#}"));
+    AgentContext::for_user_email(user_email.to_string())
+}
+
 /// Two-state Delivery flow (`identified → scoped`) whose `scoped` state
 /// requires at least one `ns://Task` and optionally carries a
 /// `semanticCheck` hint, plus one FlowInstance sitting in `identified`.
@@ -261,6 +270,21 @@ impl Fixture {
             &self.ctx,
             llm_proposals,
             semantic_check,
+            None,
+        )
+        .await
+    }
+
+    /// The same pass, acting as somebody else. The engine runs on *every*
+    /// replica and each one runs it as its own DID, so this is how a test
+    /// stands in for a second replica's evaluator over one shared graph.
+    pub(super) async fn run_pass_as(&mut self, context: &AgentContext) -> Vec<String> {
+        run_engine_proposal_pass(
+            &mut self.perspective,
+            &[BASE_URI.to_string()],
+            context,
+            &[],
+            None,
             None,
         )
         .await

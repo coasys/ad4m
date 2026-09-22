@@ -573,8 +573,8 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     LanguageController::init_global_instance();
 
-    // NOTE: load_system_languages() is called directly from Rust in
-    // agent_generate/agent_unlock mutation resolvers.
+    // NOTE: system languages are loaded from the agent.generate/agent.unlock handlers:
+    // the core ones inline, the conductor-dependent ones in `agent::conductor_startup`.
 
     // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
@@ -750,6 +750,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     if config.enable_mcp == Some(true) {
         info!("Starting MCP server alongside REST API...");
         let admin_credential = config.admin_credential.clone();
+        // Cloned out here, not read inside the closure: a non-Copy field read
+        // in there would move `config`, which the API server thread below
+        // still needs.
+        let mcp_tls = config.tls.clone();
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -760,6 +764,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             let mcp_config = mcp::server::McpServerConfig {
                 port: config.mcp_port.unwrap_or(3001),
                 dynamic_class_tools: config.dynamic_class_tools.unwrap_or(false),
+                // The same certificate the RPC port terminates with. MCP has
+                // none of its own to issue or renew.
+                tls: mcp_tls,
                 ..Default::default()
             };
             if let Err(e) = runtime.block_on(mcp::start_mcp_server(

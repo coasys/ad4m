@@ -229,6 +229,9 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Already in the lockfile as a transitive dependency; test-only certificate
+# fixtures for the MCP TLS end-to-end test.
+rcgen = "0.14"
 maplit = "1.0.2"
 lazy_static = "1.4.0"
 itertools = "0.10.1"

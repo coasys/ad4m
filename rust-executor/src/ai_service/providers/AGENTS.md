@@ -11,12 +11,13 @@ through here — `LlmModel::Local` is a different thing entirely.
 | `http.rs` | Sending a credential over HTTP: `credentialed_http` (no redirects), `is_transport_safe`, and the endpoint helpers both providers share. |
 | `openai.rs` | OpenAI-shaped HTTP (`chat_gpt_lib_rs`): OpenAI, Groq, OpenRouter, Google compat, Ollama `/v1`, vLLM. Tools are not passed natively. |
 | `anthropic.rs` | Messages API on `reqwest`: prompt caching, SSE streaming, native `tool_use`/`tool_result`. |
+| `ollama.rs` | Ollama native `/api/chat`. Native tool calling, `num_ctx`, ndjson streaming. |
 | `anthropic_e2e.rs` | `#[ignore]`d tests against the real API; need `ANTHROPIC_API_KEY` and cost money. |
 
 ## Entry points
 
-- `OpenAiChat::new` / `AnthropicChat::new`: built once per model by
-  `AIService::build_remote_client`, owned by that model's worker thread.
+- `OpenAiChat::new` / `AnthropicChat::new` / `OllamaChat::new`: built once per
+  model by `AIService::build_remote_client`, owned by that model's worker thread.
 - `RemoteChat::chat` / `chat_stream`: called from that thread's loop.
   `chat_stream` defaults to one chunk; tools are not promised on it.
 - `list_models(api_type, api_key, base_url)`: a free function, because
