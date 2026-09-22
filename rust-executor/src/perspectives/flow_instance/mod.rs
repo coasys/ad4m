@@ -94,6 +94,7 @@ pub mod fold;
 mod ordering_tests;
 pub mod pass;
 pub mod propose;
+pub mod receipt;
 pub mod roles;
 pub mod time;
 pub mod trigger;
