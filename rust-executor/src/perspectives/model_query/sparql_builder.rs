@@ -393,6 +393,21 @@ pub(super) fn build_query_patterns(
 ) -> (String, String) {
     let mut conformance_patterns = Vec::new();
 
+    /// A scope the builder cannot express, as patterns that match nothing.
+    ///
+    /// Returning empty strings here instead drops the scope *and* the class
+    /// conformance appended below it, leaving a query bounded by nothing at
+    /// all: every link in the store, of every class. A caller who scoped to a
+    /// parent and mistyped its predicate got the whole perspective back.
+    ///
+    /// Nothing is the honest answer. An id or predicate that cannot be written
+    /// as a term cannot match a term, so a scope built on one selects no rows —
+    /// the same reading the empty anchor list already has, and the opposite of
+    /// the unbounded read this guards against.
+    fn matches_nothing() -> (String, String) {
+        ("    FILTER(false)".to_string(), String::new())
+    }
+
     // Subject position for a parent id: inline `<id>` when it is a parseable
     // IRI, else a variable bound by the pattern plus a STR() filter — Flux ids
     // like `literal://string:x` exist as NamedNode subjects (never as XSD
@@ -423,18 +438,19 @@ pub(super) fn build_query_patterns(
                     conformance_patterns.extend(filter);
                 } else {
                     log::warn!(
-                        "Skipping parent scope: invalid IRI in id='{}' or predicate='{}'",
+                        "Parent scope matches nothing: invalid IRI in id='{}' or predicate='{}'",
                         id,
                         predicate
                     );
+                    return matches_nothing();
                 }
             }
             Scope::Model { id, field, model } => {
                 let safe_id = match validate_iri(id) {
                     Ok(s) => s,
                     Err(_) => {
-                        log::warn!("Skipping parent scope: invalid IRI in id='{}'", id);
-                        return (String::new(), String::new());
+                        log::warn!("Parent scope matches nothing: invalid IRI in id='{}'", id);
+                        return matches_nothing();
                     }
                 };
                 if let Some(ref f) = field {
@@ -443,7 +459,8 @@ pub(super) fn build_query_patterns(
                         conformance_patterns.push(format!("    {subj} <{safe_f}> ?source ."));
                         conformance_patterns.extend(filter);
                     } else {
-                        log::warn!("Skipping parent scope: invalid IRI in field='{}'", f);
+                        log::warn!("Parent scope matches nothing: invalid IRI in field='{}'", f);
+                        return matches_nothing();
                     }
                 } else {
                     let safe_model = escape_sparql_string(model);
@@ -468,10 +485,10 @@ pub(super) fn build_query_patterns(
                     Ok(p) => p,
                     Err(_) => {
                         log::warn!(
-                            "Skipping traverse scope: invalid IRI in predicate='{}'",
+                            "Traverse scope matches nothing: invalid IRI in predicate='{}'",
                             predicate
                         );
-                        return (String::new(), String::new());
+                        return matches_nothing();
                     }
                 };
 
