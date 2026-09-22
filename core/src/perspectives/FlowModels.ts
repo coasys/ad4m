@@ -147,8 +147,14 @@ export class FlowInstanceRecord extends Ad4mModel {
   @Property({ through: "ad4m://flow/base", required: true })
   subject: string = "";
 
-  /** Name of the state the flow is currently in. */
-  @Property({ through: "ad4m://flow/current_state", required: true })
+  /**
+   * The state name this replica's executor last derived for the flow — a
+   * per-replica cache written as a `local` link, never the authority (the
+   * fold over the signed proposals is). Optional on the shape: a row that
+   * synced in from a peer carries no value until the local consensus pass
+   * has run, so an empty string means "not yet derived here".
+   */
+  @Property({ through: "ad4m://flow/current_state", local: true })
   currentState: string = "";
 
   // "When was this flow started?" is answered by `Ad4mModel`'s built-in
