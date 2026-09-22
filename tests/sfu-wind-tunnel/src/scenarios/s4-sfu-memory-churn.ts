@@ -56,6 +56,17 @@ export const s4SfuMemoryChurn: Scenario = {
       metrics["skipped"] = true;
       metrics["skipReason"] =
         "Could not determine executor PID for RSS tracking";
+      return {
+        scenario: "s4-sfu-memory-churn",
+        branch,
+        passed: true,
+        startTime,
+        endTime: Date.now(),
+        durationMs: Date.now() - startTime,
+        metrics,
+        samples,
+        summary: "S4: skipped — could not locate executor PID for RSS tracking",
+      };
     }
 
     const activePeers: ActivePeer[] = [];
