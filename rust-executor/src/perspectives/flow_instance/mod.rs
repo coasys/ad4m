@@ -180,12 +180,13 @@ pub struct ProposalLinks {
 /// nothing a reader decides may rest on it unchecked. The two halves of the
 /// read-set are at different stages of honouring that:
 ///
-/// - **Role evidence re-verifies by construction.**
-///   [`roles::RoleGrantEvidence::resolve`] re-decorates every revocation link
-///   with
-///   [`DecoratedLinkExpression::verify_signature`](crate::types::DecoratedLinkExpression::verify_signature)
-///   before filtering, and it is the only path from carried evidence to a
-///   window — so there is no version of this call that skips the check.
+/// - **Role evidence cannot carry a verdict at all.** It holds plain
+///   [`LinkExpression`](crate::types::LinkExpression) — no `proof.valid`, no
+///   `status` — and `revocation_link_counts_for_did` computes the verdict
+///   from the signature on every call, inside
+///   [`roles::RoleGrantEvidence::resolve`], the only path from carried
+///   evidence to a window. There is no version of this call that skips the
+///   check, and no field a forger could set instead (r4076927995).
 /// - **Proposals and votes still read the carried verdict**, via
 ///   `atom::signed_by`. A reader folding a read-set that arrived from
 ///   elsewhere must therefore re-decorate those links itself before calling
