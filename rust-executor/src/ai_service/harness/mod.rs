@@ -856,23 +856,27 @@ mod tests {
         .await
         .unwrap();
 
-        let mut saw_tool_event = false;
+        let mut saw_own_tool_event = false;
         for _ in 0..4 {
             let evt = tokio::time::timeout(std::time::Duration::from_millis(150), rx.recv()).await;
             let Ok(Ok(raw)) = evt else { break };
             if let Ok(parsed) = serde_json::from_str::<AutoProcessorEvent>(&raw) {
+                // Filter by the tool name this test owns ("silent") so that
+                // parallel tests emitting ToolCall/ToolResult for their own
+                // tools (e.g. "query_links") do not cause a false failure.
                 if matches!(
                     parsed.step,
                     AutoProcessorStep::ToolCall | AutoProcessorStep::ToolResult
-                ) {
-                    saw_tool_event = true;
+                ) && parsed.tool_name.as_deref() == Some("silent")
+                {
+                    saw_own_tool_event = true;
                     break;
                 }
             }
         }
         assert!(
-            !saw_tool_event,
-            "no ToolCall/ToolResult must land when emit_ctx is None"
+            !saw_own_tool_event,
+            "no ToolCall/ToolResult for tool 'silent' must land when emit_ctx is None"
         );
     }
 

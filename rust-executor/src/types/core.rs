@@ -516,6 +516,7 @@ pub struct TriggeredNotification {
 pub enum ModelApiType {
     OpenAi,
     Anthropic,
+    Ollama,
 }
 
 impl FromStr for ModelApiType {
@@ -531,6 +532,9 @@ impl FromStr for ModelApiType {
             "anthropic" => Ok(ModelApiType::Anthropic),
             "Anthropic" => Ok(ModelApiType::Anthropic),
             "ANTHROPIC" => Ok(ModelApiType::Anthropic),
+            "ollama" => Ok(ModelApiType::Ollama),
+            "Ollama" => Ok(ModelApiType::Ollama),
+            "OLLAMA" => Ok(ModelApiType::Ollama),
             _ => Err(format!("Unknown ModelApiType: {}", s)),
         }
     }
@@ -542,6 +546,7 @@ impl ToString for ModelApiType {
         match self {
             ModelApiType::OpenAi => "OPEN_AI".to_string(),
             ModelApiType::Anthropic => "ANTHROPIC".to_string(),
+            ModelApiType::Ollama => "OLLAMA".to_string(),
         }
     }
 }
