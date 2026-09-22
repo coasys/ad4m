@@ -1246,3 +1246,319 @@ fn a_saved_model_is_held_to_the_same_exemptions_as_discovery() {
     // A local model has no endpoint at all.
     assert!(refuse(&crate::types::ModelInput::default()).is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// native_tools — /v1 chat for a provider that carries tools as data
+// ---------------------------------------------------------------------------
+
+use super::native_tools;
+use crate::ai_service::providers::{ChatReply, ChatRole, ChatUsage};
+
+fn messages(value: serde_json::Value) -> Vec<ChatMessage> {
+    serde_json::from_value(value).expect("valid OpenAI messages")
+}
+
+fn reply_calling(text: &str) -> ChatReply {
+    ChatReply {
+        text: text.to_string(),
+        tool_calls: vec![crate::ai_service::providers::ToolCall {
+            id: "toolu_1".to_string(),
+            name: "update_schema".to_string(),
+            arguments: serde_json::json!({ "patches": [] }),
+        }],
+        usage: ChatUsage::default(),
+    }
+}
+
+#[test]
+fn parallel_tool_results_each_answer_their_own_call() {
+    // A client that loads two things at once sends two `role:"tool"` messages
+    // after one assistant turn. Both have to arrive as results, each naming its
+    // call: a provider refuses the request if either call goes unanswered.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "system", "content": "be terse" },
+        { "role": "user", "content": "add a button" },
+        {
+            "role": "assistant", "content": null,
+            "tool_calls": [
+                { "id": "call_a", "type": "function", "function": { "name": "load_a", "arguments": "{}" } },
+                { "id": "call_b", "type": "function", "function": { "name": "load_b", "arguments": "{}" } },
+            ],
+        },
+        { "role": "tool", "tool_call_id": "call_a", "content": "section a" },
+        { "role": "tool", "tool_call_id": "call_b", "content": "section b" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns.len(), 5);
+    assert_eq!(turns[0].role, ChatRole::System);
+    assert_eq!(turns[2].tool_calls.len(), 2);
+    assert_eq!(turns[3].tool_result_for.as_deref(), Some("call_a"));
+    assert_eq!(turns[3].content, "section a");
+    assert_eq!(turns[4].tool_result_for.as_deref(), Some("call_b"));
+    assert_eq!(turns[4].content, "section b");
+}
+
+#[test]
+fn tool_call_arguments_reach_the_provider_as_an_object() {
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [
+                { "id": "call_a", "type": "function", "function": { "name": "update_schema", "arguments": "{\"patches\":[1]}" } },
+            ],
+        },
+        { "role": "tool", "tool_call_id": "call_a", "content": "Patches applied." },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns[0].tool_calls[0].arguments["patches"][0], 1);
+}
+
+#[test]
+fn an_empty_placeholder_message_does_not_reach_the_provider() {
+    // `content: null` with no tool_calls is legal on the OpenAI wire and
+    // clients send it as a placeholder. The injected path read it as empty
+    // prose; a provider refuses an empty message outright.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "user", "content": "add a button" },
+        { "role": "assistant", "content": null },
+        { "role": "user", "content": "   " },
+        { "role": "user", "content": "actually, two" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].content, "add a button");
+    assert_eq!(turns[1].content, "actually, two");
+}
+
+#[test]
+fn a_blank_turn_that_carries_a_call_or_answers_one_is_kept() {
+    // The drop is about turns with nothing on them. Removing one that holds a
+    // `tool_use` — or the `tool_result` naming it — is the unbalanced
+    // conversation the fold exists to prevent.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "user", "content": "add a button" },
+        {
+            "role": "assistant", "content": null,
+            "tool_calls": [
+                { "id": "call_a", "type": "function", "function": { "name": "load_a", "arguments": "{}" } },
+            ],
+        },
+        { "role": "tool", "tool_call_id": "call_a", "content": "" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns.len(), 3);
+    assert_eq!(turns[1].tool_calls.len(), 1);
+    assert_eq!(turns[2].tool_result_for.as_deref(), Some("call_a"));
+}
+
+#[test]
+fn a_request_whose_messages_all_come_out_blank_is_a_bad_request() {
+    // Sending nothing is refused by the provider, which would report as a 500
+    // on a request the caller can see is empty.
+    let err = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "assistant", "content": null },
+        { "role": "user", "content": "" },
+    ])))
+    .expect_err("refused");
+
+    assert!(err.to_string().contains("content"));
+}
+
+#[test]
+fn a_developer_message_is_a_system_turn() {
+    // OpenAI's newer name for the system role; read as the user speaking it
+    // would lose its authority.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "developer", "content": "be terse" },
+        { "role": "user", "content": "hi" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns[0].role, ChatRole::System);
+}
+
+#[test]
+fn a_function_without_parameters_still_sends_an_object_schema() {
+    let tools: Vec<ToolDef> = serde_json::from_value(serde_json::json!([
+        { "type": "function", "function": { "name": "load_stores" } },
+        { "type": "function", "function": {
+            "name": "update_schema", "description": "Apply patches",
+            "parameters": { "type": "object", "properties": { "patches": { "type": "array" } } },
+        } },
+    ]))
+    .unwrap();
+
+    let specs = native_tools::to_specs(&tools);
+
+    assert_eq!(specs[0].name, "load_stores");
+    assert_eq!(specs[0].description, "");
+    assert_eq!(specs[0].parameters["type"], "object");
+    assert_eq!(specs[1].description, "Apply patches");
+    assert_eq!(
+        specs[1].parameters["properties"]["patches"]["type"],
+        "array"
+    );
+}
+
+#[test]
+fn parameters_that_are_not_a_schema_object_are_replaced() {
+    // `"parameters": []` is the likeliest way a caller produces a request the
+    // provider refuses: an `input_schema` has to be an object.
+    let tools: Vec<ToolDef> = serde_json::from_value(serde_json::json!([
+        { "type": "function", "function": { "name": "a", "parameters": [] } },
+        { "type": "function", "function": { "name": "b", "parameters": "" } },
+        { "type": "function", "function": { "name": "c", "parameters": null } },
+    ]))
+    .unwrap();
+
+    for spec in native_tools::to_specs(&tools) {
+        assert_eq!(spec.parameters["type"], "object", "{}", spec.name);
+    }
+}
+
+#[test]
+fn two_tools_of_one_name_are_named_as_a_bad_request() {
+    // Anthropic refuses the pair, and choosing one of them for the caller is a
+    // guess about which the model should be able to call.
+    let tools: Vec<ToolDef> = serde_json::from_value(serde_json::json!([
+        { "type": "function", "function": { "name": "load" } },
+        { "type": "function", "function": { "name": "save" } },
+        { "type": "function", "function": { "name": "load" } },
+    ]))
+    .unwrap();
+
+    assert_eq!(native_tools::duplicate_tool_name(&tools), Some("load"));
+    assert_eq!(native_tools::duplicate_tool_name(&tools[..2]), None);
+}
+
+#[test]
+fn a_reply_with_calls_finishes_with_tool_calls_and_keeps_its_text() {
+    let (message, finish_reason) = native_tools::response_message(reply_calling("Adding it now."));
+    let body = serde_json::to_value(&message).unwrap();
+
+    assert_eq!(finish_reason, "tool_calls");
+    assert_eq!(body["content"], "Adding it now.");
+    assert_eq!(body["tool_calls"][0]["id"], "toolu_1");
+    assert_eq!(body["tool_calls"][0]["type"], "function");
+    assert_eq!(body["tool_calls"][0]["function"]["name"], "update_schema");
+    // A JSON string on the wire, as the OpenAI spec has it.
+    assert_eq!(
+        body["tool_calls"][0]["function"]["arguments"],
+        r#"{"patches":[]}"#
+    );
+}
+
+#[test]
+fn a_reply_that_only_calls_omits_content() {
+    let (message, _) = native_tools::response_message(reply_calling(""));
+    let body = serde_json::to_value(&message).unwrap();
+
+    assert!(body.get("content").is_none(), "{body}");
+}
+
+#[test]
+fn arguments_a_provider_did_not_send_as_an_object_go_out_under_raw() {
+    // `ContentBlock::input` is `#[serde(default)]`, so a `tool_use` block that
+    // arrives without one reads as null. Sent on as `"null"`, a client parses
+    // it and indexes the result — a failure in the caller, before the call can
+    // be answered. Under `_raw` the call is still a call, and still wrong in a
+    // way the model can see and correct.
+    let reply = ChatReply {
+        tool_calls: vec![crate::ai_service::providers::ToolCall {
+            id: "toolu_1".to_string(),
+            name: "update_schema".to_string(),
+            arguments: serde_json::Value::Null,
+        }],
+        ..Default::default()
+    };
+
+    let (message, _) = native_tools::response_message(reply.clone());
+    let body = serde_json::to_value(&message).unwrap();
+    assert_eq!(
+        body["tool_calls"][0]["function"]["arguments"],
+        r#"{"_raw":"null"}"#
+    );
+
+    // The streamed framing of the same reply says the same thing.
+    let chunks = native_tools::reply_chunks(&reply, "chatcmpl-1", "default", 7);
+    let call = serde_json::to_value(&chunks[1]).unwrap();
+    assert_eq!(
+        call["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+        r#"{"_raw":"null"}"#
+    );
+}
+
+#[test]
+fn a_reply_without_calls_is_a_plain_stop() {
+    let (message, finish_reason) = native_tools::response_message(ChatReply {
+        text: "Done.".to_string(),
+        ..Default::default()
+    });
+    let body = serde_json::to_value(&message).unwrap();
+
+    assert_eq!(finish_reason, "stop");
+    assert_eq!(body["content"], "Done.");
+    assert!(body.get("tool_calls").is_none(), "{body}");
+}
+
+#[test]
+fn a_streamed_reply_is_framed_as_role_text_calls_then_finish() {
+    let chunks =
+        native_tools::reply_chunks(&reply_calling("Adding it now."), "chatcmpl-1", "default", 7);
+    let chunks: Vec<serde_json::Value> = chunks
+        .iter()
+        .map(|c| serde_json::to_value(c).unwrap())
+        .collect();
+
+    assert_eq!(chunks.len(), 4);
+    assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+    assert_eq!(
+        chunks[1]["choices"][0]["delta"]["content"],
+        "Adding it now."
+    );
+    let call = &chunks[2]["choices"][0]["delta"]["tool_calls"][0];
+    assert_eq!(call["index"], 0);
+    assert_eq!(call["id"], "toolu_1");
+    assert_eq!(call["function"]["name"], "update_schema");
+    assert_eq!(call["function"]["arguments"], r#"{"patches":[]}"#);
+    assert_eq!(chunks[3]["choices"][0]["finish_reason"], "tool_calls");
+    for chunk in &chunks {
+        assert_eq!(chunk["object"], "chat.completion.chunk");
+        assert_eq!(chunk["id"], "chatcmpl-1");
+    }
+}
+
+#[test]
+fn a_streamed_reply_without_text_or_calls_is_role_then_stop() {
+    let chunks = native_tools::reply_chunks(&ChatReply::default(), "chatcmpl-1", "default", 7);
+    let last = serde_json::to_value(chunks.last().unwrap()).unwrap();
+
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+}
+
+#[test]
+fn usage_counts_cached_input_as_prompt_tokens() {
+    // Anthropic reports cache reads and writes apart from input_tokens; an
+    // OpenAI client reads prompt_tokens as everything that went in.
+    let usage = native_tools::usage_of(&ChatUsage {
+        input_tokens: Some(100),
+        output_tokens: Some(20),
+        cache_read_tokens: Some(7000),
+        cache_write_tokens: Some(5),
+    });
+
+    assert_eq!(usage.prompt_tokens, 7105);
+    assert_eq!(usage.completion_tokens, 20);
+    assert_eq!(usage.total_tokens, 7125);
+}
+
+#[test]
+fn usage_a_provider_did_not_report_reads_as_zero() {
+    let usage = native_tools::usage_of(&ChatUsage::default());
+    assert_eq!(usage.total_tokens, 0);
+}

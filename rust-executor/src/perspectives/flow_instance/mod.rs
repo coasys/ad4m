@@ -108,7 +108,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::DecoratedLinkExpression;
 use atom::{marked_fired, TransitionAtom};
-use fold::{fold, rule_for, Contention, DerivedState, VouchedAtom};
+use fold::{fold, rule_for, Contention, DerivedState, ResolvedRule, VouchedAtom};
 use roles::{eligible_votes, resolve_role_grants, RoleGrant, RoleGrantEvidence};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -181,12 +181,13 @@ pub struct ProposalLinks {
 /// nothing a reader decides may rest on it unchecked. The two halves of the
 /// read-set are at different stages of honouring that:
 ///
-/// - **Role evidence re-verifies by construction.**
-///   [`roles::RoleGrantEvidence::resolve`] re-decorates every revocation link
-///   with
-///   [`DecoratedLinkExpression::verify_signature`](crate::types::DecoratedLinkExpression::verify_signature)
-///   before filtering, and it is the only path from carried evidence to a
-///   window — so there is no version of this call that skips the check.
+/// - **Role evidence cannot carry a verdict at all.** It holds plain
+///   [`LinkExpression`](crate::types::LinkExpression) — no `proof.valid`, no
+///   `status` — and `revocation_link_counts_for_did` computes the verdict
+///   from the signature on every call, inside
+///   [`roles::RoleGrantEvidence::resolve`], the only path from carried
+///   evidence to a window. There is no version of this call that skips the
+///   check, and no field a forger could set instead (r4076927995).
 /// - **Proposals and votes still read the carried verdict**, via
 ///   `atom::signed_by`. A reader folding a read-set that arrived from
 ///   elsewhere must therefore re-decorate those links itself before calling
@@ -284,9 +285,16 @@ pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Der
         .atoms()
         .into_iter()
         .map(|atom| {
-            let rule = rule_for(flow, &atom.to_state);
+            // An unreadable rule leaves no vote eligible. `settle_edge`
+            // refuses the edge anyway; emptying the set here means the
+            // refusal also holds for anything reading `eligible_votes`
+            // directly, rather than resting on one call site (#1078).
+            let eligible_votes = match rule_for(flow, &atom.to_state) {
+                ResolvedRule::Rule(rule) => eligible_votes(&atom, &rule, &grants),
+                ResolvedRule::Refused => Vec::new(),
+            };
             VouchedAtom {
-                eligible_votes: eligible_votes(&atom, &rule, &grants),
+                eligible_votes,
                 atom,
             }
         })
@@ -318,7 +326,12 @@ fn role_grant_views(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<
     let record = read_set.as_record(flow);
     let mut grants = Vec::with_capacity(read_set.role_grants.len());
     for evidence in &read_set.role_grants {
-        let rule = rule_for(flow, &evidence.to_state);
+        // A refused rule is not the fail-open drop warned about above: it bars
+        // the edge for every voter (`fold_read_set` empties `eligible_votes`),
+        // so evidence targeting that state cannot sway any outcome.
+        let ResolvedRule::Rule(rule) = rule_for(flow, &evidence.to_state) else {
+            continue;
+        };
         let Some(role) = rule.from_role.as_ref() else {
             continue;
         };
@@ -406,7 +419,13 @@ impl<'a> FlowInstance<'a> {
         let atoms = read_set.atoms();
         let targets: BTreeSet<&str> = atoms.iter().map(|a| a.to_state.as_str()).collect();
         for to_state in targets {
-            let rule = rule_for(self.flow, to_state);
+            // No role resolution for a refused target: the edge cannot settle
+            // whoever voted, so resolving grants for it would be I/O whose
+            // result nothing reads. Not a fail-open — the refusal is
+            // `settle_edge`'s, and `fold_read_set` empties the eligible set.
+            let ResolvedRule::Rule(rule) = rule_for(self.flow, to_state) else {
+                continue;
+            };
             let Some(role) = rule.from_role.as_ref() else {
                 continue;
             };
