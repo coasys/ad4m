@@ -1316,6 +1316,59 @@ fn tool_call_arguments_reach_the_provider_as_an_object() {
 }
 
 #[test]
+fn an_empty_placeholder_message_does_not_reach_the_provider() {
+    // `content: null` with no tool_calls is legal on the OpenAI wire and
+    // clients send it as a placeholder. The injected path read it as empty
+    // prose; a provider refuses an empty message outright.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "user", "content": "add a button" },
+        { "role": "assistant", "content": null },
+        { "role": "user", "content": "   " },
+        { "role": "user", "content": "actually, two" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].content, "add a button");
+    assert_eq!(turns[1].content, "actually, two");
+}
+
+#[test]
+fn a_blank_turn_that_carries_a_call_or_answers_one_is_kept() {
+    // The drop is about turns with nothing on them. Removing one that holds a
+    // `tool_use` — or the `tool_result` naming it — is the unbalanced
+    // conversation the fold exists to prevent.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "user", "content": "add a button" },
+        {
+            "role": "assistant", "content": null,
+            "tool_calls": [
+                { "id": "call_a", "type": "function", "function": { "name": "load_a", "arguments": "{}" } },
+            ],
+        },
+        { "role": "tool", "tool_call_id": "call_a", "content": "" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns.len(), 3);
+    assert_eq!(turns[1].tool_calls.len(), 1);
+    assert_eq!(turns[2].tool_result_for.as_deref(), Some("call_a"));
+}
+
+#[test]
+fn a_request_whose_messages_all_come_out_blank_is_a_bad_request() {
+    // Sending nothing is refused by the provider, which would report as a 500
+    // on a request the caller can see is empty.
+    let err = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "assistant", "content": null },
+        { "role": "user", "content": "" },
+    ])))
+    .expect_err("refused");
+
+    assert!(err.to_string().contains("content"));
+}
+
+#[test]
 fn a_developer_message_is_a_system_turn() {
     // OpenAI's newer name for the system role; read as the user speaking it
     // would lose its authority.

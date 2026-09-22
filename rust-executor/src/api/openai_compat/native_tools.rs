@@ -101,9 +101,25 @@ pub async fn chat_with_native_tools(
 /// Each message is put in the shape the harness builds — `role`, text
 /// `content`, OpenAI `tool_calls`, `tool_call_id` — so it runs through the same
 /// fold rather than a copy of it.
+///
+/// A turn the fold leaves blank is then dropped. A provider refuses an empty
+/// message the way it refuses an unpaired call, and this is the first path that
+/// can produce one: the harness writes its own messages and never emits an
+/// empty one, but `{"role": "assistant", "content": null}` with no `tool_calls`
+/// is legal on the OpenAI wire and clients send it as a placeholder. The
+/// injected path swallowed it as empty prose. A turn that carries calls or
+/// answers one is kept whatever its text, because dropping it is the
+/// unbalanced conversation `structured_turns` exists to prevent.
 pub(super) fn to_turns(messages: &[ChatMessage]) -> anyhow::Result<Vec<ChatTurn>> {
     let values: Vec<Value> = messages.iter().map(message_value).collect();
-    structured_turns(&values)
+    let mut turns = structured_turns(&values)?;
+    turns.retain(|t| {
+        !t.content.trim().is_empty() || !t.tool_calls.is_empty() || t.tool_result_for.is_some()
+    });
+    if turns.is_empty() {
+        anyhow::bail!("no message carries content");
+    }
+    Ok(turns)
 }
 
 fn message_value(m: &ChatMessage) -> Value {
