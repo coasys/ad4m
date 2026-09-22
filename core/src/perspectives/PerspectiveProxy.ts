@@ -1,4 +1,5 @@
-import { LinkCallback, PerspectiveClient, SyncStateChangeCallback, FlowFireOutcome, FlowProposeResult } from "./PerspectiveClient";
+import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import type { FlowFireOutcome, FlowProposeResult } from "./FlowInstance";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";

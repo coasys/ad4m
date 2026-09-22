@@ -1851,6 +1851,7 @@ mod tests {
             requires,
             semantic_check: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         }
     }
 
@@ -1872,6 +1873,7 @@ mod tests {
             creation_hint: None,
             context: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         }
     }
 

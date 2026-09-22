@@ -56,10 +56,58 @@
  */
 
 import { PerspectiveProxy } from "./PerspectiveProxy";
-import { FlowFireOutcome, FlowProposeResult } from "./PerspectiveClient";
 import { Ad4mModel } from "../model/Ad4mModel";
 import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
+
+/** One fired flow transition, as returned by {@link FlowInstance.acceptProposal}
+ *  (and, engine-side, by every consensus pass). */
+export interface FlowFireOutcome {
+  instanceUri: string;
+  fromState: string;
+  toState: string;
+  voters: string[];
+  contributingProposalUris: string[];
+}
+
+/** What one {@link FlowInstance.proposeTransition} call did, and where the
+ *  flow stands after it.
+ *
+ *  A bare `FlowFireOutcome[]` could not distinguish "queued, waiting for other
+ *  voters" from "you had already voted on this" from "the instance is stalled":
+ *  all three are the empty array, and all three want different UI.
+ *
+ *  Read the result like this:
+ *
+ *  | `outcomes` | `recordedVote` | `contested` | meaning |
+ *  |---|---|---|---|
+ *  | non-empty | — | — | the transition fired |
+ *  | `[]` | `true` | `false` | your vote landed; waiting for other voters |
+ *  | `[]` | `false` | `false` | you had already voted; nothing was written |
+ *  | `[]` | — | `true` | the flow is stalled — do not show "awaiting votes" |
+ */
+export interface FlowProposeResult {
+  /** The live proposal this call minted or joined — always the one for the
+   *  edge, whether this call wrote it or found it open. Hand it to another
+   *  agent's `acceptProposal`, offer `rejectProposal` on it, or render it as
+   *  "pending — withdraw?". */
+  proposalUri: string;
+  /** `true` when this call wrote the proposal; `false` when an equivalent
+   *  one was already open and this call joined it. */
+  minted: boolean;
+  /** `true` when this call recorded a vote for the calling agent — its own
+   *  vote on a mint, an `acceptedBy` on a join. `false` means the agent had
+   *  already voted and nothing was written. */
+  recordedVote: boolean;
+  /** Consensus events this call recorded for the first time. Empty while
+   *  the edge is short of quorum. */
+  outcomes: FlowFireOutcome[];
+  /** The instance's derived state after the call. */
+  derivedState: string;
+  /** `true` when two edges out of `derivedState` both carry quorum: the flow
+   *  is irreversibly stalled and must not be shown as "awaiting votes". */
+  contested: boolean;
+}
 
 /**
  * Extract the flow's human-readable name from its canonical URI.
@@ -404,18 +452,8 @@ export class FlowInstance {
    * one. When the resulting vote reaches the target state's
    * `consensusRule.n`, the transition fires in the same call.
    *
-   * Read the result like this:
-   *
-   * | `outcomes` | `recordedVote` | `contested` | meaning |
-   * |---|---|---|---|
-   * | non-empty | — | — | the transition fired |
-   * | `[]` | `true` | `false` | your vote landed; waiting for other voters |
-   * | `[]` | `false` | `false` | you had already voted; nothing was written |
-   * | `[]` | — | `true` | the flow is stalled — do not show "awaiting votes" |
-   *
-   * `proposalUri` is always the live proposal for the edge, whether this call
-   * minted it or joined it, so a second agent can be handed it directly and a
-   * UI can offer `rejectProposal` on it.
+   * How to read the result — fired vs. queued vs. no-op vs. stalled — is
+   * documented on {@link FlowProposeResult} itself.
    *
    * Throws when `toState` is not reachable from the derived state, when the
    * target state carries a `requires` guard that is not currently satisfied

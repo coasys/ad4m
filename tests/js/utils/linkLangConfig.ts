@@ -7,9 +7,9 @@
 // matrix.
 //
 // Holochain flavor: perspective-diff-sync, params = {uid, name}.
-// Server flavor:    server-link-language,  params = {SERVER_URL, ROOM_ID, name}
-//                   (SERVER_URL comes from a running link-server, ROOM_ID is
-//                    fresh per neighbourhood so tests don't collide).
+// Server flavor:    server-link-language,  params = {SERVER_URL, UID, name}
+//                   (SERVER_URL comes from a running link-server, UID is fresh
+//                    per neighbourhood so tests don't collide).
 
 import { Ad4mClient, LanguageRef } from "@coasys/ad4m";
 import { v4 as uuidv4 } from "uuid";
@@ -42,7 +42,7 @@ export function serverLinkLang(languageHash: string, serverUrl: string): LinkLan
         label: "server-link",
         languageHash,
         buildTemplateParams: (name) =>
-            JSON.stringify({ SERVER_URL: serverUrl, ROOM_ID: uuidv4(), name }),
+            JSON.stringify({ SERVER_URL: serverUrl, UID: uuidv4(), name }),
     };
 }
 
