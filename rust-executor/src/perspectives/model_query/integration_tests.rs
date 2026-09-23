@@ -9278,3 +9278,120 @@ async fn links_rejects_a_key_it_cannot_resolve() {
     .expect_err("an unresolvable key must fail");
     assert!(format!("{err}").contains("role_grant_revoked"), "{err}");
 }
+
+/// A reverse relation (`belongsToOne` / `belongsToMany`) is an error, not `[]`.
+///
+/// Its links point *at* the instance (`other --we://marks--> this`), and `links`
+/// reads the instance's outgoing links only. Resolving the name to its
+/// predicate and reading outgoing links answers "asked, none found" for a
+/// question that was never asked of the store, even with a real incoming link
+/// present, which this test seeds. On 6228563a5 the query succeeded with
+/// `"markedBy": []`.
+#[tokio::test]
+async fn links_rejects_a_reverse_relation_name() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://p/1", "we://flag", "we://post", "1"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://p/1", "we://children", "we://p/2", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://m/1", "we://marks", "we://p/1", "3"))
+        .unwrap();
+
+    let post_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://post"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" },
+            "markedBy": { "predicate": "we://marks", "kind": "belongsToMany", "targetClassName": "", "direction": "reverse" }
+        }
+    }"#;
+
+    // Control: the forward relation on the same shape is read.
+    let ok = execute_model_query_from_json(&store, "Post", &links_query(&["children"]), post_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        ok.instances[0]["__links"]["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let err = execute_model_query_from_json(&store, "Post", &links_query(&["markedBy"]), post_json)
+        .await
+        .expect_err("a reverse relation must not resolve to an empty list");
+    let msg = format!("{err}");
+    assert!(msg.contains("markedBy"), "names the key: {msg}");
+    assert!(msg.contains("reverse"), "says why: {msg}");
+}
+
+/// `links` inside an `include` sub-query: the sub-query recurses through
+/// `execute_model_query_inner`, so each included instance carries its own
+/// `__links`.
+#[tokio::test]
+async fn links_inside_an_include_sub_query() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "1"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://note", "literal:string:n", "4"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "TextBlock" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(links_query(&["we://note"]))),
+        )])),
+        ..Default::default()
+    };
+    let result =
+        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
+            .await
+            .unwrap();
+    let child = &result.instances[0]["children"][0];
+    assert_eq!(child["id"], json!("we://t/1"), "{}", result.instances[0]);
+    let rows = child["__links"]["we://note"]
+        .as_array()
+        .unwrap_or_else(|| panic!("included instance carries __links: {child}"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["data"]["target"], json!("literal:string:n"));
+    assert!(
+        result.instances[0].get("__links").is_none(),
+        "the parent did not ask"
+    );
+}

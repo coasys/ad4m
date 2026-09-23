@@ -51,7 +51,9 @@ pub(crate) const LINKS_KEY: &str = "__links";
 /// A property or relation name wins over the IRI reading, mirroring how the
 /// flow engine resolves `didProperty`. An entry that is neither is an error,
 /// not an empty list: a caller that misspells `role_grant_revoked` must not be
-/// told there are no revocations.
+/// told there are no revocations. A reverse relation (`belongsToOne` /
+/// `belongsToMany`) is an error for the same reason: its links are incoming,
+/// and reading outgoing ones would always find none.
 pub(super) fn resolve_link_keys(
     shape: &ModelShape,
     requested: &[String],
@@ -61,20 +63,38 @@ pub(super) fn resolve_link_keys(
         if out.iter().any(|(k, _)| k == key) {
             continue;
         }
+        // (predicate, is_reverse)
         let by_name = shape
             .properties
             .iter()
             .find(|p| p.name == *key && !p.predicate.is_empty())
-            .map(|p| p.predicate.clone())
+            .map(|p| {
+                (
+                    p.predicate.clone(),
+                    p.direction.as_deref() == Some("reverse"),
+                )
+            })
             .or_else(|| {
                 shape
                     .include_relations
                     .iter()
                     .find(|r| r.name == *key && !r.predicate.is_empty())
-                    .map(|r| r.predicate.clone())
+                    .map(|r| (r.predicate.clone(), r.direction == "reverse"))
             });
         let predicate = match by_name {
-            Some(p) => p,
+            // A reverse relation's links point at the instance
+            // (`other --predicate--> this`); `attach_links` reads outgoing
+            // links only, so resolving it would answer `[]` for a question
+            // the store was never asked.
+            Some((_, true)) => {
+                return Err(anyhow!(
+                    "links: `{key}` is a reverse relation of class `{}`; its links point at the \
+                     instance and `links` reads outgoing links only. Ask for it on the class at \
+                     the other end",
+                    shape.target_class
+                ))
+            }
+            Some((p, false)) => p,
             None if emittable_iri(key) => key.clone(),
             None => {
                 return Err(anyhow!(
@@ -105,6 +125,11 @@ pub(super) fn resolve_link_keys(
 /// `local: true` properties get the same `LinkStatus::Local` restriction the
 /// instance query applies, so a gossiped Shared link on a local predicate is not
 /// reintroduced through this side door.
+///
+/// A link stored without a proof comes back as `"proof": {"key": "",
+/// "signature": ""}`. That is *not* "unsigned but valid":
+/// `LinkExpression::compute_proof_valid` returns `false` for it, and so must
+/// any verdict layered on these rows.
 pub(super) async fn attach_links(
     store: &SparqlStore,
     shape: &ModelShape,
