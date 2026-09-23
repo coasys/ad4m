@@ -700,25 +700,12 @@ impl PerspectiveInstance {
     }
 
     /// Multi-user auto-processor spawn loop. Every supervisor tick it
-    /// re-computes two sets from the managed users' `last_seen` timestamps and
-    /// uses them for two different decisions:
-    ///
-    /// * **spawn set** — `last_seen` within `MANAGED_USER_ONLINE_WINDOW_S`
-    ///   (the same freshness window `capabilities::track_last_seen_from_token`
-    ///   uses). A user in this set with no running loop gets one.
-    /// * **retain set** — `last_seen` within `MANAGED_USER_REAP_WINDOW_S`,
-    ///   which is strictly longer. A running loop is aborted only when its
-    ///   user falls *outside* this set.
-    ///
-    /// The gap between the two windows is deliberate hysteresis. Driving both
-    /// decisions from one window is what caused #1070: `last_seen` is written
-    /// by a 300 s write-throttle whose condition is the exact complement of a
-    /// 300 s online window, so an actively-connected user's `last_seen` is
-    /// refreshed precisely when — and only when — a single-window supervisor
-    /// has already declared them offline. That guarantees one abort plus
-    /// re-admission per user, per perspective, every 300 s, forever. See
-    /// [`MANAGED_USER_REAP_WINDOW_S`] for the full argument; do not collapse
-    /// the two constants back into one.
+    /// re-computes the set of managed users whose `last_seen` falls inside
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (twice the `last_seen` write-throttle,
+    /// so active users do not flap — #1070), spawns a per-user
+    /// `auto_processor_watch_loop` for any newly-online user, and aborts the
+    /// loop of any user who has aged out. Users that go offline are cheap to
+    /// re-spawn on next activity, so the transient churn is bounded.
     ///
     /// Why per-user rather than a single main-agent loop:
     ///   `elect_author` returns `Me` only when the loop's `AgentContext` DID
@@ -728,7 +715,7 @@ impl PerspectiveInstance {
     ///   with James in a live call.
     async fn managed_user_auto_processor_supervisor(&self) {
         use crate::perspectives::auto_processor::watcher::{
-            managed_user_windows, MANAGED_USER_REAP_WINDOW_S,
+            select_online_managed_users, MANAGED_USER_ONLINE_WINDOW_S,
         };
         use std::collections::HashMap;
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -768,18 +755,14 @@ impl PerspectiveInstance {
                 }
             };
 
-            // Two windows, two decisions, one snapshot. `windows.spawn` gates
-            // spawning; `windows.retain` (the strictly longer window) gates
-            // reaping. See this function's doc comment and
-            // `MANAGED_USER_REAP_WINDOW_S` for why one shared window flaps
-            // every connected user once per 300s (#1070).
-            let windows = managed_user_windows(user_tuples, now_s);
-            let retained_set: std::collections::HashSet<&String> = windows.retain.iter().collect();
+            let online =
+                select_online_managed_users(user_tuples, now_s, MANAGED_USER_ONLINE_WINDOW_S);
+            let online_set: std::collections::HashSet<&String> = online.iter().collect();
 
-            // Reap: drop entries for users who finished or whose `last_seen`
-            // has aged past the *reap* window. `handle.abort()` unwinds the
-            // loop's await points; `is_teardown` is not toggled by abort so the
-            // perspective stays healthy for other tasks.
+            // Reap: drop entries for users who finished, aged out, or are no
+            // longer online. `handle.abort()` unwinds the loop's await points;
+            // `is_teardown` is not toggled by abort so the perspective stays
+            // healthy for other tasks.
             per_user_loops.retain(|email, handle| {
                 if handle.is_finished() {
                     log::debug!(
@@ -788,10 +771,10 @@ impl PerspectiveInstance {
                     );
                     return false;
                 }
-                if !retained_set.contains(email) {
+                if !online_set.contains(email) {
                     log::info!(
-                        "auto_processor supervisor `{uuid}`: user `{email}` aged out of the \
-                         {MANAGED_USER_REAP_WINDOW_S}s reap window; aborting loop"
+                        "auto_processor supervisor `{uuid}`: user `{email}` aged out of \
+                         freshness window; aborting loop"
                     );
                     handle.abort();
                     return false;
@@ -803,7 +786,7 @@ impl PerspectiveInstance {
             // constructor; DID / wallet resolution happens lazily inside the
             // loop, so an email whose key never loaded still fails loudly
             // there — not silently at spawn.
-            for email in windows.spawn {
+            for email in online {
                 if per_user_loops.contains_key(&email) {
                     continue;
                 }
