@@ -1121,6 +1121,15 @@ pub(crate) async fn write_mint_scope_links(
                  (id + predicate); `Model` scopes carry no linking predicate"
             );
         }
+        Scope::Traverse { .. } => {
+            // A traversal describes how to *read* outward from anchors. Minting
+            // against it would have to pick one of them to hang the new link
+            // under, and nothing in the scope says which.
+            anyhow::bail!(
+                "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
+                 (id + predicate); `Traverse` scopes describe a read and name no single parent"
+            );
+        }
     };
     for base in bases {
         perspective

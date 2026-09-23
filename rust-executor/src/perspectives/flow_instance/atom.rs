@@ -278,10 +278,28 @@ pub fn valid_votes(
 }
 
 /// Whether **this replica** marked this proposal fired: a `Local`
-/// `resolved_as → "fired"` link. Marks are per-replica bookkeeping (#987),
-/// so a peer's mark — which can only ever arrive `Shared` — is not a mark
-/// here: a forged one cannot mute this replica's once-only
-/// [`FireOutcome`](super::pass::FireOutcome).
+/// `resolved_as → "fired"` link. Marks are per-replica bookkeeping (#987), so
+/// a peer's mark is not a mark here — a forged one cannot mute this replica's
+/// once-only [`FireOutcome`](super::pass::FireOutcome).
+///
+/// # "This replica's" is only true of links this replica read
+///
+/// That guarantee used to rest on a peer's mark arriving `Shared`, which held
+/// while every [`ReadSet`](super::ReadSet) was built from the local store. A
+/// read-set now travels, and `status` is not signed, so on a *carried*
+/// read-set `Some(Local)` means only "whoever sent this claimed `Local`" —
+/// not an answer about this replica at all.
+///
+/// The gap is closed one layer up rather than here:
+/// [`reverified_link`](super::reverified_link) clears `status` on every
+/// carried link, so a re-verified read-set answers `false` for every
+/// proposal. That is the truthful answer — this replica has marked nothing it
+/// never read — and it is why this function must keep testing
+/// `== Some(Local)` rather than `!= Some(Shared)`, which would read the
+/// cleared value as a mark and hand the sender the forgery back.
+///
+/// Callers therefore get a meaningful answer only from a locally read
+/// read-set, which is the only place [`pass`](super::pass) uses it.
 ///
 /// **Bookkeeping only.** The fold never reads it: it exists so a UI can list
 /// history and so the consensus pass knows which edges it has already
@@ -503,6 +521,133 @@ pub(super) mod fixtures {
 
     pub fn atom_of(links: &[DecoratedLinkExpression]) -> Result<TransitionAtom, AtomRejection> {
         TransitionAtom::from_links(INSTANCE, PROPOSAL, links)
+    }
+
+    // -----------------------------------------------------------------------
+    // Cryptographically honest fixtures
+    //
+    // The builders above state a signature verdict; these ones *earn* it.
+    // Both kinds are needed and neither replaces the other:
+    //
+    // - `link` / `honest_proposal` exercise the checks that read a carried
+    //   verdict (`signed_by`, `from_links`), where the verdict is the input
+    //   under test and inventing a keypair would only obscure it;
+    // - `signed_*` exercise anything downstream of
+    //   [`ReadSet::reverified`](super::super::ReadSet::reverified), which
+    //   recomputes the verdict from the signature — there a fixture that
+    //   merely *claims* `valid: true` is exactly the minter's word the
+    //   reader no longer takes, so it has to sign for real.
+    // -----------------------------------------------------------------------
+
+    use crate::agent::signatures::TestSigner;
+    use crate::types::{Link as CoreLink, LinkExpression, LinkStatus as CoreLinkStatus};
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    /// A named persona holding a **real** Ed25519 keypair. Leaked on first use
+    /// so the DIDs read like the `&'static str` constants they stand beside.
+    /// One keypair per persona per process.
+    pub fn persona(name: &str) -> &'static TestSigner {
+        static SIGNERS: LazyLock<Mutex<HashMap<String, &'static TestSigner>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+        *SIGNERS
+            .lock()
+            .expect("persona registry")
+            .entry(name.to_string())
+            .or_insert_with(|| Box::leak(Box::new(TestSigner::generate())))
+    }
+
+    /// `persona(name).did`, for fixtures that need the identity rather than
+    /// the key.
+    pub fn did_of(name: &str) -> &'static str {
+        &persona(name).did
+    }
+
+    /// One link as `get_links` returns it, with its `valid` flag honoured
+    /// **cryptographically**: a valid link is signed by `author_name`'s own
+    /// key over its own data and timestamp, and a forged one carries a
+    /// signature from a key that is not theirs.
+    ///
+    /// `proof.valid` is still pre-set to match, because that is what a store
+    /// hands back — but every reader downstream of the ingest recomputes it,
+    /// so a fixture whose claim and signature disagree gets ruled on by the
+    /// signature. That disagreement is itself a fixture: pass
+    /// `claims_valid = Some(true)` with `valid = false` to build the forgery
+    /// a dishonest minter would carry.
+    pub fn signed_link(
+        source: &str,
+        predicate: &str,
+        target: &str,
+        author_name: &str,
+        valid: bool,
+        claims_valid: Option<bool>,
+        timestamp: &str,
+    ) -> DecoratedLinkExpression {
+        let at = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .unwrap_or_else(|e| panic!("fixture timestamp `{timestamp}`: {e}"))
+            .with_timezone(&chrono::Utc);
+        let author = persona(author_name);
+        let signing_key = if valid { author } else { persona("forger") };
+        let mut expr = signing_key.sign_at(
+            CoreLink {
+                source: source.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            }
+            .normalize(),
+            at,
+        );
+        expr.author = author.did.clone();
+        expr.proof.key = author.key_id.clone();
+        let mut link =
+            DecoratedLinkExpression::from((LinkExpression::from(expr), CoreLinkStatus::Shared));
+        let claimed = claims_valid.unwrap_or(valid);
+        link.proof.valid = Some(claimed);
+        link.proof.invalid = Some(!claimed);
+        link
+    }
+
+    /// The five links `write_flow_transition_proposal` emits, all genuinely
+    /// signed by the proposer, sourced at the proposal's own URI.
+    pub fn signed_proposal(
+        proposal_uri: &str,
+        proposer_name: &str,
+        from: &str,
+        to: &str,
+        seal: &str,
+        at: &str,
+    ) -> Vec<DecoratedLinkExpression> {
+        let signed = |predicate: &str, target: &str| {
+            signed_link(
+                proposal_uri,
+                predicate,
+                target,
+                proposer_name,
+                true,
+                None,
+                at,
+            )
+        };
+        vec![
+            signed(PROPOSER_PREDICATE, did_of(proposer_name)),
+            signed(FLOW_INSTANCE_PREDICATE, INSTANCE),
+            signed(FROM_STATE_PREDICATE, &literal(from)),
+            signed(TO_STATE_PREDICATE, &literal(to)),
+            signed(EVIDENCE_HASHES_PREDICATE, &literal(seal)),
+        ]
+    }
+
+    /// A genuinely signed `proposal --acceptedBy--> voter` co-signature.
+    pub fn signed_vote(proposal_uri: &str, voter_name: &str, at: &str) -> DecoratedLinkExpression {
+        signed_link(
+            proposal_uri,
+            ACCEPTED_BY_PREDICATE,
+            did_of(voter_name),
+            voter_name,
+            true,
+            None,
+            at,
+        )
     }
 }
 
@@ -744,6 +889,63 @@ mod tests {
         assert!(
             !marked_fired(&[other_value]),
             "only the `fired` value marks a proposal fired"
+        );
+    }
+
+    /// `only_a_local_fired_mark_is_a_mark` rests on a sentence that stopped
+    /// being true when this PR made `ReadSet` travel: "a peer's mark arrives
+    /// `Shared`". It arrives however the sender wrote it. `status` is not
+    /// signed and locality is not recomputable — it is a fact about *whose
+    /// store a link sits in* — so on a carried read-set `Some(Local)` says
+    /// only "the sender claimed `Local`".
+    ///
+    /// The seam answers it the one way it can: `reverified_link` clears
+    /// `status`, so a carried mark is not this replica's mark no matter what
+    /// it asserts. Note the fixture forges nothing else — the mark is validly
+    /// signed by Mallory and survives the signature half of `reverified`
+    /// untouched. Only the locality claim is dropped.
+    ///
+    /// Killing mutation: delete `link.status = None;` from `reverified_link`.
+    /// Every other test in the crate stays green — `marked_proposals` has one
+    /// production caller (`pass`, on this replica's own store), so this is
+    /// latent rather than live, and latent is exactly what an assertion is
+    /// for. Also red if `marked_fired` is rewritten to `!= Some(Shared)`,
+    /// which reads the cleared value as a mark and hands the claim back.
+    #[test]
+    fn a_carried_local_mark_is_not_this_replicas_mark() {
+        use super::super::{ProposalLinks, ReadSet};
+
+        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        let mut forged_mark = link(
+            RESOLVED_AS_PREDICATE,
+            &literal(FIRED_MARK),
+            MALLORY,
+            true,
+            T3,
+        );
+        forged_mark.status = Some(LinkStatus::Local);
+        links.push(forged_mark);
+
+        let arrived = ReadSet {
+            instance_uri: "flow://instance".into(),
+            subject: "subject://base".into(),
+            genesis: "review".into(),
+            proposals: vec![ProposalLinks {
+                uri: "proposal://p1".into(),
+                links,
+            }],
+            role_grants: vec![],
+        };
+
+        assert!(
+            arrived.marked_proposals().contains("proposal://p1"),
+            "precondition: read as handed over, the sender's claim IS taken as \
+             our mark — this is the forgery the seam exists to answer"
+        );
+        assert!(
+            arrived.reverified().marked_proposals().is_empty(),
+            "a carried `Local` mark must not count as this replica's: we have \
+             marked nothing we never read"
         );
     }
 }

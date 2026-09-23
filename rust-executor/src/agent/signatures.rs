@@ -137,7 +137,14 @@ impl TestSigner {
     /// Sign `data` now, producing the same `Expression` shape the wallet path
     /// produces.
     pub fn sign<T: Serialize>(&self, data: T) -> Expression<T> {
-        let timestamp = Utc::now();
+        self.sign_at(data, Utc::now())
+    }
+
+    /// Sign `data` as of `timestamp` — for fixtures that need a *stated*
+    /// instant (role grants and tombstones are dated material, and a reader
+    /// that re-verifies signatures needs the signed timestamp to be the one
+    /// the fixture claims).
+    pub fn sign_at<T: Serialize>(&self, data: T, timestamp: DateTime<Utc>) -> Expression<T> {
         let signature = hex::encode(
             self.keypair
                 .sign(&hash_data_and_timestamp(&data, &timestamp)),
