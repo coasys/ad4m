@@ -28,10 +28,12 @@
 
 import { execSync } from "child_process";
 import { existsSync } from "fs";
-import { join } from "path";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
 
-const REPO = process.cwd(); // run.sh invokes the runner from the repo root
+// Resolve scripts relative to this module so the runner works from any cwd.
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 interface SubRun {
   name: string;
@@ -113,7 +115,9 @@ export const a5AvLoop: Scenario = {
         ? `A5 mocked-A/V loop — full perceive->act verified: ${passedRoutes}${skippedRoutes ? `; wake-only/skipped: ${skippedRoutes}` : ""}`
         : ran === 0
           ? "A5 mocked-A/V loop — no sub-run scripts available"
-          : "A5 mocked-A/V loop — one or more routes failed",
+          : allPassed
+            ? "A5 mocked-A/V loop — all routes skipped, nothing verified"
+            : "A5 mocked-A/V loop — one or more routes failed",
     };
   },
 };

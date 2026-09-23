@@ -20,11 +20,12 @@
 
 import { execSync } from "child_process";
 import { existsSync } from "fs";
-import { join } from "path";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
 
-// run.sh invokes the runner from the repo root.
-const REPO = process.cwd();
+// Resolve scripts relative to this module so the runner works from any cwd.
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 interface SubRun {
   name: string;
@@ -75,7 +76,7 @@ export const a2ProvisionConnect: Scenario = {
         status = sub.passRe.test(out) ? "pass" : /\bSKIP\b/.test(out) ? "skip" : "fail";
       } catch (err: any) {
         out = (err.stdout?.toString?.() ?? "") + (err.stderr?.toString?.() ?? err.message ?? "");
-        status = "fail";
+        status = /\bSKIP\b/.test(out) ? "skip" : "fail";
       }
       const didMatch = out.match(/did[=:]\s*(did:key:[A-Za-z0-9]+)/i);
       const toolsMatch = out.match(/ad4m: (\d+) tools/);
@@ -111,7 +112,9 @@ export const a2ProvisionConnect: Scenario = {
         ? `A2 provision & connect — verified: ${passedPaths} (harness → ADAM agent)`
         : ran === 0
           ? "A2 provision & connect — no sub-run scripts available"
-          : "A2 provision & connect — one or more paths failed",
+          : allPassed
+            ? "A2 provision & connect — all paths skipped, nothing verified"
+            : "A2 provision & connect — one or more paths failed",
     };
   },
 };

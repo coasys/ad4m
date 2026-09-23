@@ -22,10 +22,12 @@
 
 import { execSync } from "child_process";
 import { existsSync } from "fs";
-import { join } from "path";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
 
-const REPO = process.cwd(); // run.sh invokes the runner from the repo root
+// Resolve scripts relative to this module so the runner works from any cwd.
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 interface SubRun {
   name: string;
@@ -111,7 +113,9 @@ export const a4Waker: Scenario = {
         ? `A4 waker — real subscription -> real harness ingress: verified ${passedRoutes}`
         : ran === 0
           ? "A4 waker — no sub-run scripts available"
-          : "A4 waker — one or more routes failed",
+          : allPassed
+            ? "A4 waker — all routes skipped, nothing verified"
+            : "A4 waker — one or more routes failed",
     };
   },
 };
