@@ -613,6 +613,103 @@ describe("Multi-User Simple integration tests", () => {
         });
     });
 
+    // #1024: on a multi-user executor, users who join the same neighbourhood
+    // co-own one perspective and one link store. `Local` means "not sent to
+    // other nodes", and until #1058 it did not hide anything from a co-owner on
+    // the same node: Bob read Alice's Local links, and a write by Bob that
+    // replaced a property also deleted Alice's Local link on it. The rule these
+    // tests check is that a Local link is visible only to its author, through
+    // every read the client has (queryLinks, snapshot, model queries), and that
+    // writes remove only links the writer can see.
+    describe("Local links are private per user in a shared neighbourhood (#1024)", () => {
+        after(cleanupAllMainExecutorPerspectives);
+
+        it("hides a co-owner's Local links from reads and keeps them on writes", async function () {
+            this.timeout(300000);
+
+            const { Model, Property, Flag, Ad4mModel } = await import("@coasys/ad4m");
+
+            @Model({ name: "PrivNote" })
+            class PrivNote extends Ad4mModel {
+                @Flag({ through: "priv://type", value: "priv://note" })
+                type = "priv://note";
+                @Property({ through: "priv://title" })
+                title: string = "";
+                @Property({ through: "priv://body" })
+                body: string = "";
+            }
+
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            await createTestUser("priv1@example.com", "password1");
+            await createTestUser("priv2@example.com", "password2");
+            const alice = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("priv1@example.com", "password1"), false);
+            const bob = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("priv2@example.com", "password2"), false);
+            const aliceDid = (await alice.agent.me()).did;
+
+            const aliceHandle = await alice.perspective.add("Local Link Privacy");
+            const linkLanguage = await alice.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL,
+                JSON.stringify({ uid: uuidv4(), name: "Local Link Privacy" }),
+            );
+            const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(
+                aliceHandle.uuid,
+                linkLanguage.address,
+                new Perspective([]),
+            );
+            await sleep(1000);
+            await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000);
+            const bobHandle = (await bob.perspective.all()).find((p) => p.sharedUrl === neighbourhoodUrl);
+            expect(bobHandle, "Bob joined the neighbourhood").to.not.be.undefined;
+
+            const pa = (await alice.perspective.byUUID(aliceHandle.uuid))!;
+            const pb = (await bob.perspective.byUUID(bobHandle!.uuid))!;
+            await (PrivNote as any).register(pa);
+            await (PrivNote as any).register(pb);
+
+            // A Shared instance both users can see, plus Alice's private links
+            // on it: one on a property only she has written (`body`), one on
+            // the property Bob will overwrite (`title`).
+            const note = await (PrivNote as any).create(pa, { title: "priv://shared-title" });
+            await alice.perspective.addLink(aliceHandle.uuid, new Link({ source: note.id, predicate: "priv://body", target: "priv://alice-body" }), "local");
+            await alice.perspective.addLink(aliceHandle.uuid, new Link({ source: note.id, predicate: "priv://title", target: "priv://alice-title" }), "local");
+
+            const targets = async (client: Ad4mClient, uuid: string, predicate?: string) =>
+                (await client.perspective.queryLinks(uuid, new LinkQuery({ source: note.id, predicate })))
+                    .map((l) => l.data.target);
+
+            // Reads: Alice sees her Local links, Bob does not, on every surface.
+            expect(await targets(alice, aliceHandle.uuid)).to.include.members(["priv://alice-body", "priv://alice-title"]);
+            const bobTargets = await targets(bob, bobHandle!.uuid);
+            expect(bobTargets, "Bob still sees the Shared links").to.include("priv://shared-title");
+            expect(bobTargets, "queryLinks hides Alice's Local links from Bob").to.not.include("priv://alice-body");
+            expect(bobTargets).to.not.include("priv://alice-title");
+
+            const bobSnapshot = (await pb.snapshot()).links.map((l) => l.data.target);
+            expect(bobSnapshot, "snapshot hides Alice's Local links from Bob").to.not.include("priv://alice-body");
+            expect(bobSnapshot).to.not.include("priv://alice-title");
+
+            // Model query: `body` exists only as Alice's Local link, so it is
+            // the sole value and ordering cannot hide a leak.
+            const asBob = await (PrivNote as any).findOne(pb, { where: { id: note.id } });
+            expect(asBob, "Bob still finds the Shared instance").to.not.be.null;
+            expect(asBob.body || "", "model query does not hydrate Alice's Local value for Bob").to.not.equal("priv://alice-body");
+            const asAlice = await (PrivNote as any).findOne(pa, { where: { id: note.id } });
+            expect(asAlice.body).to.equal("priv://alice-body");
+
+            // Write: Bob replaces `title`. That removes the values Bob can see
+            // and must leave Alice's Local value alone.
+            await (PrivNote as any).update(pb, note.id, { title: "priv://bob-title" });
+
+            const titleLinks = await alice.perspective.queryLinks(aliceHandle.uuid, new LinkQuery({ source: note.id, predicate: "priv://title" }));
+            const alicesTitle = titleLinks.find((l) => l.data.target === "priv://alice-title");
+            expect(alicesTitle, "Bob's update did not delete Alice's Local link").to.not.be.undefined;
+            expect(alicesTitle!.author).to.equal(aliceDid);
+            expect(titleLinks.map((l) => l.data.target), "Bob's update did write").to.include("priv://bob-title");
+            expect(titleLinks.map((l) => l.data.target), "Bob's update replaced the Shared value").to.not.include("priv://shared-title");
+        });
+    });
+
     describe("Agent Profiles and Status", () => {
         after(cleanupAllMainExecutorPerspectives);
 
