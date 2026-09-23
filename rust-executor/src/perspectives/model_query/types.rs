@@ -207,6 +207,126 @@ pub enum Scope {
         id: String,
         predicate: String,
     },
+    /// Bounded traversal from one or more anchors — see [`Traverse`](Scope::Traverse).
+    ///
+    /// A third variant rather than options on the two above, because those are
+    /// constructed as struct literals throughout `auto_processor`,
+    /// `interpretation` and `flow_context`, none of which traverse anything.
+    /// Adding fields there would have meant editing every write-scope call site
+    /// to say "and don't traverse", which is noise at each one and a much wider
+    /// blast radius than the feature deserves. The split is also honest: the
+    /// variants above identify *an* anchor, this one says how to walk from
+    /// *several*.
+    ///
+    /// `rename_all` because the TS `TraverseScope` is spread verbatim into the
+    /// wire JSON, spelling this variant's multi-word fields in camelCase — and
+    /// serde ignores unknown fields on an untagged variant, so a missed
+    /// spelling here is not an error but a silently dropped limit. The other
+    /// variants' fields are all single words, which is why the enum never
+    /// needed this before. The snake_case alias keeps Rust-side spellings
+    /// working.
+    #[serde(rename_all = "camelCase")]
+    Traverse {
+        /// The anchors to walk from. One query answers for all of them, which
+        /// is what keeps a level of a tree to a single round trip (and a single
+        /// subscription) rather than one per parent.
+        #[serde(deserialize_with = "deserialize_ids_flex")]
+        ids: Vec<String>,
+        predicate: String,
+        /// Follow the predicate as far as it goes, rather than one step.
+        ///
+        /// Note the path reports only its endpoints: SPARQL property paths bind
+        /// no intermediate variables, so a transitive read says *that* a node is
+        /// under the anchor and never *where*. Reconstructing the shape needs
+        /// the inverse relation read separately (`@BelongsTo`).
+        ///
+        /// Every named anchor is excluded from the result, as with `levels` —
+        /// an anchor is where the read started, not something it found. The `+`
+        /// path gives that for free only in a tree; in a cycle the anchor is
+        /// one-or-more steps from itself, so the exclusion is stated in the
+        /// query rather than left to the path operator.
+        #[serde(default)]
+        transitive: bool,
+        #[serde(default)]
+        direction: ScopeDirection,
+        /// Keep at most this many results *per anchor*, applied after ordering
+        /// and before hydration.
+        ///
+        /// SPARQL cannot express a per-group limit — it has no window functions,
+        /// and its sub-SELECTs are uncorrelated — so this is applied in the
+        /// executor between the two phases of the query. That placement is the
+        /// whole point: the id phase over-fetches rows of one string, and the
+        /// hydration phase, which is the expensive half, sees only the survivors.
+        #[serde(default, alias = "limit_per_anchor")]
+        limit_per_anchor: Option<usize>,
+        /// Walk the relation level by level, keeping this many results per anchor at each depth —
+        /// `[10, 5, 3]` is "ten replies, five under each of those, three under each of *those*".
+        ///
+        /// The walk happens here rather than in the caller, and that is the whole point. A caller
+        /// driving it pays a network round trip per level, and a client that renders as each answer
+        /// arrives shows the tree assembling itself a level at a time. In here the levels are
+        /// sequential SPARQL against a local store with no serialisation between them, and the
+        /// records are hydrated once for the union — so three levels cost one request and one
+        /// hydration instead of three of each.
+        ///
+        /// Like `transitive`, the anchors are excluded from their own result. A walk that reaches
+        /// an anchor again — through a cycle, or because one anchor was named below another —
+        /// reports it once, at neither place: it is where the walk started, not something the walk
+        /// found.
+        ///
+        /// *Refused* alongside `transitive`, which is the unbounded form of the same walk: a path
+        /// expression reaches everything below the anchor and can be told nothing about depth.
+        /// Refused alongside `limit_per_anchor` too, which cannot express this on its own — with
+        /// one anchor at the top there is one group, so it caps the total rather than the breadth
+        /// at each level, and the walk sets its own per-level limit at every depth regardless.
+        /// Both are errors rather than a silent resolution in the walk's favour, which would be a
+        /// wrong answer wearing the shape of a right one.
+        #[serde(default)]
+        levels: Option<Vec<usize>>,
+    },
+}
+
+/// Which way a traversal follows its predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopeDirection {
+    /// `anchor --predicate--> result`: the anchor owns the link. The default,
+    /// and the only direction the other `Scope` variants have ever had.
+    #[default]
+    Out,
+    /// `result --predicate--> anchor`: the result owns the link and points back.
+    ///
+    /// Answers "what points at this" for a *search* — ordered, filtered,
+    /// limited. Distinct from a reverse `include`, which answers the same
+    /// question for rows already in hand and cannot narrow them.
+    In,
+}
+
+/// Accept `ids` as either a bare string or a list of them.
+///
+/// The single-anchor spelling is the common one (one branch of a thread, one
+/// node of a graph) and requiring `["x"]` for it would be a papercut at every
+/// call site.
+fn deserialize_ids_flex<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::String(s) => Ok(vec![s]),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                Value::String(s) => Ok(s),
+                other => Err(serde::de::Error::custom(format!(
+                    "scope ids must be strings, got {other}"
+                ))),
+            })
+            .collect(),
+        other => Err(serde::de::Error::custom(format!(
+            "scope ids must be a string or a list of strings, got {other}"
+        ))),
+    }
 }
 
 /// Value in the `include` map for eager-loading relations.
@@ -234,6 +354,19 @@ pub struct ProjectionInput {
     /// When true, attach a count (integer) instead of a list.
     #[serde(default)]
     pub count: bool,
+    /// Count (or list) everything reachable through `from`, not just one step.
+    ///
+    /// What "42 replies" on a collapsed branch means: people read that as the
+    /// whole conversation below it, and a direct-child count says 3. The
+    /// projection query is already grouped per parent and already asked of
+    /// every row at once, so this costs one token in the emitted path and no
+    /// extra round trip.
+    ///
+    /// Refused alongside a link-author or link-timestamp filter: those read the
+    /// reification of *one* link, and a path is a reachability test with no
+    /// single link to point at.
+    #[serde(default)]
+    pub transitive: bool,
     /// Bare class name of the projection target.  The executor resolves the
     /// target shape from this through its in-memory cache when projection
     /// where-clauses reference target properties by name.
@@ -479,6 +612,16 @@ pub struct ShapeProperty {
     /// property node.  `false` when the SDNA declared no identity — a class
     /// with no identity property is never deduplicated.
     pub(crate) identity: bool,
+    /// Whether this property's links are written with `LinkStatus::Local`,
+    /// read back from the `ad4m://local` link on the property node.  Local
+    /// links stay in the executor's own store: they are never gossiped to the
+    /// neighbourhood, so remote agents cannot read this property at all and
+    /// its values do not survive a re-sync from the network.  `false` is the
+    /// default (shared) for every property that does not declare it.
+    ///
+    /// Surfaced through `describe_perspective` so an agent can tell which
+    /// properties of a class are executor-private before writing to them.
+    pub(crate) local: bool,
 }
 
 impl ShapeProperty {

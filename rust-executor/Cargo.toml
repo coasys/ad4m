@@ -171,7 +171,7 @@ scryer-prolog = { version = "0.10", git = "https://github.com/coasys/scryer-prol
 # scryer-prolog = { path = "../../scryer-prolog", features = ["multi_thread"] }
 
 ad4m-client = { path = "../rust-client", version="0.13.0-test-interpretation-2" }
-reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking"] }
+reqwest = { version = "0.11.20", features = ["json", "native-tls", "blocking", "stream"] }
 
 # rusqlite = { version = "0.29.0", git = "https://github.com/coasys/rusqlite.git", rev = "12ec1330bd4b46411ab9895364da4a3e172d0fbb", features = ["bundled"] }
 # Bumped from 0.34 to 0.40 to match coasys/deno v2.9.5's deno_cache which pins
@@ -223,6 +223,9 @@ tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Already in the lockfile as a transitive dependency; test-only certificate
+# fixtures for the MCP TLS end-to-end test.
+rcgen = "0.14"
 maplit = "1.0.2"
 lazy_static = "1.4.0"
 itertools = "0.10.1"

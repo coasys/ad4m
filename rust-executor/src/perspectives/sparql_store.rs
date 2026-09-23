@@ -1,5 +1,5 @@
 use crate::types::LinkStatus;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
 use chrono::DateTime as ChronoDateTime;
 use deno_core::anyhow::{anyhow, Error};
 use oxigraph::model::*;
@@ -159,12 +159,31 @@ fn literal(val: &str) -> Literal {
     Literal::new_simple_literal(val)
 }
 
-fn status_str(status: &Option<LinkStatus>) -> &'static str {
+fn status_str(status: &LinkStatus) -> &'static str {
     match status {
-        Some(LinkStatus::Shared) => "Shared",
-        Some(LinkStatus::Local) => "Local",
-        None => "Shared",
+        LinkStatus::Shared => "Shared",
+        LinkStatus::Local => "Local",
     }
+}
+
+/// Decode a stored `proofValid` annotation into a verdict.
+///
+/// The store holds a *boolean*, never a third "unevaluated" state:
+/// [`SparqlStore::insert_link_triples`] writes the annotation unconditionally,
+/// deriving the verdict from the signature when the caller did not supply one.
+/// `proof.valid` is a read view over the signature — something the executor
+/// computes so a UI or a SPARQL querier does not have to roll its own crypto —
+/// and a read view has no reason to record that nobody looked yet.
+///
+/// The empty string means the annotation is absent, which this maps to `false`.
+/// Absence is not reachable from anything this store writes; it can only come
+/// from hand-seeded or foreign data, so it is answered fail-closed, the same way
+/// every consumer that branches on the field (`signed_by`, the `flow_evaluator`
+/// revocation filter, `get_sdna_facts`) reads an unverified link. Both SPARQL
+/// read paths bind `?proofValid` through `OPTIONAL` and the solution accessors
+/// yield `""` for an unbound variable, so this is the shape absence arrives in.
+fn decode_proof_valid(s: &str) -> bool {
+    s == "true"
 }
 
 /// Back-compat SPARQL function for legacy notification triggers and SDNA
@@ -330,7 +349,7 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
 }
 
 /// Generate a deterministic reifier IRI from link data + timestamp.
-fn make_reifier_iri(link: &DecoratedLinkExpression) -> NamedNode {
+fn make_reifier_iri(link: &LinkExpression) -> NamedNode {
     // Hash the *normalized* storage-term form of the target, not the raw
     // wire string. `literal:json:` targets are canonicalized before storage
     // (see `target_to_storage_term`), so two callers describing the same
@@ -362,7 +381,7 @@ fn make_reifier_iri(link: &DecoratedLinkExpression) -> NamedNode {
 /// The target is rendered through [`target_to_storage_term`] so `literal:*`
 /// wire-form targets become typed RDF literals in storage while plain IRIs
 /// stay as [`NamedNode`]s.
-fn make_direct_triple(link: &DecoratedLinkExpression) -> (NamedNode, NamedNode, Term) {
+fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
     let source_iri = NamedNode::new_unchecked(&link.data.source);
     let predicate_val = link.data.predicate.as_deref().unwrap_or("");
     let predicate_iri = NamedNode::new_unchecked(predicate_val);
@@ -436,7 +455,7 @@ impl SparqlStore {
             })
     }
 
-    fn insert_link_triples(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
+    fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
         let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
         let reifier_iri = make_reifier_iri(link);
 
@@ -477,19 +496,62 @@ impl SparqlStore {
 
         // 3. Metadata on the reifier node (all default graph)
         let proof = &link.proof;
-        let valid_str = proof.valid.unwrap_or(false).to_string();
 
-        let annotations: &[(&str, &str)] = &[
+        // `proof.valid` is a read view over the signature: always compute it from
+        // the key and signature, never trust the caller's field. This means no
+        // test helper, migration, or external caller can slip a fabricated or
+        // stale verdict onto disk. The caller's `proof.valid` is intentionally
+        // ignored here â tests that want `Some(true)` must carry a real signature.
+        let valid_str = link.compute_proof_valid().to_string();
+
+        // Status must be decided by the caller, not defaulted here. A silent
+        // `None => Shared` fallback would let any write path that forgot to
+        // set it mislabel a local link as shared — the kind of quiet
+        // conflation that never surfaces in tests. Every production path
+        // (add/update/batch, link-language ingest, migration, boot rebuild)
+        // assigns status at its own boundary; a `None` reaching this point is
+        // a bug, and refusing the insert makes it fail loudly.
+        let status = link.status.as_ref().ok_or_else(|| {
+            anyhow!(
+                "Refusing to store link without an explicit local/shared status: {} -[{}]-> {}",
+                link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                link.data.target
+            )
+        })?;
+
+        let annotations: Vec<(&str, &str)> = vec![
             (ONT_AUTHOR, &link.author),
             (ONT_TIMESTAMP, &link.timestamp),
             (ONT_PROOF_KEY, &proof.key),
             (ONT_PROOF_SIG, &proof.signature),
+            (ONT_STATUS, status_str(status)),
             (ONT_PROOF_VALID, &valid_str),
-            (ONT_STATUS, status_str(&link.status)),
         ];
 
-        for (pred_uri, value) in annotations {
+        for (pred_uri, value) in &annotations {
             let pred = NamedNodeRef::new_unchecked(pred_uri);
+
+            // Delete before insert. `make_reifier_iri` hashes author, source,
+            // predicate, target and timestamp — not the proof — so re-inserting
+            // a link whose verdict, key or signature changed lands on the same
+            // reifier. Without the delete the old annotation stays alongside the
+            // new one: a link once stored "true" keeps reading back verified,
+            // and the `OPTIONAL { ?reifier <proofValid> ?proofValid }` in
+            // `query_links` matches both quads and returns the link twice.
+            let stale: Vec<_> = self
+                .store
+                .quads_for_pattern(
+                    Some(reifier_iri.as_ref().into()),
+                    Some(pred),
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+            for quad in &stale {
+                self.store.remove(quad)?;
+            }
+
             let lit = literal(value);
             self.store.insert(QuadRef::new(
                 reifier_iri.as_ref(),
@@ -503,12 +565,12 @@ impl SparqlStore {
     }
 
     /// Insert triples for a link into the store.
-    pub fn add_link(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
+    pub fn add_link(&self, link: &LinkExpression) -> Result<(), Error> {
         self.insert_link_triples(link)
     }
 
     /// Remove all triples for a link from the store.
-    pub fn remove_link(&self, link: &DecoratedLinkExpression) -> Result<(), Error> {
+    pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
         let reifier_iri = make_reifier_iri(link);
 
         // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
@@ -868,11 +930,7 @@ impl SparqlStore {
                     }
                 }
 
-                let proof_valid = if proof_valid_str.is_empty() {
-                    None
-                } else {
-                    Some(proof_valid_str == "true")
-                };
+                let proof_valid = decode_proof_valid(&proof_valid_str);
                 let status = match status_val.as_str() {
                     "Local" => Some(LinkStatus::Local),
                     "Shared" => Some(LinkStatus::Shared),
@@ -894,8 +952,8 @@ impl SparqlStore {
                     proof: DecoratedExpressionProof {
                         key: proof_key,
                         signature: proof_sig,
-                        valid: proof_valid,
-                        invalid: proof_valid.map(|v| !v),
+                        valid: Some(proof_valid),
+                        invalid: Some(!proof_valid),
                     },
                     status,
                 };
@@ -1011,11 +1069,7 @@ impl SparqlStore {
         let proof_key = get_str("proofKey");
         let proof_sig = get_str("proofSig");
         let proof_valid_str = get_str("proofValid");
-        let proof_valid = if proof_valid_str.is_empty() {
-            None
-        } else {
-            Some(proof_valid_str == "true")
-        };
+        let proof_valid = decode_proof_valid(&proof_valid_str);
         let status_val = get_str("status");
         let status = match status_val.as_str() {
             "Local" => Some(LinkStatus::Local),
@@ -1035,8 +1089,8 @@ impl SparqlStore {
             proof: DecoratedExpressionProof {
                 key: proof_key,
                 signature: proof_sig,
-                valid: proof_valid,
-                invalid: proof_valid.map(|v| !v),
+                valid: Some(proof_valid),
+                invalid: Some(!proof_valid),
             },
             status,
         })
@@ -1240,7 +1294,7 @@ impl SparqlStore {
     }
 
     /// Clear the store and bulk-insert all provided links.
-    pub fn reload(&self, links: Vec<DecoratedLinkExpression>) -> Result<(), Error> {
+    pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
         self.clear()?;
         for link in &links {
             self.insert_link_triples(link)?;
@@ -1248,275 +1302,62 @@ impl SparqlStore {
         self.flush()?;
         Ok(())
     }
-
-    /// Check the migration version stored in the store.
-    /// Returns 0 if no migration version is found.
-    pub fn migration_version(&self) -> u32 {
-        let migration_subj = NamedNodeRef::new_unchecked("ad4m://system/migration");
-        let migration_pred = NamedNodeRef::new_unchecked("ad4m://system/version");
-        self.store
-            .quads_for_pattern(
-                Some(migration_subj.into()),
-                Some(migration_pred),
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .next()
-            .and_then(|r| r.ok())
-            .and_then(|q| match &q.object {
-                Term::Literal(l) => l.value().parse::<u32>().ok(),
-                _ => None,
-            })
-            .unwrap_or(0)
-    }
-
-    /// Set the migration version marker.
-    pub fn set_migration_version(&self, version: u32) -> Result<(), Error> {
-        let migration_subj = NamedNode::new_unchecked("ad4m://system/migration");
-        let migration_pred = NamedNodeRef::new_unchecked("ad4m://system/version");
-
-        // Remove old version marker if any
-        let old_quads: Vec<_> = self
-            .store
-            .quads_for_pattern(
-                Some(migration_subj.as_ref().into()),
-                Some(migration_pred),
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-        for q in &old_quads {
-            self.store.remove(q)?;
-        }
-
-        // Insert new version
-        let version_lit = Literal::new_simple_literal(&version.to_string());
-        self.store.insert(QuadRef::new(
-            migration_subj.as_ref(),
-            migration_pred,
-            TermRef::Literal(version_lit.as_ref()),
-            GraphNameRef::DefaultGraph,
-        ))?;
-
-        Ok(())
-    }
-
-    /// Migrate data from named-graph storage model to reifier storage model.
-    /// Returns the number of links migrated.
-    pub fn migrate_named_graphs_to_reifiers(&self) -> Result<usize, Error> {
-        // Check if already migrated
-        if self.migration_version() >= 2 {
-            return Ok(0);
-        }
-
-        // Check if there are any named graphs (old storage model)
-        let has_named_graphs = self.store.named_graphs().next().is_some();
-
-        if !has_named_graphs {
-            // No old data to migrate, just set version
-            self.set_migration_version(2)?;
-            return Ok(0);
-        }
-
-        log::info!("Migrating link storage from named graphs to RDF 1.2 reifiers...");
-
-        // Collect all old-format links by querying named graphs
-        // We use the deprecated query_opt with set_default_graph_as_union to read old data
-        let query = r#"
-            SELECT ?g ?source ?predicate ?target ?author ?timestamp
-                   ?proofKey ?proofSig ?proofValid ?status
-            WHERE {
-                GRAPH ?g { ?source ?predicate ?target . }
-                FILTER(isIRI(?source) && isIRI(?predicate))
-                ?g <ad4m://ontology/author> ?author .
-                ?g <ad4m://ontology/timestamp> ?timestamp .
-                OPTIONAL { ?g <ad4m://ontology/proofKey> ?proofKey . }
-                OPTIONAL { ?g <ad4m://ontology/proofSignature> ?proofSig . }
-                OPTIONAL { ?g <ad4m://ontology/proofValid> ?proofValid . }
-                OPTIONAL { ?g <ad4m://ontology/status> ?status . }
-            }
-        "#;
-
-        // Use the deprecated API to read old named-graph data
-        #[allow(deprecated)]
-        let results = {
-            let evaluator = self.sparql_evaluator();
-            let mut parsed_query = oxigraph::sparql::Query::parse(query, None)
-                .map_err(|e| anyhow!("Failed to parse migration query: {}", e))?;
-            parsed_query.dataset_mut().set_default_graph_as_union();
-            self.store.query_opt(parsed_query, evaluator)?
-        };
-
-        let mut links_to_migrate: Vec<DecoratedLinkExpression> = Vec::new();
-        let mut graph_iris: Vec<NamedNode> = Vec::new();
-
-        if let QueryResults::Solutions(solutions) = results {
-            for solution in solutions {
-                let solution = solution?;
-
-                let get_str = |var: &str| -> String {
-                    solution
-                        .get(var)
-                        .and_then(|t| match t {
-                            Term::Literal(l) => Some(l.value().to_string()),
-                            Term::NamedNode(n) => Some(n.as_str().to_string()),
-                            _ => None,
-                        })
-                        .unwrap_or_default()
-                };
-
-                if let Some(Term::NamedNode(g)) = solution.get("g") {
-                    graph_iris.push(g.clone());
-                }
-
-                let source = match solution.get("source") {
-                    Some(Term::NamedNode(n)) => n.as_str().to_string(),
-                    _ => continue,
-                };
-                let predicate = match solution.get("predicate") {
-                    Some(Term::NamedNode(n)) => {
-                        let s = n.as_str().to_string();
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(s)
-                        }
-                    }
-                    _ => continue,
-                };
-                let target = match solution.get("target") {
-                    Some(Term::NamedNode(n)) => n.as_str().to_string(),
-                    _ => continue,
-                };
-
-                let author = get_str("author");
-                let timestamp = get_str("timestamp");
-                let proof_key = get_str("proofKey");
-                let proof_sig = get_str("proofSig");
-                let proof_valid_str = get_str("proofValid");
-                let proof_valid = if proof_valid_str.is_empty() {
-                    None
-                } else {
-                    Some(proof_valid_str == "true")
-                };
-                let status_val = get_str("status");
-                let status = match status_val.as_str() {
-                    "Local" => Some(LinkStatus::Local),
-                    "Shared" => Some(LinkStatus::Shared),
-                    _ => None,
-                };
-
-                links_to_migrate.push(DecoratedLinkExpression {
-                    author,
-                    timestamp,
-                    data: Link {
-                        source,
-                        predicate,
-                        target,
-                    },
-                    proof: DecoratedExpressionProof {
-                        key: proof_key,
-                        signature: proof_sig,
-                        valid: proof_valid,
-                        invalid: proof_valid.map(|v| !v),
-                    },
-                    status,
-                });
-            }
-        }
-
-        let count = links_to_migrate.len();
-        log::info!("Found {} links in named-graph format to migrate", count);
-
-        // Safety: write new reifier-format data BEFORE deleting old named-graph
-        // data so a crash mid-migration doesn't lose the only readable copy.
-        for link in &links_to_migrate {
-            self.insert_link_triples(link)?;
-        }
-
-        // Now remove old named-graph data
-        for graph_iri in &graph_iris {
-            // Remove quads in the named graph
-            let ng_quads: Vec<_> = self
-                .store
-                .quads_for_pattern(
-                    None,
-                    None,
-                    None,
-                    Some(GraphNameRef::NamedNode(graph_iri.as_ref())),
-                )
-                .collect::<Result<Vec<_>, _>>()?;
-            for q in &ng_quads {
-                self.store.remove(q)?;
-            }
-
-            // Remove metadata in default graph
-            let meta_quads: Vec<_> = self
-                .store
-                .quads_for_pattern(
-                    Some(graph_iri.as_ref().into()),
-                    None,
-                    None,
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .collect::<Result<Vec<_>, _>>()?;
-            for q in &meta_quads {
-                self.store.remove(q)?;
-            }
-
-            // Remove the named graph itself
-            let _ = self.store.remove_named_graph(graph_iri.as_ref());
-        }
-
-        // Set migration version only after both insert and cleanup succeeded
-        self.set_migration_version(2)?;
-
-        log::info!(
-            "Migration complete: {} links migrated to reifier format",
-            count
-        );
-        Ok(count)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::signatures::TestSigner;
 
-    fn make_link(source: &str, predicate: &str, target: &str) -> DecoratedLinkExpression {
-        DecoratedLinkExpression {
-            author: "did:key:z6Mktest".to_string(),
-            timestamp: "2024-01-15T10:00:00.000Z".to_string(),
-            data: Link {
-                source: source.to_string(),
-                predicate: if predicate.is_empty() {
-                    None
-                } else {
-                    Some(predicate.to_string())
-                },
-                target: target.to_string(),
+    fn make_link(
+        signer: &TestSigner,
+        source: &str,
+        predicate: &str,
+        target: &str,
+    ) -> LinkExpression {
+        let data = Link {
+            source: source.to_string(),
+            predicate: if predicate.is_empty() {
+                None
+            } else {
+                Some(predicate.to_string())
             },
-            proof: DecoratedExpressionProof {
-                key: "testkey".to_string(),
-                signature: "testsig".to_string(),
-                valid: Some(true),
-                invalid: Some(false),
-            },
+            target: target.to_string(),
+        };
+        let signed = signer.sign(data.normalize());
+        LinkExpression {
+            author: signed.author,
+            timestamp: signed.timestamp,
+            data: signed.data,
+            proof: signed.proof,
             status: Some(LinkStatus::Shared),
         }
     }
 
     fn make_link_with_ts(
+        signer: &TestSigner,
         source: &str,
         predicate: &str,
         target: &str,
         ts: &str,
-        author: &str,
-    ) -> DecoratedLinkExpression {
-        let mut link = make_link(source, predicate, target);
-        link.timestamp = ts.to_string();
-        link.author = author.to_string();
-        link
+    ) -> LinkExpression {
+        let data = Link {
+            source: source.to_string(),
+            predicate: if predicate.is_empty() {
+                None
+            } else {
+                Some(predicate.to_string())
+            },
+            target: target.to_string(),
+        };
+        let signed = signer.sign_at(data.normalize(), ts.parse().expect("fixture timestamp"));
+        LinkExpression {
+            author: signed.author,
+            timestamp: signed.timestamp,
+            data: signed.data,
+            proof: signed.proof,
+            status: Some(LinkStatus::Shared),
+        }
     }
 
     fn new_service() -> SparqlStore {
@@ -1527,8 +1368,14 @@ mod tests {
 
     #[test]
     fn test_add_link_creates_direct_triple() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        let link = make_link("ad4m://source1", "ad4m://predicate1", "ad4m://target1");
+        let link = make_link(
+            &signer,
+            "ad4m://source1",
+            "ad4m://predicate1",
+            "ad4m://target1",
+        );
         svc.add_link(&link).unwrap();
 
         // Direct triple should be in default graph
@@ -1548,8 +1395,9 @@ mod tests {
 
     #[test]
     fn test_add_link_creates_reifier() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
         let reifier = make_reifier_iri(&link);
 
@@ -1570,8 +1418,9 @@ mod tests {
 
     #[test]
     fn test_add_link_creates_metadata_on_reifier() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
         let reifier = make_reifier_iri(&link);
 
@@ -1613,13 +1462,14 @@ mod tests {
             .iter()
             .find(|r| r["p"].as_str() == Some("ad4m://ontology/author"))
             .unwrap();
-        assert_eq!(author_row["v"].as_str().unwrap(), "did:key:z6Mktest");
+        assert_eq!(author_row["v"].as_str().unwrap(), signer.did.as_str());
     }
 
     #[test]
     fn test_remove_link_removes_direct_triple() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
         svc.remove_link(&link).unwrap();
 
@@ -1637,8 +1487,9 @@ mod tests {
 
     #[test]
     fn test_remove_link_removes_reifier_and_metadata() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
         let reifier = make_reifier_iri(&link);
         svc.remove_link(&link).unwrap();
@@ -1656,21 +1507,22 @@ mod tests {
 
     #[test]
     fn test_remove_preserves_shared_direct_triple() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         // Two different links with same s/p/o but different timestamps
         let link1 = make_link_with_ts(
+            &signer,
             "ad4m://src",
             "ad4m://pred",
             "ad4m://tgt",
             "2024-01-01T00:00:00Z",
-            "did:key:z6Mk1",
         );
         let link2 = make_link_with_ts(
+            &signer,
             "ad4m://src",
             "ad4m://pred",
             "ad4m://tgt",
             "2024-01-02T00:00:00Z",
-            "did:key:z6Mk2",
         );
         svc.add_link(&link1).unwrap();
         svc.add_link(&link2).unwrap();
@@ -1680,13 +1532,14 @@ mod tests {
 
         let all = svc.get_all_links().unwrap();
         assert_eq!(all.len(), 1, "Should have 1 link remaining");
-        assert_eq!(all[0].author, "did:key:z6Mk2");
+        assert_eq!(all[0].author, signer.did);
     }
 
     #[test]
     fn test_no_named_graphs_used() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
 
         // No named graphs should exist
@@ -1703,8 +1556,9 @@ mod tests {
 
     #[test]
     fn test_all_data_in_default_graph() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        let link = make_link("ad4m://src", "ad4m://pred", "ad4m://tgt");
+        let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
         svc.add_link(&link).unwrap();
 
         // All quads should be in the default graph
@@ -1737,23 +1591,27 @@ mod tests {
     /// If this holds, SHACLFlow round-trips on a fresh store with no migration.
     #[test]
     fn test_literal_targets_round_trip_to_wire_form_without_migration() {
+        let signer = TestSigner::generate();
         let svc = new_service();
 
         // SHACLFlow-shaped bookkeeping links (string + number) and an ordinary
         // model-style string property — all added through the normal write path.
         svc.add_link(&make_link(
+            &signer,
             "flow://TODO.ready",
             "ad4m://stateName",
             "literal:string:ready",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "flow://TODO.ready",
             "ad4m://stateValue",
             "literal:number:0",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "task://1",
             "ns://title",
             "literal:string:Write%20the%20guide",
@@ -1814,12 +1672,13 @@ mod tests {
 
     #[test]
     fn test_query_links_by_source() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t1"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://b", "ad4m://p", "ad4m://t2"))
+        svc.add_link(&make_link(&signer, "ad4m://b", "ad4m://p", "ad4m://t2"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://a", "ad4m://q", "ad4m://t3"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://q", "ad4m://t3"))
             .unwrap();
 
         let results = svc
@@ -1831,12 +1690,13 @@ mod tests {
 
     #[test]
     fn test_query_links_by_predicate() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t1"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://b", "ad4m://q", "ad4m://t2"))
+        svc.add_link(&make_link(&signer, "ad4m://b", "ad4m://q", "ad4m://t2"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://c", "ad4m://p", "ad4m://t3"))
+        svc.add_link(&make_link(&signer, "ad4m://c", "ad4m://p", "ad4m://t3"))
             .unwrap();
 
         let results = svc
@@ -1850,12 +1710,13 @@ mod tests {
 
     #[test]
     fn test_query_links_by_target() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t1"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://b", "ad4m://q", "ad4m://t1"))
+        svc.add_link(&make_link(&signer, "ad4m://b", "ad4m://q", "ad4m://t1"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://c", "ad4m://r", "ad4m://t2"))
+        svc.add_link(&make_link(&signer, "ad4m://c", "ad4m://r", "ad4m://t2"))
             .unwrap();
 
         let results = svc
@@ -1867,12 +1728,13 @@ mod tests {
 
     #[test]
     fn test_query_links_by_source_and_predicate() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t1"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://a", "ad4m://q", "ad4m://t2"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://q", "ad4m://t2"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://b", "ad4m://p", "ad4m://t3"))
+        svc.add_link(&make_link(&signer, "ad4m://b", "ad4m://p", "ad4m://t3"))
             .unwrap();
 
         let results = svc
@@ -1884,10 +1746,11 @@ mod tests {
 
     #[test]
     fn test_query_links_by_source_predicate_target() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t1"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t1"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t2"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t2"))
             .unwrap();
 
         let results = svc
@@ -1906,13 +1769,14 @@ mod tests {
 
     #[test]
     fn test_query_links_returns_metadata() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         let link = make_link_with_ts(
+            &signer,
             "ad4m://s",
             "ad4m://p",
             "ad4m://t",
             "2024-06-01T12:00:00.000Z",
-            "did:key:z6Mkauthor",
         );
         svc.add_link(&link).unwrap();
 
@@ -1920,39 +1784,40 @@ mod tests {
             .query_links(Some("ad4m://s"), None, None, None, None, None)
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].author, "did:key:z6Mkauthor");
+        assert_eq!(results[0].author, signer.did);
         assert_eq!(results[0].timestamp, "2024-06-01T12:00:00.000Z");
-        assert_eq!(results[0].proof.key, "testkey");
-        assert_eq!(results[0].proof.signature, "testsig");
+        assert_eq!(results[0].proof.key, signer.key_id);
+        assert!(!results[0].proof.signature.is_empty());
         assert_eq!(results[0].proof.valid, Some(true));
         assert_eq!(results[0].status, Some(LinkStatus::Shared));
     }
 
     #[test]
     fn test_query_links_date_filter() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         svc.add_link(&make_link_with_ts(
+            &signer,
             "ad4m://s",
             "ad4m://p",
             "ad4m://t1",
             "2024-01-01T00:00:00Z",
-            "did:key:z6Mk1",
         ))
         .unwrap();
         svc.add_link(&make_link_with_ts(
+            &signer,
             "ad4m://s",
             "ad4m://p",
             "ad4m://t2",
             "2024-06-15T00:00:00Z",
-            "did:key:z6Mk2",
         ))
         .unwrap();
         svc.add_link(&make_link_with_ts(
+            &signer,
             "ad4m://s",
             "ad4m://p",
             "ad4m://t3",
             "2024-12-31T00:00:00Z",
-            "did:key:z6Mk3",
         ))
         .unwrap();
 
@@ -1985,14 +1850,15 @@ mod tests {
 
     #[test]
     fn test_query_links_limit() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..10 {
             svc.add_link(&make_link_with_ts(
+                &signer,
                 "ad4m://s",
                 "ad4m://p",
                 &format!("ad4m://t{}", i),
                 &format!("2024-01-{:02}T00:00:00Z", i + 1),
-                "did:key:z6Mk1",
             ))
             .unwrap();
         }
@@ -2005,14 +1871,17 @@ mod tests {
 
     #[test]
     fn test_sparql_query_direct_triple_pattern() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         svc.add_link(&make_link(
+            &signer,
             "flux://community1",
             "flux://has_channel",
             "flux://channel1",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "flux://community1",
             "flux://has_channel",
             "flux://channel2",
@@ -2035,32 +1904,38 @@ mod tests {
 
     #[test]
     fn test_sparql_query_with_join() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         svc.add_link(&make_link(
+            &signer,
             "flux://ch1",
             "flux://entry_type",
             "flux://channel",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "flux://ch1",
             "flux://name",
             "literal:string:general",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "flux://ch2",
             "flux://entry_type",
             "flux://channel",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "flux://ch2",
             "flux://name",
             "literal:string:random",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "flux://msg1",
             "flux://entry_type",
             "flux://message",
@@ -2083,11 +1958,12 @@ mod tests {
 
     #[test]
     fn test_sync_existing_links_to_sparql() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         let links = vec![
-            make_link("ad4m://a", "ad4m://p1", "ad4m://t1"),
-            make_link("ad4m://b", "ad4m://p2", "ad4m://t2"),
-            make_link("ad4m://c", "ad4m://p3", "ad4m://t3"),
+            make_link(&signer, "ad4m://a", "ad4m://p1", "ad4m://t1"),
+            make_link(&signer, "ad4m://b", "ad4m://p2", "ad4m://t2"),
+            make_link(&signer, "ad4m://c", "ad4m://p3", "ad4m://t3"),
         ];
         svc.reload(links).unwrap();
 
@@ -2097,8 +1973,10 @@ mod tests {
 
     #[test]
     fn test_link_add_then_query_roundtrip() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         let link = make_link(
+            &signer,
             "literal:string:hello",
             "flux://has_channel",
             "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
@@ -2125,7 +2003,7 @@ mod tests {
             results[0].data.target,
             "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
         );
-        assert_eq!(results[0].author, "did:key:z6Mktest");
+        assert_eq!(results[0].author, signer.did);
     }
 
     // ── Validate readonly ──
@@ -2144,8 +2022,9 @@ mod tests {
 
     #[test]
     fn test_clear_removes_all() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t"))
             .unwrap();
         svc.clear().unwrap();
         let all = svc.get_all_links().unwrap();
@@ -2162,13 +2041,14 @@ mod tests {
         for thread_id in 0..10 {
             let svc = svc.clone();
             handles.push(std::thread::spawn(move || {
+                let signer = TestSigner::generate();
                 for i in 0..100 {
                     let link = make_link_with_ts(
+                        &signer,
                         &format!("ad4m://src_{}", thread_id),
                         "ad4m://pred",
                         &format!("ad4m://tgt_{}_{}", thread_id, i),
-                        &format!("2024-01-01T{:02}:{:02}:00Z", thread_id, i),
-                        "did:key:z6Mktest",
+                        &format!("2024-01-01T{:02}:{:02}:{:02}Z", thread_id, i / 60, i % 60),
                     );
                     svc.add_link(&link).unwrap();
                 }
@@ -2188,13 +2068,14 @@ mod tests {
         let svc_reader = svc.clone();
 
         let writer = std::thread::spawn(move || {
+            let signer = TestSigner::generate();
             for i in 0..200 {
                 let link = make_link_with_ts(
+                    &signer,
                     "ad4m://src",
                     "ad4m://pred",
                     &format!("ad4m://tgt_{}", i),
                     &format!("2024-01-01T00:{:02}:{:02}Z", i / 60, i % 60),
-                    "did:key:z6Mktest",
                 );
                 svc_writer.add_link(&link).unwrap();
             }
@@ -2216,40 +2097,39 @@ mod tests {
     #[test]
     fn test_concurrent_removes_no_corruption() {
         let svc = Arc::new(new_service());
-        // Add 200 links: 100 "keep" and 100 "remove"
+        let signer = TestSigner::generate();
+        // Pre-generate all links so the same author+timestamp is used for both
+        // add and remove (the reifier IRI hashes author + s/p/o + timestamp).
+        let mut remove_links: Vec<LinkExpression> = Vec::new();
         for i in 0..100 {
             svc.add_link(&make_link_with_ts(
+                &signer,
                 "ad4m://keep",
                 "ad4m://pred",
                 &format!("ad4m://tgt_{}", i),
-                &format!("2024-01-01T00:{:02}:00Z", i),
-                "did:key:z6Mktest",
+                &format!("2024-01-01T00:{:02}:{:02}Z", i / 60, i % 60),
             ))
             .unwrap();
-            svc.add_link(&make_link_with_ts(
+            let remove = make_link_with_ts(
+                &signer,
                 "ad4m://remove",
                 "ad4m://pred",
                 &format!("ad4m://tgt_{}", i),
-                &format!("2024-01-01T01:{:02}:00Z", i),
-                "did:key:z6Mktest",
-            ))
-            .unwrap();
+                &format!("2024-01-01T01:{:02}:{:02}Z", i / 60, i % 60),
+            );
+            svc.add_link(&remove).unwrap();
+            remove_links.push(remove);
         }
 
         // Remove the "remove" links in parallel from 5 threads
+        let remove_links = Arc::new(remove_links);
         let mut handles = vec![];
         for chunk_start in (0..100).step_by(20) {
             let svc = svc.clone();
+            let remove_links = remove_links.clone();
             handles.push(std::thread::spawn(move || {
                 for i in chunk_start..chunk_start + 20 {
-                    let link = make_link_with_ts(
-                        "ad4m://remove",
-                        "ad4m://pred",
-                        &format!("ad4m://tgt_{}", i),
-                        &format!("2024-01-01T01:{:02}:00Z", i),
-                        "did:key:z6Mktest",
-                    );
-                    svc.remove_link(&link).unwrap();
+                    svc.remove_link(&remove_links[i]).unwrap();
                 }
             }));
         }
@@ -2271,8 +2151,9 @@ mod tests {
 
     #[test]
     fn test_inmemory_store_for_tests() {
+        let signer = TestSigner::generate();
         let svc = SparqlStore::new(None).unwrap();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t"))
             .unwrap();
         assert!(svc.has_data());
     }
@@ -2285,8 +2166,9 @@ mod tests {
 
     #[test]
     fn test_has_data_after_add() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t"))
             .unwrap();
         assert!(svc.has_data());
     }
@@ -2350,7 +2232,8 @@ mod tests {
 
     #[test]
     fn test_reifier_iri_is_deterministic() {
-        let link = make_link("ad4m://a", "ad4m://p", "ad4m://t");
+        let signer = TestSigner::generate();
+        let link = make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t");
         let iri1 = make_reifier_iri(&link);
         let iri2 = make_reifier_iri(&link);
         assert_eq!(iri1, iri2, "Same link data should produce same reifier IRI");
@@ -2358,19 +2241,20 @@ mod tests {
 
     #[test]
     fn test_reifier_iri_differs_for_different_timestamps() {
+        let signer = TestSigner::generate();
         let link1 = make_link_with_ts(
+            &signer,
             "ad4m://a",
             "ad4m://p",
             "ad4m://t",
             "2024-01-01T00:00:00Z",
-            "did:key:z6Mk1",
         );
         let link2 = make_link_with_ts(
+            &signer,
             "ad4m://a",
             "ad4m://p",
             "ad4m://t",
             "2024-01-02T00:00:00Z",
-            "did:key:z6Mk1",
         );
         let iri1 = make_reifier_iri(&link1);
         let iri2 = make_reifier_iri(&link2);
@@ -2384,9 +2268,15 @@ mod tests {
 
     #[test]
     fn test_direct_query_finds_triples() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://src", "ad4m://pred", "ad4m://tgt"))
-            .unwrap();
+        svc.add_link(&make_link(
+            &signer,
+            "ad4m://src",
+            "ad4m://pred",
+            "ad4m://tgt",
+        ))
+        .unwrap();
 
         // Direct query should find the triple without GRAPH wrapper
         let result = svc.query(
@@ -2401,6 +2291,7 @@ mod tests {
 
     #[test]
     fn test_persistent_store_survives_drop() {
+        let signer = TestSigner::generate();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
 
@@ -2408,7 +2299,12 @@ mod tests {
         {
             let store = SparqlStore::new(Some(path)).unwrap();
             store
-                .add_link(&make_link("ad4m://src", "ad4m://pred", "ad4m://tgt"))
+                .add_link(&make_link(
+                    &signer,
+                    "ad4m://src",
+                    "ad4m://pred",
+                    "ad4m://tgt",
+                ))
                 .unwrap();
             assert!(store.has_data());
         }
@@ -2430,10 +2326,16 @@ mod tests {
 
     #[test]
     fn test_inmemory_store_loses_data_on_drop() {
+        let signer = TestSigner::generate();
         {
             let store = SparqlStore::new(None).unwrap();
             store
-                .add_link(&make_link("ad4m://src", "ad4m://pred", "ad4m://tgt"))
+                .add_link(&make_link(
+                    &signer,
+                    "ad4m://src",
+                    "ad4m://pred",
+                    "ad4m://tgt",
+                ))
                 .unwrap();
             assert!(store.has_data());
         }
@@ -2447,6 +2349,7 @@ mod tests {
 
     #[test]
     fn test_has_data_skips_rebuild_for_persistent_store() {
+        let signer = TestSigner::generate();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().to_str().unwrap();
 
@@ -2454,7 +2357,7 @@ mod tests {
             let store = SparqlStore::new(Some(path)).unwrap();
             assert!(!store.has_data());
             store
-                .add_link(&make_link("ad4m://a", "ad4m://b", "ad4m://c"))
+                .add_link(&make_link(&signer, "ad4m://a", "ad4m://b", "ad4m://c"))
                 .unwrap();
             assert!(store.has_data());
         }
@@ -2469,10 +2372,11 @@ mod tests {
 
     #[test]
     fn query_links_by_source() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..50 {
             let src = format!("ad4m://source{}", i);
-            let link = make_link(&src, "ad4m://pred", "ad4m://target");
+            let link = make_link(&signer, &src, "ad4m://pred", "ad4m://target");
             svc.add_link(&link).unwrap();
         }
         let results = svc
@@ -2484,11 +2388,12 @@ mod tests {
 
     #[test]
     fn query_links_by_predicate() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..20 {
             let pred = format!("ad4m://pred{}", i % 4);
             let src = format!("ad4m://src{}", i);
-            let link = make_link(&src, &pred, "ad4m://tgt");
+            let link = make_link(&signer, &src, &pred, "ad4m://tgt");
             svc.add_link(&link).unwrap();
         }
         let results = svc
@@ -2502,11 +2407,12 @@ mod tests {
 
     #[test]
     fn query_links_by_target() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..10 {
             let tgt = format!("ad4m://tgt{}", i % 3);
             let src = format!("ad4m://src{}", i);
-            let link = make_link(&src, "ad4m://pred", &tgt);
+            let link = make_link(&signer, &src, "ad4m://pred", &tgt);
             svc.add_link(&link).unwrap();
         }
         let results = svc
@@ -2520,6 +2426,7 @@ mod tests {
 
     #[test]
     fn query_links_date_range() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         let timestamps = [
             "2024-01-10T00:00:00.000Z",
@@ -2529,7 +2436,7 @@ mod tests {
         ];
         for (i, ts) in timestamps.iter().enumerate() {
             let src = format!("ad4m://src{}", i);
-            let link = make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", ts, "did:key:z6Mktest");
+            let link = make_link_with_ts(&signer, &src, "ad4m://pred", "ad4m://tgt", ts);
             svc.add_link(&link).unwrap();
         }
         let results = svc
@@ -2547,10 +2454,11 @@ mod tests {
 
     #[test]
     fn query_links_with_limit() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..20 {
             let src = format!("ad4m://src{}", i);
-            let link = make_link(&src, "ad4m://pred", "ad4m://tgt");
+            let link = make_link(&signer, &src, "ad4m://pred", "ad4m://tgt");
             svc.add_link(&link).unwrap();
         }
         let results = svc
@@ -2561,10 +2469,11 @@ mod tests {
 
     #[test]
     fn query_links_with_limit_zero_returns_empty() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..5 {
             let src = format!("ad4m://src{}", i);
-            svc.add_link(&make_link(&src, "ad4m://pred", "ad4m://tgt"))
+            svc.add_link(&make_link(&signer, &src, "ad4m://pred", "ad4m://tgt"))
                 .unwrap();
         }
         // The closure-based collector pushes a link before checking the limit,
@@ -2582,13 +2491,13 @@ mod tests {
 
     #[test]
     fn query_links_top_n_ascending_returns_oldest() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         // 10 links with timestamps spaced one day apart, ts9 newest.
         for i in 0..10 {
             let ts = format!("2024-01-{:02}T00:00:00.000Z", i + 1);
             let src = format!("ad4m://src{}", i);
-            let link =
-                make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", &ts, "did:key:z6Mktest");
+            let link = make_link_with_ts(&signer, &src, "ad4m://pred", "ad4m://tgt", &ts);
             svc.add_link(&link).unwrap();
         }
         // Top 3 ascending = the 3 oldest, sorted oldest→newest.
@@ -2603,12 +2512,12 @@ mod tests {
 
     #[test]
     fn query_links_top_n_descending_returns_newest() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..10 {
             let ts = format!("2024-01-{:02}T00:00:00.000Z", i + 1);
             let src = format!("ad4m://src{}", i);
-            let link =
-                make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", &ts, "did:key:z6Mktest");
+            let link = make_link_with_ts(&signer, &src, "ad4m://pred", "ad4m://tgt", &ts);
             svc.add_link(&link).unwrap();
         }
         // Top 3 descending = the 3 newest, sorted newest→oldest.
@@ -2623,12 +2532,12 @@ mod tests {
 
     #[test]
     fn query_links_top_n_limit_exceeds_results() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..3 {
             let ts = format!("2024-01-{:02}T00:00:00.000Z", i + 1);
             let src = format!("ad4m://src{}", i);
-            let link =
-                make_link_with_ts(&src, "ad4m://pred", "ad4m://tgt", &ts, "did:key:z6Mktest");
+            let link = make_link_with_ts(&signer, &src, "ad4m://pred", "ad4m://tgt", &ts);
             svc.add_link(&link).unwrap();
         }
         // Asking for 100 but only 3 exist — should return all 3 sorted.
@@ -2642,8 +2551,9 @@ mod tests {
 
     #[test]
     fn query_links_top_n_limit_zero_returns_empty() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://a", "ad4m://p", "ad4m://t"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://p", "ad4m://t"))
             .unwrap();
         let results = svc
             .query_links_top_n_by_timestamp(None, None, None, None, None, 0, false)
@@ -2653,14 +2563,15 @@ mod tests {
 
     #[test]
     fn query_links_combined_filters() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://a", "ad4m://likes", "ad4m://b"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://likes", "ad4m://b"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://a", "ad4m://knows", "ad4m://c"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://knows", "ad4m://c"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://b", "ad4m://likes", "ad4m://c"))
+        svc.add_link(&make_link(&signer, "ad4m://b", "ad4m://likes", "ad4m://c"))
             .unwrap();
-        svc.add_link(&make_link("ad4m://a", "ad4m://likes", "ad4m://c"))
+        svc.add_link(&make_link(&signer, "ad4m://a", "ad4m://likes", "ad4m://c"))
             .unwrap();
 
         let results = svc
@@ -2702,10 +2613,11 @@ mod tests {
 
     #[test]
     fn query_links_no_filters_returns_all() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..10 {
             let src = format!("ad4m://src{}", i);
-            svc.add_link(&make_link(&src, "ad4m://pred", "ad4m://tgt"))
+            svc.add_link(&make_link(&signer, &src, "ad4m://pred", "ad4m://tgt"))
                 .unwrap();
         }
         let results = svc.query_links(None, None, None, None, None, None).unwrap();
@@ -2714,14 +2626,17 @@ mod tests {
 
     #[test]
     fn test_query_links_skips_literal_targets() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         svc.add_link(&make_link(
+            &signer,
             "ad4m://src",
             "ad4m://pred",
             "ad4m://normal_target",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "ad4m://src",
             "ad4m://pred",
             "literal:string:hello",
@@ -2749,9 +2664,11 @@ mod tests {
 
     #[test]
     fn test_query_links_same_source_many_predicates() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         for i in 0..100 {
             svc.add_link(&make_link(
+                &signer,
                 "ad4m://src",
                 &format!("ad4m://pred_{}", i),
                 &format!("ad4m://target_{}", i),
@@ -2780,12 +2697,24 @@ mod tests {
 
     #[test]
     fn test_query_links_unicode_roundtrip() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        svc.add_link(&make_link("ad4m://héllo", "ad4m://prédicat", "ad4m://目标"))
-            .unwrap();
-        svc.add_link(&make_link("ad4m://emoji🎉", "ad4m://pred", "ad4m://target"))
-            .unwrap();
         svc.add_link(&make_link(
+            &signer,
+            "ad4m://héllo",
+            "ad4m://prédicat",
+            "ad4m://目标",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            &signer,
+            "ad4m://emoji🎉",
+            "ad4m://pred",
+            "ad4m://target",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            &signer,
             "ad4m://中文源",
             "ad4m://日本語述語",
             "ad4m://한국어대상",
@@ -2816,14 +2745,15 @@ mod tests {
 
     #[test]
     fn test_query_links_date_range_exact_boundary() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         let exact_ts = "2024-06-15T12:00:00.000Z";
         svc.add_link(&make_link_with_ts(
+            &signer,
             "ad4m://s",
             "ad4m://p",
             "ad4m://t1",
             exact_ts,
-            "did:key:z6Mk1",
         ))
         .unwrap();
 
@@ -2851,81 +2781,299 @@ mod tests {
         assert_eq!(results.len(), 1, "exact from+until should include the link");
     }
 
-    // ── Migration tests ──
+    // ── proof.valid is a derived boolean, never "unevaluated" ──
+    //
+    // `proof.valid` is a read view over the signature. The store's contract is
+    // that `proofValid` is always present and always "true" or "false", and
+    // that the value is always one a signature check produced — either the
+    // caller's, or one the store derives when the caller left the field empty.
+    //
+    // Each test below names the mutation that turns it red. Every one of those
+    // mutations was applied and confirmed red before this landed.
 
-    #[test]
-    fn test_migration_version_default_zero() {
-        let svc = new_service();
-        assert_eq!(svc.migration_version(), 0);
+    /// Build a link whose signature genuinely verifies, with the verdict left
+    /// uncomputed — the shape `migrate_links_from_rusqlite_to_sparql` used to
+    /// hand the store.
+    fn signed_link_without_verdict(signer: &TestSigner, source: &str) -> LinkExpression {
+        let signed = signer.sign(
+            Link {
+                source: source.to_string(),
+                predicate: Some("ad4m://pred".to_string()),
+                target: "ad4m://tgt".to_string(),
+            }
+            .normalize(),
+        );
+        LinkExpression {
+            author: signed.author,
+            timestamp: signed.timestamp,
+            data: signed.data,
+            proof: signed.proof,
+            status: Some(LinkStatus::Shared),
+        }
     }
 
-    #[test]
-    fn test_migration_version_set_and_get() {
-        let svc = new_service();
-        svc.set_migration_version(2).unwrap();
-        assert_eq!(svc.migration_version(), 2);
+    /// Count the `proofValid` quads on a link's reifier. A stale verdict left
+    /// behind by a re-insert shows up here as a second quad.
+    fn proof_valid_quads(svc: &SparqlStore, link: &LinkExpression) -> Vec<String> {
+        let reifier = make_reifier_iri(link);
+        svc.store
+            .quads_for_pattern(
+                Some(reifier.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(ONT_PROOF_VALID)),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .map(|q| match q.unwrap().object {
+                Term::Literal(l) => l.value().to_string(),
+                other => panic!("proofValid must be a literal, got {other:?}"),
+            })
+            .collect()
     }
 
+    /// A caller that supplies no verdict gets one computed from the signature,
+    /// not the absent annotation the tri-state used to write.
+    ///
+    /// Turns red on: deleting `.unwrap_or_else(|| link.compute_proof_valid())`
+    /// in `insert_link_triples` and writing `proof.valid.unwrap_or(false)`
+    /// instead — the pre-#1064 write. The link reads back `Some(false)`.
     #[test]
-    fn test_migration_no_named_graphs_sets_version() {
+    fn store_derives_the_verdict_when_the_caller_supplies_none() {
         let svc = new_service();
-        // No old data, migration should just set version
-        let count = svc.migrate_named_graphs_to_reifiers().unwrap();
-        assert_eq!(count, 0);
-        assert_eq!(svc.migration_version(), 2);
+        let signer = TestSigner::generate();
+        let link = signed_link_without_verdict(&signer, "ad4m://derive-src");
+        svc.add_link(&link).unwrap();
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].proof.valid,
+            Some(true),
+            "a genuinely valid signature with no caller verdict must be \
+             verified by the store, not recorded as unevaluated or false — got \
+             {:?}",
+            links[0].proof.valid
+        );
+        assert_eq!(links[0].proof.invalid, Some(false));
     }
 
+    /// The derivation is a real signature check, not a constant `true`.
+    ///
+    /// Turns red on: making the derivation a constant —
+    /// `.unwrap_or_else(|| true)` in `insert_link_triples`. That mutation
+    /// leaves `caller_supplied_false_is_stored_as_false` green, so only this
+    /// test pins that the store actually checks the signature.
     #[test]
-    fn test_migration_skips_if_already_done() {
+    fn store_derives_false_for_a_broken_signature() {
         let svc = new_service();
-        svc.set_migration_version(2).unwrap();
-        let count = svc.migrate_named_graphs_to_reifiers().unwrap();
-        assert_eq!(count, 0);
+        let signer = TestSigner::generate();
+        let mut link = signed_link_without_verdict(&signer, "ad4m://derive-bad");
+        // Same length, still valid hex, wrong bytes: this reaches the crypto
+        // and fails there, rather than erroring out of `hex::decode`.
+        link.proof.signature = link.proof.signature.replace('a', "b");
+        svc.add_link(&link).unwrap();
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].proof.valid,
+            Some(false),
+            "a tampered signature must derive as false"
+        );
+        assert_eq!(links[0].proof.invalid, Some(true));
+    }
+
+    /// A malformed proof envelope — the case where `verify` returns `Err`
+    /// rather than `Ok(false)` — is a failed verification, not a panic and not
+    /// a third state. `!!!` is not hex, so `hex::decode` errors.
+    ///
+    /// Turns red on: changing `verify_or_false` to return `true` on `Err`.
+    /// It also catches a `.unwrap()`/`.expect()` there, as a panic.
+    #[test]
+    fn store_derives_false_when_verification_errors() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        let mut link = signed_link_without_verdict(&signer, "ad4m://derive-malformed");
+        link.proof.signature = "!!!not-hex!!!".to_string();
+        svc.add_link(&link).unwrap();
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].proof.valid,
+            Some(false),
+            "a proof that cannot even be parsed has not verified"
+        );
+    }
+
+    /// Re-inserting a link whose signature changed must overwrite the stored verdict.
+    ///
+    /// `make_reifier_iri` hashes author, source, predicate, target and
+    /// timestamp — not the proof — so the second insert lands on the same
+    /// reifier. Before the delete-before-insert fix the old `proofValid` quad
+    /// stayed: a link once stored "true" kept reading back verified, and
+    /// `query_links` returned it twice because its `OPTIONAL` matched both
+    /// quads.
+    ///
+    /// Turns red on: removing the stale collect-and-remove loop from
+    /// `insert_link_triples`. Both assertions fail — two quads, and
+    /// `get_all_links` yields the stale `Some(true)`.
+    #[test]
+    fn reinserting_a_link_overwrites_a_stale_verdict() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        let mut link = make_link(&signer, "ad4m://restale", "ad4m://pred", "ad4m://tgt");
+
+        // First insert: real signature → proofValid "true"
+        svc.add_link(&link).unwrap();
+
+        // Corrupt the signature so the second insert computes "false".
+        // make_reifier_iri hashes author/source/predicate/target/timestamp, NOT
+        // the signature, so both inserts land on the same reifier.
+        link.proof.signature = "deadbeef".to_string();
+        svc.add_link(&link).unwrap();
+
+        assert_eq!(
+            proof_valid_quads(&svc, &link),
+            vec!["false".to_string()],
+            "a re-insert must replace the verdict quad, not add a second one"
+        );
+
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(
+            links.len(),
+            1,
+            "a duplicated verdict quad makes the OPTIONAL match twice and the \
+             link come back twice"
+        );
+        assert_eq!(
+            links[0].proof.valid,
+            Some(false),
+            "the re-inserted verdict must win over the stored one"
+        );
+    }
+
+    /// Every write carries the annotation, so the two read paths never have to
+    /// answer "nobody checked". Pins both, because each decodes independently.
+    ///
+    /// Turns red on: dropping the `(ONT_PROOF_VALID, &valid_str)` entry from
+    /// the `annotations` vec in `insert_link_triples` — the state the old
+    /// `if let Some(valid_str) = …` guard produced for a caller-`None` link.
+    #[test]
+    fn stored_verdict_is_always_present_and_boolean() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        let link = signed_link_without_verdict(&signer, "ad4m://always-present");
+        svc.add_link(&link).unwrap();
+
+        assert_eq!(
+            proof_valid_quads(&svc, &link).len(),
+            1,
+            "exactly one proofValid quad must be stored for every link"
+        );
+
+        for from_get_all in svc.get_all_links().unwrap() {
+            assert!(
+                from_get_all.proof.valid.is_some(),
+                "get_all_links must never report an unevaluated verdict"
+            );
+        }
+        for from_query in svc
+            .query_links(Some("ad4m://always-present"), None, None, None, None, None)
+            .unwrap()
+        {
+            assert!(
+                from_query.proof.valid.is_some(),
+                "query_links must never report an unevaluated verdict"
+            );
+        }
+    }
+
+    /// A negative verdict the caller computed is still recorded as one — the
+    /// control that stops "always store true" from passing the tests above.
+    ///
+    /// Turns red on: hard-coding `"true"` as the `ONT_PROOF_VALID` value.
+    #[test]
+    fn invalid_signature_is_stored_as_false() {
+        let signer = TestSigner::generate();
+        let svc = new_service();
+        // Corrupt the signature so compute_proof_valid() returns false.
+        let mut link = make_link(&signer, "ad4m://neg", "ad4m://pred", "ad4m://tgt");
+        link.proof.signature = "deadbeef".to_string();
+        svc.add_link(&link).unwrap();
+
+        let from_get_all = svc.get_all_links().unwrap();
+        assert_eq!(from_get_all.len(), 1);
+        assert_eq!(from_get_all[0].proof.valid, Some(false));
+
+        let from_query = svc
+            .query_links(Some("ad4m://neg"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(from_query.len(), 1);
+        assert_eq!(from_query[0].proof.valid, Some(false));
+    }
+
+    /// Data this store did not write — hand-seeded rows, a foreign dump — can
+    /// still arrive with no `proofValid` quad. That decodes fail-closed, the
+    /// way every consumer of the field reads an unverified link, and never as
+    /// an "unevaluated" third state.
+    ///
+    /// Turns red on: `decode_proof_valid(s) -> bool { s != "false" }`, the
+    /// fail-open reading, under which an absent annotation reports verified.
+    #[test]
+    fn absent_annotation_decodes_fail_closed() {
+        assert!(!decode_proof_valid(""), "absent must read as not verified");
+        assert!(!decode_proof_valid("false"));
+        assert!(decode_proof_valid("true"));
+        assert!(
+            !decode_proof_valid("TRUE"),
+            "only the exact literal this store writes counts as verified"
+        );
     }
 
     /// v4 migration converts every `literal:*:` IRI-shaped object into the
     /// matching typed RDF literal and bumps the version marker.
     #[test]
     fn test_multi_user_sync_wildcard_query() {
+        let signer = TestSigner::generate();
         let svc = new_service();
 
         // Setup link (created by node 1 user 1 during neighbourhood creation)
         let setup = make_link_with_ts(
+            &signer,
             "test://setup",
             "test://init",
             "test://neighbourhood",
             "2024-01-15T10:00:00.000Z",
-            "did:key:z6Mknode1user1",
         );
 
         // 4 user links (simulating the integration test)
         let n1u1 = make_link_with_ts(
+            &signer,
             "test://node1user1",
             "test://created",
             "test://link1",
             "2024-01-15T10:00:01.000Z",
-            "did:key:z6Mknode1user1",
         );
         let n1u2 = make_link_with_ts(
+            &signer,
             "test://node1user2",
             "test://created",
             "test://link2",
             "2024-01-15T10:00:02.000Z",
-            "did:key:z6Mknode1user2",
         );
         let n2u1 = make_link_with_ts(
+            &signer,
             "test://node2user1",
             "test://created",
             "test://link3",
             "2024-01-15T10:00:03.000Z",
-            "did:key:z6Mknode2user1",
         );
         let n2u2 = make_link_with_ts(
+            &signer,
             "test://node2user2",
             "test://created",
             "test://link4",
             "2024-01-15T10:00:04.000Z",
-            "did:key:z6Mknode2user2",
         );
 
         // Node 1 adds its local links
@@ -2974,16 +3122,17 @@ mod tests {
     /// Same scenario but also test get_all_links() (SPARQL-based query path)
     #[test]
     fn test_multi_user_sync_get_all_links() {
+        let signer = TestSigner::generate();
         let svc = new_service();
 
-        let links: Vec<DecoratedLinkExpression> = (0..5)
+        let links: Vec<LinkExpression> = (0..5)
             .map(|i| {
                 make_link_with_ts(
+                    &signer,
                     &format!("test://source{}", i),
                     "test://pred",
                     &format!("test://target{}", i),
                     &format!("2024-01-15T10:00:0{}.000Z", i),
-                    &format!("did:key:z6Mkuser{}", i),
                 )
             })
             .collect();
@@ -3014,13 +3163,14 @@ mod tests {
     /// cause duplicates or data corruption.
     #[test]
     fn test_idempotent_sync_insert() {
+        let signer = TestSigner::generate();
         let svc = new_service();
         let link = make_link_with_ts(
+            &signer,
             "test://src",
             "test://pred",
             "test://tgt",
             "2024-01-15T10:00:00.000Z",
-            "did:key:z6Mkauthor",
         );
 
         // Add twice (simulates: local add + sync receives same link back)
@@ -3050,8 +3200,10 @@ mod tests {
         is_conversation: bool,
         message_count: usize,
     ) -> (String, String, Vec<String>) {
+        let signer = TestSigner::generate();
         // Channel entry_type flag
         svc.add_link(&make_link(
+            &signer,
             channel_id,
             "flux://entry_type",
             "flux://has_channel",
@@ -3061,6 +3213,7 @@ mod tests {
         // isConversation property
         if is_conversation {
             svc.add_link(&make_link(
+                &signer,
                 channel_id,
                 "flux://channel_is_conversation",
                 "true",
@@ -3070,9 +3223,15 @@ mod tests {
 
         // Conversation entity as child of channel
         let conv_id = format!("{}-conv", channel_id);
-        svc.add_link(&make_link(channel_id, "ad4m://has_child", &conv_id))
-            .unwrap();
         svc.add_link(&make_link(
+            &signer,
+            channel_id,
+            "ad4m://has_child",
+            &conv_id,
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            &signer,
             &conv_id,
             "flux://entry_type",
             "flux://conversation",
@@ -3080,28 +3239,35 @@ mod tests {
         .unwrap();
 
         // Channel creation link (parent -> channel)
-        svc.add_link(&make_link("ad4m://self", "flux://has_channel", channel_id))
-            .unwrap();
+        svc.add_link(&make_link(
+            &signer,
+            "ad4m://self",
+            "flux://has_channel",
+            channel_id,
+        ))
+        .unwrap();
 
         // Messages as children of channel
         let mut msg_ids = Vec::new();
         for i in 0..message_count {
             let msg_id = format!("{}-msg-{}", channel_id, i);
             let link = make_link_with_ts(
+                &signer,
                 channel_id,
                 "ad4m://has_child",
                 &msg_id,
                 &format!("2026-01-15T10:{:02}:00.000Z", i),
-                "did:key:alice",
             );
             svc.add_link(&link).unwrap();
             svc.add_link(&make_link(
+                &signer,
                 &msg_id,
                 "flux://entry_type",
                 "flux://has_message",
             ))
             .unwrap();
             svc.add_link(&make_link(
+                &signer,
                 &msg_id,
                 "flux://body",
                 &format!("literal:string:Message%20{}", i),
@@ -3231,15 +3397,18 @@ mod tests {
 
     #[test]
     fn test_recent_conversations_boolean_literal_prefix() {
+        let signer = TestSigner::generate();
         // Tests that isConversation stored as "literal:boolean:true" also works
         let svc = new_service();
         svc.add_link(&make_link(
+            &signer,
             "flux://ch-lit",
             "flux://entry_type",
             "flux://has_channel",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "flux://ch-lit",
             "flux://channel_is_conversation",
             "literal:boolean:true",
@@ -3309,6 +3478,7 @@ mod tests {
 
     #[test]
     fn test_unprocessed_items_sparql_basic() {
+        let signer = TestSigner::generate();
         // Tests the exact SPARQL queries from Channel.unprocessedItems()
         let svc = new_service();
         let (ch_id, _, msg_ids) = setup_conversation_channel(&svc, "flux://ch-unproc", true, 5);
@@ -3335,14 +3505,15 @@ mod tests {
         // Mark some as processed (add to subgroup)
         let sg_id = "flux://ch-unproc-sg-1";
         svc.add_link(&make_link(
+            &signer,
             sg_id,
             "flux://entry_type",
             "flux://conversation_subgroup",
         ))
         .unwrap();
-        svc.add_link(&make_link(sg_id, "flux://has_item", &msg_ids[0]))
+        svc.add_link(&make_link(&signer, sg_id, "flux://has_item", &msg_ids[0]))
             .unwrap();
-        svc.add_link(&make_link(sg_id, "flux://has_item", &msg_ids[1]))
+        svc.add_link(&make_link(&signer, sg_id, "flux://has_item", &msg_ids[1]))
             .unwrap();
 
         // Query 2: processed items
@@ -3416,25 +3587,37 @@ mod tests {
 
     #[test]
     fn test_recent_conversations_multiple_channels_ordering() {
+        let signer = TestSigner::generate();
         // Two conversation channels with different last-activity times.
         // The one with more recent messages should come first.
         let svc = new_service();
 
         // Channel 1: older messages
         let ch1 = "flux://ch-old";
-        svc.add_link(&make_link(ch1, "flux://entry_type", "flux://has_channel"))
-            .unwrap();
-        svc.add_link(&make_link(ch1, "flux://channel_is_conversation", "true"))
-            .unwrap();
+        svc.add_link(&make_link(
+            &signer,
+            ch1,
+            "flux://entry_type",
+            "flux://has_channel",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            &signer,
+            ch1,
+            "flux://channel_is_conversation",
+            "true",
+        ))
+        .unwrap();
         let msg1 = make_link_with_ts(
+            &signer,
             ch1,
             "ad4m://has_child",
             "flux://ch-old-msg",
             "2026-01-01T01:00:00.000Z",
-            "did:key:alice",
         );
         svc.add_link(&msg1).unwrap();
         svc.add_link(&make_link(
+            &signer,
             "flux://ch-old-msg",
             "flux://entry_type",
             "flux://has_message",
@@ -3443,19 +3626,30 @@ mod tests {
 
         // Channel 2: newer messages
         let ch2 = "flux://ch-new";
-        svc.add_link(&make_link(ch2, "flux://entry_type", "flux://has_channel"))
-            .unwrap();
-        svc.add_link(&make_link(ch2, "flux://channel_is_conversation", "true"))
-            .unwrap();
+        svc.add_link(&make_link(
+            &signer,
+            ch2,
+            "flux://entry_type",
+            "flux://has_channel",
+        ))
+        .unwrap();
+        svc.add_link(&make_link(
+            &signer,
+            ch2,
+            "flux://channel_is_conversation",
+            "true",
+        ))
+        .unwrap();
         let msg2 = make_link_with_ts(
+            &signer,
             ch2,
             "ad4m://has_child",
             "flux://ch-new-msg",
             "2026-01-15T10:00:00.000Z",
-            "did:key:bob",
         );
         svc.add_link(&msg2).unwrap();
         svc.add_link(&make_link(
+            &signer,
             "flux://ch-new-msg",
             "flux://entry_type",
             "flux://has_message",
@@ -3510,10 +3704,11 @@ mod tests {
 
     #[test]
     fn test_conversation_has_child_subscription_direct_triple() {
+        let signer = TestSigner::generate();
         // Verify that `<channel> <ad4m://has_child> <msg>` exists as a direct
         // triple (required for SPARQL subscription matching)
         let svc = new_service();
-        let link = make_link("flux://ch-sub", "ad4m://has_child", "flux://msg-1");
+        let link = make_link(&signer, "flux://ch-sub", "ad4m://has_child", "flux://msg-1");
         svc.add_link(&link).unwrap();
 
         let query = r#"SELECT ?id WHERE {
@@ -3527,11 +3722,13 @@ mod tests {
 
     #[test]
     fn test_literal_string_target_is_typed_literal_in_store() {
+        let signer = TestSigner::generate();
         // `literal:string:X` wire targets land as typed xsd:string literals,
         // so `STR(?raw)` yields the decoded value directly — no custom
         // function needed.
         let svc = new_service();
         svc.add_link(&make_link(
+            &signer,
             "flux://test",
             "flux://prop",
             "literal:string:hello",
@@ -3579,11 +3776,12 @@ mod tests {
 
     #[test]
     fn test_bare_true_target_stays_as_named_node() {
+        let signer = TestSigner::generate();
         // A bare `"true"` target isn't a `literal:*:` wire value, so it stays
         // as a NamedNode <true> in the store. `STR(?val)` returns the IRI
         // text, so the same FILTER pattern still works.
         let svc = new_service();
-        svc.add_link(&make_link("flux://item", "flux://flag", "true"))
+        svc.add_link(&make_link(&signer, "flux://item", "flux://flag", "true"))
             .unwrap();
 
         let query = r#"SELECT ?s WHERE {
@@ -3602,26 +3800,27 @@ mod tests {
 
     #[test]
     fn test_group_by_with_reifier_and_optional() {
+        let signer = TestSigner::generate();
         // Isolated test: GROUP BY + OPTIONAL with reifier pattern.
         // This is the specific combination used in recentConversations.
         let svc = new_service();
 
         // Add two items to one group
         let link1 = make_link_with_ts(
+            &signer,
             "flux://group1",
             "flux://has_item",
             "flux://item1",
             "2026-01-15T10:00:00.000Z",
-            "did:key:alice",
         );
         svc.add_link(&link1).unwrap();
 
         let link2 = make_link_with_ts(
+            &signer,
             "flux://group1",
             "flux://has_item",
             "flux://item2",
             "2026-01-15T11:00:00.000Z",
-            "did:key:bob",
         );
         svc.add_link(&link2).unwrap();
 
@@ -3658,8 +3857,9 @@ mod tests {
 
     #[tokio::test]
     async fn query_cancellable_returns_normally_when_not_cancelled() {
+        let signer = TestSigner::generate();
         let svc = new_service();
-        let link = make_link("ad4m://s", "ad4m://p", "ad4m://t");
+        let link = make_link(&signer, "ad4m://s", "ad4m://p", "ad4m://t");
         svc.add_link(&link).unwrap();
 
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -3690,6 +3890,7 @@ mod tests {
 
     #[tokio::test]
     async fn query_cancellable_biased_select_prefers_cancel_over_ready_handle() {
+        let signer = TestSigner::generate();
         // Honest framing (review nit, PR #855): this does NOT test true
         // mid-flight cancellation — we can't deterministically force the
         // SPARQL eval to be slow, so there's no way to land the cancel
@@ -3708,6 +3909,7 @@ mod tests {
         // Insert a handful of links so the query has actual work to do.
         for i in 0..50 {
             let link = make_link(
+                &signer,
                 &format!("ad4m://s{}", i),
                 "ad4m://p",
                 &format!("ad4m://t{}", i),
@@ -3731,6 +3933,7 @@ mod tests {
 
     #[test]
     fn test_remove_link_with_hydrated_json_target_round_trip() {
+        let signer = TestSigner::generate();
         // The realistic failure mode: a caller inserts with a hand-written
         // (whitespace-containing) JSON target, later reads it back via a
         // query — receiving the re-serialized, whitespace-compacted wire
@@ -3745,8 +3948,17 @@ mod tests {
         // `preserve_order` feature via a transitive dependency).
         let svc = new_service();
         let insert_target = "literal:json:{\"a\": 1, \"b\": 2}".to_string();
+        // Use a fixed timestamp for both insert and remove so both calls produce
+        // the same reifier IRI (reifier hashes author + s/p/o + timestamp).
+        let ts = "2024-01-15T10:00:00.000Z";
 
-        let link = make_link("ad4m://json_source", "ad4m://json_pred", &insert_target);
+        let link = make_link_with_ts(
+            &signer,
+            "ad4m://json_source",
+            "ad4m://json_pred",
+            &insert_target,
+            ts,
+        );
         svc.add_link(&link).unwrap();
 
         let before = svc.get_all_links().unwrap();
@@ -3768,7 +3980,13 @@ mod tests {
              otherwise this test isn't exercising the mismatch at all"
         );
 
-        let remove_link = make_link("ad4m://json_source", "ad4m://json_pred", &hydrated_target);
+        let remove_link = make_link_with_ts(
+            &signer,
+            "ad4m://json_source",
+            "ad4m://json_pred",
+            &hydrated_target,
+            ts,
+        );
         svc.remove_link(&remove_link).unwrap();
 
         let after = svc.get_all_links().unwrap();
@@ -3786,17 +4004,20 @@ mod tests {
 
     #[test]
     fn test_query_arbitrary_does_not_hydrate_coincidentally_named_variables() {
+        let signer = TestSigner::generate();
         // A caller-supplied query has no reason to expect a variable it
         // happens to name `?target` or `?t` to be silently re-encoded into
         // AD4M's internal literal:*: wire format.
         let svc = new_service();
         svc.add_link(&make_link(
+            &signer,
             "ad4m://msg1",
             "ad4m://ontology/author",
             "did:key:zAlice",
         ))
         .unwrap();
         svc.add_link(&make_link(
+            &signer,
             "ad4m://msg1",
             "flux://priority",
             "literal:number:5",

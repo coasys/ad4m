@@ -12,6 +12,11 @@ import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
+// FlowInstance.ts owns the flow-proposal result types so they sit next to the
+// `proposeTransition()` API they describe. `import type` keeps this out of the
+// runtime module graph (FlowInstance → PerspectiveProxy → PerspectiveClient
+// would otherwise be a cycle).
+import type { FlowFireOutcome, FlowProposeResult } from "./FlowInstance";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -393,6 +398,35 @@ export class PerspectiveClient {
         return this.#apiClient.call<boolean>(
             'perspective.rejectInterpretation', { uuid, base, property },
         )
+    }
+
+    async proposeFlowTransition(
+        uuid: string,
+        instanceUri: string,
+        toState: string,
+        rationale?: string,
+    ): Promise<FlowProposeResult> {
+        return this.#apiClient.call<FlowProposeResult>(
+            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale },
+        )
+    }
+
+    async acceptFlowProposal(uuid: string, proposalUri: string): Promise<FlowFireOutcome[]> {
+        return this.#apiClient.call<FlowFireOutcome[]>(
+            'perspective.acceptFlowProposal', { uuid, proposalUri },
+        )
+    }
+
+    /**
+     * Withdraw this agent's own links from a proposal. Resolves to how many
+     * were retracted — one for a withdrawn vote, more when retracting a
+     * proposal this agent opened.
+     */
+    async rejectFlowProposal(uuid: string, proposalUri: string): Promise<number> {
+        const result = await this.#apiClient.call<{ retractedLinks: number }>(
+            'perspective.rejectFlowProposal', { uuid, proposalUri },
+        )
+        return result.retractedLinks
     }
 
     /**

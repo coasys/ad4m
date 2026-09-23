@@ -1,5 +1,5 @@
 use super::{
-    apply_with_overlay, build_interpretation_input, class_label,
+    apply_with_overlay, build_interpretation_input, build_speaker_name_map, class_label,
     ensure_interpretation_task_for_model, existing_instance_context, existing_relation_links,
     identity_property, normalize_identity, parse_interpretation_output,
     plan_interpretation_ops_resolved, resolve_already_present_with_strategy, DedupStrategy,
@@ -666,7 +666,14 @@ pub async fn run_interpretation_with_strategy_and_model(
             flow_filter,
         )
         .await;
-        let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
+        let speaker_names = build_speaker_name_map(transcript);
+        let prompt = build_interpretation_input(
+            shapes,
+            transcript,
+            &existing_ctx,
+            &active_flows,
+            &speaker_names,
+        );
 
         let service = crate::ai_service::AIService::global_instance()
             .await
@@ -946,7 +953,7 @@ async fn run_flow_post_pass(
     let semantic_check = crate::perspectives::flow_semantic_check::AIServiceSemanticCheck {
         task_id: task_id.to_string(),
     };
-    crate::perspectives::flow_evaluator::run_engine_proposal_pass(
+    let minted = crate::perspectives::flow_evaluator::run_engine_proposal_pass(
         perspective,
         &subjects,
         context,
@@ -954,7 +961,31 @@ async fn run_flow_post_pass(
         Some(&semantic_check),
         flow_filter,
     )
-    .await
+    .await;
+
+    // Sweep straight after minting: with the default `{ n: 1 }` rule a freshly
+    // satisfied transition has already settled by the time the mint returns,
+    // and this is what records it — the cache write and the fired marks.
+    // Higher thresholds leave the proposal live for other agents' votes.
+    let recorded = crate::perspectives::flow_instance::pass::run_flow_consensus_pass(
+        perspective,
+        None,
+        context,
+        flow_filter,
+        None,
+    )
+    .await;
+    for outcome in &recorded {
+        log::info!(
+            "🔥 flow settled: {} {} → {} (by {:?})",
+            outcome.instance_uri,
+            outcome.from_state,
+            outcome.to_state,
+            outcome.voters
+        );
+    }
+
+    minted
 }
 
 /// Harness-dispatched interpretation pass — the tool-calling alternative to
@@ -1035,7 +1066,14 @@ pub async fn run_interpretation_with_harness_and_model(
         flow_filter,
     )
     .await;
-    let prompt = build_interpretation_input(shapes, transcript, &existing_ctx, &active_flows);
+    let speaker_names = build_speaker_name_map(transcript);
+    let prompt = build_interpretation_input(
+        shapes,
+        transcript,
+        &existing_ctx,
+        &active_flows,
+        &speaker_names,
+    );
 
     // Build per-class propose shapes from the perspective's SHACL classes,
     // filtered to the class-name set the caller passed as `shapes`. Any

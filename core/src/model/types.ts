@@ -64,10 +64,137 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
  * predicate to write.
  *
  * **Raw form** — explicit predicate string, no metadata lookup.
+ *
+ * **Traverse form** — bounded traversal from one or more anchors, for reading
+ * a tree rather than one node's children. Read-only: AutoProcessor's write
+ * scopes reject it, because it names no single parent to write under.
  */
 export type Scope =
   | { model: typeof Ad4mModel; id: string; field?: string }
-  | { id: string; predicate: string };
+  | { id: string; predicate: string }
+  | TraverseScope;
+
+/**
+ * Walk a predicate from several anchors at once, and optionally all the way
+ * down.
+ *
+ * This exists because a tree read one level at a time costs a round trip per
+ * level and — under a subscription — one subscription per *parent*. Asking for
+ * every anchor in one query makes both proportional to depth instead.
+ *
+ * The predicate is named the same two ways the other scopes name it: literally,
+ * or by the model and relation that own it. See {@link TraverseByPredicate} and
+ * {@link TraverseByModel}.
+ */
+export type TraverseScope = TraverseByPredicate | TraverseByModel;
+
+/** A traversal naming its predicate literally, as the Raw scope does. */
+export interface TraverseByPredicate extends TraverseOptions {
+  predicate: string;
+}
+
+/**
+ * A traversal naming its predicate through the model that declares it, as the
+ * Model scope does — `{ model: Post, field: 'comments' }` rather than
+ * `'test://has_comment'`.
+ *
+ * Without `field` the predicate is resolved by scanning for a relation on
+ * `model` whose target is the queried class, which is the same rule the Model
+ * scope uses and the same reason to pass `field` when a parent has more than
+ * one relation to the same child.
+ */
+export interface TraverseByModel extends TraverseOptions {
+  model: typeof Ad4mModel;
+  field?: string;
+}
+
+/** Everything a traversal says that is not how it names its predicate. */
+export interface TraverseOptions {
+  /** The anchors to walk from. A bare string is the single-anchor spelling. */
+  ids: string | string[];
+  /**
+   * Follow the predicate as far as it goes rather than one step.
+   *
+   * The result is a flat set of everything reachable, and it does **not**
+   * describe the shape it came from: SPARQL property paths bind no intermediate
+   * variables, so a row says that it is under the anchor and never where. To
+   * rebuild a tree, read the inverse relation (`@BelongsToOne`) alongside it and
+   * assemble from the parent each row reports.
+   *
+   * Excludes every named anchor, not just the one a given row was reached through — a caller
+   * naming two anchors where one sits below the other gets neither back, exactly as with `levels`.
+   * An anchor is where the read started, not something it found, and that holds in a cycle too.
+   *
+   * Refused alongside `levels`, which is the bounded form of the same walk.
+   */
+  transitive?: boolean;
+  /**
+   * `'out'` (default) matches `anchor --predicate--> result`; `'in'` matches
+   * `result --predicate--> anchor`, which is how to *search* among the things
+   * pointing at a node — ordered, filtered, limited. A reverse `include`
+   * answers the same question for rows already in hand, but cannot narrow them.
+   */
+  direction?: 'out' | 'in';
+  /**
+   * Keep at most this many results per anchor — "the top 5 replies under each
+   * of these 20 comments" in one query.
+   *
+   * Applied by the executor between selecting ids and hydrating them, because
+   * SPARQL has no per-group limit (no window functions, and sub-SELECTs are
+   * uncorrelated). The practical consequence is that the over-fetch is paid in
+   * ids, not records: a branch with 3,000 replies costs 3,000 strings and
+   * hydrates 5.
+   *
+   * Pair it with `order` — without one the "top" N is whatever the store
+   * happened to return first. A global `limit`/`offset` is applied to the
+   * sliced union afterwards, not before it.
+   *
+   * Refused alongside `levels`, which applies its own per-anchor limit at
+   * every depth.
+   */
+  limitPerAnchor?: number;
+  /**
+   * Walk the relation level by level, keeping this many results per anchor at each depth —
+   * `[10, 5, 3]` is "ten replies, five under each of those, three under each of *those*".
+   *
+   * The walk happens in the executor, which is the point of it. A caller can drive the same walk by
+   * asking for one level and using the ids as the next level's anchors, but each step is then a
+   * network round trip, and a UI that draws as each answer lands shows the tree assembling itself a
+   * level at a time. Inside the executor the levels are sequential queries against a local store
+   * with nothing serialised between them, and the records are hydrated once for the union — so
+   * three levels cost one request and one hydration rather than three of each.
+   *
+   * Results come back flat and breadth-first; read the inverse relation alongside to rebuild the
+   * tree, exactly as with `transitive`. The anchors are excluded from their own result, also as
+   * with `transitive` — a walk that reaches an anchor again, through a cycle or because one anchor
+   * was named below another, reports it at neither place.
+   *
+   * Each record appears once, under whichever anchor the ordering reaches first — a reply to two
+   * of the anchors is one reply, not two. It does not spend a place in the other anchors' breadth
+   * either: they fill theirs with replies of their own, so a breadth of five means five distinct
+   * records wherever five exist.
+   *
+   * A global `limit`/`offset` applies to that flat union once, after every level has been cut to
+   * its own breadth — not to each level.
+   *
+   * Combining this with `transitive` or `limitPerAnchor` is an **error**, not a preference the
+   * executor resolves: `transitive` is the unbounded form of the same walk, and `limitPerAnchor`
+   * has no place to act when the walk sets a per-anchor limit at every depth itself. (It is not a
+   * substitute either — with a single anchor at the top there is one group, so it caps the total
+   * rather than the breadth at each level.) Put the first level's breadth in `levels[0]`.
+   */
+  levels?: number[];
+}
+
+/**
+ * Whether this scope is a traversal rather than a single named parent.
+ *
+ * The other two forms carry `id`; this one carries `ids` and may name several,
+ * so anything reaching for one parent — every write path — has to ask first.
+ */
+export function isTraverseScope(scope: Scope): scope is TraverseScope {
+  return 'ids' in scope;
+}
 
 /**
  * Describes which relations to eager-load when querying.
@@ -117,6 +244,20 @@ export interface IncludeProjection {
   from: string;
   /** When true, attaches an integer count instead of a list. */
   count?: true;
+  /**
+   * Project over everything reachable through `from`, not just one step.
+   *
+   * `{ from: 'comments', count: true, transitive: true }` is the whole
+   * conversation under each row rather than its direct replies — which is what
+   * a reader takes "42 replies" on a collapsed branch to mean. The projection
+   * query is already grouped per parent and already asked of every row at once,
+   * so this adds no round trip.
+   *
+   * Cannot be combined with a filter on the link's author or timestamp: those
+   * read the reification of one link, and a path has none. Such a projection is
+   * skipped with a warning rather than silently answering a different question.
+   */
+  transitive?: boolean;
   /**
    * Bare class name of the projection target.  Set automatically by
    * `prepareModelQueryParams`; the executor resolves the target's shape
@@ -311,9 +452,9 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
  *  variants narrow inference into `IncludeExtras` (count → number, limit-1 → scalar). */
 export type TypedIncludeProjection<T extends Ad4mModel> = {
   [K in RelationKeysOf<T>]:
-    | { from: K; count: true }
-    | { from: K; limit: 1; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> }
-    | { from: K; limit?: number; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> };
+    | { from: K; count: true; transitive?: boolean }
+    | { from: K; limit: 1; transitive?: boolean; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> }
+    | { from: K; limit?: number; transitive?: boolean; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> };
 }[RelationKeysOf<T>];
 
 type StrictTypedIncludeMap<T extends Ad4mModel> =
