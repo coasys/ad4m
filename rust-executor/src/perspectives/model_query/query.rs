@@ -47,14 +47,13 @@ fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDire
 /// pair the anchor reaches through links the viewer may see.
 ///
 /// A `+` path cannot filter its hops, so the builder cannot express this. It
-/// is walked here instead, one hop per query over the whole frontier, and the
-/// builder then keeps only these pairs
-/// ([`VisibleReach`](super::sparql_builder::VisibleReach)). Without it, a node
-/// reachable only through another user's `Local` link would be returned.
+/// is walked here instead ([`visible_pairs`]), and the builder then keeps only
+/// these pairs ([`VisibleReach`](super::sparql_builder::VisibleReach)).
+/// Without it, a node reachable only through another user's `Local` link would
+/// be returned.
 ///
 /// `None` when there is nothing to resolve: executor scope, or a scope that is
-/// not a transitive traversal. The walk follows the predicate through nodes of
-/// any class, as the `+` path does, and stops when a hop reaches nothing new.
+/// not a transitive traversal.
 async fn visible_reach(
     store: &SparqlStore,
     query: &ModelQueryInput,
@@ -73,18 +72,40 @@ async fn visible_reach(
     else {
         return Ok(None);
     };
-    // The builder matches nothing for an unwritable predicate, and drops an
-    // anchor that is not a valid IRI. Walk from the same anchors.
+    visible_pairs(store, ids, predicate, *direction, did)
+        .await
+        .map(Some)
+}
+
+/// Walk `predicate` from `anchors` in `direction`, one hop per query over the
+/// whole frontier, following only links `viewer_did` may see. Returns every
+/// `(anchor, node)` pair reached.
+///
+/// Used wherever a `+` path would otherwise match raw triples for a viewer: a
+/// transitive `Traverse` scope and a transitive projection. The walk follows
+/// the predicate through nodes of any class, as the `+` path does, and stops
+/// when a hop reaches nothing new. An anchor that is not a valid IRI is
+/// skipped and an unwritable predicate reaches nothing, as in the builder.
+pub(super) async fn visible_pairs(
+    store: &SparqlStore,
+    anchors: &[String],
+    predicate: &str,
+    direction: ScopeDirection,
+    viewer_did: &str,
+) -> Result<Vec<(String, String)>, Error> {
     let Ok(predicate) = validate_iri(predicate) else {
-        return Ok(Some(vec![]));
+        return Ok(vec![]);
     };
     let edge = match direction {
         ScopeDirection::Out => format!("?from <{predicate}> ?to"),
         ScopeDirection::In => format!("?to <{predicate}> ?from"),
     };
-    let visible = viewer_edge_filter(Some(did), &edge, "reach");
+    let visible = viewer_edge_filter(Some(viewer_did), &edge, "reach");
 
-    let anchors: Vec<&String> = ids.iter().filter(|id| validate_iri(id).is_ok()).collect();
+    let anchors: Vec<&String> = anchors
+        .iter()
+        .filter(|id| validate_iri(id).is_ok())
+        .collect();
     let mut reached: HashMap<&str, HashSet<String>> = anchors
         .iter()
         .map(|a| (a.as_str(), HashSet::new()))
@@ -126,7 +147,7 @@ async fn visible_reach(
         }
         frontier = next;
     }
-    Ok(Some(pairs))
+    Ok(pairs)
 }
 
 /// Keep the first `n` rows of each anchor, discarding the rest.

@@ -17,8 +17,10 @@
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
+use super::sparql_builder::reach_filter_on;
 use super::types::{
-    ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, ShapeResolver, WhereCondition,
+    ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, ScopeDirection, ShapeResolver,
+    WhereCondition,
 };
 use super::utils::{
     escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
@@ -112,14 +114,6 @@ pub(super) async fn resolve_projections(
 
         let where_patterns = build_projection_where_patterns(proj, resolver);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
-        // A projection walks the edge triple directly, which carries no
-        // author — without this, a count would include (and a list would
-        // return) edges another user wrote as Local links.
-        let visibility_patterns = crate::perspectives::link_visibility::viewer_triple_filter(
-            viewer_did,
-            &format!("?parent <{safe_pred}> ?t"),
-        );
-
         // A transitive projection counts (or lists) everything reachable, which
         // is what "42 replies" on a collapsed branch means to a reader. The
         // query is already grouped per parent and already asked of every row at
@@ -139,6 +133,38 @@ pub(super) async fn resolve_projections(
             );
             continue;
         }
+
+        // A projection walks the edge triple directly, which carries no
+        // author. Without a visibility check, a count would include (and a
+        // list would return) edges another user wrote as Local links.
+        //
+        // A direct projection checks the one edge. A transitive one cannot:
+        // its `+` path has no hops to filter, and checking only a direct edge
+        // from the parent would cut the reach down to the direct children.
+        // For a viewer the executor walks the edges that viewer may see
+        // instead, and the query keeps the `(parent, node)` pairs it reached.
+        let visibility_patterns = match (proj.transitive, viewer_did) {
+            (true, Some(did)) => {
+                let pairs = super::query::visible_pairs(
+                    store,
+                    &parent_ids,
+                    &safe_pred,
+                    ScopeDirection::Out,
+                    did,
+                )
+                .await?;
+                if pairs.is_empty() {
+                    "    FILTER(false)\n".to_string()
+                } else {
+                    format!("{}\n", reach_filter_on("parent", "t", &pairs))
+                }
+            }
+            (true, None) => String::new(),
+            (false, _) => crate::perspectives::link_visibility::viewer_triple_filter(
+                viewer_did,
+                &format!("?parent <{safe_pred}> ?t"),
+            ),
+        };
 
         if proj.count {
             let sparql = format!(

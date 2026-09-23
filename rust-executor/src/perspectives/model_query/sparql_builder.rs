@@ -73,12 +73,18 @@ pub(super) type VisibleReach = [(String, String)];
 /// `validate_iri`, which rejects `>`, so the first `>` ends it and two
 /// different pairs cannot give the same key.
 fn reach_filter(pairs: &VisibleReach) -> String {
+    reach_filter_on(ANCHOR_VAR, "source", pairs)
+}
+
+/// [`reach_filter`] over caller-chosen variables (given without the `?`),
+/// for a query that binds the anchor and the reached node under other names.
+pub(super) fn reach_filter_on(anchor_var: &str, node_var: &str, pairs: &VisibleReach) -> String {
     let keys = pairs
         .iter()
         .map(|(anchor, node)| format!("\"{}\"", escape_sparql_string(&format!("{anchor}>{node}"))))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("    FILTER(CONCAT(STR(?{ANCHOR_VAR}), \">\", STR(?source)) IN ({keys}))")
+    format!("    FILTER(CONCAT(STR(?{anchor_var}), \">\", STR(?{node_var})) IN ({keys}))")
 }
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";

@@ -9769,3 +9769,112 @@ async fn reverse_include_follows_only_links_the_viewer_may_see() {
     assert_eq!(containers(Some(EDGE_ALICE)).await, both);
     assert_eq!(containers(None).await, both);
 }
+
+/// A transitive projection read by a viewer counts (and lists) what the
+/// parent reaches through links that viewer may see, at every depth.
+///
+/// Uses the tree from [`comment_tree_store`] plus `hid1`, which hangs off
+/// `r2` only through Alice's Local link, and `hid2` below `hid1`. The
+/// projection used to check the direct edge `?parent <p> ?t` for the viewer.
+/// That cut every transitive reach down to the direct children, so any agent
+/// scope counted 3 where the subtree has 6 (Bob) or 8 (Alice).
+#[tokio::test]
+async fn a_transitive_projection_follows_only_links_the_viewer_may_see() {
+    use super::types::{ProjectionInput, WhereCondition};
+
+    let store = comment_tree_store();
+    add_comment(&store, "we://root");
+    add_comment(&store, "we://hid1");
+    add_comment(&store, "we://hid2");
+    add_alice_local_edge(&store, "we://r2", "we://comment", "we://hid1");
+    store
+        .add_link(&make_link(
+            "we://hid1",
+            "we://comment",
+            "we://hid2",
+            "2026-01-02T00:00:03Z",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Comment",
+        "properties": {
+            "type": { "predicate": "ad4m://type", "required": true, "flag": true, "initial": "we://Comment" },
+            "text": { "predicate": "we://text", "required": false }
+        },
+        "relations": {
+            "replies": { "predicate": "we://comment", "target": "Comment" }
+        }
+    }"#;
+    let projection = |count: bool, transitive: bool| ProjectionInput {
+        transitive,
+        from: "replies".to_string(),
+        count,
+        target_class_name: None,
+        where_clause: None,
+        limit: None,
+        order: None,
+    };
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "id".to_string(),
+            WhereCondition::String("we://root".to_string()),
+        )])),
+        projections: Some(HashMap::from([
+            ("$direct".to_string(), projection(true, false)),
+            ("$all".to_string(), projection(true, true)),
+            ("$subtree".to_string(), projection(false, true)),
+        ])),
+        ..Default::default()
+    };
+    let root_as = |viewer: Option<&'static str>| {
+        let store = &store;
+        let query = &query;
+        async move {
+            let result = super::test_helpers::execute_model_query_from_json_for_viewer(
+                store, "Comment", query, shape_json, viewer,
+            )
+            .await
+            .expect("query should execute");
+            assert_eq!(result.instances.len(), 1, "root is returned");
+            let root = result.instances[0].clone();
+            let mut subtree: Vec<String> = root["$subtree"]
+                .as_array()
+                .expect("$subtree is a list")
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            subtree.sort();
+            (root["$direct"].clone(), root["$all"].clone(), subtree)
+        }
+    };
+
+    let bob_reaches = sorted(&[
+        "we://c1", "we://c2", "we://c3", "we://r1", "we://r2", "we://rr1",
+    ]);
+    let everything = sorted(&[
+        "we://c1",
+        "we://c2",
+        "we://c3",
+        "we://hid1",
+        "we://hid2",
+        "we://r1",
+        "we://r2",
+        "we://rr1",
+    ]);
+
+    let (direct, all, subtree) = root_as(Some(EDGE_BOB)).await;
+    assert_eq!(direct, json!(3));
+    assert_eq!(all, json!(6), "Bob counts his whole visible subtree");
+    assert_eq!(subtree, bob_reaches, "and lists exactly that");
+
+    let (direct, all, subtree) = root_as(Some(EDGE_ALICE)).await;
+    assert_eq!(direct, json!(3));
+    assert_eq!(all, json!(8), "Alice also reaches past her own Local link");
+    assert_eq!(subtree, everything);
+
+    let (direct, all, subtree) = root_as(None).await;
+    assert_eq!(direct, json!(3));
+    assert_eq!(all, json!(8), "executor scope is unchanged");
+    assert_eq!(subtree, everything);
+}
