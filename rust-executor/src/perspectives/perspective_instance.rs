@@ -1831,6 +1831,7 @@ impl PerspectiveInstance {
         }
 
         link_expression.data.validate()?;
+        link_visibility::ensure_not_engine_reserved([&link_expression.data])?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
@@ -1883,6 +1884,7 @@ impl PerspectiveInstance {
         for link in &links {
             link.validate()?;
         }
+        link_visibility::ensure_not_engine_reserved(&links)?;
         let link_expressions: Result<Vec<_>, _> = links
             .into_iter()
             .map(|l| create_signed_expression(l.normalize(), context).map(LinkExpression::from))
@@ -1963,6 +1965,7 @@ impl PerspectiveInstance {
         for link in &addition_links {
             link.validate()?;
         }
+        link_visibility::ensure_not_engine_reserved(&addition_links)?;
         let additions = addition_links
             .into_iter()
             .map(|l| create_signed_expression(l.normalize(), context))
@@ -2035,6 +2038,7 @@ impl PerspectiveInstance {
         if let Some(ref email) = context.user_email {
             crate::billing::check_compute_credits(email)?;
         }
+        link_visibility::ensure_not_engine_reserved([&new_link])?;
         let handle = self.persisted.lock().await.clone();
 
         // Query SPARQL store

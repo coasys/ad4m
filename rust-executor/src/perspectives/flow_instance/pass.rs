@@ -385,7 +385,9 @@ mod tests {
     use crate::perspectives::flow_classes::{
         advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE,
     };
-    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::interpretation_test_support::{
+        setup_perspective_no_llm, store_as_peer_link,
+    };
     use crate::perspectives::perspective_instance::PerspectiveInstance;
     use crate::types::{Link, LinkStatus};
 
@@ -400,19 +402,19 @@ mod tests {
         let target = Literal::from_string(state.to_string())
             .to_url()
             .expect("encode state");
-        perspective
-            .add_link(
-                Link {
-                    source: INST_URI.to_string(),
-                    predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-                    target,
-                },
-                LinkStatus::Shared,
-                None,
-                ctx,
-            )
-            .await
-            .expect("add Shared currentState link");
+        // A peer's link: the user-facing write methods refuse this
+        // engine-reserved predicate.
+        let link = crate::agent::create_signed_expression(
+            Link {
+                source: INST_URI.to_string(),
+                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+                target,
+            }
+            .normalize(),
+            ctx,
+        )
+        .expect("sign currentState link");
+        store_as_peer_link(perspective, link.into(), LinkStatus::Shared).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

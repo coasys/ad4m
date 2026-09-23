@@ -2091,6 +2091,34 @@ async fn reject_flow_proposal_handler(
     Ok(serde_json::json!({ "retractedLinks": retracted }))
 }
 
+/// Start a `FlowInstance`. The executor mints it, because the instance's
+/// `currentState` cache is engine-reserved and a client write of it is
+/// refused. See `flow_classes::start_flow_instance`.
+async fn start_flow_instance_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let flow_uri = params.require_str("flowUri")?;
+    let base_expression = params.require_str("baseExpression")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let instance_uri = crate::perspectives::flow_classes::start_flow_instance(
+        &mut perspective,
+        &flow_uri,
+        &base_expression,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(Value::String(instance_uri))
+}
+
 async fn propose_flow_transition_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -2550,6 +2578,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "perspective.proposeFlowTransition",
         propose_flow_transition_handler,
     );
+    map.register("perspective.startFlowInstance", start_flow_instance_handler);
     map.register("perspective.getShaclNames", get_shacl_names);
     map.register("perspective.getShaclTargetClass", get_shacl_target_class);
     map.register("perspective.getShacl", get_shacl);

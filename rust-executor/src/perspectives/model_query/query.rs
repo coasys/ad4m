@@ -711,7 +711,8 @@ pub(super) async fn execute_model_query_inner(
                     // may not see. Filtering here means those sources hydrate
                     // to nothing and drop out, rather than surfacing another
                     // user's private link rows.
-                    let viewer = viewer_author_filter(viewer_did, "_reifier", "author");
+                    let viewer =
+                        viewer_author_filter(viewer_did, "_reifier", "author", "predicate");
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}

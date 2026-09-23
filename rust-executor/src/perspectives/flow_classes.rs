@@ -166,6 +166,44 @@ pub(crate) async fn mint_flow_instance(
     Ok(uri)
 }
 
+/// Start a `FlowInstance` of the flow at `flow_uri` on `base_expression`, in
+/// the flow's initial state. The client-facing mint behind
+/// `perspective.startFlowInstance`.
+///
+/// Clients cannot write the `currentState` cache themselves: it is
+/// engine-reserved (see [`write_local_current_state`]). So the executor mints
+/// the whole instance, and the initial state comes from the flow definition,
+/// not from the caller.
+///
+/// Returns the new instance's URI.
+pub(crate) async fn start_flow_instance(
+    perspective: &mut PerspectiveInstance,
+    flow_uri: &str,
+    base_expression: &str,
+    context: &AgentContext,
+) -> anyhow::Result<String> {
+    let flows = crate::perspectives::flow_context::load_shacl_flows(perspective).await?;
+    let flow = flows.get(flow_uri).ok_or_else(|| {
+        anyhow::anyhow!("flow `{flow_uri}` is not registered on this perspective")
+    })?;
+    let initial_state =
+        crate::perspectives::flow_spawn::initial_state_of(flow).ok_or_else(|| {
+            anyhow::anyhow!(
+            "flow `{flow_uri}` has no named initial state, so it cannot be started as an instance"
+        )
+        })?;
+    mint_flow_instance(
+        perspective,
+        flow_uri,
+        base_expression,
+        &initial_state,
+        &uuid::Uuid::new_v4().to_string(),
+        None,
+        context,
+    )
+    .await
+}
+
 /// Mint one `FlowTransitionProposal` at `ad4m://flow/proposal/{proposal_id}`.
 ///
 /// `proposal_id` and `batch_id` are caller-supplied, as in
@@ -272,7 +310,32 @@ pub(crate) async fn advance_flow_instance_state(
 /// removed. A `Shared` value some peer wrote (the pre-#987 executor did) is
 /// left where it is — this engine deletes nothing shared, and hydration
 /// prefers the later write, which is ours.
+///
+/// This is the only writer of [`FLOW_CURRENT_STATE_PREDICATE`]: the predicate
+/// is engine-reserved (see
+/// [`link_visibility::ENGINE_DERIVED_PREDICATES`](crate::perspectives::link_visibility::ENGINE_DERIVED_PREDICATES)),
+/// so the write runs inside
+/// [`engine_derivation`](crate::perspectives::link_visibility::engine_derivation)
+/// and every user-facing write of it is refused.
 pub(crate) async fn write_local_current_state(
+    perspective: &mut PerspectiveInstance,
+    flow_instance_uri: &str,
+    state: &str,
+    batch_id: Option<String>,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    crate::perspectives::link_visibility::engine_derivation(replace_local_current_state(
+        perspective,
+        flow_instance_uri,
+        state,
+        batch_id,
+        context,
+    ))
+    .await
+}
+
+/// The body of [`write_local_current_state`], run inside the engine scope.
+async fn replace_local_current_state(
     perspective: &mut PerspectiveInstance,
     flow_instance_uri: &str,
     state: &str,
@@ -814,5 +877,52 @@ mod tests {
             .expect("get_links");
         assert_eq!(written.len(), 1, "got {written:?}");
         assert_eq!(written[0].status, Some(LinkStatus::Local));
+    }
+
+    /// `perspective.startFlowInstance` mints the instance and writes the
+    /// initial state itself, from the flow definition. This replaces the TS
+    /// `FlowInstance.start` writing `currentState` through a model create,
+    /// which the guard now refuses.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn start_flow_instance_writes_the_initial_state_as_the_engine() {
+        use crate::perspectives::interpretation_test_support::{delivery_flow_json_for, seed_flow};
+
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+
+        let uri = start_flow_instance(
+            &mut perspective,
+            "delivery://DeliveryFlow",
+            "ad4m://task/1",
+            &ctx,
+        )
+        .await
+        .expect("start_flow_instance");
+
+        let json = perspective
+            .model_query("FlowInstance", "{}")
+            .await
+            .expect("FlowInstance.findAll");
+        let rows: Value = serde_json::from_str(&json).expect("JSON");
+        let rows = rows["instances"].as_array().expect("instances");
+        assert_eq!(rows.len(), 1, "got {rows:?}");
+        assert_eq!(rows[0]["id"], Value::String(uri));
+        assert_eq!(rows[0]["flowUri"], "delivery://DeliveryFlow");
+        assert_eq!(rows[0]["subject"], "ad4m://task/1");
+        assert_eq!(rows[0]["currentState"], "identified");
+
+        let unknown = start_flow_instance(&mut perspective, "nope://NopeFlow", "ad4m://t", &ctx)
+            .await
+            .expect_err("an unregistered flow cannot be started");
+        assert!(
+            format!("{unknown:#}").contains("not registered"),
+            "{unknown:#}"
+        );
     }
 }

@@ -17,6 +17,16 @@
 //! `link.author == viewer_did`. Links with `Shared` (or no) status are visible
 //! to everyone who can reach the perspective, exactly as before.
 //!
+//! One exception: a Local link on an [`ENGINE_DERIVED_PREDICATES`] predicate
+//! is visible to every viewer. Those links are the executor's own
+//! derivations (the flow engine's `currentState` cache). The engine writes
+//! them under whichever agent's request triggered the pass, but they describe
+//! the executor's view, not that agent's. Hiding them per author would show a
+//! co-owner an instance with no state after another user moved it. Because
+//! the exemption would otherwise admit *any* author's Local link on these
+//! predicates, the same list is reserved for the engine on the write side:
+//! [`ensure_not_engine_reserved`] refuses them on every user-facing write.
+//!
 //! # The two scopes
 //!
 //! Visibility is expressed as `Option<&str>`:
@@ -51,12 +61,82 @@
 //! query-time predicates over data that is already stored per link.
 
 use crate::agent::{did_for_context, AgentContext};
+use crate::perspectives::flow_classes::FLOW_CURRENT_STATE_PREDICATE;
 use crate::perspectives::model_query::utils::escape_sparql_string;
-use crate::types::{DecoratedLinkExpression, LinkStatus};
-use deno_core::anyhow::Error as AnyError;
+use crate::types::{DecoratedLinkExpression, Link, LinkStatus};
+use deno_core::anyhow::{anyhow, Error as AnyError};
 
 /// The `ad4m://ontology/status` value written for a Local link.
 const STATUS_LOCAL_LITERAL: &str = "Local";
+
+/// Predicates whose Local links are the executor's own derivations.
+///
+/// This one list drives both halves of the rule:
+///
+/// - **Read:** a Local link on one of these predicates is visible to every
+///   viewer, whoever authored it ([`link_visible_to`], and the SPARQL
+///   fragments below).
+/// - **Write:** no user-facing write may add a link on one of these
+///   predicates ([`ensure_not_engine_reserved`]). Only engine code running
+///   inside [`engine_derivation`] may.
+///
+/// The write half is what keeps the read half safe. Without it, a second user
+/// on the same executor could add a Local `currentState` for someone else's
+/// flow instance, and the exemption would show it to everyone.
+pub const ENGINE_DERIVED_PREDICATES: &[&str] = &[FLOW_CURRENT_STATE_PREDICATE];
+
+/// Is `predicate` one of the [`ENGINE_DERIVED_PREDICATES`]?
+pub fn is_engine_derived(predicate: Option<&str>) -> bool {
+    predicate.is_some_and(|p| ENGINE_DERIVED_PREDICATES.contains(&p))
+}
+
+tokio::task_local! {
+    /// Set while engine code writes one of its derivations. See
+    /// [`engine_derivation`].
+    static ENGINE_DERIVATION: ();
+}
+
+/// Run `write` as an engine derivation, the only context in which links on
+/// [`ENGINE_DERIVED_PREDICATES`] may be added.
+///
+/// The scope is task-local, so it covers exactly the awaited future. A
+/// request handler that is not inside this scope cannot enter it, whichever
+/// agent it runs as.
+pub async fn engine_derivation<F: std::future::Future>(write: F) -> F::Output {
+    ENGINE_DERIVATION.scope((), write).await
+}
+
+/// Refuse a link write that would add a link on an engine-reserved predicate,
+/// unless it runs inside [`engine_derivation`].
+///
+/// Called by every `PerspectiveInstance` method that adds locally authored
+/// links (`add_link_expression`, and through it `add_link`; `add_links`;
+/// `link_mutations`; `update_link`). Every user-facing surface reaches the
+/// store through one of those, including model create/update, SDNA commands
+/// and the MCP tools, so this one check covers all of them. Links arriving
+/// from the link language (peer sync) take a different path and are not
+/// checked: a peer's `Shared` link on these predicates is not a Local link,
+/// so the read-side exemption never applies to it.
+///
+/// Removals are not checked. Removing another user's cache only clears it,
+/// and the engine writes it again on its next pass.
+pub fn ensure_not_engine_reserved<'a>(
+    links: impl IntoIterator<Item = &'a Link>,
+) -> Result<(), AnyError> {
+    if ENGINE_DERIVATION.try_with(|_| ()).is_ok() {
+        return Ok(());
+    }
+    for link in links {
+        if is_engine_derived(link.predicate.as_deref()) {
+            return Err(anyhow!(
+                "the predicate `{}` is reserved for the executor's flow engine and cannot be written directly (source `{}`)",
+                link.predicate.as_deref().unwrap_or_default(),
+                link.source
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Resolve the visibility scope of a request from the agent it is attributed
 /// to — the translation from "who is calling" to the `Option<&str>` the rest
@@ -74,27 +154,38 @@ pub fn viewer_did_for_context(context: &AgentContext) -> Result<Option<String>, 
     did_for_context(context).map(Some)
 }
 
-/// Is a link with this `author` / `status` visible to `viewer_did`?
+/// Is a link with this `author` / `status` / `predicate` visible to
+/// `viewer_did`?
 ///
 /// `viewer_did == None` is executor scope and sees everything; see the module
 /// docs for why that scope still exists.
 pub fn link_visible_to(
     author: &str,
     status: Option<&LinkStatus>,
+    predicate: Option<&str>,
     viewer_did: Option<&str>,
 ) -> bool {
     match viewer_did {
         // Executor scope: the executor's own derivations read the whole row set.
         None => true,
-        // Agent scope: Local links are private to their author; everything
-        // else is unaffected.
-        Some(did) => !matches!(status, Some(LinkStatus::Local)) || author == did,
+        // Agent scope: Local links are private to their author, except the
+        // engine's derivations; everything else is unaffected.
+        Some(did) => {
+            !matches!(status, Some(LinkStatus::Local))
+                || author == did
+                || is_engine_derived(predicate)
+        }
     }
 }
 
 /// [`link_visible_to`] for an already-decorated link.
 pub fn decorated_visible_to(link: &DecoratedLinkExpression, viewer_did: Option<&str>) -> bool {
-    link_visible_to(&link.author, link.status.as_ref(), viewer_did)
+    link_visible_to(
+        &link.author,
+        link.status.as_ref(),
+        link.data.predicate.as_deref(),
+        viewer_did,
+    )
 }
 
 /// Drop the links `viewer_did` may not see.
@@ -124,9 +215,10 @@ pub fn filter_visible(
 /// — a question about the requesting agent. A row must pass both.
 ///
 /// The caller supplies the variable names already bound in the surrounding
-/// query: `reifier_var` is the reification subject carrying the annotations and
-/// `author_var` is the already-selected author, both **without** the leading
-/// `?`. A distinct `?_viewer_status` variable is bound here so this fragment
+/// query: `reifier_var` is the reification subject carrying the annotations,
+/// `author_var` is the already-selected author and `predicate_var` the
+/// link's predicate, all **without** the leading `?`. `predicate_var` is what
+/// lets [`ENGINE_DERIVED_PREDICATES`] through for every viewer. A distinct `?_viewer_status` variable is bound here so this fragment
 /// never collides with `local_status_filter`'s `?_status`.
 ///
 /// Returns an empty string in executor scope, leaving the generated query
@@ -143,16 +235,25 @@ pub fn viewer_author_filter(
     viewer_did: Option<&str>,
     reifier_var: &str,
     author_var: &str,
+    predicate_var: &str,
 ) -> String {
-    author_filter(viewer_did, reifier_var, author_var, "_viewer_status")
+    author_filter(
+        viewer_did,
+        reifier_var,
+        author_var,
+        "_viewer_status",
+        &format!("?{predicate_var}"),
+    )
 }
 
-/// [`viewer_author_filter`] with a caller-chosen status variable.
+/// [`viewer_author_filter`] with a caller-chosen status variable, and the
+/// predicate given as a SPARQL term (`?var` or `<iri>`).
 fn author_filter(
     viewer_did: Option<&str>,
     reifier_var: &str,
     author_var: &str,
     status_var: &str,
+    predicate_term: &str,
 ) -> String {
     let Some(did) = viewer_did else {
         return String::new();
@@ -163,10 +264,26 @@ fn author_filter(
     // from the wallet / agent store, not from request parameters), but a read
     // filter is the wrong place to rely on that.
     let escaped = escape_sparql_string(did);
+    let engine_derived = ENGINE_DERIVED_PREDICATES
+        .iter()
+        .map(|p| format!("<{p}>"))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     format!(
-        "    OPTIONAL {{ ?{reifier_var} <ad4m://ontology/status> ?{status_var} . }}\n    FILTER(!BOUND(?{status_var}) || ?{status_var} != \"{STATUS_LOCAL_LITERAL}\" || ?{author_var} = \"{escaped}\")\n"
+        "    OPTIONAL {{ ?{reifier_var} <ad4m://ontology/status> ?{status_var} . }}\n    FILTER(!BOUND(?{status_var}) || ?{status_var} != \"{STATUS_LOCAL_LITERAL}\" || ?{author_var} = \"{escaped}\" || {predicate_term} IN ({engine_derived}))\n"
     )
+}
+
+/// The predicate term of a `?s <p> ?o` pattern built by the model-query code.
+///
+/// Falls back to a term that matches no engine-derived predicate, so a
+/// pattern this cannot read keeps the plain author rule.
+fn pattern_predicate(triple_pattern: &str) -> &str {
+    triple_pattern
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("<ad4m://no-predicate>")
 }
 
 /// Keep a row only if the viewer may see at least one link that asserts
@@ -185,7 +302,13 @@ fn author_filter(
 pub fn viewer_edge_filter(viewer_did: Option<&str>, triple_pattern: &str, tag: &str) -> String {
     let reifier = format!("_{tag}_reifier");
     let author = format!("_{tag}_author");
-    let filter = author_filter(viewer_did, &reifier, &author, &format!("_{tag}_status"));
+    let filter = author_filter(
+        viewer_did,
+        &reifier,
+        &author,
+        &format!("_{tag}_status"),
+        pattern_predicate(triple_pattern),
+    );
     if filter.is_empty() {
         return String::new();
     }
@@ -206,7 +329,13 @@ pub fn viewer_edge_filter(viewer_did: Option<&str>, triple_pattern: &str, tag: &
 ///
 /// Returns an empty string in executor scope.
 pub fn viewer_triple_filter(viewer_did: Option<&str>, triple_pattern: &str) -> String {
-    let filter = viewer_author_filter(viewer_did, "_vis_reifier", "_vis_author");
+    let filter = author_filter(
+        viewer_did,
+        "_vis_reifier",
+        "_vis_author",
+        "_viewer_status",
+        pattern_predicate(triple_pattern),
+    );
     if filter.is_empty() {
         return String::new();
     }
@@ -224,9 +353,14 @@ mod tests {
 
     #[test]
     fn executor_scope_sees_every_link() {
-        assert!(link_visible_to(ALICE, Some(&LinkStatus::Local), None));
-        assert!(link_visible_to(ALICE, Some(&LinkStatus::Shared), None));
-        assert!(link_visible_to(ALICE, None, None));
+        assert!(link_visible_to(ALICE, Some(&LinkStatus::Local), None, None));
+        assert!(link_visible_to(
+            ALICE,
+            Some(&LinkStatus::Shared),
+            None,
+            None
+        ));
+        assert!(link_visible_to(ALICE, None, None, None));
     }
 
     #[test]
@@ -234,26 +368,37 @@ mod tests {
         assert!(link_visible_to(
             ALICE,
             Some(&LinkStatus::Local),
+            None,
             Some(ALICE)
         ));
-        assert!(!link_visible_to(ALICE, Some(&LinkStatus::Local), Some(BOB)));
+        assert!(!link_visible_to(
+            ALICE,
+            Some(&LinkStatus::Local),
+            None,
+            Some(BOB)
+        ));
     }
 
     #[test]
     fn shared_and_unannotated_links_stay_visible_to_everyone() {
-        assert!(link_visible_to(ALICE, Some(&LinkStatus::Shared), Some(BOB)));
-        assert!(link_visible_to(ALICE, None, Some(BOB)));
+        assert!(link_visible_to(
+            ALICE,
+            Some(&LinkStatus::Shared),
+            None,
+            Some(BOB)
+        ));
+        assert!(link_visible_to(ALICE, None, None, Some(BOB)));
     }
 
     #[test]
     fn filter_is_identity_in_executor_scope() {
-        let filter = viewer_author_filter(None, "_reifier", "author");
+        let filter = viewer_author_filter(None, "_reifier", "author", "predicate");
         assert_eq!(filter, "");
     }
 
     #[test]
     fn filter_binds_its_own_status_variable_and_the_viewer_did() {
-        let filter = viewer_author_filter(Some(ALICE), "_reifier", "author");
+        let filter = viewer_author_filter(Some(ALICE), "_reifier", "author", "predicate");
         // Must not reuse `?_status`, which `local_status_filter` owns.
         assert!(!filter.contains("?_status"));
         assert!(filter.contains("?_viewer_status"));
@@ -309,7 +454,57 @@ mod tests {
 
     #[test]
     fn filter_escapes_quotes_in_the_viewer_did() {
-        let filter = viewer_author_filter(Some("did:key:a\"b"), "_reifier", "author");
+        let filter = viewer_author_filter(Some("did:key:a\"b"), "_reifier", "author", "predicate");
         assert!(filter.contains("did:key:a\\\"b"));
+    }
+
+    const CACHE: Option<&str> = Some(FLOW_CURRENT_STATE_PREDICATE);
+
+    #[test]
+    fn engine_derived_local_links_are_visible_to_every_viewer() {
+        assert!(link_visible_to(
+            ALICE,
+            Some(&LinkStatus::Local),
+            CACHE,
+            Some(BOB)
+        ));
+        // The exemption is for the listed predicates only.
+        assert!(!link_visible_to(
+            ALICE,
+            Some(&LinkStatus::Local),
+            Some("ad4m://flow/currentstate-lookalike"),
+            Some(BOB)
+        ));
+    }
+
+    #[test]
+    fn filters_let_engine_derived_predicates_through() {
+        let filter = viewer_author_filter(Some(ALICE), "_reifier", "author", "predicate");
+        assert!(filter.contains(&format!("?predicate IN (<{FLOW_CURRENT_STATE_PREDICATE}>)")));
+        let edge = viewer_edge_filter(Some(ALICE), "?from <ad4m://p> ?to", "t");
+        assert!(edge.contains(&format!("<ad4m://p> IN (<{FLOW_CURRENT_STATE_PREDICATE}>)")));
+    }
+
+    fn cache_link() -> Link {
+        Link {
+            source: "ad4m://flow/instance/1".to_string(),
+            predicate: CACHE.map(str::to_string),
+            target: "literal:string:Done".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_predicates_are_refused_outside_the_engine_scope() {
+        let err = ensure_not_engine_reserved([&cache_link()]).unwrap_err();
+        assert!(err.to_string().contains("reserved"), "{err}");
+
+        let other = Link {
+            predicate: Some("ad4m://other".to_string()),
+            ..cache_link()
+        };
+        assert!(ensure_not_engine_reserved([&other]).is_ok());
+
+        let inside = engine_derivation(async { ensure_not_engine_reserved([&cache_link()]) }).await;
+        assert!(inside.is_ok(), "the engine scope may write it: {inside:?}");
     }
 }

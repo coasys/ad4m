@@ -304,7 +304,7 @@ pub(super) fn build_instance_sparql(
         // status right for a property the class declared local?), `viewer`
         // is about the *requesting agent* (may it see a Local link at all?).
         // A row must pass both.
-        let viewer = viewer_author_filter(viewer_did, "_reifier", "author");
+        let viewer = viewer_author_filter(viewer_did, "_reifier", "author", "predicate");
         InstanceQueryPlan::Single(format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
@@ -435,7 +435,7 @@ pub(super) fn build_count_sparql(
 ///
 /// Empty in executor scope, leaving the generated query byte-identical.
 fn count_visibility_guard(shape: &ModelShape, viewer_did: Option<&str>) -> String {
-    let viewer = viewer_author_filter(viewer_did, "_cnt_reifier", "_cnt_author");
+    let viewer = viewer_author_filter(viewer_did, "_cnt_reifier", "_cnt_author", "_cnt_pred");
     if viewer.is_empty() {
         return String::new();
     }

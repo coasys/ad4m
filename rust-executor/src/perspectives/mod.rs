@@ -732,9 +732,15 @@ pub async fn import_perspective(
     let perspective = get_perspective(&instance.handle.uuid)
         .ok_or_else(|| "Perspective not found after creation".to_string())?;
 
+    // The engine's derivations (`ENGINE_DERIVED_PREDICATES`) are not
+    // imported: they describe the exporting executor's view, only the engine
+    // may write them here, and its next pass derives them again.
     let decorated_links: Vec<crate::types::DecoratedLinkExpression> = instance
         .links
         .into_iter()
+        .filter(|link| {
+            !crate::perspectives::link_visibility::is_engine_derived(link.data.predicate.as_deref())
+        })
         .map(|link| {
             let status = link.status.clone().unwrap_or(LinkStatus::Local);
             crate::types::DecoratedLinkExpression::from((link, status))
