@@ -1,17 +1,50 @@
 /**
  * Bounded traversal — client ↔ executor round-trip.
  *
- * The Rust suite pins the query engine against a seeded store, and
- * `query-sparql.test.ts` pins what TypeScript emits. Both sit on one side of
- * the wire, which is how `limitPerAnchor` came to be dropped in transit by a
- * missing `rename_all` and stayed green in 300-odd tests: the field was written
- * on one side and read on the other, and nothing crossed.
+ * Bounded traversal is a new shape for the `parent` field that `findAll`,
+ * `findOne`, `count` and `findAllAndCount` already take. Nothing else about them
+ * changes; what changes is that the scope can name several anchors and say how
+ * far to walk from them:
  *
- * So this file's job is the crossing, not the semantics. Every case here is one
- * the Rust suite already proves — asked again through `findAll`, a real
- * executor and a real store, so that a field arriving under the wrong name, a
- * refusal that turns into an empty result, or a count that means something else
- * on the way back, fails here.
+ * ```typescript
+ * // "Ten replies to this post, five under each of those, two under each of
+ * //  those" — one request, whatever the width of the thread.
+ * await TestComment.findAll(perspective, {
+ *   parent: { ids: post.id, predicate: "test://has_comment", levels: [10, 5, 2] },
+ *   order: { body: "ASC" },
+ * });
+ * ```
+ *
+ * The scope is `{ ids } & (predicate | model) & options`:
+ *
+ *   ids            one anchor or many; many is the point, since a level of a
+ *                  tree is then one query and one subscription rather than one
+ *                  of each per parent
+ *   predicate      the link to follow, literally…
+ *   model, field   …or named through the model that declares the relation
+ *   levels         breadth at each depth; its length is how deep to go
+ *   transitive     everything below the anchors, any depth, in one path query
+ *   limitPerAnchor top N under *each* anchor, rather than N overall
+ *   direction      'out' (default) or 'in', to search what points *at* them
+ *
+ * Results come back flat and breadth-first in every mode, and the anchors are
+ * excluded from their own results. A tree is rebuilt from an inverse relation
+ * read alongside — see `reaches the whole subtree transitively` below.
+ *
+ * ---
+ *
+ * Why this file exists: the Rust suite pins the query engine against a seeded
+ * store, and `query-sparql.test.ts` pins what TypeScript emits. Both sit on one
+ * side of the wire, which is how `limitPerAnchor` came to be dropped in transit
+ * by a missing `rename_all` and stayed green in 300-odd tests — the field was
+ * written on one side and read on the other, and nothing crossed.
+ *
+ * So the job here is the crossing. Every case is one the Rust suite already
+ * proves, asked again through the public API against a real executor and a real
+ * store, so that a field arriving under the wrong name, a refusal that turns
+ * into an empty result, or a count that means something else on the way back,
+ * fails here. Each one is written out in full for that reason: a helper taking
+ * the scope as a parameter would hide the very thing under test.
  *
  * Picked up by `pnpm run test-model` via the tests/model/*.test.ts glob.
  */
@@ -93,97 +126,159 @@ describe("Ad4mModel — bounded traversal round-trip", function () {
   /** Bodies rather than ids, so a failure reads as a tree rather than as UUIDs. */
   const bodies = (results: TestComment[]) => results.map((c) => c.body);
 
-  const traverse = (parent: any) =>
-    TestComment.findAll(perspective, { parent, order: { body: "ASC" } });
+  // ── levels: a bounded tree in one request ─────────────────────────────────
+
+  it("takes the given breadth at each depth, for as many depths as it is given", async () => {
+    // `[2, 1]` is two of the post's replies, then one reply under each of those.
+    // Two entries, so two levels deep: rr1 is a level below what was asked for,
+    // r2 is past c1's breadth of one, and c3 is past the post's breadth of two.
+    const tree = await TestComment.findAll(perspective, {
+      parent: { ids: post.id, predicate: PREDICATE, levels: [2, 1] },
+      order: { body: "ASC" },
+    });
+
+    expect(bodies(tree)).to.deep.equal(["c1", "c2", "r1", "r3"]);
+  });
+
+  it("walks one level per entry, however narrow", async () => {
+    const tree = await TestComment.findAll(perspective, {
+      parent: { ids: post.id, predicate: PREDICATE, levels: [1, 1] },
+      order: { body: "ASC" },
+    });
+
+    expect(bodies(tree)).to.deep.equal(["c1", "r1"]);
+  });
+
+  it("totals a walk by the walk, whether or not rows were asked for", async () => {
+    // `count()` is `limit: 0`, which takes a different path through the
+    // executor than `findAllAndCount`. Both are asked the same question here,
+    // because a walk that reports two rows and a total of three is a client
+    // paging for a row that does not exist.
+    const { results, totalCount } = await TestComment.findAllAndCount(perspective, {
+      parent: { ids: post.id, predicate: PREDICATE, levels: [1, 1] },
+      order: { body: "ASC" },
+    });
+    const counted = await TestComment.count(perspective, {
+      parent: { ids: post.id, predicate: PREDICATE, levels: [1, 1] },
+      order: { body: "ASC" },
+    });
+
+    expect(bodies(results as TestComment[])).to.deep.equal(["c1", "r1"]);
+    expect(totalCount).to.equal(2);
+    expect(counted).to.equal(2);
+  });
+
+  // ── limitPerAnchor: top N under each of many anchors ──────────────────────
+
+  it("applies limitPerAnchor per anchor, not to the result as a whole", async () => {
+    // Two anchors and a limit of one: a plain `limit: 1` would answer with r1
+    // alone. Scale it to twenty rendered comments and this is one query and one
+    // subscription instead of twenty of each.
+    //
+    // It is also the shape the field was silently dropped in — and with a single
+    // anchor a per-anchor limit and a global one are indistinguishable, so the
+    // case that catches a broken slice needs two.
+    const replies = await TestComment.findAll(perspective, {
+      parent: {
+        ids: [comment.c1.id, comment.c2.id],
+        predicate: PREDICATE,
+        limitPerAnchor: 1,
+      },
+      order: { body: "ASC" },
+    });
+
+    expect(bodies(replies)).to.deep.equal(["r1", "r3"]); // r1 from c1, r3 from c2
+  });
 
   // ── the anchors ───────────────────────────────────────────────────────────
-
-  it("returns every child of a single anchor", async () => {
-    expect(bodies(await traverse({ ids: post.id, predicate: PREDICATE }))).to.deep.equal([
-      "c1",
-      "c2",
-      "c3",
-    ]);
-  });
 
   it("answers for several anchors in one query", async () => {
     // The list spelling of `ids`, which is the whole reason the scope exists —
     // and a different branch of the executor's deserializer from a bare string,
     // so a query that works for one anchor proves nothing about twenty.
-    expect(
-      bodies(await traverse({ ids: [comment.c1.id, comment.c2.id], predicate: PREDICATE })),
-    ).to.deep.equal(["r1", "r2", "r3"]);
+    const replies = await TestComment.findAll(perspective, {
+      parent: { ids: [comment.c1.id, comment.c2.id], predicate: PREDICATE },
+      order: { body: "ASC" },
+    });
+
+    expect(bodies(replies)).to.deep.equal(["r1", "r2", "r3"]);
+  });
+
+  it("returns every child of a single anchor", async () => {
+    // One step from one anchor: the same question the older `parent` spellings
+    // answer, and the same answer.
+    const replies = await TestComment.findAll(perspective, {
+      parent: { ids: post.id, predicate: PREDICATE },
+      order: { body: "ASC" },
+    });
+
+    expect(bodies(replies)).to.deep.equal(["c1", "c2", "c3"]);
   });
 
   it("names its predicate through the model that declares it", async () => {
-    // The same query as the first, written the way the other two scope forms
-    // are written — without the caller repeating a predicate string.
-    expect(
-      bodies(await traverse({ ids: post.id, model: TestPost, field: "comments" })),
-    ).to.deep.equal(["c1", "c2", "c3"]);
-  });
+    // The same query again, written without the caller repeating a predicate
+    // string. `field` is needed here because TestPost declares two relations to
+    // TestComment — `comments` and `pinnedComment` — so there is a choice to
+    // make; with one relation to the child class it can be left out.
+    const replies = await TestComment.findAll(perspective, {
+      parent: { ids: post.id, model: TestPost, field: "comments" },
+      order: { body: "ASC" },
+    });
 
-  // ── limitPerAnchor ────────────────────────────────────────────────────────
-
-  it("applies limitPerAnchor per anchor, not to the result as a whole", async () => {
-    // Two anchors and a limit of one: a global limit would answer with r1
-    // alone. This is the shape the field was silently dropped in — and with a
-    // single anchor the two readings are indistinguishable, so the test that
-    // catches a wrong one needs two.
-    expect(
-      bodies(
-        await traverse({
-          ids: [comment.c1.id, comment.c2.id],
-          predicate: PREDICATE,
-          limitPerAnchor: 1,
-        }),
-      ),
-    ).to.deep.equal(["r1", "r3"]);
+    expect(bodies(replies)).to.deep.equal(["c1", "c2", "c3"]);
   });
 
   // ── direction ─────────────────────────────────────────────────────────────
 
   it("follows the predicate inward when asked", async () => {
-    // "What points at these" as a query that can be ordered and limited, rather
-    // than a reverse include over rows already in hand.
-    expect(
-      bodies(
-        await traverse({
-          ids: [comment.r1.id, comment.r2.id],
-          predicate: PREDICATE,
-          direction: "in",
-        }),
-      ),
-    ).to.deep.equal(["c1"]);
+    // "What points at these" as a query that can be ordered, filtered and
+    // limited, rather than a reverse include over rows already in hand.
+    const parents = await TestComment.findAll(perspective, {
+      parent: {
+        ids: [comment.r1.id, comment.r2.id],
+        predicate: PREDICATE,
+        direction: "in",
+      },
+      order: { body: "ASC" },
+    });
+
+    expect(bodies(parents)).to.deep.equal(["c1"]);
   });
 
   // ── transitive ────────────────────────────────────────────────────────────
 
   it("reaches the whole subtree transitively", async () => {
-    expect(
-      bodies(await traverse({ ids: post.id, predicate: PREDICATE, transitive: true })),
-    ).to.deep.equal(["c1", "c2", "c3", "r1", "r2", "r3", "rr1"]);
+    // Everything below the anchor at any depth, as one path query rather than a
+    // walk. Note the result is flat and says nothing about the shape it came
+    // from: SPARQL property paths bind no intermediate variables, so a row says
+    // *that* it is under the anchor and never *where*. Rebuilding the tree means
+    // reading the inverse relation alongside — `TestComment.post`, which is a
+    // `@BelongsToOne` back up this same predicate — and assembling from the
+    // parent each row reports.
+    const subtree = await TestComment.findAll(perspective, {
+      parent: { ids: post.id, predicate: PREDICATE, transitive: true },
+      order: { body: "ASC" },
+    });
+
+    expect(bodies(subtree)).to.deep.equal(["c1", "c2", "c3", "r1", "r2", "r3", "rr1"]);
   });
 
   it("excludes every named anchor from a transitive read", async () => {
     // c1 is reachable from post and is also an anchor. An anchor is where the
     // read started, not something it found, so it appears at neither place.
-    expect(
-      bodies(
-        await traverse({
-          ids: [post.id, comment.c1.id],
-          predicate: PREDICATE,
-          transitive: true,
-        }),
-      ),
-    ).to.deep.equal(["c2", "c3", "r1", "r2", "r3", "rr1"]);
+    const subtree = await TestComment.findAll(perspective, {
+      parent: { ids: [post.id, comment.c1.id], predicate: PREDICATE, transitive: true },
+      order: { body: "ASC" },
+    });
+
+    expect(bodies(subtree)).to.deep.equal(["c2", "c3", "r1", "r2", "r3", "rr1"]);
   });
 
   it("counts the whole subtree in a transitive projection", async () => {
-    // `{ count: true, transitive: true }` is "42 replies" on a collapsed
-    // branch — the conversation, not the direct replies. It did not typecheck
-    // against a model with typed fields until this PR, so it is worth asking
-    // for it here in the spelling the docs use.
+    // The same reach applied to a projection: `{ count: true, transitive: true }`
+    // is "42 replies" on a collapsed branch — the conversation, not the direct
+    // replies. It did not typecheck against a model with typed fields until this
+    // PR, so it is worth asking for in the spelling the docs use.
     const [direct] = (await TestPost.findAll(perspective, {
       where: { id: post.id },
       include: { $replies: { from: "comments", count: true } },
@@ -197,70 +292,41 @@ describe("Ad4mModel — bounded traversal round-trip", function () {
     expect(whole.$replies).to.equal(7);
   });
 
-  // ── levels ────────────────────────────────────────────────────────────────
-
-  it("walks each depth with its own per-anchor breadth", async () => {
-    // One per level, two levels: the first reply to the post, then the first
-    // reply to that. `[2, 1]` would take c1 and c2 and then one reply each.
-    expect(
-      bodies(await traverse({ ids: post.id, predicate: PREDICATE, levels: [1, 1] })),
-    ).to.deep.equal(["c1", "r1"]);
-    expect(
-      bodies(await traverse({ ids: post.id, predicate: PREDICATE, levels: [2, 1] })),
-    ).to.deep.equal(["c1", "c2", "r1", "r3"]);
-  });
-
-  it("totals a walk by the walk, whether or not rows were asked for", async () => {
-    // `count()` is `limit: 0`, which takes a different path through the
-    // executor than `findAllAndCount`. Both are asked the same question here,
-    // because a walk that reports two rows and a total of three is a client
-    // paging for a row that does not exist.
-    const parent = { ids: post.id, predicate: PREDICATE, levels: [1, 1] };
-    const { results, totalCount } = await TestComment.findAllAndCount(perspective, {
-      parent,
-      order: { body: "ASC" },
-    });
-    const counted = await TestComment.count(perspective, { parent, order: { body: "ASC" } });
-
-    expect(bodies(results as TestComment[])).to.deep.equal(["c1", "r1"]);
-    expect(totalCount).to.equal(2);
-    expect(counted).to.equal(2);
-  });
-
   // ── refusals ──────────────────────────────────────────────────────────────
 
-  it("surfaces a refused combination as an error rather than an answer", async () => {
-    // The executor refuses `levels` + `transitive`. What matters on this side of
-    // the wire is that the refusal arrives as one: an error swallowed into an
-    // empty array reads as "no replies", which is a wrong answer wearing the
-    // shape of a right one.
+  it("refuses a walk asked to be transitive as well", async () => {
+    // `levels` and `transitive` are two forms of the same walk — one bounded,
+    // one not — so asking for both is a contradiction rather than a preference
+    // the executor resolves. What matters on this side of the wire is that the
+    // refusal arrives as one: an error swallowed into an empty array reads as
+    // "no replies", which is a wrong answer wearing the shape of a right one.
     let message: string | null = null;
     try {
-      await traverse({
-        ids: post.id,
-        predicate: PREDICATE,
-        levels: [2],
-        transitive: true,
+      await TestComment.findAll(perspective, {
+        parent: { ids: post.id, predicate: PREDICATE, levels: [2], transitive: true },
+        order: { body: "ASC" },
       });
     } catch (e: any) {
       message = String(e?.message ?? e);
     }
+
     expect(message, "the combination is refused, not silently resolved").to.be.a("string");
     expect(message!).to.contain("mutually exclusive");
   });
 
   it("refuses a per-anchor slice alongside a walk", async () => {
+    // The walk sets its own per-anchor limit at every depth, so a separate one
+    // has no place to act. Put the first level's breadth in `levels[0]`.
     let message: string | null = null;
     try {
-      await traverse({
-        ids: post.id,
-        predicate: PREDICATE,
-        levels: [2],
-        limitPerAnchor: 5,
+      await TestComment.findAll(perspective, {
+        parent: { ids: post.id, predicate: PREDICATE, levels: [2], limitPerAnchor: 5 },
+        order: { body: "ASC" },
       });
     } catch (e: any) {
       message = String(e?.message ?? e);
     }
+
     expect(message, "the combination is refused, not silently resolved").to.be.a("string");
     expect(message!).to.contain("mutually exclusive");
   });
