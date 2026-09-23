@@ -1,9 +1,11 @@
 /**
- * Ad4mModel — `where: { author }` beside a property condition is per link (#1114)
+ * Ad4mModel — `where` `author`: nested per link, side by side means both (#1114)
  *
- * The invariant: when a `where` names an `author` and a property, the link
- * that carries the property value must have been written by that author. It
- * is not enough that the instance's earliest link was.
+ * The invariant: `{ agent: { eq: X, author: A } }` matches only when A wrote
+ * the `agent -> X` link itself. It is not enough that A created the instance
+ * (wrote its earliest link). A top-level `author` beside a property condition,
+ * `{ agent: X, author: A }`, means both: A created the instance AND A wrote
+ * the `agent -> X` link. Alone, `{ author: A }` is still the instance author.
  *
  * This is the role-gating case from #1046 §1. Admin creates a role instance,
  * then a peer adds `agent -> themselves`. `{ agent: peer, author: admin }` used
@@ -39,7 +41,7 @@ class TestRoleGrant extends Ad4mModel {
 const MALLORY = "did:key:zMalloryTheSyncedPeer";
 const BOB = "did:key:zBobTheAppointee";
 
-describe("Ad4mModel — where author is a per-link condition", function () {
+describe("Ad4mModel — where author: nested per link, side by side both", function () {
   this.timeout(120_000);
 
   let ownStop: (() => Promise<void>) | null = null;
@@ -47,8 +49,11 @@ describe("Ad4mModel — where author is a per-link condition", function () {
   let perspective: PerspectiveProxy;
   let me: string;
 
-  /** Store a link as if `author` had written it, `ageMs` in the past. */
-  async function linkAs(author: string, source: string, predicate: string, target: string, ageMs = 0) {
+  /** Store a link as if `author` had written it, `ageMs` in the past. The
+   *  default is a second in the future, so a peer's link never ties with the
+   *  earliest link of an instance created just before it: a tie for the
+   *  earliest link makes the side-by-side form fail closed. */
+  async function linkAs(author: string, source: string, predicate: string, target: string, ageMs = -1_000) {
     await perspective.addLinkExpression({
       author,
       timestamp: new Date(Date.now() - ageMs).toISOString(),
@@ -66,6 +71,29 @@ describe("Ad4mModel — where author is a per-link condition", function () {
       await linkAs(creator, id, "test://role_grant_type", "test://reviewer", 60_000);
     }
     return id;
+  }
+
+  /** Ids matching `where`, asserting findAll, count and the paged form agree. */
+  async function idsFor(where: any): Promise<string[]> {
+    const rows = await TestRoleGrant.findAll(perspective, { where });
+    const count = await TestRoleGrant.count(perspective, { where });
+    const paged = await TestRoleGrant.findAllAndCount(perspective, { where, limit: 10 });
+    const ids = rows.map((r) => r.id).sort();
+    expect(count, `count for ${JSON.stringify(where)}`).to.equal(ids.length);
+    expect(paged.results.map((r) => r.id).sort(), `paged rows for ${JSON.stringify(where)}`).to.deep.equal(ids);
+    expect(paged.totalCount, `paged total for ${JSON.stringify(where)}`).to.equal(ids.length);
+    return ids;
+  }
+
+  async function refusal(where: any): Promise<string> {
+    let error: unknown = null;
+    try {
+      await TestRoleGrant.findAll(perspective, { where });
+    } catch (e) {
+      error = e;
+    }
+    expect(error, `${JSON.stringify(where)} must be refused, not answered`).to.not.equal(null);
+    return String(error);
   }
 
   before(async () => {
@@ -91,7 +119,7 @@ describe("Ad4mModel — where author is a per-link condition", function () {
     await TestRoleGrant.register(perspective);
   });
 
-  it("does not accept a property link another agent wrote on my instance", async () => {
+  it("Mallory's own agent link on my instance matches neither the nested nor the side-by-side form", async () => {
     const id = await roleInstanceBy(me);
     await linkAs(MALLORY, id, "test://role_agent", Literal.from(MALLORY).toUrl());
 
@@ -100,80 +128,88 @@ describe("Ad4mModel — where author is a per-link condition", function () {
     expect(all).to.have.length(1);
     expect(all[0].author).to.equal(me, "hydrated author is still the earliest link's");
 
-    const granted = await TestRoleGrant.findAll(perspective, { where: { agent: MALLORY, author: me } });
-    expect(granted, "I never appointed Mallory").to.have.length(0);
-    expect(await TestRoleGrant.count(perspective, { where: { agent: MALLORY, author: me } })).to.equal(0);
-    const paged = await TestRoleGrant.findAllAndCount(perspective, {
-      where: { agent: MALLORY, author: me },
-      limit: 10,
-    });
-    expect(paged.results).to.have.length(0);
-    expect(paged.totalCount).to.equal(0);
+    expect(await idsFor({ agent: { eq: MALLORY, author: me } }), "I never wrote agent -> Mallory").to.deep.equal([]);
+    expect(await idsFor({ agent: MALLORY, author: me }), "side by side needs my agent link too").to.deep.equal([]);
+    expect(await idsFor({ agent: { author: me } }), "I wrote no agent link at all").to.deep.equal([]);
+    expect(await idsFor({ agent: { eq: MALLORY, author: MALLORY } })).to.deep.equal([id]);
   });
 
-  it("matches the author of the property link, not the instance's creator", async () => {
+  it("the nested form asks who wrote the link, side by side also asks who created the instance", async () => {
     // Mallory created the instance; I wrote the agent link.
-    const id = await roleInstanceBy(MALLORY);
-    await perspective.add({ source: id, predicate: "test://role_agent", target: Literal.from(BOB).toUrl() });
+    const split = await roleInstanceBy(MALLORY);
+    await perspective.add({ source: split, predicate: "test://role_agent", target: Literal.from(BOB).toUrl() });
+    // I created this one and wrote its agent link.
+    const single = await roleInstanceBy(me);
+    await perspective.add({ source: single, predicate: "test://role_agent", target: Literal.from(BOB).toUrl() });
 
-    const mine = await TestRoleGrant.findAll(perspective, { where: { agent: BOB, author: me } });
-    expect(mine.map((r) => r.id)).to.deep.equal([id]);
-    expect(mine[0].author).to.equal(MALLORY, "hydrated author is still the earliest link's");
-
-    const hers = await TestRoleGrant.findAll(perspective, { where: { agent: BOB, author: MALLORY } });
-    expect(hers, "Mallory created the instance but did not write the agent link").to.have.length(0);
+    expect(await idsFor({ agent: { eq: BOB, author: me } })).to.deep.equal([single, split].sort());
+    expect(
+      await idsFor({ agent: BOB, author: me }),
+      "side by side: a single-author instance matches as before, the split one does not",
+    ).to.deep.equal([single]);
+    expect(await idsFor({ agent: BOB, author: MALLORY }), "Mallory wrote no agent link").to.deep.equal([]);
   });
 
-  it("scopes the enclosing condition from OR branches, and supports the array and not forms", async () => {
+  it("supports the array, not and eq-array author and value forms", async () => {
     const id = await roleInstanceBy(me);
     await linkAs(MALLORY, id, "test://role_agent", Literal.from(MALLORY).toUrl());
 
-    const viaOr = await TestRoleGrant.findAll(perspective, {
-      where: { agent: MALLORY, OR: [{ author: me }, { author: BOB }] },
-    });
-    expect(viaOr).to.have.length(0);
-
-    const viaIn = await TestRoleGrant.findAll(perspective, { where: { agent: MALLORY, author: [me, BOB] } });
-    expect(viaIn).to.have.length(0);
-
-    const notMine = await TestRoleGrant.findAll(perspective, { where: { agent: MALLORY, author: { not: me } } });
-    expect(notMine.map((r) => r.id)).to.deep.equal([id]);
+    expect(await idsFor({ agent: { eq: MALLORY, author: [me, BOB] } })).to.deep.equal([]);
+    expect(await idsFor({ agent: { eq: MALLORY, author: { not: me } } })).to.deep.equal([id]);
+    expect(await idsFor({ agent: { eq: [MALLORY, BOB], author: MALLORY } })).to.deep.equal([id]);
+    expect(await idsFor({ agent: { eq: MALLORY } }), "`eq` alone is the bare value").to.deep.equal([id]);
   });
 
-  it("scopes every property condition in the clause", async () => {
+  it("NOT around a nested author differs from not inside it", async () => {
+    // Both Mallory and I wrote agent -> Bob here; only Mallory did on `hers`.
+    const both = await roleInstanceBy(me);
+    await perspective.add({ source: both, predicate: "test://role_agent", target: Literal.from(BOB).toUrl() });
+    await linkAs(MALLORY, both, "test://role_agent", Literal.from(BOB).toUrl());
+    const hers = await roleInstanceBy(me);
+    await linkAs(MALLORY, hers, "test://role_agent", Literal.from(BOB).toUrl());
+
+    expect(
+      await idsFor({ agent: BOB, NOT: { agent: { eq: BOB, author: me } } }),
+      "I wrote no agent -> Bob link",
+    ).to.deep.equal([hers]);
+    expect(
+      await idsFor({ agent: { eq: BOB, author: { not: me } } }),
+      "someone other than me wrote an agent -> Bob link",
+    ).to.deep.equal([both, hers].sort());
+  });
+
+  it("scopes every property beside a side-by-side author, but not inside a sub-clause", async () => {
     const id = await roleInstanceBy(me);
     await perspective.add({ source: id, predicate: "test://role_agent", target: Literal.from(BOB).toUrl() });
     await linkAs(MALLORY, id, "test://role_note", Literal.from("trusted").toUrl());
 
-    expect(await TestRoleGrant.findAll(perspective, { where: { agent: BOB, author: me } })).to.have.length(1);
+    expect(await idsFor({ agent: BOB, author: me })).to.deep.equal([id]);
+    expect(await idsFor({ agent: BOB, note: "trusted", author: me }), "I did not write the note").to.deep.equal([]);
     expect(
-      await TestRoleGrant.findAll(perspective, { where: { agent: BOB, note: "trusted", author: me } }),
-      "I did not write the note",
-    ).to.have.length(0);
+      await idsFor({ agent: BOB, author: me, AND: [{ note: "trusted" }] }),
+      "the AND's note is its own object's",
+    ).to.deep.equal([id]);
   });
 
   it("keeps the instance-level meaning of a bare author condition", async () => {
     const id = await roleInstanceBy(me);
     await linkAs(MALLORY, id, "test://role_agent", Literal.from(MALLORY).toUrl());
 
-    const byMe = await TestRoleGrant.findAll(perspective, { where: { author: me } });
-    expect(byMe.map((r) => r.id)).to.deep.equal([id]);
-    expect(await TestRoleGrant.findAll(perspective, { where: { author: MALLORY } })).to.have.length(0);
+    expect(await idsFor({ author: me })).to.deep.equal([id]);
+    expect(await idsFor({ author: MALLORY })).to.deep.equal([]);
+    expect(await idsFor({ author: { not: [MALLORY] } }), "a mute list is still instance-level").to.deep.equal([id]);
   });
 
-  it("refuses a per-link author the store cannot answer", async () => {
+  it("refuses a per-link author the store cannot answer, and an author with no link", async () => {
     const id = await roleInstanceBy(me);
     await perspective.add({ source: id, predicate: "test://role_agent", target: Literal.from(BOB).toUrl() });
 
-    let error: unknown = null;
-    try {
-      await TestRoleGrant.findAll(perspective, {
-        where: { agent: BOB, author: me, timestamp: { gt: 0 } },
-      });
-    } catch (e) {
-      error = e;
+    for (const where of [
+      { agent: { eq: BOB, author: me }, timestamp: { gt: 0 } },
+      { agent: BOB, author: me, timestamp: { gt: 0 } },
+    ]) {
+      expect(await refusal(where)).to.contain("per-link `author`");
     }
-    expect(error, "author + timestamp beside a property must be refused, not answered").to.not.equal(null);
-    expect(String(error)).to.contain("author");
+    expect(await refusal({ timestamp: { author: me } })).to.contain("not a property stored as a link");
   });
 });
