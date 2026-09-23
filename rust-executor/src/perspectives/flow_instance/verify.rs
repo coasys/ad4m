@@ -12,20 +12,36 @@
 //! > the instance, the edge and the proposer), and here is the material the
 //! > seal was taken over and the outputs the commitment hashes.*
 //!
-//! Every word of that is cryptographic or re-derivable. A vote is
-//! `uri --acceptedBy--> did` and its signature covers nothing but that URI —
-//! which is why the URI must cover everything else: it is recomputed from
-//! the proposer-signed fields on every read
-//! ([`atom::proposal_uri`](super::atom::proposal_uri), checked in
-//! `TransitionAtom::from_links`, #1108), so a proposal whose seal or
-//! outputs commitment is not what its URI addresses is not an atom and none
-//! of its votes count. So: n distinct DIDs signed `acceptedBy` links
-//! ([`atom::signed_by`], over verdicts this replica recomputed) on an atom
-//! whose URI commits to seal S and outputs hash H; each was eligible under
-//! the carried role evidence **as of its own vote's timestamp**; S rehashes
-//! from the carried preimage; and the receipt's output preimages (class,
-//! id, content) hash to H, the one commitment every counted atom on the
-//! final edge carries (#1104), checked here, never read on trust.
+//! Every word of that is cryptographic or re-derivable. A vote is the link
+//! `uri --acceptedBy--> did`; its signature covers that link (the URI, the
+//! predicate, the voter's DID, the timestamp) and **none of the proposal's
+//! fields directly**. The seal and the outputs commitment are signed only
+//! by the proposer. What ties them to the vote is the URI: it is the
+//! SHA-256 content address of `(instance, from_state, to_state, seal,
+//! outputs_hash-or-none)` under the proposer's DID and a proposer-signed
+//! nonce ([`atom::proposal_uri`](super::atom::proposal_uri)), recomputed
+//! from the proposer-signed fields on every read in
+//! `TransitionAtom::from_links` (#1108). A proposal whose fields do not
+//! hash to its URI is not an atom, and none of its votes count. So a vote
+//! binds the seal and the commitment exactly as far as SHA-256 is
+//! collision-resistant. The proposer picks every input, nonce included, so
+//! collision resistance is the property that matters, not second-preimage
+//! resistance.
+//!
+//! So: n distinct DIDs signed `acceptedBy` links ([`atom::signed_by`], over
+//! verdicts this replica recomputed) on an atom whose URI addresses seal S
+//! and outputs hash H; each was eligible under the carried role evidence
+//! **as of its own vote's timestamp**; S rehashes from the carried
+//! preimage; and the receipt's output preimages (class, id, content) hash
+//! to H, checked here, never read on trust (#1104). H is the one commitment
+//! every counted atom on the final edge carries. The fold makes that so
+//! by pooling terminal-edge votes per commitment, and step 7 below
+//! re-checks it.
+//!
+//! The URI does **not** cover the proposer's `output` links (the list of
+//! named refs). It does not need to. A receipt's outputs are checked
+//! against H, not against those links, so re-signing them after the votes
+//! changes nothing a verifier accepts.
 //!
 //! The protocol *requires* each of those voters to have recomputed the seal
 //! and the outputs commitment against their own graph and refused to sign on
@@ -57,7 +73,7 @@
 //!
 //! | Not proven | Why |
 //! | --- | --- |
-//! | **That any voter actually recomputed the seal before signing** | Compliance with a protocol obligation, not a property of the artifact — see above. What a signature proves is that the signer signed *that atom, carrying that seal*. |
+//! | **That any voter actually recomputed the seal before signing** | Compliance with a protocol obligation, not a property of the artifact — see above. What a signature proves is that the signer signed *that URI*, which addresses that seal and that outputs commitment (#1108). |
 //! | **That every counted atom's seal is inspectable** | `mint` accepts an empty `evidence_preimage`, so a receipt may carry none. Verification checks every preimage it *is* given and requires none. Demanding one per counted seal would reject receipts mint produced — the asymmetry that makes receipts fail their own verification. Tightening it belongs on the mint side first. |
 //! | **That the named outputs existed, with that content** | A voter loads every named output through its class on its own graph and recomputes the content hash before co-signing ([`check_outputs_commitment`](super::atom::check_outputs_commitment)). Like the seal recompute, that is a protocol obligation the receipt records and cannot evidence, and a pure verifier has no graph to look in. |
 //! | **That the outputs still look like that** | A receipt attests to the content at completion. An output edited later does not invalidate it: the carried preimages still hash to the signed commitment. A consumer that cares about the current content compares it itself. |
