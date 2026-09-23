@@ -2185,6 +2185,65 @@ async fn propose_commits_to_the_named_outputs_and_refuses_a_missing_one() {
     assert_eq!(atom.outputs_hash, Some(outputs_hash(&expected)));
 }
 
+/// A run does not end in a non-terminal state, so `propose` refuses to name
+/// outputs there, even ones that exist, and writes nothing. The same call
+/// without outputs goes through, so the refusal is the outputs rule and not
+/// some other guard on the edge.
+///
+/// Red if `propose` drops the non-terminal branch: the call then writes a
+/// proposal with no commitment and reports `minted: true`.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_refuses_outputs_on_a_non_terminal_state() {
+    use super::flow_instance::atom::TransitionAtom;
+    let mut f = seed_review_flow().await;
+    let instance = f.instance_uri.clone();
+
+    let err = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "changes_requested",
+        &[TASK.to_string()],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect_err("a non-terminal state has no outputs to name");
+    assert!(
+        format!("{err:#}").contains("is not terminal, so a run does not end there"),
+        "the refusal must be the non-terminal outputs rule, got: {err:#}"
+    );
+    assert!(
+        f.read_set().await.proposals.is_empty(),
+        "nothing is written on refusal"
+    );
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "changes_requested",
+        &[],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the same edge without outputs is proposable");
+    assert!(out.minted);
+    let links = f
+        .perspective
+        .get_links(&LinkQuery {
+            source: Some(out.proposal_uri.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("links");
+    let atom = TransitionAtom::from_links(&instance, &out.proposal_uri, &links).expect("an atom");
+    assert!(atom.outputs.is_empty());
+    assert_eq!(
+        atom.outputs_hash, None,
+        "no commitment on a non-terminal edge"
+    );
+}
+
 /// An open proposal on this edge that names other outputs is neither joined
 /// (that would sign outputs the caller did not name) nor twinned (the final
 /// edge would carry two commitments, and no receipt for the run could
