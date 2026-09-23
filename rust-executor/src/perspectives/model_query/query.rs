@@ -10,6 +10,7 @@ use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
+use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
@@ -258,6 +259,13 @@ pub(super) async fn execute_model_query_inner(
             ));
         }
     }
+
+    // Resolved up front so a bad key is an error on every query shape, not
+    // only on the ones that go on to return rows.
+    let link_keys = match &query_input.links {
+        Some(requested) => resolve_link_keys(shape, requested)?,
+        None => Vec::new(),
+    };
 
     // Fast path: COUNT-only
     //
@@ -751,6 +759,9 @@ pub(super) async fn execute_model_query_inner(
     } else {
         paginated
     };
+
+    // After `filter_properties`, so a `properties` selection cannot strip it.
+    attach_links(store, shape, &link_keys, &mut final_instances).await?;
 
     // Attach projection results
     if let Some(ref projections) = query_input.projections {
