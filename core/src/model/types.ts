@@ -304,6 +304,24 @@ export type Query = {
    * queries where getter-backed properties are not needed.
    */
   deepQuery?: boolean;
+  /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * By default the executor withholds every link whose stored signature
+   * verdict is not valid, so a forged or tampered link never becomes a
+   * property value, a relation target, `author` or `updatedAt`. Set this to
+   * `true` only to *display* an unverified claim, e.g. a UI that marks a value
+   * as unverified. Anything that acts on the data, such as a vote counter or a
+   * role check, must leave it off.
+   *
+   * Included relations inherit the setting unless their sub-query sets its own.
+   *
+   * Scope: this filters the links that hydrate an instance. Which instances
+   * are *selected* (`where`, the class's flags, `count`, `$` projection
+   * counts) still matches unverified links, see
+   * https://github.com/coasys/ad4m/issues/1120.
+   */
+  includeUnverified?: boolean;
 };
 
 /**
@@ -445,6 +463,8 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
   include?: TypedIncludeMap<U>;
   limit?: number;
   offset?: number;
+  /** See {@link Query.includeUnverified}. Inherited from the parent query when unset. */
+  includeUnverified?: boolean;
 };
 
 /** Projection — `from` must be a real relation on T; `where`/`order` constrained to that target.
@@ -506,6 +526,8 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   limit?: number;
   count?: boolean;
   deepQuery?: boolean;
+  /** See {@link Query.includeUnverified}. */
+  includeUnverified?: boolean;
 };
 
 export type TypedQuery<T extends Ad4mModel> =

@@ -248,6 +248,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * Off by default: the executor withholds unverified links. Turn it on only
+   * to *display* an unverified claim, never for data you act on. See
+   * {@link Query.includeUnverified}.
+   *
+   * @param enabled - Whether to include unverified links (default: true)
+   * @returns The query builder for chaining
+   */
+  includeUnverified(enabled: boolean = true): ModelQueryBuilder<T> {
+    this.queryParams.includeUnverified = enabled;
+    return this;
+  }
+
+  /**
    * Specifies which relations to eager-load (hydrate into model instances).
    *
    * Without `include`, relation fields contain raw expression URIs (strings).
