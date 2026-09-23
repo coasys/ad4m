@@ -869,6 +869,16 @@ export class PerspectiveProxy {
         return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
     }
 
+    /**
+     * Start an instance of the flow at `flowUri` on `baseExpression`, in the
+     * flow's initial state. The executor writes the instance, including its
+     * `currentState` cache, which clients cannot write themselves. Resolves to
+     * the new instance's URI. Most callers want {@link FlowInstance.start}.
+     */
+    async startFlowInstance(flowUri: string, baseExpression: string): Promise<string> {
+        return await this.#client.startFlowInstance(this.#handle.uuid, flowUri, baseExpression)
+    }
+
     async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string): Promise<FlowProposeResult> {
         return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale)
     }
